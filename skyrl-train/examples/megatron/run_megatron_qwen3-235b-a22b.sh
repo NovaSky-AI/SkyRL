@@ -13,7 +13,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 DATA_DIR="$HOME/data/gsm8k"
 # download Qwen/Qwen3-235B-A22B-Instruct-2507 from huggingface
 # `pip install huggingface_hub hf_transfer`
-# `HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
+# `HF_HUB_ENABLE_HF_TRANSFER=1 hf download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
 MODEL_NAME="$HOME/qwen235b"
 
 NUM_NODES=8
@@ -47,11 +47,7 @@ INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 # no kl loss, so just use the policy model
 USE_KL_LOSS=false
 
-export SKYRL_PYTHONPATH_EXPORT=1
-# make sure PYTHONPATH is set to the location of TransformerEngine installation
-export PYTHONPATH="$HOME/anaconda3/lib/python3.12/site-packages"
-
-uv run --isolated --extra $INFERENCE_BACKEND --extra mcore -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

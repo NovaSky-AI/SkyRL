@@ -51,26 +51,18 @@ class VllmServer:
 
         @app.post("/init_weight_update_communicator")
         async def _init_weight_update_communicator(request: Request):
+            import pickle
+            from skyrl_train.weight_sync import BroadcastInitInfo
+
             data = await request.json()
-            master_addr = data.get("master_address")
-            master_port = data.get("master_port")
-            world_size = data.get("world_size")
-            backend = data.get("backend")
-            group_name = data.get("group_name")
-            rank_offset = data.get("rank_offset")
-            override_existing = data.get("override_existing", False)
+            init_info = BroadcastInitInfo(**data)
+
+            # Pickle to preserve type through collective_rpc
+            pickled_init_info = pickle.dumps(init_info)
 
             await engine.collective_rpc(
                 "init_weight_update_communicator",
-                args=(
-                    master_addr,
-                    master_port,
-                    rank_offset,
-                    world_size,
-                    group_name,
-                    backend,
-                    override_existing,
-                ),
+                args=(pickled_init_info,),
             )
             return {"status": "ok"}
 
@@ -100,14 +92,23 @@ class VllmServer:
 
         @app.post("/update_weights")
         async def _update_weights(request: Request):
+            import pickle
+            from skyrl_train.weight_sync import BroadcastWeightUpdateRequest
+
+            # Convert the HTTP request to a BroadcastWeightUpdateRequest
+            # TODO(haochen): only the broadcast strategy is currently supported
+            # for the remote inference engine path.
+            # To support other strategies, we'll need to add a "strategy=xxx"
+            # parameter in the HTTP request.
             data = await request.json()
-            # engine expects a list of objects
-            names = [data.get("name")]
-            dtypes = [data.get("dtype")]
-            shapes = [data.get("shape")]
+            weight_request = BroadcastWeightUpdateRequest(**data)
+
+            # Pickle to preserve type through collective_rpc
+            pickled_request = pickle.dumps(weight_request)
+
             await engine.collective_rpc(
-                "update_weights",
-                args=(names, dtypes, shapes),
+                "load_weights",
+                args=(pickled_request,),
             )
             return {"status": "ok"}
 
@@ -115,7 +116,7 @@ class VllmServer:
         async def _destroy_weights_update_group(request: Request):
             data = await request.json()  # noqa: F841
             await engine.collective_rpc(
-                "destroy_weights_update_group",
+                "teardown_weight_receiver",
                 args=(),
             )
             return {"status": "ok"}

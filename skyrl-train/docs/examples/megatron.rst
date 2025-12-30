@@ -88,29 +88,13 @@ Installation
 
 Setting up the Docker image
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To get started, you can follow the instructions for installing via Docker in the :doc:`../getting-started/installation` page, but using the ``novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8-megatron`` image instead of the default image.
+To get started, you can follow the instructions for installing via Docker in the :doc:`../getting-started/installation` page, but using the ``novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron`` image instead of the default image.
 
-This ensures that the necessary dependencies needed for Megatron (i.e. ``TransformerEngine``) are installed and don't need to be built on each node for each run, which can be time consuming.
+This ensures that the necessary dependencies needed for Megatron are installed and don't need to be built on each node for each run, which can be time consuming. Previously, we recommended setting PYTHONPATH to the location of TransformerEngine installation, but this is no longer necessary.
 
-Environment Variables
-~~~~~~~~~~~~~~~~~~~~~
-After following the installation instructions, set the following environment variables for the ``TransformerEngine`` dependency to be correctly picked up by the uv + ray integration (since we currently exclude it from the pyproject.toml file to avoid building it on each node):
-
-.. code-block:: bash
-
-    export SKYRL_PYTHONPATH_EXPORT=1
-    # where TransformerEngine is installed (via pip) on your machine
-    export PYTHONPATH="/home/ray/anaconda3/lib/python3.12/site-packages"
-
-Flash Attention
 ~~~~~~~~~~~~~~~
-Next, in order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.5.0``.
-You can replace the ``flash-attn`` wheel in the ``pyproject.toml`` file with the following to use the ``2.7.4.post1`` release, and you can find wheels for other versions `here <https://github.com/Dao-AILab/flash-attention/releases>`_.
-
-.. code-block:: bash
-
-    flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl" }
-
+In order to use flash attention with the megatron backend, you must use ``flash_attn`` version ``2.7.4.post1`` or lower for compatibility with ``TransformerEngine==2.7.0``.
+This is handled in the ``pyproject.toml`` file for the ``mcore`` extra.
 
 Configuration
 -------------
@@ -137,7 +121,9 @@ for advanced users to fully take advantage of all of Megatron-Core's feature fla
     transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
       # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
       ...
-
+    # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+    # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+    empty_cuda_cache: true
 
 These default values can be overridden by passing in the corresponding arguments to ``trainer.policy.megatron_config`` in the launch script.
 

@@ -36,35 +36,30 @@ class DAPOTrainer(RayPPOTrainer):
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
         # modify rewards here
-        prompt_token_ids = generator_output["prompt_token_ids"]
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
 
         assert not isinstance(rewards[0], list), "we assume verifiable sequence level rewards here"
 
-        # get the prompt length
-        prompt_lengths = [len(prompt) for prompt in prompt_token_ids]
-
         # get the response length
         response_lengths = [len(response) for response in response_ids]
 
         # get the max context length
-        max_context_length = (
-            self.cfg.generator.max_input_length + self.cfg.generator.sampling_params.max_generate_length
-        )
+        # NOTE: this is only valid for single turn generation
+        max_response_length = self.cfg.generator.sampling_params.max_generate_length
 
         # apply soft overlong punishment
-        for i, (prompt_length, response_length) in enumerate(zip(prompt_lengths, response_lengths)):
+        for i, response_length in enumerate(response_lengths):
             # max_exceed_length is the beginning of the overlong buffer
-            max_exceed_length = max_context_length - overlong_buffer_len - prompt_length
+            max_exceed_length = max_response_length - overlong_buffer_len
             # if the response is within the overlong buffer, apply the penalty
-            if response_length > max_exceed_length and response_length <= max_context_length - prompt_length:
+            if response_length > max_exceed_length and response_length <= max_response_length:
                 exceed_length = response_length - max_exceed_length
                 penalty = exceed_length / overlong_buffer_len * overlong_buffer_penalty_factor
 
                 rewards[i] -= penalty
             # if the response is outside the overlong buffer, set the reward to 0
-            elif response_length > max_context_length - prompt_length:
+            elif response_length > max_response_length:
                 # if self.cfg.generator.apply_overlong_filtering is true, loss masks are already set to 0 for these responses
                 rewards[i] = 0.0
 

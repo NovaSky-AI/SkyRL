@@ -31,12 +31,14 @@ fi
 # Set a writable, shared web cache directory for the web_browser tool
 mkdir -p "${SKYAGENT_WEB_CACHE_DIR:-$DATA_DIR/web_cache}" 
 
+
+
 # Optimize HuggingFace model loading
 # export HF_HUB_OFFLINE=1  # Commented out to allow model download if needed
 # export TRANSFORMERS_OFFLINE=1  # Commented out to allow online checks
 # export HF_HOME=~/.cache/huggingface  # Use default cache location where models exist
 
-uv run --isolated --frozen --extra verl --env-file .env -m skyrl_agent.integrations.verl.verl_main_ppo \
+uv run --active --extra verl --env-file .env -m skyrl_agent.integrations.verl.verl_main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files="${DATA_FILE}" \
     data.val_files="${VAL_FILE}" \

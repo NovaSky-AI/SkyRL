@@ -282,7 +282,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
             full_param = full_param.detach().cuda()
             mesh = sharded_param.device_mesh
-            dist.broadcast(full_param, src=0, group=mesh.get_group())
+            dist.broadcast(full_param, src=0)
             sharded_tensor = distribute_tensor(full_param, mesh, sharded_param.placements)
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,
@@ -296,7 +296,7 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
         for param_name, sharded_param in meta_sharded_sd.items():
             full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
             mesh = sharded_param.device_mesh
-            dist.broadcast(full_tensor, src=0, group=mesh.get_group())
+            dist.broadcast(full_tensor, src=0)
             sharded_tensor = distribute_tensor(full_tensor, mesh, sharded_param.placements)
             to_contiguous, casting_dtype = _infer_parameter_dtype(
                 model,

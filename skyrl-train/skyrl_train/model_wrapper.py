@@ -3,7 +3,7 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/actor.py
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
-from typing import Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 from copy import deepcopy
 
 import torch
@@ -11,12 +11,14 @@ import torch.nn as nn
 from loguru import logger
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
+import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from flash_attn.bert_padding import pad_input, unpad_input
+from packaging.version import Version
 
 
 class HFModelWrapper(nn.Module):
@@ -33,6 +35,7 @@ class HFModelWrapper(nn.Module):
         lora_rank (int, optional): Rank for LoRA adaptation. Defaults to 0.
         lora_alpha (int, optional): Alpha parameter for LoRA. Defaults to 16.
         lora_dropout (float, optional): Dropout rate for LoRA layers. Defaults to 0.
+        lora_init_method (str, optional): Initialization method for LoRA layers. Defaults to "kaiming".
         target_modules (list, optional): List of target modules for applying LoRA. Defaults to None.
         exclude_modules (list, optional): List of modules to exclude from applying LoRA. Defaults to None.
         ds_config (dict, optional): Configuration for DeepSpeed, enabling model partitioning across multiple GPUs. Defaults to None.
@@ -52,6 +55,7 @@ class HFModelWrapper(nn.Module):
         lora_rank=0,
         lora_alpha=16,
         lora_dropout=0,
+        lora_init_method="kaiming",
         target_modules=None,
         exclude_modules=None,
         ds_config=None,
@@ -61,20 +65,22 @@ class HFModelWrapper(nn.Module):
         sequence_parallel_size=1,
         use_sample_packing: bool = False,
         use_torch_compile: bool = False,
+        rope_scaling: Dict[str, Any] = {},
+        rope_theta: float | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.use_flash_attention_2 = use_flash_attention_2
+        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
-            assert self.use_flash_attention_2, "Flash attention 2 should be used for `use_sample_packing`"
+            assert (
+                self.attn_implementation == "flash_attention_2"
+            ), "Flash attention 2 should be used for `use_sample_packing`"
 
         if isinstance(pretrain_or_model, str):
-            attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
-
             # Note: dschf is defined in function scope to avoid global effects
             # https://huggingface.co/docs/transformers/deepspeed#non-trainer-deepspeed-integration
             if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
@@ -107,14 +113,43 @@ class HFModelWrapper(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
+            rope_scaling_kwargs = {}
+            if rope_scaling:
+                rope_scaling_kwargs["rope_scaling"] = rope_scaling
+            if rope_theta:
+                rope_scaling_kwargs["rope_theta"] = rope_theta
+
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
                 trust_remote_code=True,
-                attn_implementation=attn_implementation,
+                attn_implementation=self.attn_implementation,
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
+                **rope_scaling_kwargs,
             )
+
+            # gpt oss
+            if Version(transformers.__version__) >= Version("4.56.2"):
+                from transformers import GptOssConfig
+
+                if isinstance(self.model.config, GptOssConfig):
+                    # patch attention with Unsloth's flex attn
+                    from skyrl_train.patches.gptoss.patch_transformers import (
+                        custom_attention,
+                        custom_attention_mask,
+                        patch_GptOssAttention,
+                    )
+                    from transformers import AttentionInterface, AttentionMaskInterface
+
+                    AttentionInterface.register("custom_flex", custom_attention)
+                    AttentionMaskInterface.register("custom_flex", custom_attention_mask)
+                    # set attention implementation to be `custom_flex`
+                    self.model.set_attn_implementation("custom_flex")
+                    self.attn_implementation = "custom_flex"
+                    # NOTE: Even though we set a custom attn implementation, we
+                    # also patch the full attention function for GPT OSS
+                    patch_GptOssAttention()
 
             # LoRA
             if lora_rank > 0:
@@ -128,6 +163,7 @@ class HFModelWrapper(nn.Module):
                     exclude_modules=exclude_modules,
                     lora_dropout=lora_dropout,
                     bias="none",
+                    init_lora_weights=True if lora_init_method == "kaiming" else lora_init_method,
                 )
                 self.model = get_peft_model(self.model, lora_config)
 
@@ -245,6 +281,7 @@ class HFModelWrapper(nn.Module):
         temperature: float = 1.0,
         return_output=False,
         compute_entropy=False,
+        entropy_requires_grad=True,
     ) -> torch.Tensor:
         """Returns action log probs"""
         position_ids = attention_mask.long().cumsum(-1) - 1
@@ -269,7 +306,7 @@ class HFModelWrapper(nn.Module):
         sequences_rolled = torch.roll(sequences_fwd, shifts=-1, dims=1)
         if self.sequence_parallel_size > 1:
             # NOTE: don't pass any attn mask with sample packing
-            attention_mask_fwd = None if self.use_flash_attention_2 and self.use_sample_packing else attention_mask_fwd
+            attention_mask_fwd = None if self.use_sample_packing else attention_mask_fwd
 
             # slice for sequence parallelism
             # (bsz, seqlen) -> (bsz, seqlen//sp_size)
@@ -281,7 +318,7 @@ class HFModelWrapper(nn.Module):
             )
 
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        if self.use_sample_packing and self.use_flash_attention_2:
+        if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
@@ -314,7 +351,6 @@ class HFModelWrapper(nn.Module):
             ).squeeze(-1)
 
         if compute_entropy:
-            # entropy calculation as a metric - we use no grad
             # For sample packing: entropy is calculated on unpacked data, so no attention mask needed
             # For non-sample packing: pass the attention mask to exclude padding tokens
             entropy_mask = None
@@ -324,7 +360,7 @@ class HFModelWrapper(nn.Module):
                 entropy_mask = attention_mask_fwd
 
             entropy_BS = self.chunked_entropy_from_logits_fn(
-                logits_BSV, requires_grad=False, attention_mask=entropy_mask
+                logits_BSV, requires_grad=entropy_requires_grad, attention_mask=entropy_mask
             )
 
             if self.sequence_parallel_size > 1:
@@ -563,7 +599,6 @@ def get_llm_for_sequence_regression(
     if lora_rank > 0:
         model.enable_input_require_grads()
         lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
             r=lora_rank,
             lora_alpha=lora_alpha,
             target_modules=target_modules,

@@ -1,9 +1,13 @@
 import re
+from typing import Tuple, Optional
+import time
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
+
+from .utils import _ERROR_MSG_PREFIX
 
 _MAX_CHAR_DISPLAY = 2048
 
@@ -175,11 +179,11 @@ def _compute_score(solution_str, ground_truth, extra_info, format_reward=0.0, an
     reward_log.append("-" * 16 + "Extracted Code to Execute" + "-" * 16)
     ground_truth = json.loads(ground_truth)
 
-    # t_start = time.time()
+    t_start = time.time()
 
     # log code
     if "functional" in ground_truth:
-        if "prefix" in extra_info and extra_info["prefix"] is not None:
+        if "prefix" in extra_info and extra_info["prefix"] != None:
             solution_code = extra_info["prefix"] + "\n" + solution_code
         reward_log.append(solution_code + "\n" + ground_truth["functional"])
     else:
@@ -187,7 +191,7 @@ def _compute_score(solution_str, ground_truth, extra_info, format_reward=0.0, an
 
     if "pytest" in ground_truth or "functional" in ground_truth or "solution_file" in ground_truth:
         if "functional" in ground_truth:
-            if "prefix" in extra_info and extra_info["prefix"] is not None:
+            if "prefix" in extra_info and extra_info["prefix"] != None:
                 solution_code = extra_info["prefix"] + "\n" + solution_code
             succ, output = code_exec(solution_code + "\n" + ground_truth["functional"])
         elif "solution_file" in ground_truth:

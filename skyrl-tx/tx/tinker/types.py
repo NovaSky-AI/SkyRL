@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import BaseModel
@@ -17,11 +18,15 @@ class RequestType(str, Enum):
 
     CREATE_MODEL = "create_model"
     FORWARD_BACKWARD = "forward_backward"
+    FORWARD = "forward"
     OPTIM_STEP = "optim_step"
     SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
+
+    # External request that should not be processed by the engine
+    EXTERNAL = "external"
 
 
 class CheckpointType(str, Enum):
@@ -55,11 +60,15 @@ class AdamParams(BaseModel):
     beta1: float
     beta2: float
     eps: float
+    weight_decay: float
 
 
 class LoraConfig(BaseModel):
     rank: int
     alpha: float
+    train_attn: bool = True
+    train_mlp: bool = True
+    train_unembed: bool = False
 
 
 class CreateModelInput(BaseModel):
@@ -107,7 +116,7 @@ class ForwardBackwardOutput(BaseModel):
     metrics: dict
 
 
-class ForwardBackwardError(BaseModel):
+class ErrorResponse(BaseModel):
     error: str
     status: str
 
@@ -147,16 +156,28 @@ class LoadWeightsOutput(BaseModel):
     type: str
 
 
+class SamplingParams(BaseModel):
+    temperature: float
+    max_tokens: int
+    seed: int
+    stop_tokens: list[int] | None = None
+    stop_strings: list[str] | None = None
+    top_k: int = -1  # -1 for no limit
+
+
 class ModelMetadata(BaseModel):
     adapter_index: int
     lora_config: LoraConfig
+    loaded_checkpoint_id: str | None = None
 
 
 class SampleInput(BaseModel):
-    prompt: dict[str, Any]
-    sampling_params: dict[str, Any]
+    base_model: str | None = None
+    prompt: ModelInput
+    sampling_params: SamplingParams
     num_samples: int
     checkpoint_id: str
+    prompt_logprobs: bool
 
 
 class GeneratedSequence(BaseModel):
@@ -167,9 +188,57 @@ class GeneratedSequence(BaseModel):
 
 class SampleOutput(BaseModel):
     sequences: list[GeneratedSequence]
-    prompt_logprobs: list[float]
+    prompt_logprobs: list[float] | None = None
 
 
 # Metrics tracked in the engine
 class EngineMetrics(BaseModel):
-    seq_len_jit_times: dict[int, float] = {}
+    train_seq_len_jit_times: dict[int, float] = {}
+    sample_seq_len_jit_times: dict[int, float] = {}
+
+
+# Prepared batch data for backend processing
+# These are prepared by the engine and passed to the backend
+
+
+@dataclass
+class PreparedModelPassBatch:
+    """Prepared batch data for forward/forward_backward operations.
+
+    Engine extracts this from requests, backend converts to JAX arrays and computes.
+    """
+
+    # Per-example data (list of lists)
+    all_input_ids: list[list[int]]
+    all_targets: list[list[int]]
+    all_token_weights: list[list[float]]
+    all_sampling_logprobs: list[list[float]]
+    all_advantages: list[list[float]]
+
+    # Per-example scalars
+    all_model_ids: list[str]
+    all_loss_fn_types: list[int]
+
+    # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
+    request_batch_slices: list[tuple[str, str, int, int]]
+
+
+@dataclass
+class PreparedSampleBatch:
+    """Prepared batch data for sample operations.
+
+    Engine extracts this from requests, backend converts to JAX arrays and computes.
+    """
+
+    # Per-sample data
+    all_prompts: list[list[int]]
+    all_sampling_params: list[SamplingParams]
+    all_model_ids: list[str]
+    all_checkpoint_ids: list[str]
+    all_checkpoint_paths: list[str]
+
+    # Whether any request needs prompt logprobs
+    needs_prompt_logprobs: bool
+
+    # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
+    request_batch_slices: list[tuple[str, str, int, int, bool]]

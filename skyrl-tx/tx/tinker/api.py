@@ -1,27 +1,35 @@
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Any, AsyncGenerator
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager
-from sqlmodel import SQLModel, select
+from sqlmodel import SQLModel, select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
-import logging
 import subprocess
+import random
+import time
 
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model, config_to_argv
-from tx.tinker.db_models import CheckpointDB, ModelDB, FutureDB, DB_PATH, RequestStatus, CheckpointStatus
+from tx.tinker.db_models import (
+    CheckpointDB,
+    ModelDB,
+    FutureDB,
+    RequestStatus,
+    CheckpointStatus,
+    SessionDB,
+    SamplingSessionDB,
+    get_async_database_url,
+)
+from tx.tinker.extra import ExternalInferenceClient
 from tx.utils.storage import download_file
-
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from tx.utils.log import logger
 
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
@@ -32,10 +40,19 @@ ID_MAX_LENGTH = 255
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
-    app.state.db_engine = create_async_engine(f"sqlite+aiosqlite:///{DB_PATH}", echo=False)
+    db_url = get_async_database_url(app.state.engine_config.database_url)
+    app.state.db_engine = create_async_engine(db_url, echo=False)
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+
+    # Setup external inference client if configured
+    if app.state.engine_config.external_inference_url:
+        app.state.external_inference_client = ExternalInferenceClient(app.state.engine_config, app.state.db_engine)
+        logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
+    else:
+        app.state.external_inference_client = None
+        logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
@@ -201,10 +218,16 @@ class Datum(BaseModel):
 
     def to_types(self) -> types.Datum:
         inp = self.loss_fn_inputs
+
+        if "weights" not in inp:
+            weights = types.TensorData(data=[1.0] * len(inp["target_tokens"].data))
+        else:
+            weights = inp["weights"].to_types()
+
         return types.Datum(
             loss_fn_inputs=types.LossFnInputs(
                 target_tokens=inp["target_tokens"].to_types(),
-                weights=inp["weights"].to_types(),
+                weights=weights,
                 advantages=inp["advantages"].to_types() if "advantages" in inp else types.TensorData(data=[]),
                 logprobs=inp["logprobs"].to_types() if "logprobs" in inp else types.TensorData(data=[]),
             ),
@@ -225,14 +248,26 @@ class ForwardBackwardRequest(BaseModel):
     forward_backward_input: ForwardBackwardInput
 
 
+class ForwardRequest(BaseModel):
+    model_id: str
+    forward_input: ForwardBackwardInput
+
+
 class AdamParams(BaseModel):
     learning_rate: float = Field(default=1e-4, ge=0.0)
     beta1: float = Field(default=0.9, ge=0.0, lt=1.0)
     beta2: float = Field(default=0.95, ge=0.0, lt=1.0)
     eps: float = Field(default=1e-12, gt=0.0)
+    weight_decay: float = Field(default=0.0, ge=0.0)
 
     def to_types(self) -> types.AdamParams:
-        return types.AdamParams(learning_rate=self.learning_rate, beta1=self.beta1, beta2=self.beta2, eps=self.eps)
+        return types.AdamParams(
+            learning_rate=self.learning_rate,
+            beta1=self.beta1,
+            beta2=self.beta2,
+            eps=self.eps,
+            weight_decay=self.weight_decay,
+        )
 
 
 class OptimStepRequest(BaseModel):
@@ -245,15 +280,75 @@ class SaveWeightsForSamplerRequest(BaseModel):
     path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
 
 
+class SamplingParams(BaseModel):
+    max_tokens: int | None = None
+    seed: int | None = None
+    stop: list[int] | list[str] | None = None
+    temperature: float = 1
+    top_k: int = -1
+    top_p: float = 1
+
+    def to_types(self) -> types.SamplingParams:
+        if self.max_tokens is None:
+            raise HTTPException(status_code=400, detail="max_tokens is currently required")
+
+        if self.top_p != 1.0:
+            raise HTTPException(status_code=501, detail="'top_p' parameter is not yet implemented")
+
+        # Generate a random seed if not provided
+        seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
+
+        # Determine if stop values are token IDs (int) or strings
+        stop_tokens = None
+        stop_strings = None
+        if self.stop:
+            if all(isinstance(s, int) for s in self.stop):
+                stop_tokens = list(self.stop)
+            elif all(isinstance(s, str) for s in self.stop):
+                stop_strings = list(self.stop)
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="stop must be either all integers (token IDs) or all strings, not mixed",
+                )
+
+        return types.SamplingParams(
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            seed=seed,
+            stop_tokens=stop_tokens,
+            stop_strings=stop_strings,
+            top_k=self.top_k,
+        )
+
+
 class SampleRequest(BaseModel):
-    # For now we require model_path, in the official SDK there can actually be
-    # either model_path or base_model, the latter to sample from the base model:
-    # https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/sample_request.py
-    model_path: str
-    prompt: dict[str, Any]
-    sampling_params: dict[str, Any]
-    num_samples: int
-    prompt_logprobs: bool = False
+    num_samples: int = 1
+    prompt: ModelInput
+    sampling_params: SamplingParams
+    base_model: str | None = None
+    model_path: str | None = None
+    sampling_session_id: str | None = None
+    seq_id: int | None = None
+    prompt_logprobs: bool | None = None
+    topk_prompt_logprobs: int = 0
+    type: Literal["sample"] = "sample"
+
+    @model_validator(mode="after")
+    def validate_model_source(self):
+        """Valid if:
+        - sampling_session_id is provided AND seq_id is provided
+        - OR exactly one of base_model or model_path is provided
+        """
+        if self.sampling_session_id is not None:
+            if self.seq_id is None:
+                raise ValueError("'seq_id' must be provided when 'sampling_session_id' is used")
+            return self
+        if (self.base_model is None) == (self.model_path is None):
+            raise ValueError(
+                "When 'sampling_session_id' is not provided, exactly one of 'base_model' or 'model_path' must be provided"
+            )
+        return self
 
 
 class SaveWeightsRequest(BaseModel):
@@ -294,6 +389,47 @@ class TelemetryResponse(BaseModel):
     status: Literal["accepted"] = "accepted"
 
 
+class HealthResponse(BaseModel):
+    status: Literal["ok"]
+
+
+class CreateSessionRequest(BaseModel):
+    tags: list[str]
+    user_metadata: dict[str, Any] | None = None
+    sdk_version: str
+    type: Literal["create_session"] = "create_session"
+
+
+class CreateSessionResponse(BaseModel):
+    type: Literal["create_session"] = "create_session"
+    info_message: str | None = None
+    warning_message: str | None = None
+    error_message: str | None = None
+    session_id: str
+
+
+class SessionHeartbeatRequest(BaseModel):
+    session_id: str
+    type: Literal["session_heartbeat"] = "session_heartbeat"
+
+
+class SessionHeartbeatResponse(BaseModel):
+    type: Literal["session_heartbeat"] = "session_heartbeat"
+
+
+class CreateSamplingSessionRequest(BaseModel):
+    session_id: str
+    sampling_session_seq_id: int
+    base_model: str | None = None
+    model_path: str | None = None
+    type: Literal["create_sampling_session"] = "create_sampling_session"
+
+
+class CreateSamplingSessionResponse(BaseModel):
+    type: Literal["create_sampling_session"] = "create_sampling_session"
+    sampling_session_id: str
+
+
 class SupportedModel(BaseModel):
     model_name: str
 
@@ -304,6 +440,86 @@ class GetServerCapabilitiesResponse(BaseModel):
 
 class ListCheckpointsResponse(BaseModel):
     checkpoints: list[Checkpoint]
+
+
+class Cursor(BaseModel):
+    offset: int
+    limit: int
+    total_count: int
+
+
+class TrainingRunsResponse(BaseModel):
+    training_runs: list[TrainingRun]
+    cursor: Cursor
+
+
+class WeightsInfoRequest(BaseModel):
+    tinker_path: str
+
+
+class WeightsInfoResponse(BaseModel):
+    """Minimal information for loading public checkpoints."""
+
+    # from: https://github.com/thinking-machines-lab/tinker/blob/main/src/tinker/types/weights_info_response.py
+    base_model: str
+    is_lora: bool
+    lora_rank: int | None = None
+
+
+@app.get("/api/v1/healthz", response_model=HealthResponse)
+async def healthz():
+    """Checks if the API server is ready."""
+    return HealthResponse(status="ok")
+
+
+@app.post("/api/v1/create_session", response_model=CreateSessionResponse)
+async def create_session(request: CreateSessionRequest, session: AsyncSession = Depends(get_session)):
+    """Create a new session + persist in DB"""
+    session_id = f"session_{uuid4().hex[:8]}"
+    session_db = SessionDB(
+        session_id=session_id,
+        tags=request.tags,
+        user_metadata=request.user_metadata or {},
+        sdk_version=request.sdk_version,
+        status="active",
+    )
+    session.add(session_db)
+    await session.commit()
+    return CreateSessionResponse(session_id=session_id)
+
+
+@app.post("/api/v1/session_heartbeat", response_model=SessionHeartbeatResponse)
+async def session_heartbeat(request: SessionHeartbeatRequest, session: AsyncSession = Depends(get_session)):
+    """Heartbeat for an active session to keep it alive."""
+    session_db = await session.get(SessionDB, request.session_id)
+    if session_db is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session_db.last_heartbeat_at = datetime.now(timezone.utc)
+    session_db.heartbeat_count += 1
+    await session.commit()
+    return SessionHeartbeatResponse()
+
+
+@app.post("/api/v1/create_sampling_session", response_model=CreateSamplingSessionResponse)
+async def create_sampling_session(request: CreateSamplingSessionRequest, session: AsyncSession = Depends(get_session)):
+    """Create a new sampling session within an existing session."""
+    session_db = await session.get(SessionDB, request.session_id)
+    if session_db is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    # Exactly one of base_model or model_path must be provided
+    if (request.base_model is None) == (request.model_path is None):
+        raise HTTPException(status_code=400, detail="Exactly one of base_model or model_path must be provided")
+    sampling_session_id = f"sampling_{uuid4().hex[:8]}"
+    sampling_db = SamplingSessionDB(
+        sampling_session_id=sampling_session_id,
+        session_id=request.session_id,
+        sampling_session_seq_id=request.sampling_session_seq_id,
+        base_model=request.base_model,
+        model_path=request.model_path,
+    )
+    session.add(sampling_db)
+    await session.commit()
+    return CreateSamplingSessionResponse(sampling_session_id=sampling_session_id)
 
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
@@ -372,7 +588,8 @@ async def get_training_run(model_id: str, session: AsyncSession = Depends(get_se
         is_lora=True,
         corrupted=False,
         lora_rank=lora_config.rank,
-        last_request_time=model.created_at,  # TODO: Once we track modified_at timestamps, update this
+        # TODO: Once we track modified_at timestamps, update this
+        last_request_time=model.created_at,
         last_checkpoint=None,
         last_sampler_checkpoint=None,
         user_metadata=None,
@@ -389,6 +606,23 @@ async def forward_backward(request: ForwardBackwardRequest, session: AsyncSessio
         request_type=types.RequestType.FORWARD_BACKWARD,
         model_id=request.model_id,
         request_data=request.forward_backward_input.to_types(),
+    )
+
+    await session.commit()
+
+    return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
+
+
+@app.post("/api/v1/forward", response_model=FutureResponse)
+async def forward(request: ForwardRequest, session: AsyncSession = Depends(get_session)):
+    """Forward pass to obtain logprobs without accumulating gradients"""
+    await get_model(session, request.model_id)
+
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.FORWARD,
+        model_id=request.model_id,
+        request_data=request.forward_input.to_types(),
     )
 
     await session.commit()
@@ -429,7 +663,7 @@ async def load_weights(request: LoadWeightsRequest, req: Request, session: Async
             status_code=400, detail="request.path must be in format tinker://source_model_id/weights/checkpoint_id"
         )
 
-    await validate_checkpoint(req, source_model_id, checkpoint_id, session)
+    await validate_checkpoint(req, source_model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
 
     request_id = await create_future(
         session=session,
@@ -489,28 +723,64 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
 
-@app.post("/api/v1/asample", response_model=FutureResponse)
-async def asample(request: SampleRequest, session: AsyncSession = Depends(get_session)):
-    """Generates samples from the model (async version)."""
-    path = types.TinkerPath.parse(request.model_path)
-    if not path or path.kind != "" or not (model_id := path.primary_id) or not (checkpoint_id := path.secondary_id):
-        raise HTTPException(status_code=400, detail="model_path must be in format tinker://model_id/checkpoint_id")
+async def get_sampling_model(request: SampleRequest, session: AsyncSession) -> (str | None, str | None):
+    """Return (base_model, model_path) for a sampling request."""
+    # Resolve model/base from sampling_session_id if provided
+    if request.sampling_session_id is not None:
+        sampling_session = await session.get(SamplingSessionDB, request.sampling_session_id)
+        if sampling_session is None:
+            raise HTTPException(status_code=404, detail="Sampling session not found")
+        return (sampling_session.base_model, sampling_session.model_path)
+    return (request.base_model, request.model_path)
 
-    await get_model(session, model_id)
+
+@app.post("/api/v1/asample", response_model=FutureResponse)
+async def asample(request: SampleRequest, req: Request, session: AsyncSession = Depends(get_session)):
+    """Generates samples from the model (async version)."""
+    base_model, model_path = await get_sampling_model(request, session)
+
+    if base_model:
+        model_id = checkpoint_id = ""
+    else:
+        assert model_path is not None
+        path = types.TinkerPath.parse(model_path)
+        if (
+            not path
+            # Accept either tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id
+            or path.kind not in ("", "sampler_weights")
+            or not (model_id := path.primary_id)
+            or not (checkpoint_id := path.secondary_id)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="model_path must be tinker://model_id/checkpoint_id or tinker://model_id/sampler_weights/checkpoint_id",
+            )
+        await get_model(session, model_id)
+        # Validate that the checkpoint exists and is ready
+        await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     request_id = await create_future(
         session=session,
-        request_type=types.RequestType.SAMPLE,
+        request_type=(
+            types.RequestType.EXTERNAL if req.app.state.external_inference_client else types.RequestType.SAMPLE
+        ),
         model_id=model_id,
         request_data=types.SampleInput(
-            prompt=request.prompt,
-            sampling_params=request.sampling_params,
+            base_model=base_model,
+            prompt=request.prompt.to_types(),
+            sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
+            prompt_logprobs=request.prompt_logprobs,
         ),
     )
 
     await session.commit()
+
+    if req.app.state.external_inference_client:
+        asyncio.create_task(
+            req.app.state.external_inference_client.call_and_store_result(request_id, request, model_id, checkpoint_id)
+        )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
 
@@ -532,28 +802,44 @@ class RetrieveFutureRequest(BaseModel):
 async def retrieve_future(request: RetrieveFutureRequest, req: Request):
     """Retrieve the result of an async operation, waiting until it's available."""
     timeout = 300  # 5 minutes
-    poll_interval = 0.1  # 100ms
+    deadline = time.perf_counter() + timeout
 
-    for _ in range(int(timeout / poll_interval)):
-        async with AsyncSession(req.app.state.db_engine) as session:
-            statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
-            result = await session.exec(statement)
-            future = result.first()
+    # Start with 100ms, grow to 1s
+    poll = 0.1
+    max_poll = 1.0
 
-            if not future:
-                raise HTTPException(status_code=404, detail="Future not found")
+    while time.perf_counter() < deadline:
+        try:
+            async with AsyncSession(req.app.state.db_engine) as session:
+                # First, only query the status to avoid deserializing JSON data
+                statement = select(FutureDB.status).where(FutureDB.request_id == int(request.request_id))
+                result = await session.exec(statement)
+                status = result.first()
 
-            if future.status == RequestStatus.COMPLETED:
-                return future.result_data
+                if not status:
+                    raise HTTPException(status_code=404, detail="Future not found")
 
-            if future.status == RequestStatus.FAILED:
-                # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
-                if future.result_data and "error" in future.result_data:
-                    raise HTTPException(status_code=400, detail=future.result_data["error"])
-                else:
-                    raise HTTPException(status_code=500, detail="Unknown error")
+                # Only fetch full record if status is terminal (completed or failed)
+                if status in (RequestStatus.COMPLETED, RequestStatus.FAILED):
+                    statement = select(FutureDB).where(FutureDB.request_id == int(request.request_id))
+                    result = await session.exec(statement)
+                    future = result.first()
 
-        await asyncio.sleep(poll_interval)
+                    if future.status == RequestStatus.COMPLETED:
+                        return future.result_data
+
+                    if future.status == RequestStatus.FAILED:
+                        # Return 400 for handled errors (validation, etc.), 500 for unexpected failures
+                        if future.result_data and "error" in future.result_data:
+                            raise HTTPException(status_code=400, detail=future.result_data["error"])
+                        else:
+                            raise HTTPException(status_code=500, detail="Unknown error")
+        except SATimeoutError:
+            pass
+
+        # Exponential backoff
+        await asyncio.sleep(poll)
+        poll = min(poll * 1.5, max_poll)
 
     raise HTTPException(status_code=408, detail="Timeout waiting for result")
 
@@ -565,9 +851,11 @@ async def send_telemetry(request: TelemetryRequest):
     return TelemetryResponse(status="accepted")
 
 
-async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: str, session: AsyncSession):
+async def validate_checkpoint(
+    request: Request, unique_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType, session: AsyncSession
+):
     """Validate that a model and checkpoint exist in the database, returning the checkpoint path."""
-    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id))
+    checkpoint_db = await session.get(CheckpointDB, (unique_id, checkpoint_id, checkpoint_type))
 
     if not checkpoint_db:
         raise HTTPException(status_code=404, detail=f"Checkpoint not found: {unique_id}/{checkpoint_id}")
@@ -578,8 +866,46 @@ async def validate_checkpoint(request: Request, unique_id: str, checkpoint_id: s
     if checkpoint_db.status == CheckpointStatus.FAILED:
         raise HTTPException(status_code=500, detail=f"Checkpoint creation failed: {checkpoint_db.error_message}")
 
-    checkpoint_path = request.app.state.engine_config.checkpoints_base / unique_id / f"{checkpoint_id}.tar.gz"
-    return checkpoint_path
+    subdir = "sampler_weights" if checkpoint_type == types.CheckpointType.SAMPLER else ""
+    return request.app.state.engine_config.checkpoints_base / unique_id / subdir / f"{checkpoint_id}.tar.gz"
+
+
+@app.get("/api/v1/training_runs")
+async def list_training_runs(
+    limit: int = 20, offset: int = 0, session: AsyncSession = Depends(get_session)
+) -> TrainingRunsResponse:
+    """List all training runs"""
+
+    # Use window function to get total count alongside paginated results in a single query
+    statement = select(ModelDB, func.count().over().label("total_count")).offset(offset).limit(limit)
+    result = await session.exec(statement)
+    rows = result.all()
+
+    total_count = rows[0].total_count if rows else 0
+
+    training_runs = []
+    for row in rows:
+        model = row.ModelDB
+        lora_config = types.LoraConfig.model_validate(model.lora_config)
+
+        training_runs.append(
+            TrainingRun(
+                training_run_id=model.model_id,
+                base_model=model.base_model,
+                model_owner="default",
+                is_lora=True,
+                corrupted=False,
+                lora_rank=lora_config.rank,
+                last_request_time=model.created_at,  # TODO: Once we track modified_at timestamps, update this
+                last_checkpoint=None,
+                last_sampler_checkpoint=None,
+                user_metadata=None,
+            )
+        )
+
+    return TrainingRunsResponse(
+        training_runs=training_runs, cursor=Cursor(offset=offset, limit=limit, total_count=total_count)
+    )
 
 
 @app.get("/api/v1/training_runs/{unique_id}/checkpoints/{checkpoint_id}/archive")
@@ -590,7 +916,7 @@ async def get_checkpoint_archive_url(
     session: AsyncSession = Depends(get_session),
 ):
     """Return a 302 redirect to the download URL (SDK expects this pattern)"""
-    await validate_checkpoint(request, unique_id, checkpoint_id, session)
+    await validate_checkpoint(request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
     # Generate URL to the download endpoint and return 302 redirect
     download_url = str(request.url_for("download_checkpoint_archive", unique_id=unique_id, checkpoint_id=checkpoint_id))
@@ -609,7 +935,9 @@ async def download_checkpoint_archive(
     session: AsyncSession = Depends(get_session),
 ):
     """Actually download the checkpoint archive bytes"""
-    checkpoint_path = await validate_checkpoint(request, unique_id, checkpoint_id, session)
+    checkpoint_path = await validate_checkpoint(
+        request, unique_id, checkpoint_id, types.CheckpointType.SAMPLER, session
+    )
 
     file_buffer = await asyncio.to_thread(download_file, checkpoint_path)
 
@@ -651,6 +979,44 @@ async def list_checkpoints(
         )
 
     return ListCheckpointsResponse(checkpoints=checkpoints)
+
+
+@app.get("/api/v1/models/{unique_id}/checkpoints")
+async def list_checkpoints_models(
+    unique_id: str = fastapi.Path(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH),
+    session: AsyncSession = Depends(get_session),
+):
+    """Just to be compatible with tinker SDK"""
+    return await list_checkpoints(unique_id=unique_id, session=session)
+
+
+@app.post("/api/v1/weights_info", response_model=WeightsInfoResponse)
+async def get_weights_info(request: WeightsInfoRequest, req: Request, session: AsyncSession = Depends(get_session)):
+    """Get information about weights/checkpoint from a tinker path."""
+    path = types.TinkerPath.parse(request.tinker_path)
+
+    if not path or path.kind != "weights":
+        raise HTTPException(
+            status_code=400, detail="Invalid tinker path format. Expected: tinker://model_id/weights/checkpoint_id"
+        )
+
+    model_id = path.primary_id
+    checkpoint_id = path.secondary_id
+
+    # Get model info (this will raise 404 if model doesn't exist)
+    model = await get_model(session, model_id)
+
+    # Validate checkpoint exists and is completed
+    await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.TRAINING, session)
+
+    lora_config = types.LoraConfig.model_validate(model.lora_config)
+    is_lora = lora_config.rank > 0
+
+    return WeightsInfoResponse(
+        base_model=model.base_model,
+        is_lora=is_lora,
+        lora_rank=lora_config.rank,
+    )
 
 
 @app.get("/")

@@ -61,8 +61,8 @@ class FullCtxTrainer(RayPPOTrainer):
                 }
                 training_input = self.convert_to_training_input(dummy_generator_output, uids)
 
-                # Run forward pass
-                training_input = self.fwd_logprobs_values_reward(training_input)
+                with Timer("fwd_logprobs_values_reward", self.all_timings):
+                    training_input = self.fwd_logprobs_values_reward(training_input)
 
                 # 1.5 apply kl divergence penalty to rewards
                 if self.cfg.trainer.algorithm.use_kl_in_reward:
@@ -80,6 +80,7 @@ class FullCtxTrainer(RayPPOTrainer):
                 # 4. train policy/critic model
                 with Timer("train_critic_and_policy", self.all_timings):
                     status = self.train_critic_and_policy(training_input)
+                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
                 self.tracker.log(self.all_metrics, step=self.global_step)
                 self.all_metrics = {}

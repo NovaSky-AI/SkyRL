@@ -16,6 +16,7 @@ import json
 from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
+from skyrl_train.utils.utils import print_mem
 from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor, validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
 
@@ -63,15 +64,16 @@ def get_test_actor_config(strategy: str) -> DictConfig:
 
 
 @pytest.mark.parametrize(
-    "strategy",
+    ("strategy", "lora"),
     [
-        "deepspeed",
-        "fsdp",
-        "fsdp2",
-        pytest.param("megatron", marks=pytest.mark.megatron),
+        ("deepspeed", False),
+        ("fsdp", False),
+        ("fsdp2", False),
+        pytest.param("megatron", False, marks=pytest.mark.megatron),
+        pytest.param("megatron", True, marks=[pytest.mark.megatron, pytest.mark.lora]),
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy):
+def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -81,6 +83,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
     5. Repeating second training step and comparing logits
     """
     cfg = get_test_actor_config(strategy)
+    if lora:
+        cfg.trainer.policy.model.lora.rank = 32
+        cfg.trainer.policy.model.lora.alpha = 32
 
     try:
         actor_group = init_worker_with_type(
@@ -134,6 +139,20 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
                 "pass_through", "save_checkpoint", ckpt_dir=checkpoint_path, tokenizer=tokenizer
             )
         )
+
+        # Step 2.1: Make sure that offloading still works after saving checkpoint
+        memory_after_saving = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
+        print_mem("memory after saving checkpoint", memory_after_saving)
+
+        actor_group.offload_to_cpu()
+
+        memory_after_offloading = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))[0]
+        print_mem("memory after offloading", memory_after_offloading)
+
+        assert (
+            memory_after_offloading["allocated"] < memory_after_saving["allocated"]
+        ), f"Memory after offloading should be less than after saving: {memory_after_offloading} bytes < {memory_after_saving} bytes"
+        actor_group.backload_to_gpu()
 
         # check that relevant files are saved
         huggingface_dir = os.path.join(checkpoint_path, "huggingface")

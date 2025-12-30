@@ -1,9 +1,9 @@
 # SkyRL tx: Unified API for training and inference
 
 > ⚠️  The project is currently very early with lots of missing features
-> (e.g. currently LoRA is only supported for the MLP layer, pure inference
-> is not supported, model sharding is in a very early state). Many of
-> these are easy to implement and we welcome contributions! ⚠️
+> (e.g. currently LoRA is only supported for the MLP layer, model sharding
+> is in a very early state). Many of these are easy to implement and we
+> welcome contributions! ⚠️
 
 
 SkyRL tx is an open-source cross-platform library that allows users to
@@ -17,7 +17,26 @@ The `t` in `tx` stands for transformers, training, or tinker, and the `x`
 stands for "cross-platform".
 
 ## Getting Started
-See the SkyRL tx [blog post](https://www.notion.so/SkyRL-tx-An-open-source-project-to-implement-the-Tinker-API-2848f0016b9d80fe9873eea1e38815ca?source=copy_link#2848f0016b9d80bc8a4bebeedac69f6e) for a quickstart example. 
+See the following SkyRL tx blog posts for more info and examples:
+- [Initial blog post](https://novasky-ai.notion.site/skyrl-tx) with the piglatin training example
+- [v0.0.2 release](https://novasky-ai.notion.site/skyrl-tx-v002) with a `Qwen/Qwen3-4B` training example
+- [v0.0.3 release](https://novasky-ai.notion.site/skyrl-tx-003) with a `Qwen/Qwen3-Coder-30B-A3B` training and a sampling example
+- [v0.1.0 release](https://novasky-ai.notion.site/skyrl-tx-v010) with an end-to-end RL example
+
+See also our talk [SkyRL tx: A unified training and inference engine](https://docs.google.com/presentation/d/1g-u8zxz7FsnlQXXShBVoqjUJhS48c6rxkJJJn0sj78A/view) at Ray Summit 2025.
+
+## Features
+
+### ✅ Implemented
+- **Training**: MultiLoRA fine-tuning with gradient accumulation
+- **Inference**: Text generation with
+  - Temperature sampling
+  - Stop token support
+- **API**: REST API compatible with Tinker specification
+
+### 🚧 In Progress
+- Model sharding improvements
+- Additional LoRA layer support
 
 ## Project Status
 

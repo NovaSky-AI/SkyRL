@@ -2,7 +2,10 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
+from tx.utils.models import filter_lora
 from tx.layers.util import Param, prepare_routing
+from tx.models.types import ModelForCausalLM
+from tx.tinker.types import LoraConfig
 
 
 class LoRAMixin:
@@ -24,8 +27,8 @@ class LoRAMixin:
         max_lora_rank: int,
         shape_A: tuple[int, ...],
         shape_B: tuple[int, ...],
-        sharding_A: jax.sharding.PartitionSpec,
-        sharding_B: jax.sharding.PartitionSpec,
+        sharding_A: tuple[str | None, ...],
+        sharding_B: tuple[str | None, ...],
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ) -> None:
@@ -62,26 +65,81 @@ class LoRAMixin:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
 
-        (batch_size, seq_len, in_features) = x.shape
-        assert len(self.lora_A.shape) == 3 and self.lora_A.value.shape[1] == in_features
+        if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
+            raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
+
+        (batch_size, seq_len, *dims) = x.shape
+        assert len(self.lora_A.shape) == 3
+        assert len(dims) == 0 if isinstance(self, nnx.Embed) else tuple(dims) == self.lora_A.value.shape[1:-1]
         assert adapter_indices.shape[0] == batch_size
 
-        x_flat = x.reshape(-1, in_features)
+        x_flat = x.reshape(-1, *dims)
         adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
 
         # Sort tokens to prepare for ragged_dot
-        x_sorted, group_sizes, unsort_indices, _ = prepare_routing(
-            x_flat, adapter_indices_expanded, self.max_lora_adapters
+        x_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
+            x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
         )
 
         # Apply LoRA using ragged_dot: x @ A @ B
-        intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
+        if isinstance(self, nnx.Embed):
+            # Embedding path: A[x]
+            intermediate = self.lora_A.value[adapter_indices_sorted, x_sorted, :]
+        else:
+            # Linear path: x @ A
+            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
 
         # Unsort, reshape, scale
         lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
         lora_output = lora_output * self.lora_scaling.value[adapter_indices, None, None]
         return base_output + lora_output.reshape(base_output.shape)
+
+
+class LoRAEmbed(LoRAMixin, nnx.Embed):
+    """An nnx.Embed layer with multi-adapter LoRA support"""
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        features: int,
+        *,
+        max_lora_adapters: int = 0,
+        max_lora_rank: int = 8,
+        dtype: jnp.dtype = jnp.float32,
+        param_dtype: jnp.dtype | None = None,
+        embedding_init: nnx.Initializer,
+        rngs: nnx.Rngs,
+    ) -> None:
+        param_dtype = param_dtype or dtype
+
+        super().__init__(
+            num_embeddings=num_embeddings,
+            features=features,
+            dtype=dtype,
+            param_dtype=param_dtype,
+            embedding_init=embedding_init,
+            rngs=rngs,
+        )
+        assert (
+            self.embedding.value.sharding is not None
+        ), "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
+        sharding = self.embedding.value.sharding.spec
+
+        self.init_lora(
+            max_lora_adapters=max_lora_adapters,
+            max_lora_rank=max_lora_rank,
+            shape_A=(max_lora_adapters, num_embeddings, max_lora_rank),
+            shape_B=(max_lora_adapters, max_lora_rank, features),
+            sharding_A=(None, sharding[0], None),
+            sharding_B=(None, None, sharding[1]),
+            dtype=param_dtype,
+            rngs=rngs,
+        )
+
+    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+        base_out = super().__call__(x)
+        return self.apply_lora(x, base_out, adapter_indices)
 
 
 class LoRALinear(LoRAMixin, nnx.Linear):
@@ -96,13 +154,13 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
         param_dtype: jnp.dtype | None = None,
-        use_bias: bool = True,
-        kernel_init: nnx.Initializer | None = None,
+        use_bias: bool,
+        kernel_init: nnx.Initializer,
         bias_init: nnx.Initializer | None = None,
         rngs: nnx.Rngs,
     ) -> None:
         param_dtype = param_dtype or dtype
-        if use_bias and bias_init is None:
+        if bias_init is None:
             bias_init = nnx.initializers.zeros_init()
 
         super().__init__(
@@ -124,8 +182,8 @@ class LoRALinear(LoRAMixin, nnx.Linear):
             max_lora_rank=max_lora_rank,
             shape_A=(max_lora_adapters, in_features, max_lora_rank),
             shape_B=(max_lora_adapters, max_lora_rank, out_features),
-            sharding_A=jax.sharding.PartitionSpec(None, sharding[0], None),
-            sharding_B=jax.sharding.PartitionSpec(None, None, sharding[1]),
+            sharding_A=(None, sharding[0], None),
+            sharding_B=(None, None, sharding[1]),
             dtype=param_dtype,
             rngs=rngs,
         )
@@ -147,7 +205,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
-        kernel_init: nnx.Initializer | None = None,
+        kernel_init: nnx.Initializer,
         rngs: nnx.Rngs,
     ) -> None:
         self.num_experts = num_experts
@@ -163,8 +221,8 @@ class LoRAExpert(LoRAMixin, nnx.Module):
             max_lora_rank=max_lora_rank,
             shape_A=(max_lora_adapters, num_experts, in_features, max_lora_rank),
             shape_B=(max_lora_adapters, num_experts, max_lora_rank, out_features),
-            sharding_A=jax.sharding.PartitionSpec(None, sharding[0], sharding[1], None),
-            sharding_B=jax.sharding.PartitionSpec(None, sharding[0], None, sharding[2]),
+            sharding_A=(None, sharding[0], sharding[1], None),
+            sharding_B=(None, sharding[0], None, sharding[2]),
             dtype=dtype,
             rngs=rngs,
         )
@@ -179,6 +237,9 @@ class LoRAExpert(LoRAMixin, nnx.Module):
 
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
+
+        if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
+            raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         # Reconstruct expert indices from group_sizes
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])
@@ -205,7 +266,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int, lora_alpha: float):
+def update_adapter_config(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
     """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
 
     Note: This method needs to be called BEFORE any training happens, you should not update
@@ -216,20 +277,31 @@ def update_adapter_config(model: nnx.Module, adapter_index: int, lora_rank: int,
     Args:
         model: The model containing LoRA layers
         adapter_index: Index of the adapter to update
-        lora_rank: Rank to set for this adapter
-        lora_alpha: Alpha value to use for computing scaling (alpha / rank)
+        lora_config: LoraConfig object containing rank, alpha, and training flags
     """
-    scaling = lora_alpha / lora_rank
     state = nnx.state(model)
 
     def update_lora_config(path, value):
+        effective_rank = lora_config.rank
+        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+
+        # Apply rank normalization for MoE expert layers
+        # Following Thinking Machines' approach: divide rank by num_experts
+        # to keep total LoRA parameters similar to non-MoE models
+        if "experts" in normalized_path:
+            effective_rank = max(1, lora_config.rank // model.config.num_experts)
+
+        if not filter_lora(lora_config, normalized_path):
+            effective_rank = 0
+
         if path[-2].key == "lora_ranks":
-            return value.at[adapter_index].set(lora_rank)
+            return value.at[adapter_index].set(effective_rank)
         if path[-2].key == "lora_scaling":
-            return value.at[adapter_index].set(scaling)
+            # Set scaling to 0.0 if rank is 0
+            return value.at[adapter_index].set(lora_config.alpha / effective_rank if effective_rank > 0 else 0.0)
         if path[-2].key == "lora_A":
             # Zero out columns beyond the rank for this adapter; lora_B is already zero
-            return value.at[adapter_index, :, lora_rank:].set(0.0)
+            return value.at[adapter_index, ..., effective_rank:].set(0.0)
         return value
 
     updated_state = jax.tree.map_with_path(update_lora_config, state)

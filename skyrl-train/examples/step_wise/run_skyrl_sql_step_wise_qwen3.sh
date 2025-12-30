@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen3-4B on SkyRL-SQL-653 data with step-wise training
 # Uses 1 node with 8 GPUs.
-# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+# hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/step_wise/run_skyrl_sql_step_wise_qwen3.sh
 
@@ -22,7 +22,7 @@ MAX_TURNS=6
 # NOTE: we set `generator.retokenize_chat_history` to true so that 
 # chat template is applied to the input each time - this ensures
 # that previous think tokens are removed 
-uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
+uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -74,5 +74,6 @@ uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   trainer.eval_before_train=true \
   trainer.eval_interval=5 \
   trainer.algorithm.policy_loss_type="dual_clip" \
+  generator.step_wise_trajectories=true \
   +generator.retokenize_chat_history=true \
   $@

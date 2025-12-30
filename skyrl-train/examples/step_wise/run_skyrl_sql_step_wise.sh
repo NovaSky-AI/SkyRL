@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
 # Uses 1 node with 8 GPUs.
-# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+# hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/step_wise/run_skyrl_sql_step_wise.sh
 
@@ -19,7 +19,7 @@ MAX_GENERATE_LENGTH=3000
 TRAIN_BATCH_SIZE=256
 MAX_TURNS=6
 
-uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
+uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -63,7 +63,7 @@ uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
-  trainer.project_name="gptoss_multiturn" \
+  trainer.project_name="stepwise_multiturn" \
   trainer.run_name="skyrlsql_multiturn_test_7b" \
   trainer.resume_mode=null \
   trainer.ckpt_path=$CKPT_PATH \
@@ -71,4 +71,5 @@ uv run --isolated --extra vllm -m examples.step_wise.main_step_wise \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.algorithm.policy_loss_type="dual_clip" \
+  generator.step_wise_trajectories=true \
   $@

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import socket
+from datetime import timedelta
 from typing import Dict, Optional, Type, List, Any, Callable
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from tqdm import tqdm
@@ -22,7 +23,7 @@ from ray.util.placement_group import (
 )
 
 from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import masked_mean
 from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
@@ -30,7 +31,6 @@ from skyrl_train.distributed.strategy import DistributedStrategy
 from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
-from skyrl_train.distributed.utils import init_custom_process_group
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
@@ -78,7 +78,10 @@ class DistributedTorchRayActor:
 
     def init_worker_process_group(self):
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend="nccl")
+            # Default torch dist pg init timeout is 10 minutes (600 seconds)
+            torch.distributed.init_process_group(
+                backend="nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+            )
 
         # setup device mesh
         # TODO: Support TP / PP for DeepSpeed
@@ -155,7 +158,13 @@ class DistributedTorchRayActor:
                 ("maskp", POINTER(c_ulong)),
             ]
 
-        LIBNUMA = CDLL(find_library("numa"))
+        try:
+            LIBNUMA = CDLL(find_library("numa"))
+        except Exception as e:
+            logger.error(f"Skipping NUMA affinity setup because libnuma is not installed: {e}")
+            _SET_AFFINITY = True
+            return
+
         LIBNUMA.numa_parse_nodestring.argtypes = [c_char_p]
         LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
         LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
@@ -181,8 +190,11 @@ class DistributedTorchRayActor:
 
 class Worker(DistributedTorchRayActor):
     def __init__(self, cfg: DictConfig, *args, **kwargs):
+        from skyrl_train.weight_sync import get_transfer_strategy_cls
+
         super().__init__(*args, **kwargs)
         self.cfg = cfg
+        self._transfer_strategy_cls = get_transfer_strategy_cls(self.cfg)
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -246,66 +258,44 @@ class Worker(DistributedTorchRayActor):
     async def init_weight_sync_state(self, inference_engine_client: InferenceEngineClient):
         """Initialize state for weight syncing with Inference Engine Client
 
-        Initializes a custom process group with the rank 0 Worker and all the inference engine ranks
-        for weight syncing.
+        Creates init info and sender, then sends init info to inference engines
+        so they can create receivers.
 
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
+
         assert inference_engine_client is not None
 
+        # Create init info on all ranks (it's deterministic from cfg)
+        init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
+
+        # Create sender on all ranks
+        # Strategy implementations may have different logic for different ranks
+        tasks = [
+            asyncio.to_thread(
+                self._transfer_strategy_cls.create_sender,
+                init_info=init_info,
+                inference_client=inference_engine_client,
+            ),
+        ]
+
+        # Only rank 0 initializes receivers on inference engines
+        # NOTE: For broadcast strategy, sender and receiver init must run concurrently
+        # because both need to join the same process group to avoid deadlock
         if torch.distributed.get_rank() == 0:
-            master_addr = ray._private.services.get_node_ip_address()
-            with socket.socket() as sock:
-                sock.bind(("", 0))
-                master_port = sock.getsockname()[1]
+            tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
 
-            num_inference_engines, tensor_parallel_size, data_parallel_size = (
-                self.cfg.generator.num_inference_engines,
-                self.cfg.generator.inference_engine_tensor_parallel_size,
-                self.cfg.generator.inference_engine_data_parallel_size,
-            )
-            world_size = num_inference_engines * tensor_parallel_size * data_parallel_size + 1
+        results = await asyncio.gather(*tasks)
+        self._weight_transfer_sender = results[0]  # sender is always first task
 
-            backend = self.cfg.generator.weight_sync_backend
-
-            override_existing = False if self.cfg.generator.override_existing_update_group == "disable" else True
-            group_name = "skyrl"
-            self._model_update_group_name = group_name
-
-            tasks = []
-            tasks.append(
-                inference_engine_client.init_weight_update_communicator(
-                    master_addr=master_addr,
-                    master_port=master_port,
-                    rank_offset=1,
-                    world_size=world_size,
-                    group_name=group_name,
-                    backend=backend,
-                    override_existing=override_existing,
-                )
-            )
-
-            tasks.append(
-                asyncio.to_thread(
-                    init_custom_process_group,
-                    backend=backend,
-                    init_method=f"tcp://{master_addr}:{master_port}",
-                    world_size=world_size,
-                    rank=0,
-                    group_name=group_name,
-                )
-            )
-            results = await asyncio.gather(*tasks)
-            self._model_update_group = results[-1]
-
-            # # Register signal handlers for termination only on rank 0
-            # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
-            # The better way is to just have this specified in __del__, but there is
-            # no guarattee that __del__ will be called in general. Ray also doesn't
-            # explictly call __del__ when the actor shuts down.
-            # It's commented out so that we can fix this in the future.
-            # atexit.register(self._handle_termination)
+        # # Register signal handlers for termination only on rank 0
+        # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
+        # The better way is to just have this specified in __del__, but there is
+        # no guarattee that __del__ will be called in general. Ray also doesn't
+        # explictly call __del__ when the actor shuts down.
+        # It's commented out so that we can fix this in the future.
+        # atexit.register(self._handle_termination)
 
         torch.distributed.barrier()
 
@@ -631,6 +621,97 @@ class PolicyWorkerBase(Worker):
             self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
 
+    def forward_backward(self, experience: Experience, accumulation_steps: int) -> Dict[str, float]:
+        """
+        Perform the forward and backward pass for one micro-batch.
+        """
+        self.model.train()
+        experience.to_device(torch.cuda.current_device())
+
+        sequences = experience.sequences
+        old_action_log_probs = experience.action_log_probs
+        base_action_log_probs = (
+            experience.base_action_log_probs if experience.base_action_log_probs is not None else None
+        )
+        advantages = experience.advantages
+        num_actions = experience.num_actions
+        attention_mask = experience.attention_mask
+        loss_mask = experience.loss_mask
+        rollout_action_logprobs = experience.rollout_logprobs
+
+        # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
+        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+            # actor loss
+            action_log_probs, output = self.model(
+                sequences,
+                num_actions,
+                attention_mask=attention_mask,
+                temperature=self.cfg.generator.sampling_params.temperature,
+                return_output=True,
+                compute_entropy=True,
+                entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
+            )
+            # loss function
+            # TODO: recompute advantages
+            policy_loss, clip_ratio = self.policy_loss_fn(
+                action_log_probs,
+                old_action_log_probs,
+                advantages,
+                config=self.cfg.trainer.algorithm,
+                loss_mask=loss_mask,
+                rollout_logprobs=rollout_action_logprobs,
+            )
+
+        # entropy loss
+        with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
+            # batch_size, seqlen
+            entropy_BS = output["entropy"]
+            entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
+            entropy = masked_mean(entropy_BS, loss_mask)
+
+        if self.cfg.trainer.algorithm.use_entropy_loss:
+            entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
+        else:
+            entropy_loss_term = torch.tensor(0.0)
+
+        # kl loss
+        if self.cfg.trainer.algorithm.use_kl_loss:
+            kl_loss = compute_approx_kl(
+                action_log_probs,
+                base_action_log_probs,
+                loss_mask=loss_mask,
+                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+            )
+            kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
+        else:
+            kl_loss = torch.tensor(0.0)
+        kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
+
+        loss = policy_loss + kl_loss_term - entropy_loss_term
+        loss = loss / accumulation_steps
+        self.strategy.backward(loss, self.model, self.optimizer)
+
+        status = {
+            "final_loss": loss.item(),
+            "policy_loss": policy_loss.item(),
+            "ppo_clip_ratio": clip_ratio,
+            "policy_entropy": entropy.item(),
+            "response_length": num_actions,
+        }
+        if self.cfg.trainer.algorithm.use_kl_loss:
+            status["policy_kl"] = kl_loss.item()
+
+        return status
+
+    def optim_step(self) -> float:
+        """
+        Perform optimizer step and return the gradient norm.
+        """
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        if grad_norm is not None:
+            grad_norm = grad_norm.detach().cpu().item()
+        return grad_norm
+
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
         dataloader = BatchIterator(
@@ -654,12 +735,17 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
-                status = self.training_step(
-                    experience,
-                    global_step,
-                    local_step,
-                    accumulation_steps,
-                )
+                status = self.forward_backward(experience, accumulation_steps)
+
+                if (local_step + 1) % accumulation_steps == 0:
+                    grad_norm = self.optim_step()
+                    status["raw_grad_norm"] = grad_norm
+
+                if self.record_memory:
+                    self.save_memory_snapshot(global_step, local_step)
+
+                status["policy_lr"] = self.scheduler.get_last_lr()[0]
+
                 policy_update_steps += 1
 
                 # for DP
@@ -717,95 +803,17 @@ class PolicyWorkerBase(Worker):
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
-        self.model.train()
-        experience.to_device(torch.cuda.current_device())
+        status = self.forward_backward(experience, accumulation_steps)
 
-        sequences = experience.sequences
-        old_action_log_probs = experience.action_log_probs
-        base_action_log_probs = (
-            experience.base_action_log_probs if experience.base_action_log_probs is not None else None
-        )
-        advantages = experience.advantages
-        num_actions = experience.num_actions
-        attention_mask = experience.attention_mask
-        loss_mask = experience.loss_mask
-        rollout_action_logprobs = experience.rollout_logprobs
-
-        # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            # actor loss
-            action_log_probs, output = self.model(
-                sequences,
-                num_actions,
-                attention_mask=attention_mask,
-                temperature=self.cfg.generator.sampling_params.temperature,
-                return_output=True,
-                compute_entropy=True,
-            )
-            # loss function
-            # TODO: recompute advantages
-            policy_loss, clip_ratio = self.policy_loss_fn(
-                action_log_probs,
-                old_action_log_probs,
-                advantages,
-                config=self.cfg.trainer.algorithm,
-                loss_mask=loss_mask,
-                rollout_logprobs=rollout_action_logprobs,
-            )
-        # entropy
-        with torch.no_grad():
-            # batch_size, seqlen
-            entropy_BS = output["entropy"]
-            entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-
-            entropy = masked_mean(entropy_BS, loss_mask)
-
-        # kl loss
-        if self.cfg.trainer.algorithm.use_kl_loss:
-            kl_loss = compute_approx_kl(
-                action_log_probs,
-                base_action_log_probs,
-                loss_mask=loss_mask,
-                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
-            )
-            kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
-        else:
-            kl_loss = torch.tensor(0.0)
-
-        loss = policy_loss + kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
-        loss = loss / accumulation_steps
-        self.strategy.backward(loss, self.model, self.optimizer)
-
-        grad_norm = None
         if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
-            if grad_norm is not None:
-                grad_norm = grad_norm.detach().cpu().item()
+            grad_norm = self.optim_step()
+            status["raw_grad_norm"] = grad_norm
 
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)
 
-        # status
-        status = {
-            "policy_loss": policy_loss.item(),
-            "policy_lr": self.scheduler.get_last_lr()[0],
-            "ppo_clip_ratio": clip_ratio,
-            "policy_entropy": entropy.item(),
-        }
-        if self.cfg.trainer.algorithm.use_kl_loss:
-            status["policy_kl"] = kl_loss.item()
+        status["policy_lr"] = self.scheduler.get_last_lr()[0]
 
-        if grad_norm is not None:
-            status["raw_grad_norm"] = grad_norm
-
-        for k, v in experience.info.items():
-            if k == "kl":
-                # just use the same value as loss if available
-                status[k] = kl_loss.item() if isinstance(kl_loss, torch.Tensor) else status["policy_kl"]
-            else:
-                status[k] = v.mean().item() if isinstance(v, torch.Tensor) else v
-
-        status["response_length"] = num_actions
         return status
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
@@ -867,7 +875,6 @@ class PolicyWorkerBase(Worker):
 
 
 class CriticWorkerBase(Worker):
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
@@ -889,6 +896,54 @@ class CriticWorkerBase(Worker):
         self.critic_mini_batch_size_per_gpu = (
             self.cfg.trainer.critic_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
+
+    def forward_backward(self, experience: Experience, accumulation_steps: int) -> Dict[str, float]:
+        """
+        Perform the forward and backward pass for one micro-batch.
+        """
+        experience.to_device(torch.cuda.current_device())
+
+        sequences = experience.sequences
+        old_values = experience.values
+        returns = experience.returns
+        num_actions = experience.num_actions
+        attention_mask = experience.attention_mask
+        loss_mask = experience.loss_mask
+
+        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
+            # critic loss
+            values, output = self.model(
+                sequences,
+                num_actions=num_actions,
+                attention_mask=attention_mask,
+                return_output=True,
+            )
+            # loss function
+            loss, clipfrac = self.critic_loss_fn(
+                values,
+                old_values,
+                returns,
+                config=self.cfg.trainer.algorithm,
+                loss_mask=loss_mask,
+            )
+        loss = loss / accumulation_steps
+        self.strategy.backward(loss, self.model, self.optimizer)
+
+        status = {
+            "critic_loss": loss.item(),
+            "values_mean": masked_mean(values, loss_mask).item(),
+            "values_clipfrac": clipfrac,
+        }
+        return status
+
+    def optim_step(self) -> float:
+        """
+        Perform optimizer step and return the gradient norm.
+        """
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="critic")
+        if grad_norm is not None:
+            grad_norm = grad_norm.detach().cpu().item()
+        return grad_norm
 
     def _forward_micro_batch(
         self,
@@ -924,7 +979,6 @@ class CriticWorkerBase(Worker):
         )
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
-        global_step = train_data.metadata["global_step"]
         dataloader = BatchIterator(
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
         )
@@ -947,7 +1001,13 @@ class CriticWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for local_step, experience in enumerate(pbar):
-                status = self.training_step(experience, global_step, local_step, accumulation_steps)
+                status = self.forward_backward(experience, accumulation_steps)
+
+                if (local_step + 1) % accumulation_steps == 0:
+                    grad_norm = self.optim_step()
+                    status["raw_grad_norm"] = grad_norm
+
+                status["critic_lr"] = self.scheduler.get_last_lr()[0]
                 critic_update_steps += 1
 
                 # for DP
@@ -973,48 +1033,13 @@ class CriticWorkerBase(Worker):
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
-        experience.to_device(torch.cuda.current_device())
+        status = self.forward_backward(experience, accumulation_steps)
 
-        sequences = experience.sequences
-        old_values = experience.values
-        returns = experience.returns
-        num_actions = experience.num_actions
-        attention_mask = experience.attention_mask
-        loss_mask = experience.loss_mask
-
-        with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            # critic loss
-            values, output = self.model(
-                sequences,
-                num_actions=num_actions,
-                attention_mask=attention_mask,
-                return_output=True,
-            )
-            # loss function
-            loss, clipfrac = self.critic_loss_fn(
-                values,
-                old_values,
-                returns,
-                config=self.cfg.trainer.algorithm,
-                loss_mask=loss_mask,
-            )
-        loss = loss / accumulation_steps
-        self.strategy.backward(loss, self.model, self.optimizer)
-        grad_norm = None
         if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="critic")
-            if grad_norm is not None:
-                grad_norm = grad_norm.detach().cpu().item()
-
-        # status
-        status = {
-            "critic_loss": loss.item(),
-            "values_mean": masked_mean(values, loss_mask).item(),
-            "critic_lr": self.scheduler.get_last_lr()[0],
-            "values_clipfrac": clipfrac,
-        }
-        if grad_norm is not None:
+            grad_norm = self.optim_step()
             status["raw_grad_norm"] = grad_norm
+
+        status["critic_lr"] = self.scheduler.get_last_lr()[0]
         return status
 
     def save_checkpoint(self, ckpt_dir: str, tokenizer=None):

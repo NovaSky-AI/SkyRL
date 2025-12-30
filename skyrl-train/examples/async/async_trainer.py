@@ -26,7 +26,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
         # Load checkpoint state if resumption is enabled
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.load_checkpoints()
+                self.global_step, _ = self.load_checkpoints()
                 logger.info(f"Resumed training from global_step {self.global_step}")
 
         # Initialize weight sync state
@@ -45,9 +45,10 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
+        start_epoch = self.global_step // len(self.train_dataloader)
         # Start from step 1
         self.global_step += 1
-        for epoch in range(self.cfg.trainer.epochs):
+        for epoch in range(start_epoch, self.cfg.trainer.epochs):
             # while this is just off by one, you can image a more general queue based approach
             # where the generation buffer holds a list of objects that the trainer can read from
             # bit by bit.
@@ -122,7 +123,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        print("example: ", vis)
+        logger.info(f"Example generated: {vis}")
 
         with Timer("convert_to_training_input", self.all_timings):
             training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
