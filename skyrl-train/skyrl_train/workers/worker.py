@@ -621,7 +621,7 @@ class PolicyWorkerBase(Worker):
             self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
         )
 
-    def forward_backward(self, experience: Experience, accumulation_steps: int) -> Dict[str, float]:
+    def forward_backward(self, experience: Experience, microbatch_weight: float) -> Dict[str, float]:
         """
         Perform the forward and backward pass for one micro-batch.
         """
@@ -688,7 +688,7 @@ class PolicyWorkerBase(Worker):
         kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
         loss = policy_loss + kl_loss_term - entropy_loss_term
-        loss = loss / accumulation_steps
+        loss = loss * microbatch_weight
         self.strategy.backward(loss, self.model, self.optimizer)
 
         status = {
@@ -714,39 +714,47 @@ class PolicyWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+        minibatch_iterator = BatchIterator(
+            train_data, sample_batch_size=self.policy_mini_batch_size_per_gpu, drop_last=False
         )
 
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-        # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        accumulation_steps = micro_batches_per_mini_batch
+        # micro_batches_per_mini_batch = (
+        #     self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
+        # )
+        # # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
+        # accumulation_steps = micro_batches_per_mini_batch
 
         status_list = []
         all_metrics = defaultdict(list)
-        policy_update_steps = 0
+        num_minibatches = len(minibatch_iterator)
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            pbar = tqdm(
-                dataloader,
+            minibatch_pbar = tqdm(
+                minibatch_iterator,
                 desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, experience in enumerate(pbar):
-                status = self.forward_backward(experience, accumulation_steps)
+            for local_step, minibatch in enumerate(minibatch_pbar):
+                microbatch_iterator = BatchIterator(
+                    minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+                )
+                num_microbatches = len(microbatch_iterator)
+                microbatch_weight = 1.0 / num_microbatches
 
-                if (local_step + 1) % accumulation_steps == 0:
-                    grad_norm = self.optim_step()
-                    status["raw_grad_norm"] = grad_norm
+                for microbatch in microbatch_iterator:
+                    microbatch_experience = BatchIterator.batch_to_experience(microbatch)
+                    status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
+
+                grad_norm = self.optim_step()
+                status["raw_grad_norm"] = grad_norm
 
                 if self.record_memory:
+                    # NOTE: local_step == minibatch index now instead of microbatch index
                     self.save_memory_snapshot(global_step, local_step)
 
                 status["policy_lr"] = self.scheduler.get_last_lr()[0]
 
-                policy_update_steps += 1
+                # TODO: Move all the progress bar stuff into a utility function, and then add it back in the inner loop.
 
                 # for DP
                 # TODO (sumanthrh): this assumes all workers are data parallel.
@@ -785,14 +793,14 @@ class PolicyWorkerBase(Worker):
                 status_list.append(status)
                 for k, v in status.items():
                     all_metrics[k].append(v)
-                pbar.set_postfix(short_status)
+                minibatch_pbar.set_postfix(short_status)
 
         torch.distributed.barrier()
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
 
         status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = policy_update_steps / accumulation_steps
+        status_mean["policy_update_steps"] = num_minibatches
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
@@ -803,6 +811,7 @@ class PolicyWorkerBase(Worker):
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
         """
+        # TODO: Is this method actually used?
         status = self.forward_backward(experience, accumulation_steps)
 
         if (local_step + 1) % accumulation_steps == 0:
