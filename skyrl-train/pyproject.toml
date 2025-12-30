@@ -115,6 +115,9 @@ dev = [
     "pre-commit",
     "litellm",
 ]
+dspy = [
+    "dspy @ git+https://github.com/stanfordnlp/dspy.git",
+]
 docs = [
     "sphinx>=7.0.0",
     "sphinx-rtd-theme>=2.0.0",

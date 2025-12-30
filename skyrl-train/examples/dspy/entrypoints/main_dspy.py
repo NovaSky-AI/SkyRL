@@ -17,9 +17,9 @@ class DSPyExp(BasePPOExp):
         """
         Initializes the TerminalBenchGenerator.
         """
+      
         return DSPyGenerator(
             generator_cfg=cfg.generator,
-            terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
         )
@@ -31,7 +31,8 @@ class DSPyExp(BasePPOExp):
             TerminalBenchTaskDataset: The training dataset.
         """
         prompts_dataset = DSPyDataset(
-            data_files=self.cfg.data.train_data,
+            data_file=self.cfg.data.train_data,
+            max_num_examples=self.cfg.data.max_num_examples,
         )
         # make sure the dataset is large enough to train on
         assert (
@@ -47,8 +48,9 @@ class DSPyExp(BasePPOExp):
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
             prompts_dataset = DSPyDataset(
-                data_files=self.cfg.data.val_data,
-            )
+                data_file=self.cfg.data.val_data,
+                max_num_examples=self.cfg.data.max_num_examples,
+            )   
             return prompts_dataset
         return None
 
