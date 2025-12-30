@@ -1114,8 +1114,7 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         process_id=process_id,
     )
     logger.info(
-        f"Worker {jax.process_index()}/{jax.process_count()} initialized, "
-        f"waiting for config from coordinator..."
+        f"Worker {jax.process_index()}/{jax.process_count()} initialized, waiting for config from coordinator..."
     )
 
     # Receive INIT command with base_model and config from coordinator
