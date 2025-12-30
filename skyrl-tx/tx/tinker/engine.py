@@ -13,15 +13,15 @@ from sqlmodel import create_engine, Session, select, update, func
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.tinker.backends import JaxBackend
 from tx.tinker.backends.jax import JaxBackendConfig
+from tx.tinker.backends.worker import DistributedJaxBackend
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
 
 
 BACKENDS = {
-    "jax": (JaxBackend, JaxBackendConfig),
+    "jax": (DistributedJaxBackend, JaxBackendConfig),
 }
 
 
@@ -305,7 +305,7 @@ class TinkerEngine:
 
         # TODO: This leaks the abstraction by accessing backend-specific config.
         # We should find a better way to handle this going forward.
-        if isinstance(self.backend, JaxBackend) and self.backend.config.sample_max_num_sequences > 0:
+        if isinstance(self.backend, DistributedJaxBackend) and self.backend.config.sample_max_num_sequences > 0:
             batchable = batchable[: self.backend.config.sample_max_num_sequences]
 
         return {str(f.request_id): (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
