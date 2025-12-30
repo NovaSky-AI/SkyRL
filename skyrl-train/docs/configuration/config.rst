@@ -264,8 +264,8 @@ This section configures the policy model used for training, including optimizer,
          target_modules: "all-linear"  # Apply to all linear layers OR
          # specify specific modules as a list
          exclude_modules: null  # Modules to exclude from LoRA
-         # see https://huggingface.co/docs/peft/v0.18.0/en/package_reference/lora#peft.LoraConfig.init_lora_weights for supported initialization methods for FSDP
-         # for megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported
+         # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig
+         # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
          init_method: "kaiming" # Initialization method for LoRA layers
      deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
 
@@ -302,7 +302,7 @@ LoRA (Low-Rank Adaptation) enables parameter-efficient fine-tuning by training o
 - ``policy.model.lora.alpha``: Scaling factor for LoRA updates.
 - ``policy.model.lora.dropout``: Dropout probability applied to LoRA layers. Helps prevent overfitting during training.
 - ``policy.model.lora.lora_sync_path``: Directory path where LoRA adapter weights are saved and synchronized between training and inference processes. Must be accessible to all workers in distributed setups.
-- ``policy.model.lora.init_method``: Initialization method for LoRA layers. See `Huggingface documentation <https://huggingface.co/docs/peft/v0.18.0/en/package_reference/lora#peft.LoraConfig.init_lora_weights>`_ for supported initialization methods for FSDP. For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
+- ``policy.model.lora.init_method``: Initialization method for LoRA layers. For FSDP, this corresponds to `init_lora_weights <https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights>`_ in PEFT. 'kaiming' is mapped to 'true' by default for PEFT. For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
 
 
 Critic Configuration
