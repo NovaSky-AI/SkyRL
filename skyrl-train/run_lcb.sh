@@ -11,7 +11,7 @@ NUM_NODES=1
 NUM_GPUS=1
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-0.5B"
+MODEL_NAME="Qwen/Qwen2.5-7B-instruct"
 
 
 FLASH_ATTN=true
@@ -42,8 +42,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.http_endpoint_host="127.0.0.1" \
   generator.http_endpoint_port=8000 \
   trainer.policy_mini_batch_size=4 \
-  trainer.train_batch_size=16 \
-  trainer.micro_forward_batch_size_per_gpu=16 \
+  trainer.train_batch_size=4 \
+  trainer.micro_forward_batch_size_per_gpu=2 \
   trainer.micro_train_batch_size_per_gpu=2 \
   trainer.max_prompt_length=29000 \
   generator.max_input_length=29000 \
@@ -69,6 +69,6 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/lcb_3B_ckpt" \
   trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
+  trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   $@

@@ -180,13 +180,13 @@ class DSPyGenerator(GeneratorInterface):
                 reward = results.reward.output
                 chat_history = results.traces
                 
-                if len(chat_history) > 0 and chat_history[0].get("role") == "user":
+                if len(chat_history) == 3 and chat_history[2].get("content"):
                     successful = True
                     metadata = results.reward.metadata
                     logger.info(f"{prefix} successful: Results: {metadata}")
                     break
                 else:
-                    logger.warning(f"{prefix} failed: Did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}")
+                    logger.warning(f"{prefix} failed: Did not return a chat history with an assistant message. chat_history: {chat_history}\n\nResults: {results}")
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
@@ -204,8 +204,9 @@ class DSPyGenerator(GeneratorInterface):
             )
 
         # Use the first message as the prompt. We assume to be no systems messages.
-        assert chat_history[0]["role"] == "user", "The first message should be a user message"
-        prompt = [chat_history[0]]
+        assert chat_history[0]["role"] == "system", "The first message should be a system message"
+        assert chat_history[1]["role"] == "user", "The second message should be a user message"
+        prompt = [chat_history[0], chat_history[1]]
         prompt_ids = self.tokenizer.apply_chat_template(
             prompt,
             add_generation_prompt=False,  # the message below will add it themselves
@@ -215,7 +216,7 @@ class DSPyGenerator(GeneratorInterface):
         initial_prompt_length = len(prompt_ids)
 
         # Process response messages (everything after the first message)
-        response_messages = chat_history[1:]
+        response_messages = chat_history[2:]
         assistant_logprobs = getattr(results.reward, "output_logprobs", None) if results.reward else None
         response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
             response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content

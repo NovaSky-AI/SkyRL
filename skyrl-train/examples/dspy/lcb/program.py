@@ -155,26 +155,25 @@ class NaiveCodeGenerator_dspy(dspy.Module):
         all_messages = finetune_data.get('messages', [])
         
         # Extract user and assistant messages
-        # The messages list should contain the full conversation
-        user_content = ""
-        assistant_content = ""
-        
-        for msg in all_messages:
-            if msg.get("role") == "user":
-                user_content = msg.get("content", "")
-            elif msg.get("role") == "assistant":
-                assistant_content = msg.get("content", "")
 
-        chat_history = [
-            {
-                "role": "user",
-                "content": user_content
-            },
-            {
-                "role": "assistant",
-                "content": assistant_content,
-            },
-        ]
+        chat_history = [None, None, None]
+
+        for msg in all_messages:
+            if msg.get("role") == "system":
+                chat_history[0] = {
+                    "role": "system",
+                    "content": msg['content']
+                }
+            if msg.get("role") == "user":
+                chat_history[1] = {
+                    "role": "user",
+                    "content": msg['content']
+                }
+            elif msg.get("role") == "assistant":
+                chat_history[2] = {
+                    "role": "assistant",
+                    "content": msg['content']
+                }
         return chat_history
 
 
