@@ -8,7 +8,7 @@ set -x
 # bash examples/megatron/run_megatron_moonlight.sh
 
 # running moonlight16b
-# huggingface-cli download moonshotai/Moonlight-16B-A3B-Instruct --local-dir ~/moonlight16b
+# hf download moonshotai/Moonlight-16B-A3B-Instruct --local-dir ~/moonlight16b
 
 DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
