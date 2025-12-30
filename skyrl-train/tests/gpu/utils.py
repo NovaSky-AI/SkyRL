@@ -445,15 +445,13 @@ def init_remote_inference_servers(
             # NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
             # For standalone server, we use mp for now.
             "--distributed-executor-backend",
-            "mp",
+            "ray",
             "--dtype",
             "bfloat16",
             "--host",
             "127.0.0.1",
             "--port",
             str(engine_port),
-            "--worker-extension-cls",
-            "skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
         ]
     elif backend == "sglang":
         remote_server_command = [

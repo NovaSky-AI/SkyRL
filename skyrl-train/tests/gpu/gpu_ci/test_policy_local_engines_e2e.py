@@ -2,6 +2,20 @@
 # Run only vllm tests (requires vllm extra):
 uv run --isolated --extra dev --extra vllm --extra deepspeed pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
 
+for megatron run installation for nccl like so:
+mkdir -p ~/nccl-2.27.5
+cd ~/nccl-2.27.5
+wget https://developer.download.nvidia.com/compute/redist/nccl/v2.27.5/nccl_2.27.5-1+cuda12.9_x86_64.txz
+tar -xf nccl_2.27.5-1+cuda12.9_x86_64.txz --strip-components=1
+
+then run (LD_PRELOAD ensures both PyTorch and vLLM use the same NCCL version):
+LD_PRELOAD=~/nccl-2.27.5/lib/libnccl.so.2 \
+NCCL_DEBUG=INFO \
+VLLM_NCCL_SO_PATH=~/nccl-2.27.5/lib/libnccl.so.2 \
+LD_LIBRARY_PATH=~/nccl-2.27.5/lib:$LD_LIBRARY_PATH \
+uv run --isolated --extra dev --extra mcore --extra deepspeed \
+pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
+
 # Run only sglang tests (requires sglang extra):
 uv run --isolated --extra dev --extra sglang --extra deepspeed pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "sglang"
 """
@@ -17,7 +31,7 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-RUN_ENGINE_LOCALLY = True
+RUN_ENGINE_LOCALLY = False
 
 
 def get_test_actor_config() -> DictConfig:
@@ -43,7 +57,7 @@ def get_test_actor_config() -> DictConfig:
 @pytest.mark.parametrize(
     ("colocate_all", "weight_sync_backend", "strategy", "backend", "tp_size"),
     [
-        pytest.param(False, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
+        pytest.param(False, "nccl", "megatron", "vllm", 2, marks=pytest.mark.vllm),
         # pytest.param(True, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
         # pytest.param(False, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
         # pytest.param(True, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),

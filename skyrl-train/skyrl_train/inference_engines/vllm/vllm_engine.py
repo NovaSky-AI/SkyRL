@@ -406,9 +406,9 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 ),
             )
         else:
-            assert (
-                len(request["names"]) == 1
-            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
+            # assert (
+            #     len(request["names"]) == 1
+            # ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
             return await asyncio.to_thread(
                 engine.collective_rpc, "update_weights", args=(request["names"], request["dtypes"], request["shapes"])
             )

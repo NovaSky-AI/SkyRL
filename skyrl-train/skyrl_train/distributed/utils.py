@@ -102,7 +102,7 @@ def get_free_port():
 def init_custom_process_group(master_address, master_port, rank, world_size):
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
-
+    print("NCCL VERSION: ", torch.cuda.nccl.version())
     # Create stateless process group
     pg = StatelessProcessGroup.create(
         host=master_address,

@@ -500,7 +500,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
                     # Broadcast weights from training rank 0 to inference engine ranks via the update group
                     if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                        # torch.distributed.broadcast(param.data, 0, group=self._model_update_group)
+                        self._model_update_group.broadcast(param.data, 0, stream=torch.cuda.current_stream())
 
                 await asyncio.to_thread(broadcast_param, param)
                 if torch.distributed.get_rank() == 0:

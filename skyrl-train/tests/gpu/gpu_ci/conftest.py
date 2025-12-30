@@ -1,3 +1,4 @@
+import os
 import pytest
 import ray
 from loguru import logger
@@ -18,6 +19,12 @@ def ray_init_fixture():
 
     # TODO (team): maybe we should use the default config and use prepare_runtime_environment in some way
     env_vars = {"VLLM_USE_V1": "1", "VLLM_ENABLE_V1_MULTIPROCESSING": "0", "VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}
+
+    # Pass through NCCL-related environment variables to Ray workers
+    # LD_PRELOAD is critical to ensure all processes (PyTorch + vLLM) use the same NCCL version
+    for env_key in ["VLLM_NCCL_SO_PATH", "LD_LIBRARY_PATH", "LD_PRELOAD", "NCCL_DEBUG", "NCCL_DEBUG_SUBSYS"]:
+        if env_key in os.environ:
+            env_vars[env_key] = os.environ[env_key]
 
     if not peer_access_supported(max_num_gpus_per_node=2):
         log_once("Disabling NCCL P2P for CI environment")

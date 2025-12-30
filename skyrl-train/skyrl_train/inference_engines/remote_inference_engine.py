@@ -21,10 +21,10 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         model_name: str,
         engine_backend: str,
         tokenizer: PreTrainedTokenizerBase,
-        tp_size: Optional[int] = None,
-        pp_size: Optional[int] = None,
-        dp_size: Optional[int] = None,
-        ep_size: Optional[int] = None,
+        tp_size: int = 1,
+        pp_size: int = 1,
+        dp_size: int = 1,
+        ep_size: int = 1,
     ):
         """Initialize the InferenceEngine."""
         self.url = f"http://{url}"
@@ -199,14 +199,14 @@ class RemoteInferenceEngine(InferenceEngineInterface):
         if "names" not in request:
             raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
 
-        assert (
-            len(request["names"]) == 1
-        ), f"Remote inference engines support only requests with a single named weight at a time , got request with {len(request['names'])} entries"
+        # assert (
+        #     len(request["names"]) == 1
+        # ), f"Remote inference engines support only requests with a single named weight at a time , got request with {len(request['names'])} entries"
 
-        if request.get("extras") and "ipc_handles" in request["extras"][0]:
-            raise ValueError(
-                "Remote inference engines do not support CUDA IPC weight updates. Only local engines support IPC."
-            )
+        # if request.get("extras") and "ipc_handles" in request["extras"][0]:
+        #     raise ValueError(
+        #         "Remote inference engines do not support CUDA IPC weight updates. Only local engines support IPC."
+        #     )
         if self.engine_backend == "vllm":
             weight_update_method = "update_weights"
         elif self.engine_backend == "sglang":
@@ -282,10 +282,10 @@ def create_remote_inference_engines(
     model_name: str,
     engine_backend: str,
     tokenizer: PreTrainedTokenizerBase,
-    tensor_parallel_size: Optional[int] = None,
-    pipeline_parallel_size: Optional[int] = None,
-    data_parallel_size: Optional[int] = None,
-    expert_parallel_size: Optional[int] = None,
+    tensor_parallel_size: int = 1,
+    pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    expert_parallel_size: int = 1,
 ):
     return [
         RemoteInferenceEngine(
