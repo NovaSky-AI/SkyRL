@@ -4,12 +4,12 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 
 import dspy
-from data import lcb_data
-from utils import GenerateLCBcodestdin
-from lcb_utils import reduce_preds
-from program import GenerateLCBcodestdin, GenerateLCBcodefunctional
-from live_code_bench_execute import check_correctness
-from utils import post_process_code
+from .data import lcb_data
+from .utils import GenerateLCBcodestdin
+from .lcb_utils import reduce_preds
+from .program import GenerateLCBcodestdin, GenerateLCBcodefunctional
+from .live_code_bench_execute import check_correctness
+from .utils import post_process_code
 
 load_dotenv()
 

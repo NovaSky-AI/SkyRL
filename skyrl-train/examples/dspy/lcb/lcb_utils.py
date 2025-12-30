@@ -5,7 +5,7 @@ from datasets import load_dataset
 import dspy.evaluate
 import numpy as np
 import tqdm
-from live_code_bench_execute import (
+from .live_code_bench_execute import (
     check_correctness,
     unsafe_lcb_runTests,
     time_limit,
@@ -14,8 +14,6 @@ from live_code_bench_execute import (
     unsafe_lcb_run_timeout_tests,
 )
 import os
-from matplotlib import pyplot as plt
-import matplotlib.colors as mcolors
 from collections import Counter
 import concurrent.futures
 import openai
@@ -24,7 +22,6 @@ import threading
 import copy
 from itertools import chain
 import time
-from rich import print as rprint
 from collections import defaultdict
 import multiprocessing
 from multiprocessing import Process, Manager

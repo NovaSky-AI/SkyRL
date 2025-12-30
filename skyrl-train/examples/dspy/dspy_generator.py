@@ -3,13 +3,14 @@ from dataclasses import dataclass
 from typing import List, Optional
 from loguru import logger
 from uuid import uuid4
+import dspy
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from pathlib import Path
-from .trial import TrialConfig
+from .trial import TrialConfig, Trial, AgentResult
 from .lcb.utils import reward_fn
 from .lcb.program import NaiveCodeGenerator_dspy
 
@@ -45,6 +46,27 @@ class DSPyGenerator(GeneratorInterface):
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
 
+        # Create DSPy LM for the program
+        # Disable DSPy cache/logs
+        dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
+        dspy.disable_logging()
+        
+        # Create LM pointing to the inference engine endpoint
+        # Add a warning if temperature is not found in sampling_params
+        temperature = generator_cfg.sampling_params.get("temperature", None)
+        if temperature is None:
+            import warnings
+            warnings.warn("Temperature not found in sampling_params, defaulting to 1.0")
+            temperature = 1.0
+            
+        self.dspy_lm = dspy.LM(
+            model=f"openai/{self.model_name}",
+            api_base=f"{self.base_url}/v1",
+            api_key="fake-key",
+            temperature=temperature,
+            model_type="chat",
+            cache=False,
+        )
 
         # Read custom chat template
         custom_chat_template_path = generator_cfg.engine_init_kwargs.get("custom_chat_template_chat_completion_path", None)
@@ -57,7 +79,6 @@ class DSPyGenerator(GeneratorInterface):
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
-        import pdb; pdb.set_trace()
         for i in range(len(input_batch["prompts"])):
             tasks.append(
                 self.foward(
@@ -128,11 +149,17 @@ class DSPyGenerator(GeneratorInterface):
 
         
         # TODO: make each DSPy trial configurable.
-        trial_config = TrialConfig(dspy_program=NaiveCodeGenerator_dspy, example=prompt, reward_fn=)
+        trial_config = TrialConfig(
+            dspy_program=NaiveCodeGenerator_dspy, 
+            example=prompt, 
+            reward_fn=reward_fn,
+            lm=self.dspy_lm
+        )
 
         trial = Trial(trial_config)
 
         # Run the trial to get `rewards`, `chat_history`, and `summarization_count`
+        prefix = f"Trajectory {trajectory_id}"
         successful = False
         reward = None
         chat_history = None
@@ -142,17 +169,24 @@ class DSPyGenerator(GeneratorInterface):
             results = None
             try:
                 results = await trial.run()
-                if not results.verifier_result:
+                if results.exception_info:
                     logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
-                reward = results.reward
+                if results.reward is None:
+                    logger.warning(f"{prefix} failed: No reward returned. Results: {results}")
+                    continue
+                
+                # Extract reward value from AgentResult
+                reward = results.reward.output
                 chat_history = results.traces
-                if len(chat_history) > 1 and chat_history[0]["role"] == "user":
+                
+                if len(chat_history) > 0 and chat_history[0].get("role") == "user":
                     successful = True
-                    logger.info(f"{prefix} successful: Results: {results.agent_result.metadata}")
+                    metadata = results.reward.metadata
+                    logger.info(f"{prefix} successful: Results: {metadata}")
                     break
                 else:
-                    logger.warning(f"{prefix} failed: Agent {self.agent_name} did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}")
+                    logger.warning(f"{prefix} failed: Did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}")
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
@@ -182,7 +216,7 @@ class DSPyGenerator(GeneratorInterface):
 
         # Process response messages (everything after the first message)
         response_messages = chat_history[1:]
-        assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
+        assistant_logprobs = getattr(results.reward, "output_logprobs", None) if results.reward else None
         response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
             response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
         )

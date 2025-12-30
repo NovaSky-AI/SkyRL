@@ -45,6 +45,7 @@ dependencies = [
     "uvicorn",
     "pybind11",
     "setuptools",
+    "dspy>=3.1.0b1",
 ]
 
 [tool.uv]

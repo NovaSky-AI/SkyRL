@@ -16,6 +16,7 @@ import builtins
 import shutil
 import subprocess
 import time
+import warnings
 import dspy
 
 fast_check_global_time_out = 150 # In case some problems have too many test cases - giving roughly 20 time out chances.
@@ -668,7 +669,7 @@ def restore_original_references():
 
 
 
-from lcb_utils import reduce_preds, post_process_tests_inputs, check_test, post_process_code
+from .lcb_utils import reduce_preds, post_process_tests_inputs, check_test, post_process_code
 from collections import Counter, defaultdict
 from dotenv import load_dotenv
 import pickle
@@ -711,11 +712,31 @@ def check_test_raw(
     return result["passed"], test, result["result"], result["maybe_error_messages"], result["maybe_output_values"]
 
 
-with open("gold_preds_train.pkl", "rb") as f: #TODO: use test during test time
-    gold_preds = pickle.load(f)
+# Load gold predictions if available, otherwise use empty dicts
+# Try to find the files relative to the module location or current directory
+_gold_preds_train_path = os.path.join(os.path.dirname(__file__), "gold_preds_train.pkl")
+_gold_preds_test_path = os.path.join(os.path.dirname(__file__), "gold_preds_test.pkl")
 
-with open("gold_preds_test.pkl", "rb") as f: #TODO: use test during test time
-    gold_preds_test = pickle.load(f)
+gold_preds = {}
+gold_preds_test = {}
+
+if os.path.exists(_gold_preds_train_path):
+    with open(_gold_preds_train_path, "rb") as f:
+        gold_preds = pickle.load(f)
+elif os.path.exists("gold_preds_train.pkl"):
+    with open("gold_preds_train.pkl", "rb") as f:
+        gold_preds = pickle.load(f)
+else:
+    warnings.warn("gold_preds_train.pkl not found. Using empty dict. Run gen_golden_soln.py to generate it.")
+
+if os.path.exists(_gold_preds_test_path):
+    with open(_gold_preds_test_path, "rb") as f:
+        gold_preds_test = pickle.load(f)
+elif os.path.exists("gold_preds_test.pkl"):
+    with open("gold_preds_test.pkl", "rb") as f:
+        gold_preds_test = pickle.load(f)
+else:
+    warnings.warn("gold_preds_test.pkl not found. Using empty dict. Run gen_golden_soln.py to generate it.")
 
 prompt_test_map = defaultdict(set)
 def assert_test(pred, **kwargs):
@@ -741,6 +762,10 @@ def assert_test(pred, **kwargs):
     pred_results = []
     assertion_msg = prompt_test_map[prompt]
     num_correct_test = 0
+
+    # If no gold_pred available, skip validation
+    if gold_pred is None:
+        return None, 0
 
     for test in tests:
         # Check if the test passes
@@ -785,12 +810,16 @@ def assert_test_multiple(example, pred, **kwargs):
         prompt = example.prompt
         task_id = example.task_id
         is_stdin = example.is_stdin
-        gold_pred = gold_preds[task_id]
+        gold_pred = gold_preds.get(task_id, None)
     else:
         prompt = kwargs["prompt"]
         task_id = kwargs["task_id"]
         is_stdin = kwargs["is_stdin"]
-        gold_pred = gold_preds[task_id]
+        gold_pred = gold_preds.get(task_id, None)
+    
+    # If no gold_pred available, return 0
+    if gold_pred is None:
+        return 0
 
     # import pdb; pdb.set_trace()
 
@@ -827,6 +856,67 @@ def assert_test_multiple(example, pred, **kwargs):
 def assert_dummy(pred, **kwargs):
     return "", 0
 
+def reward_fn(input, pred, trace=None):
+    """
+    Reward function for DSPy code generation.
+    
+    Args:
+        input: Dictionary containing "prompt", "task_id", "is_stdin"
+        pred: DSPy prediction object with .tests attribute
+        trace: Optional trace (not used)
+    
+    Returns:
+        float: Reward score (0.0 to 1.0) representing fraction of tests passed
+    """
+    # Extract input parameters
+    prompt = input.get("prompt", "")
+    task_id = input.get("task_id", "")
+    is_stdin = input.get("is_stdin", False)
+    
+    # Get gold prediction for this task
+    gold_pred = gold_preds.get(task_id, None)
+    
+    # If no gold_pred available, return 0
+    if gold_pred is None:
+        return 0.0
+    
+    # Process tests from prediction
+    try:
+        tests = post_process_tests_inputs(pred.tests, is_stdin)
+    except Exception as e:
+        print(f"test parsing failed: {e}")
+        return 0.0
+    
+    if len(tests) == 0:
+        print("no test found!")
+        return 0.0
+    
+    # Deduplicate tests by converting to JSON strings
+    tests_as_strings = [json.dumps(test, sort_keys=True) for test in tests]
+    tests_counter = Counter(tests_as_strings)
+    tests = [
+        {"test": json.loads(test_str), "count": count}
+        for test_str, count in tests_counter.items()
+    ]
+    
+    # Check each test against gold prediction
+    num_passed = 0
+    for test in tests:
+        try:
+            results = check_test([test["test"]], gold_pred, 0, prompt, "dummy", runtime_debug=True)
+            passed = results[0]
+            if passed:
+                num_passed += 1
+        except Exception as e:
+            print(f"Error checking test: {e}")
+            continue
+    
+    if len(tests) == 0:
+        return 0.0
+    
+    reward = num_passed / len(tests)
+    return reward
+
 def assert_test_multiple_test(example, pred, **kwargs):
 
 
@@ -835,12 +925,16 @@ def assert_test_multiple_test(example, pred, **kwargs):
         prompt = example.prompt
         task_id = example.task_id
         is_stdin = example.is_stdin
-        gold_pred = gold_preds_test[task_id]
+        gold_pred = gold_preds_test.get(task_id, None)
     else:
         prompt = kwargs["prompt"]
         task_id = kwargs["task_id"]
         is_stdin = kwargs["is_stdin"]
-        gold_pred = gold_preds_test[task_id]
+        gold_pred = gold_preds_test.get(task_id, None)
+    
+    # If no gold_pred available, return 0
+    if gold_pred is None:
+        return 0
         
     # import pdb; pdb.set_trace()
 

@@ -2,11 +2,11 @@
 import argparse
 import os
 
-from program import CodeGeneratorWithRankerAssertTestGen_single
-from data import lcb_data
+from .program import CodeGeneratorWithRankerAssertTestGen_single
+from .data import lcb_data
 from assertion.trainer import LMManager, AssertionTrainer, ArborLM
-from utils import post_process_code
-from live_code_bench_execute import check_correctness
+from .utils import post_process_code
+from .live_code_bench_execute import check_correctness
 from assertion.evaluator import Evaluator
 import dspy
 

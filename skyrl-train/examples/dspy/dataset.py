@@ -138,7 +138,6 @@ class DSPyDataset:
 
     def _load_dataset(self) -> List[dspy.Example]:
         """Load dataset from JSON file."""
-        import pdb; pdb.set_trace()
         if not os.path.exists(self.data_file):
             logger.warning(f"JSON file does not exist: {self.data_file}")
             return []
@@ -194,7 +193,6 @@ class DSPyDataset:
         # Create dspy.Example objects with UUIDs
         examples = []
         for row in processed_entries:
-            import pdb; pdb.set_trace()
             example = dspy.Example(**_map_to_dspy_example(row)).with_inputs(
                 "prompt", "tests"
             )

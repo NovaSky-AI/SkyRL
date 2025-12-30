@@ -12,11 +12,11 @@ import pickle
 import json
 from collections import Counter
 
-from lcb_utils import post_process_tests_inputs, check_test
-from live_code_bench_execute import check_correctness
-from utils import post_process_code
-from program import NaiveCodeGenerator_dspy
-from data import lcb_data
+from .lcb_utils import post_process_tests_inputs, check_test
+from .live_code_bench_execute import check_correctness
+from .utils import post_process_code
+from .program import NaiveCodeGenerator_dspy
+from .data import lcb_data
 
 
 import os

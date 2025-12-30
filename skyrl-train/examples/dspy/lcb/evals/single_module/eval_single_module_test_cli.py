@@ -18,7 +18,7 @@ from assertion.livecodebench.utils import post_process_code
 from assertion.eval_utils import ProgressLogger
 
 from concurrent.futures import ProcessPoolExecutor
-from utils import assert_test_multiple_test, assert_test_multiple
+from ...utils import assert_test_multiple_test, assert_test_multiple
 
 dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
 # Example CLI:

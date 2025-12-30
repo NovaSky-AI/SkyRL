@@ -1,15 +1,34 @@
 import json
 import dspy.evaluate
-from utils import (
+from .utils import (
     check_correctness,
     unsafe_lcb_runTests,
 )
 from collections import Counter
 import dspy
-from utils import GenerateLCBcodestdin, GenerateLCBcodefunctional, post_process_code, assert_test, assert_test_multiple, assert_dummy
-from lcb_utils import post_process_tests_inputs, reduce_preds, check_test
-from assertion.assertion_chain import Assertion_module, Assertion_variable
-from utils import assert_test
+from .utils import GenerateLCBcodestdin, GenerateLCBcodefunctional, post_process_code, assert_test, assert_test_multiple, assert_dummy
+from .lcb_utils import post_process_tests_inputs, reduce_preds, check_test
+from .utils import assert_test
+
+# Optional import for assertion module (only used by some classes, not NaiveCodeGenerator_dspy)
+try:
+    from assertion.assertion_chain import Assertion_module, Assertion_variable
+except ImportError:
+    # Define dummy classes if assertion module is not available
+    class Assertion_module:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("assertion module not available. Install it or use classes that don't require it.")
+    
+    class Assertion_variable:
+        def __init__(self, *args, **kwargs):
+            raise ImportError("assertion module not available. Install it or use classes that don't require it.")
+
+try:
+    from dspy.adapters.xml_adapter import XMLAdapter
+except ImportError:
+    # Fallback to dspy.Adapter if XMLAdapter is not available
+    XMLAdapter = dspy.Adapter
+
 from collections import defaultdict
 import time
 
@@ -111,43 +130,52 @@ class NaiveCodeGenerator_dspy(dspy.Module):
         
         self.adapter = XMLAdapter()
 
-    # def forward(self, prompt, is_stdin, **kargs):
     def forward(self, **kwargs):
         prompt = kwargs.get("prompt")
         is_stdin = kwargs.get("is_stdin")
-        # prompt = example.prompt
-        # is_stdin = example.is_stdin
 
         prog = self.stdin_prog if is_stdin else self.functional_prog
 
         pred = prog(prompt=prompt)
         return pred
     
-    def collect_trace(self, pred, kwargs):
-        inp_messages = self.adapter.format(
-                                signature=self.original_sig,
-                                inputs=kwargs,
-                                demos=[] # TODO: Add support for demos
-                            )
-        
-        all_messages = self.adapter.format_finetune_data(
-                                signature=self.original_sig,
+    def collect_trace(self, kwargs, pred):
+        # Determine which signature to use based on is_stdin
+        is_stdin = kwargs.get("is_stdin", False)
+        original_sig = GenerateLCBcodestdin if is_stdin else GenerateLCBcodefunctional
+
+        # Get formatted finetune data which contains both input and output messages
+        finetune_data = self.adapter.format_finetune_data(
+                                signature=original_sig,
                                 inputs=kwargs,
                                 outputs=pred,
                                 demos=[] # TODO: Add support for demos
-                            )['messages']
+                            )
         
-        trace = []
-        trace.append({
-            "role": "user",
-            "content": inp_messages,
-        })
-        trace.append({
-            "role": "assistant",
-            "content": all_messages[-1]["content"],
-        })
-        return trace
+        all_messages = finetune_data.get('messages', [])
         
+        # Extract user and assistant messages
+        # The messages list should contain the full conversation
+        user_content = ""
+        assistant_content = ""
+        
+        for msg in all_messages:
+            if msg.get("role") == "user":
+                user_content = msg.get("content", "")
+            elif msg.get("role") == "assistant":
+                assistant_content = msg.get("content", "")
+
+        chat_history = [
+            {
+                "role": "user",
+                "content": user_content
+            },
+            {
+                "role": "assistant",
+                "content": assistant_content,
+            },
+        ]
+        return chat_history
 
 
 class CodeGeneratorWithRanker_Original(dspy.Module):

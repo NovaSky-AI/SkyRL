@@ -168,7 +168,7 @@ if __name__ == "__main__":
         help="Local directory to save processed datasets",
     )
     parser.add_argument(
-        "--dataset_dir",
+        "--dataset_dir"
         default=os.path.expanduser("~/data/lcb"),
         help="Directory containing raw input datasets",
     )

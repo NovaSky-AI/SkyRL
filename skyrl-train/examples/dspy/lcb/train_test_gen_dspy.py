@@ -12,10 +12,10 @@ import pickle
 import json
 from collections import Counter
 
-from lcb_utils import post_process_tests_inputs, check_test
+from .lcb_utils import post_process_tests_inputs, check_test
 
-from program import CodeGeneratorWithRankerAssertTestGen_single_dspy
-from data import lcb_data
+from .program import CodeGeneratorWithRankerAssertTestGen_single_dspy
+from .data import lcb_data
 
 
 import os

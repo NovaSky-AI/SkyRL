@@ -11,7 +11,7 @@ NUM_NODES=1
 NUM_GPUS=1
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-0.5B"
 
 
 FLASH_ATTN=true
@@ -23,7 +23,7 @@ train_data="$HOME/data/lcb/deepcoder_train_short.json"
 # val_data="['${DATA_DIR}/test_livecodebench_short.json']"
 
 # NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
-uv run --isolated --extra vllm --extra dspy -m examples.dspy.entrypoints.main_dspy \
+uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_dspy \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data=$train_data \
   data.val_data=$train_data \

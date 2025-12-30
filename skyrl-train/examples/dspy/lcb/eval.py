@@ -1,8 +1,8 @@
-from program import CodeGeneratorWithRanker_Original
-from data import lcb_data
+from .program import CodeGeneratorWithRanker_Original
+from .data import lcb_data
 from assertion.evaluator import Evaluator
-from live_code_bench_execute import check_correctness
-from utils import post_process_code
+from .live_code_bench_execute import check_correctness
+from .utils import post_process_code
 import dspy
 from concurrent.futures import ProcessPoolExecutor, as_completed
 

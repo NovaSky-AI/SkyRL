@@ -1,7 +1,7 @@
 import dspy
-from utils import assert_test_multiple_test, assert_test_multiple
-from program import GenerateTests_func_inputs, GenerateTests_std_inputs, CodeGeneratorWithRanker
-from data import lcb_data
+from .utils import assert_test_multiple_test, assert_test_multiple
+from .program import GenerateTests_func_inputs, GenerateTests_std_inputs, CodeGeneratorWithRanker
+from .data import lcb_data
 from tqdm import tqdm
 
 class CodeGeneratorWithRankerAssertTestGen_eval(dspy.Module):
