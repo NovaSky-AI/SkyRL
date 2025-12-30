@@ -60,7 +60,7 @@ class AdamParams(BaseModel):
     beta1: float
     beta2: float
     eps: float
-    weight_decay: float = 0.0
+    weight_decay: float
 
 
 class LoraConfig(BaseModel):

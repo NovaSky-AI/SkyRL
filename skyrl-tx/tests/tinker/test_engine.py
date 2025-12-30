@@ -240,7 +240,7 @@ def test_process_optim_step_hyperparams_behavior():
         return float(optax.global_norm(delta))
 
     tiny_request = types.OptimStepInput(
-        adam_params=types.AdamParams(learning_rate=1e-8, beta1=1e-8, beta2=1e-8, eps=1e-9)
+        adam_params=types.AdamParams(learning_rate=1e-8, beta1=1e-8, beta2=1e-8, eps=1e-9, weight_decay=0.0)
     )
     default_request = types.OptimStepInput(adam_params=api.AdamParams().to_types())
 
