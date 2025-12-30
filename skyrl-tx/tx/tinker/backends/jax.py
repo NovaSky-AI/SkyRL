@@ -21,12 +21,10 @@ Usage:
     uv run -m tx.tinker.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
-import pickle
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from enum import IntEnum
-from typing import Callable
+from typing import Annotated, Callable, Literal, Union
 
 from cloudpathlib import AnyPath
 import numpy as np
@@ -36,7 +34,7 @@ from jax.experimental import multihost_utils
 import optax
 from flax import nnx
 from flax.training import checkpoints
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
@@ -896,36 +894,93 @@ class JaxBackendImpl(AbstractBackend):
 # =============================================================================
 
 
-class CommandType(IntEnum):
-    """Command types broadcast from coordinator to workers."""
-
-    NOOP = 0
-    FORWARD_BACKWARD = 1
-    FORWARD = 2
-    SAMPLE = 3
-    CREATE_MODEL = 4
-    OPTIM_STEP = 5
-    LOAD_CHECKPOINT = 6
-    SAVE_CHECKPOINT = 7
-    SAVE_SAMPLER_CHECKPOINT = 8
-    SHUTDOWN = 99
+class NoopCommand(BaseModel):
+    type: Literal["noop"] = "noop"
 
 
-def _broadcast_command_type(cmd: CommandType) -> CommandType:
-    """Broadcast command type from coordinator to all workers."""
-    arr = np.array([cmd], dtype=np.int32)
-    arr = multihost_utils.broadcast_one_to_all(arr)
-    return CommandType(arr[0])
+class InitCommand(BaseModel):
+    type: Literal["init"] = "init"
+    base_model: str
+    config: JaxBackendConfig
 
 
-def _broadcast_object(obj) -> object:
-    """Broadcast a Python object from coordinator to all workers using pickle.
+class ShutdownCommand(BaseModel):
+    type: Literal["shutdown"] = "shutdown"
 
-    On coordinator (process 0): serializes and broadcasts the object.
-    On workers: receives and deserializes the object.
+
+class ForwardBackwardCommand(BaseModel):
+    type: Literal["forward_backward"] = "forward_backward"
+    prepared_batch: types.PreparedModelPassBatch
+
+
+class ForwardCommand(BaseModel):
+    type: Literal["forward"] = "forward"
+    prepared_batch: types.PreparedModelPassBatch
+
+
+class SampleCommand(BaseModel):
+    type: Literal["sample"] = "sample"
+    prepared_batch: types.PreparedSampleBatch
+
+
+class CreateModelCommand(BaseModel):
+    type: Literal["create_model"] = "create_model"
+    model_id: str
+    lora_config: types.LoraConfig
+
+
+class OptimStepCommand(BaseModel):
+    type: Literal["optim_step"] = "optim_step"
+    model_id: str
+    request_data: types.OptimStepInput
+
+
+class LoadCheckpointCommand(BaseModel):
+    type: Literal["load_checkpoint"] = "load_checkpoint"
+    checkpoint_path: str
+    model_id: str
+
+
+class SaveCheckpointCommand(BaseModel):
+    type: Literal["save_checkpoint"] = "save_checkpoint"
+    output_path: str
+    model_id: str
+
+
+class SaveSamplerCheckpointCommand(BaseModel):
+    type: Literal["save_sampler_checkpoint"] = "save_sampler_checkpoint"
+    output_path: str
+    model_id: str
+
+
+Command = Annotated[
+    Union[
+        NoopCommand,
+        InitCommand,
+        ShutdownCommand,
+        ForwardBackwardCommand,
+        ForwardCommand,
+        SampleCommand,
+        CreateModelCommand,
+        OptimStepCommand,
+        LoadCheckpointCommand,
+        SaveCheckpointCommand,
+        SaveSamplerCheckpointCommand,
+    ],
+    Field(discriminator="type"),
+]
+
+CommandAdapter: TypeAdapter[Command] = TypeAdapter(Command)
+
+
+def _broadcast_command(cmd: Command | None) -> Command:
+    """Broadcast a Command from coordinator to all workers using JSON.
+
+    On coordinator (process 0): serializes and broadcasts the command.
+    On workers: receives and deserializes the command (pass None).
     """
     if jax.process_index() == 0:
-        data = pickle.dumps(obj)
+        data = CommandAdapter.dump_json(cmd)
         size = np.array([len(data)], dtype=np.int64)
     else:
         size = np.array([0], dtype=np.int64)
@@ -941,7 +996,7 @@ def _broadcast_object(obj) -> object:
 
     data_arr = multihost_utils.broadcast_one_to_all(data_arr)
 
-    return pickle.loads(data_arr.tobytes())
+    return CommandAdapter.validate_json(data_arr.tobytes())
 
 
 class JaxBackend(AbstractBackend):
@@ -966,7 +1021,7 @@ class JaxBackend(AbstractBackend):
 
         # In multi-host mode, broadcast config to workers so they can initialize
         if jax.process_count() > 1:
-            _broadcast_object((base_model, config))
+            _broadcast_command(InitCommand(base_model=base_model, config=config))
 
         self._backend = JaxBackendImpl(base_model, config)
 
@@ -980,53 +1035,53 @@ class JaxBackend(AbstractBackend):
         """Pass-through to underlying backend metrics."""
         return self._backend.metrics
 
-    def _broadcast_and_call(self, cmd: CommandType, method_name: str, *args):
-        """Broadcast command and arguments, then call the underlying method."""
+    def _broadcast_and_call(self, cmd_class: type, **kwargs):
+        """Broadcast command to workers and call the corresponding backend method."""
+        cmd = cmd_class(**kwargs)
         if jax.process_count() > 1:
-            _broadcast_command_type(cmd)
-            _broadcast_object(args)
-        return getattr(self._backend, method_name)(*args)
+            _broadcast_command(cmd)
+        return getattr(self._backend, cmd.type)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
         """Create a new model, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(CommandType.CREATE_MODEL, "create_model", model_id, lora_config)
+        self._broadcast_and_call(CreateModelCommand, model_id=model_id, lora_config=lora_config)
 
     def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Run forward and backward pass, broadcasting to workers in multi-host mode."""
-        return self._broadcast_and_call(CommandType.FORWARD_BACKWARD, "forward_backward", prepared_batch)
+        return self._broadcast_and_call(ForwardBackwardCommand, prepared_batch=prepared_batch)
 
     def forward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         """Run forward-only pass, broadcasting to workers in multi-host mode."""
-        return self._broadcast_and_call(CommandType.FORWARD, "forward", prepared_batch)
+        return self._broadcast_and_call(ForwardCommand, prepared_batch=prepared_batch)
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Apply optimizer step, broadcasting to workers in multi-host mode."""
-        return self._broadcast_and_call(CommandType.OPTIM_STEP, "optim_step", model_id, request_data)
+        return self._broadcast_and_call(OptimStepCommand, model_id=model_id, request_data=request_data)
 
     def sample(
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         """Generate samples, broadcasting to workers in multi-host mode."""
-        return self._broadcast_and_call(CommandType.SAMPLE, "sample", prepared_batch)
+        return self._broadcast_and_call(SampleCommand, prepared_batch=prepared_batch)
 
     def save_checkpoint(self, output_path, model_id: str) -> None:
         """Save training checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(CommandType.SAVE_CHECKPOINT, "save_checkpoint", output_path, model_id)
+        self._broadcast_and_call(SaveCheckpointCommand, output_path=output_path, model_id=model_id)
 
     def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
         """Load training checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(CommandType.LOAD_CHECKPOINT, "load_checkpoint", checkpoint_path, model_id)
+        self._broadcast_and_call(LoadCheckpointCommand, checkpoint_path=checkpoint_path, model_id=model_id)
 
     def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
         """Save sampler checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(CommandType.SAVE_SAMPLER_CHECKPOINT, "save_sampler_checkpoint", output_path, model_id)
+        self._broadcast_and_call(SaveSamplerCheckpointCommand, output_path=output_path, model_id=model_id)
 
     def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
         """Load sampler checkpoint - delegates to underlying backend."""
@@ -1063,49 +1118,26 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         f"waiting for config from coordinator..."
     )
 
-    # Receive base_model and config from coordinator
-    base_model, config = _broadcast_object(None)
-    logger.info(f"Worker received config: base_model={base_model}")
+    # Receive INIT command with base_model and config from coordinator
+    init_cmd = _broadcast_command(None)
+    assert isinstance(init_cmd, InitCommand), f"Expected InitCommand, got {type(init_cmd)}"
+    logger.info(f"Worker received config: base_model={init_cmd.base_model}")
 
     # Now create the backend (skip distributed init since we already did it)
-    backend = JaxBackendImpl(base_model, config)
+    backend = JaxBackendImpl(init_cmd.base_model, init_cmd.config)
 
     logger.info(f"Worker {jax.process_index()} entering command loop")
 
     while True:
-        cmd = _broadcast_command_type(CommandType.NOOP)
+        cmd = _broadcast_command(None)
 
-        if cmd == CommandType.SHUTDOWN:
+        if isinstance(cmd, ShutdownCommand):
             logger.info(f"Worker {jax.process_index()} received shutdown command")
             break
-        elif cmd == CommandType.NOOP:
+        elif isinstance(cmd, NoopCommand):
             continue
-        elif cmd == CommandType.FORWARD_BACKWARD:
-            (prepared_batch,) = _broadcast_object(None)
-            backend.forward_backward(prepared_batch)
-        elif cmd == CommandType.FORWARD:
-            (prepared_batch,) = _broadcast_object(None)
-            backend.forward(prepared_batch)
-        elif cmd == CommandType.SAMPLE:
-            (prepared_batch,) = _broadcast_object(None)
-            backend.sample(prepared_batch)
-        elif cmd == CommandType.CREATE_MODEL:
-            model_id, lora_config = _broadcast_object(None)
-            backend.create_model(model_id, lora_config)
-        elif cmd == CommandType.OPTIM_STEP:
-            model_id, request_data = _broadcast_object(None)
-            backend.optim_step(model_id, request_data)
-        elif cmd == CommandType.LOAD_CHECKPOINT:
-            checkpoint_path, model_id = _broadcast_object(None)
-            backend.load_checkpoint(checkpoint_path, model_id)
-        elif cmd == CommandType.SAVE_CHECKPOINT:
-            output_path, model_id = _broadcast_object(None)
-            backend.save_checkpoint(output_path, model_id)
-        elif cmd == CommandType.SAVE_SAMPLER_CHECKPOINT:
-            output_path, model_id = _broadcast_object(None)
-            backend.save_sampler_checkpoint(output_path, model_id)
         else:
-            logger.warning(f"Worker received unknown command type: {cmd}")
+            getattr(backend, cmd.type)(**cmd.model_dump(exclude={"type"}))
 
     logger.info(f"Worker {jax.process_index()} exiting command loop")
 
