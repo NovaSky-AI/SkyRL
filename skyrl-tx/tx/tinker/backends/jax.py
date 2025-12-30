@@ -592,6 +592,7 @@ class JaxBackend(AbstractBackend):
         hp["b1"][...] = request_data.adam_params.beta1
         hp["b2"][...] = request_data.adam_params.beta2
         hp["eps"][...] = request_data.adam_params.eps
+        hp["weight_decay"][...] = request_data.adam_params.weight_decay
 
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
         with jax.set_mesh(self.mesh):
