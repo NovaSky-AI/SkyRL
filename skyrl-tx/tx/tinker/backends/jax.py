@@ -911,7 +911,7 @@ class JaxBackend(JaxBackendImpl):
                 process_id=0,
             )
             logger.info(
-                f"JAX distributed initialized: process {jax.process_index()}/{jax.process_count()}, "
+                f"JAX distributed initialized: process_id={jax.process_index()} ({jax.process_count()} total), "
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
 
@@ -970,19 +970,18 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         process_id=process_id,
     )
     logger.info(
-        f"Worker {jax.process_index()}/{jax.process_count()} initialized, waiting for config from coordinator..."
+        f"Worker process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
     )
 
     # Receive INIT payload with base_model and config from coordinator
     init_payload = _broadcast_command(None)
     assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
-    logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}")
-
-    # Re-hydrate the config object manually for init
     config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
+    logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}")
+
     backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
 
-    logger.info(f"Worker {jax.process_index()} entering command loop")
+    logger.info(f"Worker process_id={jax.process_index()} entering command loop")
 
     while True:
         payload: RpcPayload = _broadcast_command(None)
@@ -997,8 +996,6 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         hints = get_type_hints(method)
         kwargs = {k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v for k, v in payload.kwargs.items()}
         method(**kwargs)
-
-    logger.info(f"Worker {jax.process_index()} exiting command loop")
 
 
 def main():
