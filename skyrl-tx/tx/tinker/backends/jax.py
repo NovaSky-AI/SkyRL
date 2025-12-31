@@ -693,11 +693,10 @@ class JaxBackendImpl(AbstractBackend):
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
                 input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
-                adapter_indices = np.array(batch_adapter_indices, dtype=np.int32)
 
                 # Shard inputs along FSDP axis (already padded to max_batch_size)
                 input_ids, attention_mask, adapter_indices = jax.device_put(
-                    (input_ids, attention_mask, adapter_indices),
+                    (input_ids, attention_mask, np.array(batch_adapter_indices, dtype=np.int32)),
                     (sharding_2d, sharding_2d, sharding_1d),
                 )
 
