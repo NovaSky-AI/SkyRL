@@ -1042,6 +1042,10 @@ class CriticWorkerBase(Worker):
         # TODO: Is this method actually used?
         status = self.forward_backward(experience, microbatch_weight=1.0 / accumulation_steps)
 
+        if (local_step + 1) % accumulation_steps == 0:
+            grad_norm = self.optim_step()
+            status["raw_grad_norm"] = grad_norm
+
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)
 
