@@ -951,7 +951,9 @@ class JaxBackend(JaxBackendImpl):
         self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
 
     def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
-        self._broadcast_and_call("load_sampler_checkpoint", model_id=model_id, checkpoint_id=checkpoint_id, checkpoint_path=checkpoint_path)
+        self._broadcast_and_call(
+            "load_sampler_checkpoint", model_id=model_id, checkpoint_id=checkpoint_id, checkpoint_path=checkpoint_path
+        )
 
 
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):
