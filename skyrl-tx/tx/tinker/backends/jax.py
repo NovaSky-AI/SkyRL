@@ -57,39 +57,6 @@ from tx.utils.storage import pack_and_upload, download_and_unpack
 from tx.utils.log import logger
 
 
-def initialize_distributed(config: "JaxBackendConfig") -> None:
-    """Initialize JAX distributed for multi-node training if configured.
-
-    This must be called before creating the device mesh and before any other JAX calls.
-    If coordinator_address is None, the backend runs in single-node mode.
-
-    Args:
-        config: JaxBackendConfig with multi-node settings
-
-    Raises:
-        RuntimeError: If JAX distributed is already initialized
-    """
-    if jax.distributed.is_initialized():
-        raise RuntimeError(
-            "JAX distributed already initialized. Cannot reinitialize. "
-            "Ensure initialize_distributed is called before any other JAX operations."
-        )
-
-    if config.coordinator_address is None:
-        logger.info("Running in single-node mode")
-        return
-
-    jax.distributed.initialize(
-        coordinator_address=config.coordinator_address,
-        num_processes=config.num_processes,
-        process_id=0,  # Coordinator is always process 0
-    )
-    logger.info(
-        f"JAX distributed initialized: process {jax.process_index()}/{jax.process_count()}, "
-        f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
-    )
-
-
 class JaxBackendConfig(BaseModel, extra="forbid"):
     """Configuration specific to the JAX backend."""
 
@@ -1006,11 +973,18 @@ class JaxBackend(AbstractBackend):
         On coordinator: initializes distributed, broadcasts config to workers, creates backend.
         Workers receive the config via broadcast and initialize their own backend.
         """
-        # Initialize distributed first (coordinator side)
-        initialize_distributed(config)
-
-        # In multi-host mode, broadcast config to workers so they can initialize
-        if jax.process_count() > 1:
+        # Initialize JAX distributed for multi-node training (coordinator is always process 0)
+        if config.coordinator_address is not None:
+            jax.distributed.initialize(
+                coordinator_address=config.coordinator_address,
+                num_processes=config.num_processes,
+                process_id=0,
+            )
+            logger.info(
+                f"JAX distributed initialized: process {jax.process_index()}/{jax.process_count()}, "
+                f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
+            )
+            # Broadcast config to workers so they can initialize
             _broadcast_command(InitCommand(base_model=base_model, config=config))
 
         self._backend = JaxBackendImpl(base_model, config)
