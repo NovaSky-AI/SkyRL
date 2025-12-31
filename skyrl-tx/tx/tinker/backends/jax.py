@@ -950,18 +950,6 @@ class JaxBackend(JaxBackendImpl):
         self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
 
 
-def _rehydrate_kwargs(method: Callable, raw_kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Re-hydrate raw JSON dicts into Pydantic models using type hints.
-
-    Uses TypeAdapter which handles Pydantic models, generics, and primitives uniformly.
-    """
-    hints = get_type_hints(method)
-    return {
-        k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v
-        for k, v in raw_kwargs.items()
-    }
-
-
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):
     """Entry point for worker processes.
 
@@ -1007,10 +995,12 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         method = getattr(backend, payload.method)
 
         # Re-hydrate raw dicts into Pydantic models using type hints
-        rehydrated_kwargs = _rehydrate_kwargs(method, payload.kwargs)
-
-        # Execute
-        method(**rehydrated_kwargs)
+        hints = get_type_hints(method)
+        kwargs = {
+            k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v
+            for k, v in payload.kwargs.items()
+        }
+        method(**kwargs)
 
     logger.info(f"Worker {jax.process_index()} exiting command loop")
 
