@@ -915,12 +915,8 @@ class JaxBackend(JaxBackendImpl):
                 f"JAX distributed initialized: process {jax.process_index()}/{jax.process_count()}, "
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
-            _broadcast_command(RpcPayload(
-                method="__init__",
-                kwargs={"base_model": base_model, "config": config.model_dump()}
-            ))
 
-        super().__init__(base_model, config)
+        self._broadcast_and_call("__init__", base_model=base_model, config=config)
 
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
