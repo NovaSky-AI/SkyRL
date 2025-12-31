@@ -54,6 +54,8 @@ trainer:
     use_torch_compile: false
     # saves memory snapshots to os.path.join(ckpt_path, "memory_snapshots") - can visualize by dragging pickle files to https://docs.pytorch.org/memory_viz
     record_memory: false
+    # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
+    model_config_kwargs: {}
   ref:
     model:
       path: ${trainer.policy.model.path}
@@ -63,6 +65,9 @@ trainer:
       cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
+    # pass through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
+    # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use ref.megatron_config.transformer_config_kwargs instead
+    model_config_kwargs: {}
   critic:
     model:
       path: null
@@ -87,6 +92,8 @@ trainer:
       reshard_after_forward: true
       fsdp_size: -1
     sequence_parallel_size: 1
+    # pass through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
+    model_config_kwargs: {}
   algorithm:
     advantage_estimator: "grpo"  # "grpo", "gae", "rloo", "reinforce++", or customizable with AdvantageEstimatorRegistry
     kl_ctrl: # only used if use_kl_in_reward is true (not applied in the case of use_kl_loss=true) - uses kl_loss_coef as the initial KL coefficient

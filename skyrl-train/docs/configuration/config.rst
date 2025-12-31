@@ -286,6 +286,8 @@ This section configures the policy model used for training, including optimizer,
      use_torch_compile: false  # Enable torch compile for the entropy calculation
      record_memory: false  # Dump memory snapshot for debugging
 
+     model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
+
 - ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``policy.optimizer_config``: Optimizer configuration for the policy model
 - ``policy.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
@@ -334,6 +336,7 @@ We support similar configuration options as the policy model, including LoRA.
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
+      model_config_kwargs: {} # pass through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
 
 
 Reference Model Configuration
@@ -351,6 +354,7 @@ Reference Model Configuration
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
+      model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use ref.megatron_config.transformer_config_kwargs instead
 
 - ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
 - ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
