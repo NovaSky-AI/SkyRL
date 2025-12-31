@@ -14,13 +14,6 @@ from tx.tinker import types
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
-def make_engine(config: EngineConfig) -> TinkerEngine:
-    """Create TinkerEngine with JaxBackendImpl directly for test access to internals."""
-    engine = TinkerEngine(config)
-    engine.backend = engine.backend._backend
-    return engine
-
-
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:
     samples = []
     for tokens in token_lists:
@@ -71,7 +64,7 @@ def test_adapter_gradient_calculation():
         checkpoints_base=AnyPath(""),
         backend_config={"max_lora_adapters": 8, "max_lora_rank": 32},
     )
-    engine = make_engine(config)
+    engine = TinkerEngine(config)
 
     adapter1_id = "adapter1"
     adapter2_id = "adapter2"
@@ -138,7 +131,7 @@ def test_micro_batch_grad_accumulation():
         checkpoints_base=AnyPath(""),
         backend_config={"max_lora_adapters": 8, "max_lora_rank": 32, "train_micro_batch_size": 4},
     )
-    engine = make_engine(config)
+    engine = TinkerEngine(config)
 
     adapter1_id = "adapter1"
     adapter2_id = "adapter2"
@@ -185,7 +178,7 @@ def test_micro_batch_grad_accumulation():
         checkpoints_base=AnyPath(""),
         backend_config={"max_lora_adapters": 8, "max_lora_rank": 32, "train_micro_batch_size": 0},
     )
-    engine = make_engine(config)
+    engine = TinkerEngine(config)
 
     engine.process_single_request(
         types.RequestType.CREATE_MODEL, adapter1_id, {"lora_config": {"rank": 32, "alpha": 32}}
@@ -223,7 +216,7 @@ def test_process_optim_step_hyperparams_behavior():
         backend_config={"max_lora_adapters": 8, "max_lora_rank": 32},
     )
 
-    engine = make_engine(config)
+    engine = TinkerEngine(config)
 
     low_adapter = "adapter_low"
     default_adapter = "adapter_default"
@@ -278,7 +271,7 @@ def test_gradient_checkpointing():
                 "gradient_checkpointing": use_gradient_checkpointing,
             },
         )
-        engine = make_engine(cfg)
+        engine = TinkerEngine(cfg)
 
         # Create batch
         B, T = 2, 8

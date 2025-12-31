@@ -896,10 +896,9 @@ def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
     return RpcPayloadAdapter.validate_json(data_arr.tobytes())
 
 
-class JaxBackend(AbstractBackend):
-    """Distributed wrapper around JaxBackendImpl for multi-host coordination.
+class JaxBackend(JaxBackendImpl):
+    """Distributed wrapper that broadcasts commands before calling JaxBackendImpl methods.
 
-    On the coordinator (process 0), broadcasts commands before calling methods.
     Workers use runtime type introspection to re-hydrate arguments automatically.
     """
 
@@ -921,22 +920,14 @@ class JaxBackend(AbstractBackend):
                 kwargs={"base_model": base_model, "config": config.model_dump()}
             ))
 
-        self._backend = JaxBackendImpl(base_model, config)
+        super().__init__(base_model, config)
 
     def _broadcast_and_call(self, method: str, **kwargs):
-        """Broadcast method call to workers and execute locally."""
+        """Broadcast method call to workers and execute locally via super()."""
         if self._is_distributed:
             clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
             _broadcast_command(RpcPayload(method=method, kwargs=clean))
-        return getattr(self._backend, method)(**kwargs)
-
-    @property
-    def config(self) -> JaxBackendConfig:
-        return self._backend.config
-
-    @property
-    def metrics(self) -> types.EngineMetrics:
-        return self._backend.metrics
+        return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
         self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config)
@@ -961,9 +952,6 @@ class JaxBackend(AbstractBackend):
 
     def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
         self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
-
-    def has_model(self, model_id: str) -> bool:
-        return self._backend.has_model(model_id)
 
 
 def _rehydrate_kwargs(method: Callable, raw_kwargs: dict[str, Any]) -> dict[str, Any]:
