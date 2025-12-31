@@ -733,16 +733,15 @@ class JaxBackendImpl(AbstractBackend):
         return results
 
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
-        """Save training checkpoint as tar.gz using Flax checkpoints."""
-        with pack_and_upload(output_path) as temp_dir:
-            checkpoint_data = self._extract_checkpoint_data(model_id)
-            checkpoints.save_checkpoint_multiprocess(
-                target=checkpoint_data,
-                ckpt_dir=temp_dir,
-                step=0,
-                prefix="checkpoint_",
-                overwrite=True,
-            )
+        """Save training checkpoint using Flax checkpoints."""
+        checkpoint_data = self._extract_checkpoint_data(model_id)
+        checkpoints.save_checkpoint_multiprocess(
+            target=checkpoint_data,
+            ckpt_dir=output_path,
+            step=0,
+            prefix="checkpoint_",
+            overwrite=True,
+        )
         logger.info(f"Saved training checkpoint to {output_path}")
 
     def _extract_checkpoint_data(self, model_id: str) -> dict:
@@ -774,13 +773,12 @@ class JaxBackendImpl(AbstractBackend):
         )
 
     def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
-        """Load training checkpoint from tar.gz using Flax checkpoints."""
-        with download_and_unpack(checkpoint_path) as temp_dir:
-            checkpoint = checkpoints.restore_checkpoint(
-                ckpt_dir=temp_dir,
-                target=self._extract_checkpoint_data(model_id),
-                prefix="checkpoint_",
-            )
+        """Load training checkpoint using Flax checkpoints."""
+        checkpoint = checkpoints.restore_checkpoint(
+            ckpt_dir=checkpoint_path,
+            target=self._extract_checkpoint_data(model_id),
+            prefix="checkpoint_",
+        )
 
         if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_path}")
