@@ -878,6 +878,7 @@ def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
     On workers: receives and deserializes the payload (pass None).
     """
     if jax.process_index() == 0:
+        assert cmd is not None, "Coordinator must provide a command to broadcast."
         data = RpcPayloadAdapter.dump_json(cmd)
         size = np.array([len(data)], dtype=np.int64)
     else:
