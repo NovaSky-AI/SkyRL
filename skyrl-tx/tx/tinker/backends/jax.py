@@ -904,9 +904,7 @@ class JaxBackend(JaxBackendImpl):
     """
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
-        self._is_distributed = config.coordinator_address is not None
-
-        if self._is_distributed:
+        if config.coordinator_address is not None:
             jax.distributed.initialize(
                 coordinator_address=config.coordinator_address,
                 num_processes=config.num_processes,
@@ -921,7 +919,7 @@ class JaxBackend(JaxBackendImpl):
 
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
-        if self._is_distributed:
+        if jax.process_count() > 1:
             clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
             _broadcast_command(RpcPayload(method=method, kwargs=clean))
         return getattr(super(), method)(**kwargs)
@@ -949,11 +947,6 @@ class JaxBackend(JaxBackendImpl):
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
-
-    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath) -> None:
-        self._broadcast_and_call(
-            "load_sampler_checkpoint", model_id=model_id, checkpoint_id=checkpoint_id, checkpoint_path=checkpoint_path
-        )
 
 
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):
