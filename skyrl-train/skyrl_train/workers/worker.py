@@ -718,12 +718,6 @@ class PolicyWorkerBase(Worker):
             train_data, sample_batch_size=self.policy_mini_batch_size_per_gpu, drop_last=False
         )
 
-        # micro_batches_per_mini_batch = (
-        #     self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        # )
-        # # The number of steps (over micro batches) to accumulate gradients before taking an optimizer step.
-        # accumulation_steps = micro_batches_per_mini_batch
-
         status_list = []
         all_metrics = defaultdict(list)
         num_minibatches = len(minibatch_iterator)
