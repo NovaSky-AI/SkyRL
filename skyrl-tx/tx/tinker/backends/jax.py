@@ -863,6 +863,7 @@ class RpcPayload(BaseModel):
     type hints from the target method to automatically re-hydrate the kwargs
     into the correct Pydantic models.
     """
+
     method: str
     kwargs: dict[str, Any]  # Contains raw dicts/JSON types
 
@@ -996,10 +997,7 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
 
         # Re-hydrate raw dicts into Pydantic models using type hints
         hints = get_type_hints(method)
-        kwargs = {
-            k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v
-            for k, v in payload.kwargs.items()
-        }
+        kwargs = {k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v for k, v in payload.kwargs.items()}
         method(**kwargs)
 
     logger.info(f"Worker {jax.process_index()} exiting command loop")
