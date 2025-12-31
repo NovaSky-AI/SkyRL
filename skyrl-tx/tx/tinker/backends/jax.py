@@ -23,7 +23,7 @@ Usage:
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Annotated, Callable, Literal, Union
+from typing import Any, Callable, get_type_hints
 
 from cloudpathlib import AnyPath
 import numpy as np
@@ -855,88 +855,29 @@ class JaxBackendImpl(AbstractBackend):
 # =============================================================================
 
 
-class NoopCommand(BaseModel):
-    type: Literal["noop"] = "noop"
+class RpcPayload(BaseModel):
+    """Generic RPC payload container using runtime type introspection.
+
+    Instead of defining separate command classes for each method, this single
+    generic container holds the method name and raw kwargs. The worker uses
+    type hints from the target method to automatically re-hydrate the kwargs
+    into the correct Pydantic models.
+    """
+    method: str
+    kwargs: dict[str, Any]  # Contains raw dicts/JSON types
 
 
-class InitCommand(BaseModel):
-    type: Literal["init"] = "init"
-    base_model: str
-    config: JaxBackendConfig
+RpcPayloadAdapter: TypeAdapter[RpcPayload] = TypeAdapter(RpcPayload)
 
 
-class ForwardBackwardCommand(BaseModel):
-    type: Literal["forward_backward"] = "forward_backward"
-    prepared_batch: types.PreparedModelPassBatch
+def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
+    """Broadcast an RpcPayload from coordinator to all workers using JSON.
 
-
-class ForwardCommand(BaseModel):
-    type: Literal["forward"] = "forward"
-    prepared_batch: types.PreparedModelPassBatch
-
-
-class SampleCommand(BaseModel):
-    type: Literal["sample"] = "sample"
-    prepared_batch: types.PreparedSampleBatch
-
-
-class CreateModelCommand(BaseModel):
-    type: Literal["create_model"] = "create_model"
-    model_id: str
-    lora_config: types.LoraConfig
-
-
-class OptimStepCommand(BaseModel):
-    type: Literal["optim_step"] = "optim_step"
-    model_id: str
-    request_data: types.OptimStepInput
-
-
-class LoadCheckpointCommand(BaseModel):
-    type: Literal["load_checkpoint"] = "load_checkpoint"
-    checkpoint_path: AnyPath
-    model_id: str
-
-
-class SaveCheckpointCommand(BaseModel):
-    type: Literal["save_checkpoint"] = "save_checkpoint"
-    output_path: AnyPath
-    model_id: str
-
-
-class SaveSamplerCheckpointCommand(BaseModel):
-    type: Literal["save_sampler_checkpoint"] = "save_sampler_checkpoint"
-    output_path: AnyPath
-    model_id: str
-
-
-Command = Annotated[
-    Union[
-        NoopCommand,
-        InitCommand,
-        ForwardBackwardCommand,
-        ForwardCommand,
-        SampleCommand,
-        CreateModelCommand,
-        OptimStepCommand,
-        LoadCheckpointCommand,
-        SaveCheckpointCommand,
-        SaveSamplerCheckpointCommand,
-    ],
-    Field(discriminator="type"),
-]
-
-CommandAdapter: TypeAdapter[Command] = TypeAdapter(Command)
-
-
-def _broadcast_command(cmd: Command | None) -> Command:
-    """Broadcast a Command from coordinator to all workers using JSON.
-
-    On coordinator (process 0): serializes and broadcasts the command.
-    On workers: receives and deserializes the command (pass None).
+    On coordinator (process 0): serializes and broadcasts the payload.
+    On workers: receives and deserializes the payload (pass None).
     """
     if jax.process_index() == 0:
-        data = CommandAdapter.dump_json(cmd)
+        data = RpcPayloadAdapter.dump_json(cmd)
         size = np.array([len(data)], dtype=np.int64)
     else:
         size = np.array([0], dtype=np.int64)
@@ -952,28 +893,20 @@ def _broadcast_command(cmd: Command | None) -> Command:
 
     data_arr = multihost_utils.broadcast_one_to_all(data_arr)
 
-    return CommandAdapter.validate_json(data_arr.tobytes())
+    return RpcPayloadAdapter.validate_json(data_arr.tobytes())
 
 
 class JaxBackend(AbstractBackend):
     """Distributed wrapper around JaxBackendImpl for multi-host coordination.
 
-    This backend wraps JaxBackendImpl to handle multi-host coordination.
-    On the coordinator (process 0), it broadcasts commands before calling JaxBackendImpl methods.
-    Workers should be started separately using `run_worker()` or `python -m tx.tinker.backends.jax`.
-
-    The engine only runs on process 0 and uses this backend like a normal backend.
-    Workers automatically participate in collective operations when commands are broadcast.
+    On the coordinator (process 0), broadcasts commands before calling methods.
+    Workers use runtime type introspection to re-hydrate arguments automatically.
     """
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
-        """Initialize the distributed backend.
+        self._is_distributed = config.coordinator_address is not None
 
-        On coordinator: initializes distributed, broadcasts config to workers, creates backend.
-        Workers receive the config via broadcast and initialize their own backend.
-        """
-        # Initialize JAX distributed for multi-node training (coordinator is always process 0)
-        if config.coordinator_address is not None:
+        if self._is_distributed:
             jax.distributed.initialize(
                 coordinator_address=config.coordinator_address,
                 num_processes=config.num_processes,
@@ -983,79 +916,73 @@ class JaxBackend(AbstractBackend):
                 f"JAX distributed initialized: process {jax.process_index()}/{jax.process_count()}, "
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
-            # Broadcast config to workers so they can initialize
-            _broadcast_command(InitCommand(base_model=base_model, config=config))
+            _broadcast_command(RpcPayload(
+                method="__init__",
+                kwargs={"base_model": base_model, "config": config.model_dump()}
+            ))
 
         self._backend = JaxBackendImpl(base_model, config)
 
+    def _broadcast_and_call(self, method: str, **kwargs):
+        """Broadcast method call to workers and execute locally."""
+        if self._is_distributed:
+            clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
+            _broadcast_command(RpcPayload(method=method, kwargs=clean))
+        return getattr(self._backend, method)(**kwargs)
+
     @property
     def config(self) -> JaxBackendConfig:
-        """Pass-through to underlying backend config."""
         return self._backend.config
 
     @property
     def metrics(self) -> types.EngineMetrics:
-        """Pass-through to underlying backend metrics."""
         return self._backend.metrics
 
-    def _broadcast_and_call(self, cmd_class: type, **kwargs):
-        """Broadcast command to workers and call the corresponding backend method."""
-        cmd = cmd_class(**kwargs)
-        if jax.process_count() > 1:
-            _broadcast_command(cmd)
-        return getattr(self._backend, cmd.type)(**kwargs)
-
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        """Create a new model, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(CreateModelCommand, model_id=model_id, lora_config=lora_config)
+        self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config)
 
-    def forward_backward(
-        self,
-        prepared_batch: types.PreparedModelPassBatch,
-    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Run forward and backward pass, broadcasting to workers in multi-host mode."""
-        return self._broadcast_and_call(ForwardBackwardCommand, prepared_batch=prepared_batch)
+    def forward_backward(self, prepared_batch: types.PreparedModelPassBatch):
+        return self._broadcast_and_call("forward_backward", prepared_batch=prepared_batch)
 
-    def forward(
-        self,
-        prepared_batch: types.PreparedModelPassBatch,
-    ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        """Run forward-only pass, broadcasting to workers in multi-host mode."""
-        return self._broadcast_and_call(ForwardCommand, prepared_batch=prepared_batch)
+    def forward(self, prepared_batch: types.PreparedModelPassBatch):
+        return self._broadcast_and_call("forward", prepared_batch=prepared_batch)
 
-    def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
-        """Apply optimizer step, broadcasting to workers in multi-host mode."""
-        return self._broadcast_and_call(OptimStepCommand, model_id=model_id, request_data=request_data)
+    def optim_step(self, model_id: str, request_data: types.OptimStepInput):
+        return self._broadcast_and_call("optim_step", model_id=model_id, request_data=request_data)
 
-    def sample(
-        self,
-        prepared_batch: types.PreparedSampleBatch,
-    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Generate samples, broadcasting to workers in multi-host mode."""
-        return self._broadcast_and_call(SampleCommand, prepared_batch=prepared_batch)
+    def sample(self, prepared_batch: types.PreparedSampleBatch):
+        return self._broadcast_and_call("sample", prepared_batch=prepared_batch)
 
     def save_checkpoint(self, output_path, model_id: str) -> None:
-        """Save training checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(SaveCheckpointCommand, output_path=output_path, model_id=model_id)
+        self._broadcast_and_call("save_checkpoint", output_path=output_path, model_id=model_id)
 
     def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
-        """Load training checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(LoadCheckpointCommand, checkpoint_path=checkpoint_path, model_id=model_id)
+        self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
 
     def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
-        """Save sampler checkpoint, broadcasting to workers in multi-host mode."""
-        self._broadcast_and_call(SaveSamplerCheckpointCommand, output_path=output_path, model_id=model_id)
+        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
 
     def has_model(self, model_id: str) -> bool:
-        """Check if model is registered - local check only, no broadcast needed."""
         return self._backend.has_model(model_id)
+
+
+def _rehydrate_kwargs(method: Callable, raw_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Re-hydrate raw JSON dicts into Pydantic models using type hints.
+
+    Uses TypeAdapter which handles Pydantic models, generics, and primitives uniformly.
+    """
+    hints = get_type_hints(method)
+    return {
+        k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v
+        for k, v in raw_kwargs.items()
+    }
 
 
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):
     """Entry point for worker processes.
 
     Initializes JAX distributed, receives config from coordinator, then runs
-    the worker loop. This should be called on non-coordinator processes.
+    the worker loop using runtime type introspection to re-hydrate arguments.
 
     Args:
         coordinator_address: JAX coordinator address (host:port)
@@ -1075,23 +1002,31 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         f"Worker {jax.process_index()}/{jax.process_count()} initialized, waiting for config from coordinator..."
     )
 
-    # Receive INIT command with base_model and config from coordinator
-    init_cmd = _broadcast_command(None)
-    assert isinstance(init_cmd, InitCommand), f"Expected InitCommand, got {type(init_cmd)}"
-    logger.info(f"Worker received config: base_model={init_cmd.base_model}")
+    # Receive INIT payload with base_model and config from coordinator
+    init_payload = _broadcast_command(None)
+    assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
+    logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}")
 
-    # Now create the backend (skip distributed init since we already did it)
-    backend = JaxBackendImpl(init_cmd.base_model, init_cmd.config)
+    # Re-hydrate the config object manually for init
+    config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
+    backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
 
     logger.info(f"Worker {jax.process_index()} entering command loop")
 
     while True:
-        cmd = _broadcast_command(None)
+        payload: RpcPayload = _broadcast_command(None)
 
-        if isinstance(cmd, NoopCommand):
+        if not hasattr(backend, payload.method):
+            logger.error(f"Unknown method: {payload.method}")
             continue
-        kwargs = {k: getattr(cmd, k) for k in type(cmd).model_fields if k != "type"}
-        getattr(backend, cmd.type)(**kwargs)
+
+        method = getattr(backend, payload.method)
+
+        # Re-hydrate raw dicts into Pydantic models using type hints
+        rehydrated_kwargs = _rehydrate_kwargs(method, payload.kwargs)
+
+        # Execute
+        method(**rehydrated_kwargs)
 
     logger.info(f"Worker {jax.process_index()} exiting command loop")
 
