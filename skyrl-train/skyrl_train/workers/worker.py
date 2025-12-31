@@ -1041,12 +1041,12 @@ class CriticWorkerBase(Worker):
         output.metadata = {"train_status": status_mean}
         return output
 
-    def training_step(self, experience: Experience, global_step, local_step, microbatch_weight) -> Dict[str, float]:
+    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
         """
         Perform one micro-batch of training, accumulate gradients, and step the optimizer only after all micro-batches.
         """
         # TODO: Is this method actually used?
-        status = self.forward_backward(experience, microbatch_weight)
+        status = self.forward_backward(experience, microbatch_weight=1.0 / accumulation_steps)
 
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)
