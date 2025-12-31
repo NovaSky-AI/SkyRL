@@ -42,6 +42,7 @@ def make_sample_input(prompt_tokens: list[int], max_tokens: int, checkpoint_id: 
 
 def build_engine(config: EngineConfig, num_adapters: int) -> TinkerEngine:
     engine = TinkerEngine(config)
+    engine.backend = engine.backend._backend
     for i in range(num_adapters):
         model_id = f"adapter_{i}"
         engine.process_single_request(
