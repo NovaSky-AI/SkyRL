@@ -904,10 +904,6 @@ class InitCommand(BaseModel):
     config: JaxBackendConfig
 
 
-class ShutdownCommand(BaseModel):
-    type: Literal["shutdown"] = "shutdown"
-
-
 class ForwardBackwardCommand(BaseModel):
     type: Literal["forward_backward"] = "forward_backward"
     prepared_batch: types.PreparedModelPassBatch
@@ -957,7 +953,6 @@ Command = Annotated[
     Union[
         NoopCommand,
         InitCommand,
-        ShutdownCommand,
         ForwardBackwardCommand,
         ForwardCommand,
         SampleCommand,
@@ -1125,14 +1120,10 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
     while True:
         cmd = _broadcast_command(None)
 
-        if isinstance(cmd, ShutdownCommand):
-            logger.info(f"Worker {jax.process_index()} received shutdown command")
-            break
-        elif isinstance(cmd, NoopCommand):
+        if isinstance(cmd, NoopCommand):
             continue
-        else:
-            kwargs = {k: getattr(cmd, k) for k in type(cmd).model_fields if k != "type"}
-            getattr(backend, cmd.type)(**kwargs)
+        kwargs = {k: getattr(cmd, k) for k in type(cmd).model_fields if k != "type"}
+        getattr(backend, cmd.type)(**kwargs)
 
     logger.info(f"Worker {jax.process_index()} exiting command loop")
 
