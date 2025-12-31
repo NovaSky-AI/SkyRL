@@ -739,7 +739,8 @@ class PolicyWorkerBase(Worker):
 
                 if (local_step + 1) % accumulation_steps == 0:
                     grad_norm = self.optim_step()
-                    status["raw_grad_norm"] = grad_norm
+                    if grad_norm is not None:
+                        status["raw_grad_norm"] = grad_norm
 
                 if self.record_memory:
                     self.save_memory_snapshot(global_step, local_step)
@@ -807,7 +808,8 @@ class PolicyWorkerBase(Worker):
 
         if (local_step + 1) % accumulation_steps == 0:
             grad_norm = self.optim_step()
-            status["raw_grad_norm"] = grad_norm
+            if grad_norm is not None:
+                status["raw_grad_norm"] = grad_norm
 
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)
@@ -1005,7 +1007,8 @@ class CriticWorkerBase(Worker):
 
                 if (local_step + 1) % accumulation_steps == 0:
                     grad_norm = self.optim_step()
-                    status["raw_grad_norm"] = grad_norm
+                    if grad_norm is not None:
+                        status["raw_grad_norm"] = grad_norm
 
                 status["critic_lr"] = self.scheduler.get_last_lr()[0]
                 critic_update_steps += 1
@@ -1037,7 +1040,8 @@ class CriticWorkerBase(Worker):
 
         if (local_step + 1) % accumulation_steps == 0:
             grad_norm = self.optim_step()
-            status["raw_grad_norm"] = grad_norm
+            if grad_norm is not None:
+                status["raw_grad_norm"] = grad_norm
 
         status["critic_lr"] = self.scheduler.get_last_lr()[0]
         return status
