@@ -13,7 +13,6 @@ Usage:
     uv run -m tx.tinker.engine --base-model Qwen/Qwen3-8B --backend-config '{
         "coordinator_address": "localhost:7777",
         "num_processes": 2,
-        "process_id": 0,
         ...
     }'
 
@@ -83,7 +82,7 @@ def initialize_distributed(config: "JaxBackendConfig") -> None:
     jax.distributed.initialize(
         coordinator_address=config.coordinator_address,
         num_processes=config.num_processes,
-        process_id=config.process_id,
+        process_id=0,  # Coordinator is always process 0
     )
     logger.info(
         f"JAX distributed initialized: process {jax.process_index()}/{jax.process_count()}, "
@@ -125,10 +124,6 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     num_processes: int | None = Field(
         default=None,
         description="Total number of processes in the multi-node cluster",
-    )
-    process_id: int | None = Field(
-        default=None,
-        description="This process's ID (0-indexed) in the multi-node cluster",
     )
 
 
