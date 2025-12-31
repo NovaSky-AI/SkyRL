@@ -732,7 +732,7 @@ class JaxBackendImpl(AbstractBackend):
 
         return results
 
-    def save_checkpoint(self, output_path, model_id: str) -> None:
+    def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         """Save training checkpoint as tar.gz using Flax checkpoints."""
         with pack_and_upload(output_path) as temp_dir:
             checkpoint_data = self._extract_checkpoint_data(model_id)
@@ -773,7 +773,7 @@ class JaxBackendImpl(AbstractBackend):
             adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
         )
 
-    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
         """Load training checkpoint from tar.gz using Flax checkpoints."""
         with download_and_unpack(checkpoint_path) as temp_dir:
             checkpoint = checkpoints.restore_checkpoint(
@@ -788,7 +788,7 @@ class JaxBackendImpl(AbstractBackend):
         self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
-    def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
         lora_model = self.models[model_id]
         save_lora_checkpoint(
@@ -800,7 +800,7 @@ class JaxBackendImpl(AbstractBackend):
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
-    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
+    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath) -> None:
         """Insert sampler weights from checkpoint file."""
         adapter_index = self.models[model_id].adapter_index
         adapter_config = self.models[model_id].lora_config
@@ -941,16 +941,16 @@ class JaxBackend(JaxBackendImpl):
     def sample(self, prepared_batch: types.PreparedSampleBatch):
         return self._broadcast_and_call("sample", prepared_batch=prepared_batch)
 
-    def save_checkpoint(self, output_path, model_id: str) -> None:
+    def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("save_checkpoint", output_path=output_path, model_id=model_id)
 
-    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
 
-    def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
 
-    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
+    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath) -> None:
         self._broadcast_and_call(
             "load_sampler_checkpoint", model_id=model_id, checkpoint_id=checkpoint_id, checkpoint_path=checkpoint_path
         )
