@@ -736,7 +736,7 @@ class JaxBackendImpl(AbstractBackend):
         """Save training checkpoint as tar.gz using Flax checkpoints."""
         with pack_and_upload(output_path) as temp_dir:
             checkpoint_data = self._extract_checkpoint_data(model_id)
-            checkpoints.save_checkpoint(
+            checkpoints.save_checkpoint_multiprocess(
                 target=checkpoint_data,
                 ckpt_dir=temp_dir,
                 step=0,
