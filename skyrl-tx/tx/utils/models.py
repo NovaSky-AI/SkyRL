@@ -151,12 +151,9 @@ def save_safetensors(
         from jax.experimental import multihost_utils
 
         tensors = {k: multihost_utils.process_allgather(v, tiled=True) for k, v in tensors.items()}
-        if jax.process_index() == 0:
-            # Convert to numpy arrays for saving
-            tensors = {k: np.asarray(v) for k, v in tensors.items()}
-            safetensors.numpy.save_file(tensors, filename)
-    else:
-        safetensors.numpy.save_file(tensors, filename)
+
+    if jax.process_index() == 0:
+        safetensors.numpy.save_file({k: np.asarray(v) for k, v in tensors.items()}, filename)
 
 
 def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:
