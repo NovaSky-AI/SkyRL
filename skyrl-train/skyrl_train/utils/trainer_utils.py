@@ -218,12 +218,13 @@ def calculate_per_dataset_metrics(
         subset_uids = [concat_uids[i] for i in indices]
 
         # Calculate metrics for this subset
-        avg_score, pass_at_n = get_metrics_from_generator_output(subset_generator_output, subset_uids)
+        overall_metrics = get_metrics_from_generator_output(subset_generator_output, subset_uids)
 
         # Add to eval metrics with proper naming
         sanitized_data_source = sanitize_data_source(data_source)
-        eval_metrics[f"eval/{sanitized_data_source}/avg_score"] = avg_score
-        eval_metrics[f"eval/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = pass_at_n
+        eval_metrics[f"eval/{sanitized_data_source}/avg_score"] = overall_metrics["avg_score"]
+        eval_metrics[f"eval/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = overall_metrics["pass_at_n"]
+        eval_metrics[f"eval/{sanitized_data_source}/mean_positive_reward"] = overall_metrics["mean_positive_reward"]
 
     return eval_metrics
 
