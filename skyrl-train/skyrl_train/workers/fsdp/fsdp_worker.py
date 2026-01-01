@@ -139,6 +139,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
+                model_config_kwargs=self.cfg.trainer.policy.model_config_kwargs,
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -299,6 +300,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
                 sequence_parallel_size=self.cfg.trainer.critic.sequence_parallel_size,
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
+                model_config_kwargs=self.cfg.trainer.critic.model_config_kwargs,
             )
             self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
 
@@ -363,6 +365,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 use_sample_packing=self.cfg.trainer.use_sample_packing,
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
+                model_config_kwargs=self.cfg.trainer.ref.model_config_kwargs,
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

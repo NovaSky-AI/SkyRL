@@ -184,6 +184,9 @@ Megatron Configuration
       transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
         # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
         ...
+      lora_config:
+        # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
+        lora_type: "lora"
       # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
       # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
       empty_cuda_cache: true
@@ -261,6 +264,9 @@ This section configures the policy model used for training, including optimizer,
          target_modules: "all-linear"  # Apply to all linear layers OR
          # specify specific modules as a list
          exclude_modules: null  # Modules to exclude from LoRA
+         # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig
+         # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
+         init_method: "kaiming" # Initialization method for LoRA layers
      deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
 
      optimizer_config:
@@ -280,6 +286,8 @@ This section configures the policy model used for training, including optimizer,
      use_torch_compile: false  # Enable torch compile for the entropy calculation
      record_memory: false  # Dump memory snapshot for debugging
 
+     model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
+
 - ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``policy.optimizer_config``: Optimizer configuration for the policy model
 - ``policy.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
@@ -296,6 +304,7 @@ LoRA (Low-Rank Adaptation) enables parameter-efficient fine-tuning by training o
 - ``policy.model.lora.alpha``: Scaling factor for LoRA updates.
 - ``policy.model.lora.dropout``: Dropout probability applied to LoRA layers. Helps prevent overfitting during training.
 - ``policy.model.lora.lora_sync_path``: Directory path where LoRA adapter weights are saved and synchronized between training and inference processes. Must be accessible to all workers in distributed setups.
+- ``policy.model.lora.init_method``: Initialization method for LoRA layers. For FSDP, this corresponds to `init_lora_weights <https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights>`_ in PEFT. 'kaiming' is mapped to 'true' by default for PEFT. For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
 
 
 Critic Configuration
@@ -314,6 +323,7 @@ We support similar configuration options as the policy model, including LoRA.
           dropout: 0                 # LoRA dropout rate
           target_modules: "all-linear"
           exclude_modules: null  # Modules to exclude from LoRA
+          init_method: "kaiming" # Initialization method for LoRA layers
       deepspeed_config: ${deepspeed_config.train}
       optimizer_config:
         lr: 5.0e-6
@@ -326,6 +336,7 @@ We support similar configuration options as the policy model, including LoRA.
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
+      model_config_kwargs: {} # pass through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
 
 
 Reference Model Configuration
@@ -343,6 +354,7 @@ Reference Model Configuration
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
+      model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use ref.megatron_config.transformer_config_kwargs instead
 
 - ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
 - ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.

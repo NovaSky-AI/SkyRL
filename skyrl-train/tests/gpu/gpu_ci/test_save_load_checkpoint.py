@@ -108,7 +108,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
 
         # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
         if "megatron" in strategy:
-            from tests.gpu.test_megatron_worker import get_test_training_batch
+            from tests.gpu.gpu_ci.test_megatron_worker import get_test_training_batch
 
             dp_size = actor_group.actor_infos[0].rank.dp_size
             train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)

@@ -740,7 +740,8 @@ class PolicyWorkerBase(Worker):
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
                 grad_norm = self.optim_step()
-                status["raw_grad_norm"] = grad_norm
+                if grad_norm is not None:
+                    status["raw_grad_norm"] = grad_norm
 
                 if self.record_memory:
                     # NOTE: local_step == minibatch index now instead of microbatch index
@@ -810,7 +811,8 @@ class PolicyWorkerBase(Worker):
 
         if (local_step + 1) % accumulation_steps == 0:
             grad_norm = self.optim_step()
-            status["raw_grad_norm"] = grad_norm
+            if grad_norm is not None:
+                status["raw_grad_norm"] = grad_norm
 
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)
@@ -1009,7 +1011,8 @@ class CriticWorkerBase(Worker):
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
                 grad_norm = self.optim_step()
-                status["raw_grad_norm"] = grad_norm
+                if grad_norm is not None:
+                    status["raw_grad_norm"] = grad_norm
 
                 if self.record_memory:
                     self.save_memory_snapshot(global_step, local_step)
@@ -1044,7 +1047,8 @@ class CriticWorkerBase(Worker):
 
         if (local_step + 1) % accumulation_steps == 0:
             grad_norm = self.optim_step()
-            status["raw_grad_norm"] = grad_norm
+            if grad_norm is not None:
+                status["raw_grad_norm"] = grad_norm
 
         if self.record_memory:
             self.save_memory_snapshot(global_step, local_step)
