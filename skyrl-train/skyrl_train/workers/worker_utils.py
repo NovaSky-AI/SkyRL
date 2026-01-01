@@ -37,11 +37,9 @@ class BatchIterator:
     def __iter__(self):
         return self
 
-    def __next__(self) -> Experience:
+    def __next__(self) -> TrainingInputBatch:
         try:
-            batch = next(self._iter)
-            exp = self.batch_to_experience(batch)
-            return exp
+            return next(self._iter)
         except StopIteration:
             self._iter = iter(self._chunks)
             raise StopIteration
