@@ -570,7 +570,6 @@ def get_llm_for_sequence_regression(
         value_head_prefix,
         sequence_parallel_size=sequence_parallel_size,
         use_sample_packing=use_sample_packing,
-        model_config_kwargs=model_config_kwargs,
     )
 
     # Note: dschf is defined in function scope to avoid global effects
