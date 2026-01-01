@@ -721,6 +721,51 @@ class PolicyWorkerBase(Worker):
         status_list = []
         all_metrics = defaultdict(list)
         num_minibatches = len(minibatch_iterator)
+        local_step = 0
+
+        def record_status(status: Dict[str, float]):
+            """Record the aggregated (all-reduced) training status for the latest microbatch.
+            Also, update the progress bar with the latest status."""
+            status["policy_lr"] = self.scheduler.get_last_lr()[0]
+
+            # for DP
+            # TODO (sumanthrh): this assumes all workers are data parallel.
+            # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
+            status = self.strategy.all_reduce(status)
+
+            # weighted mean for kl
+            # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
+            # we can log this in the driver
+            # if "kl" in status:
+            #     status["kl"] *= status["response_length"]
+            #     status["kl"] /= status["response_length"]
+
+            short_status = {}
+
+            if "policy_loss" in status:
+                short_status = {
+                    "pg": status["policy_loss"],
+                    "glen": status["response_length"],
+                    "policy_lr": status["policy_lr"],
+                    "ent": status["policy_entropy"],
+                }
+                if "raw_grad_norm" in status:
+                    short_status["grad_norm"] = status["raw_grad_norm"]
+                if "reward" in status:
+                    short_status["rm"] = status["reward"]
+
+            if "critic_loss" in status:
+                short_status["cri"] = status["critic_loss"]
+                short_status["vals"] = status["values"]
+                short_status["cri_lr"] = status["critic_lr"]
+
+            if "ptx_loss" in status:
+                short_status["ptx"] = status["ptx_loss"]
+
+            status_list.append(status)
+            for k, v in status.items():
+                all_metrics[k].append(v)
+            minibatch_pbar.set_postfix(short_status)
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             minibatch_pbar = tqdm(
@@ -728,67 +773,34 @@ class PolicyWorkerBase(Worker):
                 desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, minibatch in enumerate(minibatch_pbar):
+            for minibatch in minibatch_pbar:
                 microbatch_iterator = BatchIterator(
                     minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
                 )
                 num_microbatches = len(microbatch_iterator)
                 microbatch_weight = 1.0 / num_microbatches
 
-                for microbatch in microbatch_iterator:
+                for microbatch_idx, microbatch in enumerate(microbatch_iterator):
                     microbatch_experience = BatchIterator.batch_to_experience(microbatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
+
+                    if self.record_memory:
+                        self.save_memory_snapshot(global_step, local_step)
+
+                    # Record status for all but the last microbatch in the minibatch.
+                    # The last microbatch should be recorded after the optimizer step.
+                    if microbatch_idx < num_microbatches - 1:
+                        record_status(status)
+
+                    # Local step counts the number of processed microbatches.
+                    local_step += 1
 
                 grad_norm = self.optim_step()
                 if grad_norm is not None:
                     status["raw_grad_norm"] = grad_norm
 
-                if self.record_memory:
-                    # NOTE: local_step == minibatch index now instead of microbatch index
-                    self.save_memory_snapshot(global_step, local_step)
-
-                status["policy_lr"] = self.scheduler.get_last_lr()[0]
-
-                # TODO: Move all the progress bar stuff into a utility function, and then add it back in the inner loop.
-
-                # for DP
-                # TODO (sumanthrh): this assumes all workers are data parallel.
-                # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
-                status = self.strategy.all_reduce(status)
-
-                # weighted mean for kl
-                # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
-                # we can log this in the driver
-                # if "kl" in status:
-                #     status["kl"] *= status["response_length"]
-                #     status["kl"] /= status["response_length"]
-
-                short_status = {}
-
-                if "policy_loss" in status:
-                    short_status = {
-                        "pg": status["policy_loss"],
-                        "glen": status["response_length"],
-                        "policy_lr": status["policy_lr"],
-                        "ent": status["policy_entropy"],
-                    }
-                    if "raw_grad_norm" in status:
-                        short_status["grad_norm"] = status["raw_grad_norm"]
-                    if "reward" in status:
-                        short_status["rm"] = status["reward"]
-
-                if "critic_loss" in status:
-                    short_status["cri"] = status["critic_loss"]
-                    short_status["vals"] = status["values"]
-                    short_status["cri_lr"] = status["critic_lr"]
-
-                if "ptx_loss" in status:
-                    short_status["ptx"] = status["ptx_loss"]
-
-                status_list.append(status)
-                for k, v in status.items():
-                    all_metrics[k].append(v)
-                minibatch_pbar.set_postfix(short_status)
+                # Record status for the last microbatch in the minibatch.
+                record_status(status)
 
         torch.distributed.barrier()
         # not needed beyond status logging
