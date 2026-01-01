@@ -102,9 +102,9 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 
 
 @torch.no_grad()
-def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
+def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> MetricsOutput:
     """
-    Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
+    Get `mean_raw_reward` (or avg_score), `pass_at_n`, and `mean_positive_reward` from generator output.
 
     The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
     calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
