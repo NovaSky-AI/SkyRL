@@ -94,7 +94,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_1.7b_base_12-30" \
+  trainer.run_name="dapo_qwen3_1.7b_base" \
   trainer.export_path="$HOME/exports/dapo_qwen3_1.7b_base" \
   trainer.hf_save_interval=10 \
   trainer.resume_mode=latest \
