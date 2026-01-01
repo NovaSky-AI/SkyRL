@@ -2,7 +2,14 @@ import torch
 from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
-from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase, MetricsOutput
+from skyrl_train.generators.base import (
+    GeneratorOutput,
+    GeneratorInput,
+    TrajectoryID,
+    BatchMetadata,
+    TrainingPhase,
+    MetricsOutput,
+)
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
@@ -125,7 +132,9 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
 
         # For each trajectory, we sum over the positive token rewards for mean_positive_reward computation
-        mean_positive_reward = float(np.mean([sum(max(r, 0) for r in trajectory_rewards) for trajectory_rewards in rewards]))
+        mean_positive_reward = float(
+            np.mean([sum(max(r, 0) for r in trajectory_rewards) for trajectory_rewards in rewards])
+        )
 
         # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
         for i, cur_trajectory_rewards in enumerate(rewards):
@@ -149,7 +158,6 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         pass_at_n=pass_at_n,
         mean_positive_reward=mean_positive_reward,
     )
-
 
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:

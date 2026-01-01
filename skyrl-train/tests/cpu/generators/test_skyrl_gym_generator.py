@@ -412,7 +412,6 @@ def test_get_metrics_from_generator_output():
     assert metrics["mean_positive_reward"] == 0.75
 
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("batched", [True, False])
 @patch("skyrl_gym.make")

@@ -703,7 +703,9 @@ class RayPPOTrainer:
             "reward/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
         self.all_metrics.update(reward_metrics)
-        logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {overall_metrics['pass_at_n']}, reward/avg_raw_reward: {overall_metrics['avg_score']}, reward/mean_positive_reward: {overall_metrics['mean_positive_reward']}")
+        logger.info(
+            f"reward/avg_pass_at_{n_samples_per_prompt}: {overall_metrics['pass_at_n']}, reward/avg_raw_reward: {overall_metrics['avg_score']}, reward/mean_positive_reward: {overall_metrics['mean_positive_reward']}"
+        )
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
         return generator_output
