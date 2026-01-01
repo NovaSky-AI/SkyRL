@@ -8,7 +8,7 @@ Design:
      Clean interface defining what backends must implement:
      - create_model (manages model metadata, adapter allocation, and optimizer lifecycle)
      - forward_backward, forward, optim_step, sample
-     - load_checkpoint, save_checkpoint, load_sampler_checkpoint, save_sampler_checkpoint
+     - load_checkpoint, save_checkpoint, save_sampler_checkpoint
 
   2. JaxBackend (jax.py)
      - Implements all abstract methods in Jax, fully supporting MultiLoRA for training and sampling
@@ -139,17 +139,6 @@ class AbstractBackend(ABC):
         Args:
             output_path: Path to save the checkpoint tar.gz file
             model_id: The model identifier
-        """
-        pass
-
-    @abstractmethod
-    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
-        """Insert sampler weights into model state from checkpoint file.
-
-        Args:
-            model_id: The model identifier
-            checkpoint_id: The checkpoint identifier
-            checkpoint_path: Path to the checkpoint file
         """
         pass
 

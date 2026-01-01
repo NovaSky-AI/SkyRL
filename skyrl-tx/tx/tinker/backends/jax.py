@@ -3,21 +3,37 @@
 This backend implements the full training and inference pipeline for models
 with LoRA adapters. It uses jax.value_and_grad for gradient computation and supports
 multiple LoRA adapters via the AccumulatedGradients dataclass.
+
+In multi-host mode, process 0 (coordinator) runs the engine with JaxBackend,
+which broadcasts commands to workers. Workers run separately using `run_worker()`
+or by running this module directly with `python -m tx.tinker.backends.jax`.
+
+Usage:
+    # Coordinator (process 0) - runs the full engine:
+    uv run -m tx.tinker.engine --base-model Qwen/Qwen3-8B --backend-config '{
+        "coordinator_address": "localhost:7777",
+        "num_processes": 2,
+        ...
+    }'
+
+    # Workers (process 1+) - run only the worker loop (receives config from coordinator):
+    uv run -m tx.tinker.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable, get_type_hints
 
 from cloudpathlib import AnyPath
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax.experimental import multihost_utils
 import optax
 from flax import nnx
 from flax.training import checkpoints
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
@@ -37,7 +53,6 @@ from tx.utils.models import (
     round_up_seq_len,
     resolve_model_path,
 )
-from tx.utils.storage import pack_and_upload, download_and_unpack
 from tx.utils.log import logger
 
 
@@ -66,6 +81,15 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     gradient_checkpointing: bool = Field(
         default=False,
         description="Whether to use gradient checkpointing (full recomputation strategy)",
+    )
+    # Multi-node configuration
+    coordinator_address: str | None = Field(
+        default=None,
+        description="JAX coordinator address (host:port) for multi-node training. If not set, runs in single-node mode.",
+    )
+    num_processes: int | None = Field(
+        default=None,
+        description="Total number of processes in the multi-node cluster",
     )
 
 
@@ -110,8 +134,11 @@ class AccumulatedGradients:
         )
 
 
-class JaxBackend(AbstractBackend):
-    """JAX backend for models with LoRA adapters.
+class JaxBackendImpl(AbstractBackend):
+    """JAX backend implementation for models with LoRA adapters.
+
+    This is the core implementation class. Use JaxBackend (the distributed wrapper)
+    for multi-host coordination.
 
     This backend:
     - Uses jax.value_and_grad for gradient computation
@@ -518,6 +545,11 @@ class JaxBackend(AbstractBackend):
                 token_losses_device.append(per_token_losses[: mb_end - mb_start])
                 logprobs_device.append(target_logprobs[: mb_end - mb_start])
 
+        # Gather results from all hosts before device_get
+        if jax.process_count() > 1:
+            token_losses_device = [multihost_utils.process_allgather(x, tiled=True) for x in token_losses_device]
+            logprobs_device = [multihost_utils.process_allgather(x, tiled=True) for x in logprobs_device]
+
         # Single batched device-to-host transfer for all arrays
         token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
 
@@ -699,17 +731,16 @@ class JaxBackend(AbstractBackend):
 
         return results
 
-    def save_checkpoint(self, output_path, model_id: str) -> None:
-        """Save training checkpoint as tar.gz using Flax checkpoints."""
-        with pack_and_upload(output_path) as temp_dir:
-            checkpoint_data = self._extract_checkpoint_data(model_id)
-            checkpoints.save_checkpoint(
-                target=checkpoint_data,
-                ckpt_dir=temp_dir,
-                step=0,
-                prefix="checkpoint_",
-                overwrite=True,
-            )
+    def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
+        """Save training checkpoint using Flax checkpoints."""
+        checkpoint_data = self._extract_checkpoint_data(model_id)
+        checkpoints.save_checkpoint_multiprocess(
+            target=checkpoint_data,
+            ckpt_dir=output_path,
+            step=0,
+            prefix="checkpoint_",
+            overwrite=True,
+        )
         logger.info(f"Saved training checkpoint to {output_path}")
 
     def _extract_checkpoint_data(self, model_id: str) -> dict:
@@ -740,14 +771,13 @@ class JaxBackend(AbstractBackend):
             adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
         )
 
-    def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
-        """Load training checkpoint from tar.gz using Flax checkpoints."""
-        with download_and_unpack(checkpoint_path) as temp_dir:
-            checkpoint = checkpoints.restore_checkpoint(
-                ckpt_dir=temp_dir,
-                target=self._extract_checkpoint_data(model_id),
-                prefix="checkpoint_",
-            )
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
+        """Load training checkpoint using Flax checkpoints."""
+        checkpoint = checkpoints.restore_checkpoint(
+            ckpt_dir=checkpoint_path,
+            target=self._extract_checkpoint_data(model_id),
+            prefix="checkpoint_",
+        )
 
         if checkpoint is None:
             raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_path}")
@@ -755,7 +785,7 @@ class JaxBackend(AbstractBackend):
         self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
-    def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
         lora_model = self.models[model_id]
         save_lora_checkpoint(
@@ -767,7 +797,7 @@ class JaxBackend(AbstractBackend):
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
-    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path) -> None:
+    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath) -> None:
         """Insert sampler weights from checkpoint file."""
         adapter_index = self.models[model_id].adapter_index
         adapter_config = self.models[model_id].lora_config
@@ -815,3 +845,183 @@ class JaxBackend(AbstractBackend):
                 adapter_indices.append(0)
 
         return adapter_indices
+
+
+# =============================================================================
+# Multi-host coordination
+# =============================================================================
+
+
+class RpcPayload(BaseModel):
+    """Generic RPC payload container using runtime type introspection.
+
+    Instead of defining separate command classes for each method, this single
+    generic container holds the method name and raw kwargs. The worker uses
+    type hints from the target method to automatically re-hydrate the kwargs
+    into the correct Pydantic models.
+    """
+
+    method: str
+    kwargs: dict[str, Any]  # Contains raw dicts/JSON types
+
+
+RpcPayloadAdapter: TypeAdapter[RpcPayload] = TypeAdapter(RpcPayload)
+
+
+def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
+    """Broadcast an RpcPayload from coordinator to all workers using JSON.
+
+    On coordinator (process 0): serializes and broadcasts the payload.
+    On workers: receives and deserializes the payload (pass None).
+    """
+    if jax.process_index() == 0:
+        assert cmd is not None, "Coordinator must provide a command to broadcast."
+        data = RpcPayloadAdapter.dump_json(cmd)
+        size = np.array([len(data)], dtype=np.int64)
+    else:
+        size = np.array([0], dtype=np.int64)
+
+    # Broadcast size first
+    size = multihost_utils.broadcast_one_to_all(size)
+
+    # Broadcast data
+    if jax.process_index() == 0:
+        data_arr = np.frombuffer(data, dtype=np.uint8)
+    else:
+        data_arr = np.zeros(size[0], dtype=np.uint8)
+
+    data_arr = multihost_utils.broadcast_one_to_all(data_arr)
+
+    return RpcPayloadAdapter.validate_json(data_arr.tobytes())
+
+
+class JaxBackend(JaxBackendImpl):
+    """Distributed wrapper that broadcasts commands before calling JaxBackendImpl methods.
+
+    Workers use runtime type introspection to re-hydrate arguments automatically.
+    """
+
+    def __init__(self, base_model: str, config: JaxBackendConfig):
+        if config.coordinator_address is not None:
+            jax.distributed.initialize(
+                coordinator_address=config.coordinator_address,
+                num_processes=config.num_processes,
+                process_id=0,
+            )
+            logger.info(
+                f"JAX distributed initialized: process_id={jax.process_index()} ({jax.process_count()} total), "
+                f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
+            )
+
+        self._broadcast_and_call("__init__", base_model=base_model, config=config)
+
+    def _broadcast_and_call(self, method: str, **kwargs):
+        """Broadcast method call to workers and execute locally via super()."""
+        if jax.process_count() > 1:
+            clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
+            _broadcast_command(RpcPayload(method=method, kwargs=clean))
+        return getattr(super(), method)(**kwargs)
+
+    def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
+        self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config)
+
+    def forward_backward(self, prepared_batch: types.PreparedModelPassBatch):
+        return self._broadcast_and_call("forward_backward", prepared_batch=prepared_batch)
+
+    def forward(self, prepared_batch: types.PreparedModelPassBatch):
+        return self._broadcast_and_call("forward", prepared_batch=prepared_batch)
+
+    def optim_step(self, model_id: str, request_data: types.OptimStepInput):
+        return self._broadcast_and_call("optim_step", model_id=model_id, request_data=request_data)
+
+    def sample(self, prepared_batch: types.PreparedSampleBatch):
+        return self._broadcast_and_call("sample", prepared_batch=prepared_batch)
+
+    def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
+        self._broadcast_and_call("save_checkpoint", output_path=output_path, model_id=model_id)
+
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
+        self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
+
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
+        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
+
+
+def run_worker(coordinator_address: str, num_processes: int, process_id: int):
+    """Entry point for worker processes.
+
+    Initializes JAX distributed, receives config from coordinator, then runs
+    the worker loop using runtime type introspection to re-hydrate arguments.
+
+    Args:
+        coordinator_address: JAX coordinator address (host:port)
+        num_processes: Total number of processes in the cluster
+        process_id: This process's ID (must be > 0 for workers)
+    """
+    if process_id == 0:
+        raise ValueError("Worker process_id must be > 0 (process 0 is the coordinator)")
+
+    # Initialize JAX distributed first (before any other JAX operations)
+    jax.distributed.initialize(
+        coordinator_address=coordinator_address,
+        num_processes=num_processes,
+        process_id=process_id,
+    )
+    logger.info(
+        f"Worker process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
+    )
+
+    # Receive INIT payload with base_model and config from coordinator
+    init_payload = _broadcast_command(None)
+    assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
+    config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
+    logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}")
+
+    backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
+
+    logger.info(f"Worker process_id={jax.process_index()} entering command loop")
+
+    while True:
+        payload: RpcPayload = _broadcast_command(None)
+
+        if not hasattr(backend, payload.method):
+            logger.error(f"Unknown method: {payload.method}")
+            continue
+
+        method = getattr(backend, payload.method)
+
+        # Re-hydrate raw dicts into Pydantic models using type hints
+        hints = get_type_hints(method)
+        kwargs = {k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v for k, v in payload.kwargs.items()}
+        method(**kwargs)
+
+
+def main():
+    """Entry point for running as a worker process."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SkyRL tx tinker worker process")
+    parser.add_argument(
+        "--coordinator-address",
+        required=True,
+        help="JAX coordinator address (host:port)",
+    )
+    parser.add_argument(
+        "--num-processes",
+        type=int,
+        required=True,
+        help="Total number of processes in the cluster",
+    )
+    parser.add_argument(
+        "--process-id",
+        type=int,
+        required=True,
+        help="This process's ID (must be > 0 for workers)",
+    )
+
+    args = parser.parse_args()
+    run_worker(args.coordinator_address, args.num_processes, args.process_id)
+
+
+if __name__ == "__main__":
+    main()

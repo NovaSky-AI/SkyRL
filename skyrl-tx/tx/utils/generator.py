@@ -283,6 +283,15 @@ class GeneratorMixin:
         has_stop = (stop_pos != -1) & (stop_pos <= max_tokens)
         end_positions = jnp.where(has_stop, stop_pos, max_tokens)
 
+        # In multi-host mode, gather all shards before device_get
+        if jax.process_count() > 1:
+            from jax.experimental import multihost_utils
+
+            (new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths) = jax.tree.map(
+                lambda x: multihost_utils.process_allgather(x, tiled=True),
+                (new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths),
+            )
+
         # Single device-to-host transfer
         (
             new_tokens_host,

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 from urllib.parse import urlparse
@@ -201,8 +200,7 @@ class EngineMetrics(BaseModel):
 # These are prepared by the engine and passed to the backend
 
 
-@dataclass
-class PreparedModelPassBatch:
+class PreparedModelPassBatch(BaseModel):
     """Prepared batch data for forward/forward_backward operations.
 
     Engine extracts this from requests, backend converts to JAX arrays and computes.
@@ -223,8 +221,7 @@ class PreparedModelPassBatch:
     request_batch_slices: list[tuple[str, str, int, int]]
 
 
-@dataclass
-class PreparedSampleBatch:
+class PreparedSampleBatch(BaseModel):
     """Prepared batch data for sample operations.
 
     Engine extracts this from requests, backend converts to JAX arrays and computes.

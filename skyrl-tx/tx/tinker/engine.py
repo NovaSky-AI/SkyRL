@@ -13,8 +13,7 @@ from sqlmodel import create_engine, Session, select, update, func
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.tinker.backends import JaxBackend
-from tx.tinker.backends.jax import JaxBackendConfig
+from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
