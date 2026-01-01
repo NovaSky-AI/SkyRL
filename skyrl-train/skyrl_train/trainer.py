@@ -16,7 +16,6 @@ from transformers import AutoTokenizer
 import numpy as np
 from collections import defaultdict
 
-import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch

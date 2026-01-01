@@ -8,9 +8,9 @@ MODEL_NAME="Qwen/Qwen3-1.7B-Base"
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
-NUM_NODES=2
+NUM_NODES=1
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=16
+NUM_INFERENCE_ENGINES=8
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
 LOGGER="wandb"  # change to "console" to print to stdout
 
@@ -94,7 +94,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_1.7b_base" \
+  trainer.run_name="dapo_qwen3_1.7b_base_12-30" \
   trainer.export_path="$HOME/exports/dapo_qwen3_1.7b_base" \
   trainer.hf_save_interval=10 \
   trainer.resume_mode=latest \
