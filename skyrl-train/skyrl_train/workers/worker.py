@@ -784,12 +784,11 @@ class PolicyWorkerBase(Worker):
                     microbatch_experience = BatchIterator.batch_to_experience(microbatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
-                    if self.record_memory:
-                        self.save_memory_snapshot(global_step, local_step)
-
                     # Record status for all but the last microbatch in the minibatch.
                     # The last microbatch should be recorded after the optimizer step.
                     if microbatch_idx < num_microbatches - 1:
+                        if self.record_memory:
+                            self.save_memory_snapshot(global_step, local_step)
                         record_status(status)
 
                     # Local step counts the number of processed microbatches.
@@ -798,6 +797,9 @@ class PolicyWorkerBase(Worker):
                 grad_norm = self.optim_step()
                 if grad_norm is not None:
                     status["raw_grad_norm"] = grad_norm
+
+                if self.record_memory:
+                    self.save_memory_snapshot(global_step, local_step)
 
                 # Record status for the last microbatch in the minibatch.
                 record_status(status)
@@ -1004,6 +1006,20 @@ class CriticWorkerBase(Worker):
 
         all_metrics = defaultdict(list)
         num_minibatches = len(minibatch_iterator)
+        local_step = 0
+
+        def record_status(status: Dict[str, float]):
+            status["critic_lr"] = self.scheduler.get_last_lr()[0]
+
+            # for DP
+            # TODO (sumanthrh): this assumes all workers are data parallel.
+            # We should get more accurate metrics with seq parallel or TP.
+            # There are metrics like entropy where we get average over local data size
+            status = self.strategy.all_reduce(status)
+
+            for k, v in status.items():
+                all_metrics[k].append(v)
+            minibatch_pbar.set_postfix(status)
 
         for epoch in range(self.cfg.trainer.update_epochs_per_batch):
             minibatch_pbar = tqdm(
@@ -1011,16 +1027,23 @@ class CriticWorkerBase(Worker):
                 desc=f"Critic Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
                 disable=not self.strategy.is_rank_0(),
             )
-            for local_step, minibatch in enumerate(minibatch_pbar):
+            for minibatch in minibatch_pbar:
                 microbatch_iterator = BatchIterator(
                     minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
                 )
                 num_microbatches = len(microbatch_iterator)
                 microbatch_weight = 1.0 / num_microbatches
 
-                for microbatch in microbatch_iterator:
+                for microbatch_idx, microbatch in enumerate(microbatch_iterator):
                     microbatch_experience = BatchIterator.batch_to_experience(microbatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
+
+                    if microbatch_idx < num_microbatches - 1:
+                        if self.record_memory:
+                            self.save_memory_snapshot(global_step, local_step)
+                        record_status(status)
+
+                    local_step += 1
 
                 grad_norm = self.optim_step()
                 if grad_norm is not None:
@@ -1028,18 +1051,7 @@ class CriticWorkerBase(Worker):
 
                 if self.record_memory:
                     self.save_memory_snapshot(global_step, local_step)
-
-                status["critic_lr"] = self.scheduler.get_last_lr()[0]
-
-                # for DP
-                # TODO (sumanthrh): this assumes all workers are data parallel.
-                # We should get more accurate metrics with seq parallel or TP.
-                # There are metrics like entropy where we get average over local data size
-                status = self.strategy.all_reduce(status)
-
-                for k, v in status.items():
-                    all_metrics[k].append(v)
-                minibatch_pbar.set_postfix(status)
+                record_status(status)
 
         torch.distributed.barrier()
 
