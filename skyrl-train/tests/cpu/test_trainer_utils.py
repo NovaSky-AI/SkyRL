@@ -13,6 +13,7 @@ from skyrl_train.utils.trainer_utils import (
     handle_replace_sampling,
     handle_filter_sampling,
     filter_generator_output,
+    zero_variance_filter,
     validate_generator_output,
     build_dataloader,
 )
@@ -652,6 +653,37 @@ def test_filter_generator_output():
     assert filtered["stop_reasons"] == ["length", "stop"]
     assert filtered["rollout_metrics"] == {"metric": "value"}
     assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
+
+
+def test_zero_variance_filter_mixed_groups():
+    """uid groups with non-zero variance and singletons are kept; zero-variance duplicates are removed."""
+    rewards = [1.0, 2.0, 3.0, 3.0, 5.0]
+    uids = ["uid1", "uid1", "uid2", "uid2", "uid3"]
+
+    kept_indices = zero_variance_filter(rewards, uids)
+
+    # uid1 has variance > 0 -> keep indices 0,1; uid2 has variance 0 with size>1 -> drop 2,3; uid3 singleton -> keep 4
+    assert kept_indices == [0, 1, 4]
+
+
+def test_zero_variance_filter_all_zero_variance_duplicates():
+    """All duplicate groups with zero variance should be filtered out, yielding no kept indices."""
+    rewards = [1.0, 1.0, 2.0, 2.0]
+    uids = ["a", "a", "b", "b"]
+
+    kept_indices = zero_variance_filter(rewards, uids)
+
+    assert kept_indices == []
+
+
+def test_zero_variance_filter_singletons_kept():
+    """Singleton groups should always be kept regardless of reward values."""
+    rewards = [1.0, 1.0, 1.0]
+    uids = ["x", "y", "z"]
+
+    kept_indices = zero_variance_filter(rewards, uids)
+
+    assert kept_indices == [0, 1, 2]
 
 
 def test_validate_generator_output_valid_case():
