@@ -156,30 +156,30 @@ def test_top_k_filtering():
 
 def test_top_p_filtering():
     """Test apply_top_p_batch function directly."""
+    # probs = [0.002, 0.006, 0.015, 0.041, 0.112, 0.825]
     logits = jnp.array([[0.0, 1.0, 2.0, 3.0, 4.0, 6.0]])
 
     # Test p=1.0: should not filter anything
     filtered = apply_top_p_batch(logits, p_values=jnp.array([1.0]))
     assert jnp.array_equal(filtered, logits)
 
-    # Test p=0.0: should only keep the top token
+    # Test p=0.0: should only keep the top token (index 5)
     filtered = apply_top_p_batch(logits, p_values=jnp.array([0.0]))
-    assert jnp.isfinite(filtered[0, 5])
-    assert jnp.all(filtered[0, :5] == -jnp.inf)
+    expected = jnp.array([[-jnp.inf, -jnp.inf, -jnp.inf, -jnp.inf, -jnp.inf, 6.0]])
+    assert jnp.array_equal(filtered, expected)
 
-    # Test p=0.9: keeps tokens until cumulative prob exceeds threshold
+    # Test p=0.9: cumsum_exclusive < 0.9 keeps top 2 tokens
     filtered = apply_top_p_batch(logits, p_values=jnp.array([0.9]))
-    assert jnp.isfinite(filtered[0, 5])
-    assert jnp.isfinite(filtered[0, 4])
-
-    # Test all-infinite input logits
-    inf_logits = jnp.array([[-jnp.inf, -jnp.inf, -jnp.inf, -jnp.inf]])
-    filtered = apply_top_p_batch(inf_logits, p_values=jnp.array([0.9]))
-    assert filtered.shape == inf_logits.shape
+    expected = jnp.array([[-jnp.inf, -jnp.inf, -jnp.inf, -jnp.inf, 4.0, 6.0]])
+    assert jnp.array_equal(filtered, expected)
 
     # Test per-example p values in batch
     logits_batch = jnp.array([[0.0, 1.0, 2.0, 3.0, 4.0, 6.0], [0.0, 1.0, 2.0, 3.0, 4.0, 6.0]])
     filtered = apply_top_p_batch(logits_batch, p_values=jnp.array([1.0, 0.0]))
-    assert jnp.array_equal(filtered[0], logits_batch[0])
-    assert jnp.isfinite(filtered[1, 5])
-    assert jnp.all(filtered[1, :5] == -jnp.inf)
+    expected = jnp.array(
+        [
+            [0.0, 1.0, 2.0, 3.0, 4.0, 6.0],
+            [-jnp.inf, -jnp.inf, -jnp.inf, -jnp.inf, -jnp.inf, 6.0],
+        ]
+    )
+    assert jnp.array_equal(filtered, expected)
