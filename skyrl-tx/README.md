@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🐻 SkyRL tx: Unifying LLM training and inference
+# 🧸 SkyRL tx: Unifying LLM training and inference
 
 <p align="center">
   <a href="https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-tx">GitHub</a> •
