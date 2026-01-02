@@ -137,10 +137,6 @@ def test_top_k_filtering():
     expected = jnp.array([[-jnp.inf, -jnp.inf, -jnp.inf, 4.0, 5.0]])
     assert jnp.array_equal(filtered, expected)
 
-    # Test max_k=0: should not filter anything regardless of k_values
-    filtered = apply_top_k_batch(logits, k_values=jnp.array([2]), max_k=0)
-    assert jnp.array_equal(filtered, logits)
-
     # Test k<=0 with max_k>0: should not filter that example
     filtered = apply_top_k_batch(logits, k_values=jnp.array([-1]), max_k=5)
     assert jnp.array_equal(filtered, logits)
