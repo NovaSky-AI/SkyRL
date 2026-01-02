@@ -334,7 +334,7 @@ def handle_dynamic_sampling(
         )
         return processed_output, processed_uids, keep_sampling, collected_state
     elif sampling_type == "filter":
-        # For filter strategies, accumulate the generator output and UIDs 
+        # For filter strategies, accumulate the generator output and UIDs
         # across batches in collected_state if we are sampling repeatedly.
         return handle_filter_sampling(generator_output, uids, sampling_config, collected_state)
     else:
@@ -588,9 +588,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "rewards",
             "rollout_logprobs",
         ]:
-            assert len(generator_output[key]) == len(
-                generator_output["response_ids"]
-            ), (
+            assert len(generator_output[key]) == len(generator_output["response_ids"]), (
                 f"Generator output {key} length must be equal to response_ids length, "
                 f"got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
             )
@@ -600,24 +598,18 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
     for i, (response_ids, loss_masks, rewards) in enumerate(
         zip(generator_output["response_ids"], generator_output["loss_masks"], generator_output["rewards"])
     ):
-        assert len(response_ids) == len(
-            loss_masks
-        ), (
+        assert len(response_ids) == len(loss_masks), (
             f"Response ids and loss masks must have the same length, "
             f"for sample {i} got {len(response_ids)} and {len(loss_masks)}"
         )
         if isinstance(rewards, list):
-            assert len(rewards) == len(
-                response_ids
-            ), (
+            assert len(rewards) == len(response_ids), (
                 f"Token rewards and response ids must have the same length, "
                 f"for sample {i} got {len(rewards)} and {len(response_ids)}"
             )
 
         if generator_output["rollout_logprobs"]:
-            assert len(response_ids) == len(
-                generator_output["rollout_logprobs"][i]
-            ), (
+            assert len(response_ids) == len(generator_output["rollout_logprobs"][i]), (
                 f"Response ids and rollout logprobs must have the same length, "
                 f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
             )

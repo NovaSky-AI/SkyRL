@@ -68,7 +68,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         engine_kwargs["max_loras"] = 1
         engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
 
-        # TODO(devpatel): Bandaid solution, replace this once we have a better 
+        # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side
         if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
             logger.warning(
@@ -87,7 +87,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
 
 
 def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
-    # TODO(tgriggs): We may want a separate config for the model name in case 
+    # TODO(tgriggs): We may want a separate config for the model name in case
     # it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
         urls=cfg.generator.remote_inference_engine_urls,
@@ -146,9 +146,9 @@ class BasePPOExp:
         # make sure the dataset is large enough to train on
         n_got_size = len(prompts_dataset)
         n_expected_size = self.cfg.trainer.train_batch_size
-        assert n_got_size >= n_expected_size, (
-            f"dataset should be at least as large as `train_batch_size` {n_expected_size}, got {n_got_size}"
-        )
+        assert (
+            n_got_size >= n_expected_size
+        ), f"dataset should be at least as large as `train_batch_size` {n_expected_size}, got {n_got_size}"
         return prompts_dataset
 
     def get_eval_dataset(self):

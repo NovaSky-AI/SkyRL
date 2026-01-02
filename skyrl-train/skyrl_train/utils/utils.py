@@ -52,13 +52,13 @@ def validate_batch_sizes(cfg: DictConfig):
 
     Explanation of how batching operates:
     1. Each prompt in train_batch_size creates `n_samples_per_prompt` total samples.
-    2. During training, these samples are split across data parallel (DP) workers, making the effective per-GPU 
+    2. During training, these samples are split across data parallel (DP) workers, making the effective per-GPU
        batch size: `train_batch_size * n_samples_per_prompt / dp_size`.
-    3. Mini batches are similarly normalized to per-gpu mini batches with size: 
+    3. Mini batches are similarly normalized to per-gpu mini batches with size:
        `mini_batch_size * n_samples_per_prompt / dp_size`.
-    4. Per-gpu train batch size must be divisible by per-gpu mini batch size, otherwise the last mini batch will 
+    4. Per-gpu train batch size must be divisible by per-gpu mini batch size, otherwise the last mini batch will
        be incomplete.
-    5. Per-gpu mini batch size must be divisible by per-gpu micro batch size, otherwise the last micro batch will 
+    5. Per-gpu mini batch size must be divisible by per-gpu micro batch size, otherwise the last micro batch will
        be incomplete.
     """
     assert cfg.trainer.train_batch_size >= cfg.trainer.policy_mini_batch_size
@@ -84,9 +84,7 @@ def validate_batch_sizes(cfg: DictConfig):
     else:
         policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
 
-    assert (
-        cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0
-    ), (
+    assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
         f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
         f"policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
     )
@@ -99,15 +97,11 @@ def validate_batch_sizes(cfg: DictConfig):
         f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
         f"dp_size={policy_dp_size}"
     )
-    assert (
-        policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0
-    ), (
+    assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
         f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
         f"by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
     )
-    assert (
-        policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0
-    ), (
+    assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
         f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
         f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
     )
@@ -116,9 +110,7 @@ def validate_batch_sizes(cfg: DictConfig):
     )
 
     # `train_batch_size_per_gpu` should be divisible by `policy_mini_batch_size_per_gpu`
-    assert (
-        policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0
-    ), (
+    assert policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0, (
         f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) "
         f"{policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu "
         f"(policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
@@ -129,9 +121,7 @@ def validate_batch_sizes(cfg: DictConfig):
     critic_dp_size = critic_world_size // cfg.trainer.critic.sequence_parallel_size
 
     if cfg.trainer.critic.model.path is not None:
-        assert (
-            cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0
-        ), (
+        assert cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0, (
             f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
             f"critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
         )
@@ -144,24 +134,18 @@ def validate_batch_sizes(cfg: DictConfig):
             f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
             f"dp_size={critic_dp_size}"
         )
-        assert (
-            critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0
-        ), (
+        assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
             f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by "
             f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
         )
-        assert (
-            critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0
-        ), (
+        assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
             f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than "
             f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
         )
         critic_train_batch_size_per_gpu = (
             cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
         )
-        assert (
-            critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0
-        ), (
+        assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
             f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) "
             f"{critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu "
             f"(critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
@@ -214,9 +198,7 @@ def validate_megatron_cfg(cfg: DictConfig):
         if config.megatron_config.context_parallel_size > 1:
             assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
         # check that sequence parallel is not configured outside of megatron
-        assert (
-            config.sequence_parallel_size == 1
-        ), (
+        assert config.sequence_parallel_size == 1, (
             f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence "
             f"parallel is not supported for megatron"
         )
@@ -272,9 +254,7 @@ def validate_cfg(cfg: DictConfig):
     ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
 
     available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
-    assert (
-        cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
-    ), (
+    assert cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators, (
         f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. "
         f"Must be one of {available_advantage_estimators}"
     )
@@ -364,24 +344,18 @@ def validate_cfg(cfg: DictConfig):
             * cfg.generator.inference_engine_pipeline_parallel_size
             * cfg.generator.inference_engine_data_parallel_size
         )
-        assert (
-            num_policy_gpus == num_rollout_gpus
-        ), (
+        assert num_policy_gpus == num_rollout_gpus, (
             f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) "
             "must be the same when colocating all models"
         )
     else:
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
-            assert (
-                cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
-            ), (
+            assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
                 f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes "
                 f"({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
             )
-            assert (
-                cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
-            ), (
+            assert cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node, (
                 f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and "
                 f"ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same "
                 f"when colocate policy and ref model."
@@ -404,9 +378,7 @@ def validate_generator_cfg(cfg: DictConfig):
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
         ), "generator.max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
     else:
-        assert (
-            cfg.generator.max_input_length >= cfg.trainer.max_prompt_length
-        ), (
+        assert cfg.generator.max_input_length >= cfg.trainer.max_prompt_length, (
             "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length "
             "for multi-turn generation"
         )
@@ -490,7 +462,7 @@ def validate_generator_cfg(cfg: DictConfig):
             # instead. sglang_engine.py not supported yet because we still need to figure out how
             # to make SGLang Python engine take OAI request.
             raise ValueError(
-                'generator.enable_http_endpoint is not supported for SGLang backend yet. '
+                "generator.enable_http_endpoint is not supported for SGLang backend yet. "
                 'Please set generator.backend="vllm".'
             )
         if not cfg.generator.async_engine:
@@ -575,7 +547,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
         if cfg.trainer.flash_attn:
-            # disable fused attention for megatron with flash_attn 
+            # disable fused attention for megatron with flash_attn
             # (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
             env_vars["NVTE_FUSED_ATTN"] = "0"
@@ -583,14 +555,14 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     if cfg.generator.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
-        # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle 
+        # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle
         # for collective RPCs. During weight transfer, we use IPC handles, which contains a `function`
         # object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-        # NOTE (sumanthrh): In vLLM >= 0.9.0, we've observed compilatiion failures with torch compile. 
-        # removing the compilation directory and trying again does not fix the issue. Temporarily we disable 
-        # compilation cache, which seems to fix the issue. This should not have any effect on performance - 
+        # NOTE (sumanthrh): In vLLM >= 0.9.0, we've observed compilatiion failures with torch compile.
+        # removing the compilation directory and trying again does not fix the issue. Temporarily we disable
+        # compilation cache, which seems to fix the issue. This should not have any effect on performance -
         # compilation will still happen, it's just not cached
         # TODO (sumanthrh): remove this once vLLM fixes the issue
         env_vars["VLLM_DISABLE_COMPILE_CACHE"] = "1"
@@ -643,7 +615,7 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     if SKYRL_PYTHONPATH_EXPORT:
         # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
-        # not recommended since it can cause unexpected conflicts with UV packages, 
+        # not recommended since it can cause unexpected conflicts with UV packages,
         # but keeping for backwards compatibility
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
@@ -761,7 +733,7 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     return pg_reordered_bundle_indices
 
 
-# NOTE (sumanthrh): For SGLang, the string representations here should also match those used by 
+# NOTE (sumanthrh): For SGLang, the string representations here should also match those used by
 # (and supported by) SGLang. This is because we do not control the update weight implementation
 # with SGLang backend. With VLLM, we use a custom Worker extension to have a custom update weight implementation.
 def torch_dtype_to_str(dtype: torch.dtype) -> str:

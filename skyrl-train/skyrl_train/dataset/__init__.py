@@ -1,1 +1,1 @@
-from .dataset import PromptDataset
+from .dataset import PromptDataset as PromptDataset

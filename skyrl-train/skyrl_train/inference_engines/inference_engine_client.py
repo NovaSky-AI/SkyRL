@@ -175,7 +175,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
 
         For the final response, we return `InferenceEngineOutput` with:
-        - `responses`: decoded at the end from `response_ids` if generation is completed in > 1 turns, otherwise 
+        - `responses`: decoded at the end from `response_ids` if generation is completed in > 1 turns, otherwise
             the text response of the first turn.
         - `response_ids`: the accumulated output tokens
         - `stop_reasons`: the stop reason of the final response
@@ -257,7 +257,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         self, engine_idx: int, original_request_payload: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not 
+        Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not
         "abort".
 
         The retry mechanism is intended to be used in combination with `pause_generation()` and `resume_generation()`
@@ -348,10 +348,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             if base_response is None:
                 if finish_reason != "abort":
                     # If we only made one request and it is not aborted, return the partial result directly.
-                    # This is the codepath that will hit when we do not use `pause_generation()` 
+                    # This is the codepath that will hit when we do not use `pause_generation()`
                     # or `resume_generation()`.
                     return partial_response
-                # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when 
+                # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when
                 # modifying this.
                 base_response = partial_response.copy()
 

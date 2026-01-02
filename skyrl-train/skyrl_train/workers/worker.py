@@ -494,7 +494,7 @@ class PPORayActorGroup:
         *args,
         **kwargs,
     ) -> List[ObjectRef]:
-        """Asynchronously initialize worker state (model, and optimizer if applicable) from model path 
+        """Asynchronously initialize worker state (model, and optimizer if applicable) from model path
         on all the workers.
 
         Returns:
@@ -1032,7 +1032,7 @@ class CriticWorkerBase(Worker):
 
     def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
         """
-        Perform one micro-batch of training, accumulate gradients, and step the optimizer only 
+        Perform one micro-batch of training, accumulate gradients, and step the optimizer only
         after `accumulation_steps` micro-batches.
         """
         status = self.forward_backward(experience, accumulation_steps)
