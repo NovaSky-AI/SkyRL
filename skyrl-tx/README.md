@@ -3,7 +3,7 @@
 # SkyRL tx: Unifying LLM training and inference
 
 <p align="center">
-  <a href="https://github.com/NovaSky-AI/SkyRL">GitHub</a> •
+  <a href="https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-tx">GitHub</a> •
   <a href="https://tinker-docs.thinkingmachines.ai/">Tinker Docs</a> •
   <a href="https://github.com/thinking-machines-lab/tinker-cookbook">Tinker Cookbook</a> •
   <a href="https://skyrl.slack.com/archives/C09K1JGNPJS">Slack</a>
@@ -264,7 +264,7 @@ We welcome contributions! The project is early and hackable — now is a great t
 ## 📬 Contact
 
 - **Slack**: [#skyrl-tx](https://skyrl.slack.com/archives/C09K1JGNPJS)
-- **GitHub**: [NovaSky-AI/SkyRL](https://github.com/NovaSky-AI/SkyRL)
+- **GitHub**: [NovaSky-AI/SkyRL/skyrl-tx](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-tx)
 - **Twitter/X**: [@NovaSkyAI](https://x.com/NovaSkyAI)
 
 ## 📄 License
