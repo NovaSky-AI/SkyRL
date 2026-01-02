@@ -261,6 +261,15 @@ We welcome contributions! The project is early and hackable — now is a great t
 - **[Tinker Documentation](https://tinker-docs.thinkingmachines.ai/)** — Official Tinker API docs
 - **[Tinker Cookbook](https://github.com/thinking-machines-lab/tinker-cookbook)** — Example recipes
 
+### Blog Posts
+
+- **[Introducing SkyRL tx](https://novasky-ai.notion.site/skyrl-tx)**
+- **[SkyRL tx v0.0.2](https://novasky-ai.notion.site/skyrl-tx-v002)**
+- **[SkyRL tx v0.0.3](https://novasky-ai.notion.site/skyrl-tx-003)**
+- **[SkyRL tx v0.1.0](https://novasky-ai.notion.site/skyrl-tx-v010)**
+- **[SkyRL tx v0.2.0](https://novasky-ai.notion.site/skyrl-tx-v02)**
+- **[SkyRL tx v0.2.1](https://novasky-ai.notion.site/skyrl-tx-v021)**
+
 ## 📬 Contact
 
 - **Slack**: [#skyrl-tx](https://skyrl.slack.com/archives/C09K1JGNPJS)
