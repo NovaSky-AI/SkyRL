@@ -95,7 +95,8 @@ def create_ray_wrapped_inference_engines(
     rope_theta: float | None = None,
 ) -> List[InferenceEngineInterface]:
     """
-    Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
+    Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
+    instances.
     """
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
     from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -115,7 +116,8 @@ def create_ray_wrapped_inference_engines(
 
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
-    # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1 to explicitly manage resource allocation
+    # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1
+    # to explicitly manage resource allocation
     # TODO: we should be able to support mp backend by allocating resources at engine level
     distributed_executor_backend = "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else "ray"
     data_parallel_backend = "mp"
@@ -293,7 +295,8 @@ def create_ray_wrapped_inference_engines(
             sleep_level = 1 if enable_lora else sleep_level
             sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
         elif backend == "sglang":
-            # NOTE(Charlie): we always need to sync weights after waking up: https://github.com/sgl-project/sglang/issues/7939
+            # NOTE(Charlie): we always need to sync weights after waking up,
+            # see: https://github.com/sgl-project/sglang/issues/7939 for more details.
             assert sleep_level == 2, "SGLang always discards weights, so sleep_level is not applicable."
             sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
         ray.get(sleep_refs)

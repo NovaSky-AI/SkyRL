@@ -35,7 +35,7 @@ class InferenceEngineInterface(ABC):
 
     @abstractmethod
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -47,7 +47,7 @@ class InferenceEngineInterface(ABC):
         The specific fields of the response/request depend on the engine's backend (e.g. for vllm
         these are defined in vllm.entrypoints.openai.protocol).
         """
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -59,15 +59,15 @@ class InferenceEngineInterface(ABC):
         The specific fields of the response/request depend on the engine's backend (e.g. for vllm
         these are defined in vllm.entrypoints.openai.protocol).
         """
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     async def wake_up(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     async def sleep(self, *args: Any, **kwargs: Any):
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
@@ -85,26 +85,26 @@ class InferenceEngineInterface(ABC):
 
     @abstractmethod
     async def teardown(self):
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     async def reset_prefix_cache(self):
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     def tp_size(self) -> int:
         """Return the tensor parallel size of this inference engine."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     def pp_size(self) -> int:
         """Return the pipeline parallel size of this inference engine."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     def dp_size(self) -> int:
         """Return the data parallel size of this inference engine."""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     async def abort_generation(self) -> None:
@@ -113,4 +113,4 @@ class InferenceEngineInterface(ABC):
         already-generated tokens with a stop_reason of "abort". If the request was waiting,
         it returns a response with zero completion tokens.
         """
-        raise NotImplementedError()
+        raise NotImplementedError
