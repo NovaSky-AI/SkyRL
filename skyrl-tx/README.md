@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/NovaSky-AI/SkyRL">GitHub</a> •
   <a href="https://tinker-docs.thinkingmachines.ai/">Tinker Docs</a> •
-  <a href="https://github.com/thinking-machines-lab/tinker-cookbook">Cookbook</a> •
+  <a href="https://github.com/thinking-machines-lab/tinker-cookbook">Tinker Cookbook</a> •
   <a href="https://skyrl.slack.com/archives/C09K1JGNPJS">Slack</a>
 </p>
 
@@ -15,7 +15,7 @@ SkyRL tx is an open-source library that implements a backend for the [Tinker API
 
 ## ✨ Key Features
 
-- **Unified Training & Inference** — Single API for forward passes, backward passes, and sampling
+- **Unified Training & Inference** — Single engine for forward passes, backward passes, and sampling
 - **Multi-User LoRA Support** — Efficient GPU sharing across users with individual adapters
 - **Full RL Support** — End-to-end reinforcement learning with PPO and custom loss functions
 - **Multi-Node Training** — FSDP and tensor parallelism for distributed training
