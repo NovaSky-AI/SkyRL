@@ -1,0 +1,54 @@
+name: SkyRL-GPU-Megatron
+
+on: 
+  push: 
+    branches: 
+      - main
+    paths:
+      - 'skyrl-train/workers/**'
+      - 'skyrl-train/distributed/megatron/**'
+      - 'skyrl-train/config/**'
+      - 'skyrl-train/tests/gpu/gpu_ci/**'
+      - 'skyrl-train/pyproject.toml'
+      - '!skyrl-train/docs/**'
+      - '!skyrl-train/examples/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+
+permissions:
+  checks: write   # for status checks to appear
+  contents: read
+
+jobs:
+  
+  skyrl_tests_megatron:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./skyrl-train
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        # This is the version of the action for setting up Python, not the Python version.
+        uses: actions/setup-python@v5
+        with:
+          # Semantic version range syntax or exact version of a Python version
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - name: Install basic dependencies
+        run: uv pip install anyscale==0.24.79 typer==0.9.0
+      # Run tests
+      - name: GPU tests
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+        run: |
+          anyscale job submit -f ci/anyscale_gpu_ci_megatron.yaml --timeout 5000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-ci-megatron --timeout 5000

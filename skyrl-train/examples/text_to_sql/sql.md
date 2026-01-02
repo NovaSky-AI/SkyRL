@@ -5,7 +5,7 @@ We provide the training set we used on HuggingFace: https://huggingface.co/datas
 You can download the dataset by running the following command:
 
 ```bash
-huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 ```
 
 ## DB environment 
@@ -22,7 +22,7 @@ The dataset download is 22.2GB and include BIRD, Spider, ScienceBenchmark, EHRSQ
 To download, run:
 
 ```bash
-huggingface-cli download seeklhy/OmniSQL-datasets data.zip --repo-type dataset --local-dir $HOME/data/sql/db_files/
+hf download seeklhy/OmniSQL-datasets data.zip --repo-type dataset --local-dir $HOME/data/sql/db_files/
 
 unzip $HOME/data/sql/db_files/data.zip -d $HOME/data/sql/db_files/
 ```

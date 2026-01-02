@@ -64,15 +64,16 @@ def get_test_actor_config(strategy: str) -> DictConfig:
 
 
 @pytest.mark.parametrize(
-    "strategy",
+    ("strategy", "lora"),
     [
-        "deepspeed",
-        "fsdp",
-        "fsdp2",
-        pytest.param("megatron", marks=pytest.mark.megatron),
+        ("deepspeed", False),
+        ("fsdp", False),
+        ("fsdp2", False),
+        pytest.param("megatron", False, marks=pytest.mark.megatron),
+        pytest.param("megatron", True, marks=[pytest.mark.megatron, pytest.mark.lora]),
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy):
+def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -82,6 +83,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
     5. Repeating second training step and comparing logits
     """
     cfg = get_test_actor_config(strategy)
+    if lora:
+        cfg.trainer.policy.model.lora.rank = 32
+        cfg.trainer.policy.model.lora.alpha = 32
 
     try:
         actor_group = init_worker_with_type(
@@ -104,7 +108,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy):
 
         # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
         if "megatron" in strategy:
-            from tests.gpu.test_megatron_worker import get_test_training_batch
+            from tests.gpu.gpu_ci.test_megatron_worker import get_test_training_batch
 
             dp_size = actor_group.actor_infos[0].rank.dp_size
             train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)

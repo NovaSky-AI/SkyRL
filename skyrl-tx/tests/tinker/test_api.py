@@ -33,8 +33,8 @@ def api_server():
             "--base-model",
             BASE_MODEL,
             # Set number of LoRA adapters lower to avoid OOMs in the CI
-            "--max-lora-adapters",
-            "4",
+            "--backend-config",
+            '{"max_lora_adapters": 4}',
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -166,6 +166,15 @@ def test_training_workflow(service_client):
     checkpoint_ids = [ckpt.checkpoint_id for ckpt in checkpoints_response.checkpoints]
     assert "0000" in checkpoint_ids
 
+    # Verify the training run appears in list_training_runs with correct fields
+    training_runs = rest_client.list_training_runs().result()
+    assert training_runs.cursor.total_count == len(training_runs.training_runs)
+    training_run = next(tr for tr in training_runs.training_runs if tr.training_run_id == original_training_run_id)
+    assert training_run.base_model == BASE_MODEL
+    assert training_run.is_lora is True
+    assert training_run.lora_rank == 32
+    assert training_run.corrupted is False
+
 
 @pytest.mark.parametrize("use_lora", [False, True], ids=["base_model", "lora_model"])
 def test_sample(service_client, use_lora):
@@ -216,6 +225,34 @@ def test_sample(service_client, use_lora):
     assert len(stopped_result.sequences[0].tokens) == 5
     assert stopped_result.sequences[0].stop_reason == "stop"
     assert stopped_result.sequences[0].tokens[-1] == stop_token
+
+
+def test_sample_top_k(service_client):
+    """Test that top_k sampling restricts token selection."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
+
+    def sample_with_top_k(top_k, num_runs=3):
+        return [
+            sampling_client.sample(
+                prompt=prompt,
+                sampling_params=types.SamplingParams(temperature=1.0, max_tokens=5, seed=42 + i, top_k=top_k),
+                num_samples=1,
+            )
+            .result()
+            .sequences[0]
+            .tokens
+            for i in range(num_runs)
+        ]
+
+    # top_k=1 should produce identical outputs regardless of seed
+    results_top_1 = sample_with_top_k(top_k=1)
+    assert all(r == results_top_1[0] for r in results_top_1), "top_k=1 should produce identical outputs"
+
+    # top_k=-1 (disabled) should vary with different seeds
+    results_no_top_k = sample_with_top_k(top_k=-1)
+    assert not all(seq == results_no_top_k[0] for seq in results_no_top_k), "Without top_k, outputs should vary"
 
 
 def test_sample_with_stop_strings(service_client):

@@ -7,8 +7,8 @@ SynSQL reward calculation.
 
 import re
 import sqlite3
-from func_timeout import func_timeout, FunctionTimedOut
 import sys
+import threading
 
 
 THINK_START, THINK_END = "<think>", "</think>"
@@ -43,38 +43,57 @@ def verify_format_and_extract(output: str):
     return True, thoughts, solution_text.strip(), None
 
 
-def execute_sql_single(db_file, sql):
-    try:
-        conn = sqlite3.connect(db_file)
-        cursor = conn.cursor()
-        conn.execute("BEGIN TRANSACTION;")
-        cursor.execute(sql)
-        execution_res = frozenset(cursor.fetchall())
-        conn.rollback()
-        conn.close()
-        # print('Successfully executed')
-        return db_file, sql, execution_res, 1
-    except Exception:
-        # print(f"Error executing SQL: {e}, db file: {db_file}")
-        conn.rollback()
-        conn.close()
-        return db_file, sql, None, 0
-
-
 def execute_sql_wrapper_single(db_file, sql, timeout, output_str):
+    """
+    Execute SQL with a timeout using a worker thread and conn.interrupt().
+    Ensures long-running queries are interrupted and connections are closed.
+    """
+    res = (db_file, sql, None, 0)
+    done = threading.Event()
+    conn_holder = {"conn": None}
+
+    def worker():
+        nonlocal res
+        conn = None
+        try:
+            conn = sqlite3.connect(db_file, check_same_thread=False)
+            conn_holder["conn"] = conn
+            cur = conn.cursor()
+            conn.execute("BEGIN TRANSACTION;")
+            cur.execute(sql)
+            rows = frozenset(cur.fetchall())
+            conn.rollback()
+            res = (db_file, sql, rows, 1)
+        except Exception:
+            res = (db_file, sql, None, 0)
+        finally:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+
     try:
-        res = func_timeout(timeout, execute_sql_single, args=(db_file, sql))
+        if not done.wait(timeout):
+            conn = conn_holder.get("conn")
+            if conn is not None:
+                try:
+                    conn.interrupt()
+                except Exception:
+                    pass
+            done.wait()
     except KeyboardInterrupt:
         sys.exit(0)
-    except FunctionTimedOut:
-        print(f"SQL:\n{sql}\nTime Out!")
-        print("-" * 30)
-        res = (db_file, sql, None, 0)
     except Exception:
-        # print(f"Error executing SQL: {e}, db_file: {db_file}")
         res = (db_file, sql, None, 0)
 
-    # Append the output to the tuple
     if isinstance(res, tuple):
         res = res + (output_str,)
 

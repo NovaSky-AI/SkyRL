@@ -186,9 +186,9 @@ def validate_batch_sizes(cfg: DictConfig):
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
-    assert cfg.trainer.train_batch_size >= lcm_dp_size, (
-        f"train_batch_size ({cfg.trainer.train_batch_size}) should be larger than or equal to the least common "
-        f"multiple of the data parallel sizes of the enabled models: "
+    assert cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt >= lcm_dp_size, (
+        f"train_batch_size * n_samples_per_prompt ({cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt}) "
+        f"should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
         f"policy_dp_size={policy_dp_size}, "
         f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
         f"lcm_dp_size={lcm_dp_size}"
@@ -340,7 +340,11 @@ def validate_cfg(cfg: DictConfig):
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
         assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
-        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
+        assert cfg.trainer.strategy in (
+            "fsdp",
+            "fsdp2",
+            "megatron",
+        ), "LoRA enabled requires fsdp/fsdp2/megatron training backend"
 
         if cfg.trainer.target_modules is not None:
             logger.warning(

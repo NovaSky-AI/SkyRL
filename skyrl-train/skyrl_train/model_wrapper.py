@@ -35,6 +35,7 @@ class HFModelWrapper(nn.Module):
         lora_rank (int, optional): Rank for LoRA adaptation. Defaults to 0.
         lora_alpha (int, optional): Alpha parameter for LoRA. Defaults to 16.
         lora_dropout (float, optional): Dropout rate for LoRA layers. Defaults to 0.
+        lora_init_method (str, optional): Initialization method for LoRA layers. Defaults to "kaiming".
         target_modules (list, optional): List of target modules for applying LoRA. Defaults to None.
         exclude_modules (list, optional): List of modules to exclude from applying LoRA. Defaults to None.
         ds_config (dict, optional): Configuration for DeepSpeed, enabling model partitioning across multiple GPUs. Defaults to None.
@@ -54,6 +55,7 @@ class HFModelWrapper(nn.Module):
         lora_rank=0,
         lora_alpha=16,
         lora_dropout=0,
+        lora_init_method="kaiming",
         target_modules=None,
         exclude_modules=None,
         ds_config=None,
@@ -65,6 +67,7 @@ class HFModelWrapper(nn.Module):
         use_torch_compile: bool = False,
         rope_scaling: Dict[str, Any] = {},
         rope_theta: float | None = None,
+        model_config_kwargs: dict = {},
         **kwargs,
     ) -> None:
         super().__init__()
@@ -111,6 +114,8 @@ class HFModelWrapper(nn.Module):
             else:
                 model_class = AutoModelForCausalLM
 
+            model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
+
             rope_scaling_kwargs = {}
             if rope_scaling:
                 rope_scaling_kwargs["rope_scaling"] = rope_scaling
@@ -119,6 +124,7 @@ class HFModelWrapper(nn.Module):
 
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
+                config=model_config,
                 trust_remote_code=True,
                 attn_implementation=self.attn_implementation,
                 quantization_config=nf4_config,
@@ -161,6 +167,7 @@ class HFModelWrapper(nn.Module):
                     exclude_modules=exclude_modules,
                     lora_dropout=lora_dropout,
                     bias="none",
+                    init_lora_weights=True if lora_init_method == "kaiming" else lora_init_method,
                 )
                 self.model = get_peft_model(self.model, lora_config)
 
@@ -534,6 +541,7 @@ def get_llm_for_sequence_regression(
     device_map=None,
     sequence_parallel_size=1,
     use_sample_packing: bool = False,
+    model_config_kwargs: dict = {},
     **kwargs,
 ) -> nn.Module:
     """Get transformer with a sequence classification head on top (linear layer).
@@ -551,7 +559,7 @@ def get_llm_for_sequence_regression(
     """
     assert model_type == "critic", f"Only model_type critic is supported, got: {model_type}."
 
-    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True, **model_config_kwargs)
     config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
 
     base_class = AutoModel._model_mapping[type(config)]
@@ -562,6 +570,7 @@ def get_llm_for_sequence_regression(
         value_head_prefix,
         sequence_parallel_size=sequence_parallel_size,
         use_sample_packing=use_sample_packing,
+        model_config_kwargs=model_config_kwargs,
     )
 
     # Note: dschf is defined in function scope to avoid global effects

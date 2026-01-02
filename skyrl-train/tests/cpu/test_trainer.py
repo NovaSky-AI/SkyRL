@@ -5,7 +5,6 @@ uv  run --isolated --extra dev pytest tests/cpu/test_trainer.py
 import torch
 import pytest
 from jaxtyping import Float, Integer
-from omegaconf import OmegaConf
 from pytest import approx
 from unittest.mock import MagicMock, patch
 
@@ -204,21 +203,12 @@ def test_normalize_mini_batch_size():
         train_batch_size, policy_mini_batch_size, micro_train_batch_size_per_gpu, n_samples_per_prompt, dp_size
     ):
         """Helper to create policy worker with specific config."""
-        cfg = OmegaConf.create(
-            {
-                "trainer": {
-                    "train_batch_size": train_batch_size,
-                    "policy_mini_batch_size": policy_mini_batch_size,
-                    "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
-                    "algorithm": {
-                        "policy_loss_type": "regular",
-                    },
-                },
-                "generator": {
-                    "n_samples_per_prompt": n_samples_per_prompt,
-                },
-            }
-        )
+        cfg = get_default_config()
+        cfg.trainer.train_batch_size = train_batch_size
+        cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
+        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
+        cfg.trainer.algorithm.policy_loss_type = "regular"
+        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
 
         worker = TestPolicyWorker(
             cfg=cfg,
@@ -239,18 +229,11 @@ def test_normalize_mini_batch_size():
         train_batch_size, critic_mini_batch_size, micro_train_batch_size_per_gpu, n_samples_per_prompt, dp_size
     ):
         """Helper to create critic worker with specific config."""
-        cfg = OmegaConf.create(
-            {
-                "trainer": {
-                    "train_batch_size": train_batch_size,
-                    "critic_mini_batch_size": critic_mini_batch_size,
-                    "micro_train_batch_size_per_gpu": micro_train_batch_size_per_gpu,
-                },
-                "generator": {
-                    "n_samples_per_prompt": n_samples_per_prompt,
-                },
-            }
-        )
+        cfg = get_default_config()
+        cfg.trainer.train_batch_size = train_batch_size
+        cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
+        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
+        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
 
         worker = TestCriticWorker(
             cfg=cfg,
@@ -507,22 +490,11 @@ def test_ppo_train_batch_calculations():
     """Test the key batch calculations and control flow in ppo_train methods."""
 
     # Create test configuration
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "micro_train_batch_size_per_gpu": 2,
-                "update_epochs_per_batch": 1,
-                "algorithm": {
-                    "policy_loss_type": "regular",
-                },
-            },
-            "generator": {
-                "sampling_params": {
-                    "temperature": 1.0,
-                },
-            },
-        }
-    )
+    cfg = get_default_config()
+    cfg.trainer.micro_train_batch_size_per_gpu = 2
+    cfg.trainer.update_epochs_per_batch = 1
+    cfg.trainer.algorithm.policy_loss_type = "regular"
+    cfg.generator.sampling_params.temperature = 1.0
 
     # Create dummy databatch with known size
     batch_size = 12  # This will create 6 micro batches with micro_train_batch_size_per_gpu=2
@@ -573,14 +545,18 @@ def test_ppo_train_batch_calculations():
     # Test PolicyWorkerBase
     policy_worker = create_test_worker(PolicyWorkerBase)
 
-    # Mock training_step to track calls and verify accumulation behavior
-    policy_training_calls = []
+    # Mock forward_backward and optim_step to track calls and verify accumulation behavior
+    policy_forward_backward_calls = []
 
-    def mock_policy_training_step(experience, global_step, local_step, accumulation_steps):
-        policy_training_calls.append({"local_step": local_step, "accumulation_steps": accumulation_steps})
-        return {"policy_loss": 0.5, "policy_lr": 1e-4, "entropy": 2.0}
+    def mock_policy_forward_backward(experience, accumulation_steps):
+        policy_forward_backward_calls.append({"accumulation_steps": accumulation_steps})
+        return {"policy_loss": 0.5, "ppo_clip_ratio": 0.1, "policy_entropy": 2.0, "response_length": response_length}
 
-    policy_worker.training_step = mock_policy_training_step
+    policy_worker.forward_backward = mock_policy_forward_backward
+    policy_worker.optim_step = MagicMock(return_value=None)
+    policy_worker.scheduler = MagicMock()
+    policy_worker.scheduler.get_last_lr.return_value = [1e-4]
+    policy_worker.record_memory = False
 
     # Calculate expected values based on new accumulation logic
     dataloader = BatchIterator(
@@ -602,21 +578,14 @@ def test_ppo_train_batch_calculations():
 
     # Verify Policy Worker Results
     assert (
-        len(policy_training_calls) == total_micro_batches
-    ), f"PolicyWorker: Expected {total_micro_batches} training_step calls, got {len(policy_training_calls)}"
+        len(policy_forward_backward_calls) == total_micro_batches
+    ), f"PolicyWorker: Expected {total_micro_batches} forward_backward calls, got {len(policy_forward_backward_calls)}"
 
     # Verify accumulation_steps are consistent (should equal micro_batches_per_mini_batch)
-    for call in policy_training_calls:
+    for call in policy_forward_backward_calls:
         assert (
             call["accumulation_steps"] == expected_accumulation_steps
         ), f"PolicyWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
-
-    # Verify no early termination (all micro batches processed)
-    expected_local_steps = list(range(total_micro_batches))
-    actual_local_steps = [call["local_step"] for call in policy_training_calls]
-    assert (
-        actual_local_steps == expected_local_steps
-    ), f"PolicyWorker: Expected local_steps {expected_local_steps}, got {actual_local_steps}"
 
     # Verify result structure
     assert "train_status" in result.metadata
@@ -624,19 +593,23 @@ def test_ppo_train_batch_calculations():
     assert "policy_update_steps" in train_status
 
     # Verify policy_update_steps calculation (should be total_calls / accumulation_steps)
-    expected_policy_update_steps_normalized = len(policy_training_calls) / expected_accumulation_steps
+    expected_policy_update_steps_normalized = len(policy_forward_backward_calls) / expected_accumulation_steps
     assert train_status["policy_update_steps"] == expected_policy_update_steps_normalized
 
     # Test CriticWorkerBase with same accumulation logic
     critic_worker = create_test_worker(CriticWorkerBase)
 
-    critic_training_calls = []
+    # Mock forward_backward and optim_step for critic
+    critic_forward_backward_calls = []
 
-    def mock_critic_training_step(experience, global_step, local_step, accumulation_steps):
-        critic_training_calls.append({"local_step": local_step, "accumulation_steps": accumulation_steps})
-        return {"critic_loss": 0.3, "values": 1.0, "critic_lr": 1e-4}
+    def mock_critic_forward_backward(experience, accumulation_steps):
+        critic_forward_backward_calls.append({"accumulation_steps": accumulation_steps})
+        return {"critic_loss": 0.3, "values": 1.0}
 
-    critic_worker.training_step = mock_critic_training_step
+    critic_worker.forward_backward = mock_critic_forward_backward
+    critic_worker.optim_step = MagicMock(return_value=None)
+    critic_worker.scheduler = MagicMock()
+    critic_worker.scheduler.get_last_lr.return_value = [1e-4]
 
     # Run critic ppo_train
     with (
@@ -648,26 +621,20 @@ def test_ppo_train_batch_calculations():
 
     # Verify Critic Worker Results
     assert (
-        len(critic_training_calls) == total_micro_batches
-    ), f"CriticWorker: Expected {total_micro_batches} training_step calls, got {len(critic_training_calls)}"
+        len(critic_forward_backward_calls) == total_micro_batches
+    ), f"CriticWorker: Expected {total_micro_batches} forward_backward calls, got {len(critic_forward_backward_calls)}"
 
     # Verify accumulation_steps are consistent for critic (should equal micro_batches_per_mini_batch)
-    for call in critic_training_calls:
+    for call in critic_forward_backward_calls:
         assert (
             call["accumulation_steps"] == expected_accumulation_steps
         ), f"CriticWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
-
-    # Verify no early termination for critic
-    actual_local_steps = [call["local_step"] for call in critic_training_calls]
-    assert (
-        actual_local_steps == expected_local_steps
-    ), f"CriticWorker: Expected local_steps {expected_local_steps}, got {actual_local_steps}"
 
     # Verify result structure for critic
     assert "train_status" in result.metadata
     train_status = result.metadata["train_status"]
     assert "critic_update_steps" in train_status
-    assert train_status["critic_update_steps"] == len(critic_training_calls) / expected_accumulation_steps
+    assert train_status["critic_update_steps"] == len(critic_forward_backward_calls) / expected_accumulation_steps
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():
@@ -693,6 +660,7 @@ def test_validate_batch_sizes_lcm_dp_requirement():
         cfg.trainer.algorithm.use_kl_loss = include_ref
         cfg.trainer.algorithm.use_kl_in_reward = False
         cfg.trainer.algorithm.policy_loss_type = "regular"
+        cfg.generator.n_samples_per_prompt = 1
         return cfg
 
     # Fail: lcm(2, 3) = 6, but train_batch_size = 5 when ref is used

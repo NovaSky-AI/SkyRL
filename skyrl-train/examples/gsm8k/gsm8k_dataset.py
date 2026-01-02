@@ -33,6 +33,12 @@ def extract_solution(solution_str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", default="~/data/gsm8k")
+    parser.add_argument(
+        "--max_train_dataset_length",
+        type=int,
+        default=None,
+        help="If set, truncate the training split to this many examples.",
+    )
 
     args = parser.parse_args()
 
@@ -44,6 +50,10 @@ if __name__ == "__main__":
 
     train_dataset = dataset["train"]
     val_dataset = dataset["test"]
+
+    if args.max_train_dataset_length is not None:
+        max_len = min(args.max_train_dataset_length, len(train_dataset))
+        train_dataset = train_dataset.select(range(max_len))
 
     instruction_following = 'Let\'s think step by step and output the final answer after "####".'
 

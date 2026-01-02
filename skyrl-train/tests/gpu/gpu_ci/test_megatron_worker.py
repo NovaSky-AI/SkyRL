@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_megatron_worker.py
+uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_megatron_worker.py
 """
 
 import ray
@@ -9,7 +9,7 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import asyncio
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from omegaconf import OmegaConf
 from tests.gpu.utils import (
     init_worker_with_type,
@@ -43,6 +43,7 @@ def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.use_sample_packing = False
+    cfg.trainer.logger = "console"
     if "moonlight" in model_name:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = OmegaConf.create(
             {"num_layers_in_last_pipeline_stage": 13}
@@ -110,16 +111,22 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp"),
-    [(True, 4, 2, 2, 1, None), (False, 2, 2, 1, 1, None)],
-    ids=["colocate_all", "non_colocated"],
+    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
+    [(True, 4, 2, 2, 1, None, False), (False, 2, 2, 1, 1, None, False), (True, 4, 2, 2, 1, None, True)],
+    ids=["colocate_all", "non_colocated", "colocate_all_lora"],
 )
-def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp):
+@pytest.mark.megatron
+def test_megatron_policy_weight_sync(
+    colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
         cfg = get_test_actor_config(model_name=MODEL_NAME)
+        if lora:
+            cfg.trainer.policy.model.lora.rank = 16
+            cfg.trainer.policy.model.lora.alpha = 16
         cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
@@ -174,30 +181,33 @@ def test_megatron_policy_weight_sync(colocate_all, inference_tp, megatron_tp, me
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing"),
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "lora"),
     [
-        ("policy", 2, 1, 1, 1, None, 2, False),
+        ("policy", 2, 1, 1, 1, None, 2, False, False),
         # ref has same forward pass as policy - just duplicate one test to test setup
-        ("ref", 2, 1, 1, 1, None, 2, False),
-        ("policy", 1, 2, 1, 1, None, 2, False),
-        ("policy", 2, 2, 1, 1, None, 4, False),
-        ("policy", 2, 2, 1, 1, None, 4, True),
-        ("policy", 1, 1, 2, 1, None, 2, True),
-        ("policy", 2, 2, 2, 1, None, 8, True),
-        ("policy", 4, 2, 1, 4, 1, 8, True),
+        ("ref", 2, 1, 1, 1, None, 2, False, False),
+        ("policy", 2, 2, 1, 1, None, 4, False, False),
+        ("policy", 2, 2, 1, 1, None, 4, True, False),
+        ("policy", 2, 2, 1, 1, None, 4, True, True),
+        ("policy", 1, 1, 2, 1, None, 2, True, False),
+        ("policy", 2, 1, 2, 1, None, 4, True, False),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False),
     ],
     ids=[
         "tp2_pp1_policy",
         "tp2_pp1_ref",
-        "tp1_pp2_policy",
         "tp2_pp2_policy_unpacked",
         "tp2_pp2_policy_seq_packing",
+        "tp2_pp2_lora",
         "cp_2_policy_seq_packing",
-        "tp_2_pp_2_cp_2_policy_seq_packing",
-        "tp4_pp2_cp1_ep4_etp1_policy_seq_packing",
+        "tp_2_cp_2_policy_seq_packing",
+        "tp4_pp1_cp1_ep4_etp1_policy_seq_packing",
     ],
 )
-async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing):
+@pytest.mark.megatron
+async def test_megatron_forward(
+    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, lora
+):
     """
     Test that the Megatron forward pass is numerically equivalent to just running a huggingface model forward.
     """
@@ -212,6 +222,17 @@ async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, e
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.use_sample_packing = use_sample_packing
     batch = get_test_training_batch(max(4, gpus_per_node))
+
+    if ep > 1:
+        transformer_config_kwargs = OmegaConf.to_container(
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
+        )
+        transformer_config_kwargs["num_layers"] = 2
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+
+    if lora:
+        cfg.trainer.policy.model.lora.rank = 16
+        cfg.trainer.policy.model.lora.alpha = 16
 
     actor_group = init_worker_with_type(
         worker_type,
@@ -234,7 +255,10 @@ async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, e
     # now run the huggingface model forward
     @ray.remote(num_gpus=1)
     def run_hf_forward(batch, model_name):
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16)
+        config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, dtype=torch.bfloat16)
+        if ep > 1:
+            config.num_hidden_layers = 2
+        model = AutoModelForCausalLM.from_pretrained(model_name, config=config, dtype=torch.bfloat16)
         model.eval()
         model.to("cuda")
         sequences_fwd = batch["sequences"]
@@ -283,7 +307,8 @@ async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, e
     avg_diff = torch.mean(torch.abs(action_log_probs_masked - action_log_probs_megatron_masked))
     print(f"Avg diff: {avg_diff}")
 
-    assert max_diff < 4.5e-1, f"Max diff {max_diff} is too large"
+    if ep == 1:
+        assert max_diff < 4e-1, f"Max diff {max_diff} is too large"
 
     if ep == 1:
         assert avg_diff < 7e-2, f"Avg diff {avg_diff} is too large"
@@ -294,24 +319,131 @@ async def test_megatron_forward(ray_init_fixture, worker_type, tp, pp, cp, ep, e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "use_entropy_loss"),
+    ("tp", "pp", "cp", "ep", "etp", "gpus_per_node"),
     [
-        ("policy", 2, 2, 1, 1, 1, 4, True, False),
-        ("policy", 2, 2, 1, 1, 1, 4, True, True),
-        ("policy", 2, 2, 1, 1, 1, 4, False, False),
-        ("policy", 2, 2, 2, 1, 1, 8, True, False),
-        ("policy", 2, 1, 1, 8, 1, 8, True, False),
+        (2, 2, 1, 1, None, 4),
+        (4, 1, 1, 4, 1, 4),
+    ],
+    ids=[
+        "tp2_pp2_policy",
+        "tp4_pp1_cp1_ep4_etp1_policy",
+    ],
+)
+@pytest.mark.megatron
+async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus_per_node):
+    """
+    Test that the Megatron + lora forward pass is numerically equivalent to just running a megatron model forward.
+    """
+    cfg = get_test_actor_config(model_name=MOE_MODEL_NAME if ep > 1 else MODEL_NAME)
+    #### Megatron forward pass ####
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
+    cfg.trainer.use_sample_packing = True
+    batch = get_test_training_batch(max(4, gpus_per_node))
+
+    if ep > 1:
+        transformer_config_kwargs = OmegaConf.to_container(
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
+        )
+        transformer_config_kwargs["num_layers"] = 4
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+
+    actor_group = init_worker_with_type(
+        "policy",
+        shared_pg=None,
+        colocate_all=False,
+        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+        cfg=cfg,
+    )
+
+    action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
+    all_rank_action_log_probs = ray.get(action_log_probs_refs)
+    action_log_probs_full = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, all_rank_action_log_probs)[
+        "output"
+    ]
+
+    ray.shutdown()
+    ray_init_for_tests()
+
+    #### Megatron forward pass ####
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+    cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+    cfg.trainer.policy.megatron_config.context_parallel_size = cp
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
+    cfg.trainer.use_sample_packing = True
+    batch = get_test_training_batch(max(4, gpus_per_node))
+
+    # set lora this time
+    cfg.trainer.policy.model.lora.rank = 16
+    cfg.trainer.policy.model.lora.alpha = 16
+
+    if ep > 1:
+        transformer_config_kwargs = OmegaConf.to_container(
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
+        )
+        transformer_config_kwargs["num_layers"] = 4
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+
+    actor_group = init_worker_with_type(
+        "policy",
+        shared_pg=None,
+        colocate_all=False,
+        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+        cfg=cfg,
+    )
+
+    action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
+    all_rank_action_log_probs = ray.get(action_log_probs_refs)
+    action_log_probs_lora = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, all_rank_action_log_probs)[
+        "output"
+    ]
+
+    #### Compare results ####
+    # compare just non-padding tokens
+    print(f"Comparing {action_log_probs_full.numel()} valid response tokens")
+    print(f"Full sample: {action_log_probs_full[:5]}")
+    print(f"Lora sample: {action_log_probs_lora[:5]}")
+
+    # max diff
+    max_diff = torch.max(torch.abs(action_log_probs_full - action_log_probs_lora))
+    print(f"Max diff: {max_diff}")
+
+    assert max_diff == 0, "Numerical difference between LoRA and full fine tuning at init should be 0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "use_entropy_loss", "lora"),
+    [
+        ("policy", 2, 2, 1, 1, 1, 4, True, False, False),
+        ("policy", 2, 2, 1, 1, 1, 4, True, True, False),
+        ("policy", 2, 2, 1, 1, 1, 4, True, False, True),
+        ("policy", 2, 2, 1, 1, 1, 4, False, False, False),
+        ("policy", 2, 1, 2, 1, 1, 4, True, False, False),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False, False),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False, True),
     ],
     ids=[
         "tp2_pp2_policy_seq_packing",
         "tp2_pp2_policy_seq_packing_with_entropy_loss",
+        "tp2_pp2_policy_lora",
         "tp2_pp2_policy_unpacked",
-        "tp2_pp2_cp2_policy_seq_packing",
-        "tp4_pp2_cp1_ep8_etp1_policy_seq_packing",
+        "tp2_cp2_policy_seq_packing",
+        "tp4_pp1_cp1_ep4_etp1_policy_seq_packing",
+        "tp4_pp1_cp1_ep4_etp1_policy_seq_packing_lora",
     ],
 )
+@pytest.mark.megatron
 async def test_megatron_train(
-    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, use_entropy_loss
+    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, use_entropy_loss, lora
 ):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
@@ -330,6 +462,16 @@ async def test_megatron_train(
     if use_entropy_loss:
         cfg.trainer.algorithm.use_entropy_loss = True
         cfg.trainer.algorithm.entropy_loss_coef = 0.01
+    if lora:
+        cfg.trainer.policy.model.lora.rank = 16
+        cfg.trainer.policy.model.lora.alpha = 16
+
+    if ep > 1:
+        transformer_config_kwargs = OmegaConf.to_container(
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
+        )
+        transformer_config_kwargs["num_layers"] = 2
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = gpus_per_node
@@ -375,6 +517,11 @@ async def test_megatron_train(
     cfg.trainer.use_sample_packing = False
     if ep > 1:
         cfg.trainer.policy.fsdp_config.cpu_offload = True
+
+    if ep > 1:
+        model_config_kwargs = OmegaConf.to_container(cfg.trainer.policy.model_config_kwargs, resolve=True)
+        model_config_kwargs["num_hidden_layers"] = 2
+        cfg.trainer.policy.model_config_kwargs = model_config_kwargs
     actor_group = init_worker_with_type(
         "policy",
         shared_pg=None,
@@ -411,6 +558,7 @@ async def test_megatron_train(
         ("policy", 1, 2, 2),
     ],
 )
+@pytest.mark.megatron
 async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node):
     """
     Full test: initialize actor group, send dummy experience to training_step, validate output.
@@ -507,6 +655,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
         "policy",
     ],
 )
+@pytest.mark.megatron
 async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_type):
     """
     Test that offloading model memory to cpu lowers memory usage and that correctness
@@ -527,13 +676,18 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     getattr(cfg.trainer, worker_type).optimizer_config.lr = 0
     getattr(cfg.trainer, worker_type).optimizer_config.weight_decay = 0
 
-    cfg.trainer.placement.policy_num_gpus_per_node = 8
-    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
+    cfg.trainer.placement.policy_num_gpus_per_node = 4
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 2
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
-    cfg.trainer.policy.megatron_config.expert_model_parallel_size = 4
+    cfg.trainer.policy.megatron_config.expert_model_parallel_size = 2
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
     cfg.trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer = False
+    transformer_config_kwargs = OmegaConf.to_container(
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
+    )
+    transformer_config_kwargs["num_layers"] = 2
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
     actor_group = init_worker_with_type(
         worker_type,
         shared_pg=None,

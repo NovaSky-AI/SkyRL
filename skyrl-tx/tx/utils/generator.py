@@ -127,7 +127,7 @@ class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens", "prompt_logprobs"))
+    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens", "max_top_k", "prompt_logprobs"))
     def _prefill_and_decode(
         model,
         input_ids: jax.Array,
@@ -138,6 +138,8 @@ class GeneratorMixin:
         temperatures: jax.Array,
         rngs: jax.Array,
         stop_tokens: jax.Array,
+        top_k_values: jax.Array,
+        max_top_k: int,
         prompt_logprobs: bool = False,
     ):
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
@@ -162,8 +164,12 @@ class GeneratorMixin:
 
             zero_temp_mask = temperatures == 0.0
             scaled_logits = s.logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
+
+            # Apply top_k filtering using static max_top_k
+            filtered_logits = apply_top_k_batch(scaled_logits, top_k_values, max_top_k)
+
             sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
-                sample_keys, scaled_logits
+                sample_keys, filtered_logits
             )
             greedy = jnp.argmax(s.logits, axis=-1)
             next_token = jnp.where(zero_temp_mask[:, None], greedy[:, None], sampled[:, None])
@@ -237,6 +243,7 @@ class GeneratorMixin:
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
+        top_k_values = jnp.array([sampling_param.top_k for sampling_param in sampling_params], dtype=jnp.int32)
 
         # One PRNGKey per provided seed
         seeds = [sampling_param.seed for sampling_param in sampling_params]
@@ -253,6 +260,9 @@ class GeneratorMixin:
         # Capture prompt lengths for prompt_logprobs if requested
         prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
 
+        # Compute max_top_k as static value (0 means no filtering)
+        max_top_k = max((sp.top_k for sp in sampling_params if sp.top_k > 0), default=0)
+
         new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = self._prefill_and_decode(
             self,
             input_ids,
@@ -263,6 +273,8 @@ class GeneratorMixin:
             temperatures,
             rngs,
             stop_tokens,
+            top_k_values,
+            max_top_k,
             prompt_logprobs=prompt_logprobs,
         )
 
@@ -315,3 +327,30 @@ class GeneratorMixin:
                 else None
             ),
         )
+
+
+def apply_top_k_batch(logits: jax.Array, k_values: jax.Array, max_k: int) -> jax.Array:
+    """Keep only top-k logits per example, set rest to -inf.
+
+    Args:
+        logits: Logits tensor of shape [batch_size, vocab_size]
+        k_values: Per-example k values of shape [batch_size]. If k <= 0, no filtering.
+        max_k: Static maximum k value (must be > 0 if any filtering is applied).
+
+    Returns:
+        Filtered logits with the same shape.
+    """
+    if max_k <= 0:
+        return logits
+
+    top_values, top_indices = jax.lax.top_k(logits, max_k)
+
+    # Keep only first k values per example
+    keep = jnp.arange(max_k) < k_values[:, None]
+    top_values = jnp.where(keep, top_values, -jnp.inf)
+
+    # Scatter back to original positions
+    batch_idx = jnp.arange(logits.shape[0])[:, None]
+    result = jnp.full_like(logits, -jnp.inf).at[batch_idx, top_indices].set(top_values)
+
+    return jnp.where(k_values[:, None] <= 0, logits, result)

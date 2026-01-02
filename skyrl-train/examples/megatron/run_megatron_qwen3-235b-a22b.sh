@@ -13,7 +13,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 DATA_DIR="$HOME/data/gsm8k"
 # download Qwen/Qwen3-235B-A22B-Instruct-2507 from huggingface
 # `pip install huggingface_hub hf_transfer`
-# `HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
+# `HF_HUB_ENABLE_HF_TRANSFER=1 hf download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
 MODEL_NAME="$HOME/qwen235b"
 
 NUM_NODES=8
