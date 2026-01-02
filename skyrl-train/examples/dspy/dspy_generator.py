@@ -65,6 +65,7 @@ class DSPyGenerator(GeneratorInterface):
             api_key="fake-key",
             temperature=temperature,
             model_type="chat",
+            max_tokens=self.generator_cfg.max_generate_length,
             cache=False,
         )
 

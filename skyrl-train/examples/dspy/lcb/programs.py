@@ -275,7 +275,7 @@ class CodeGeneratorWithRanker_prog(CodeGeneratorWithRanker):
 
 
 class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
-    def forward(self, example):
+    async def forward(self, example):
         prompt = example.get("prompt")  
         task_id = example.get("task_id")
         is_stdin = example.get("is_stdin")
@@ -296,6 +296,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
                 print(f"[Program] Retrying {retry + 1} out of 3")
                 continue
             
+        print(f"[Program] tests generated for task_id: {task_id}")
         tests = post_process_tests_inputs(self.raw_tests.tests, is_stdin)
 
         self.prog = self.stdin_prog if is_stdin else self.functional_prog
@@ -312,6 +313,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
             )
             for i in range(self.num_generations)
         ]
+        print(f"[Program] programs generated for task_id: {task_id}")
 
         
         preds = reduce_preds(preds)
@@ -324,6 +326,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
         ]
 
 
+        print(f"[Program] running tests for task_id: {task_id}")
         preds_pass = [
             list(
                 map(
@@ -338,6 +341,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
             for pred in preds
         ]
 
+        print(f"[Program] tests finished for task_id: {task_id}")
         
         zipped_stats = sorted(zip([p.code for p in preds], map(sum, preds_pass)), key=lambda x: x[1])
         sorted_arr =  {task_id: zipped_stats}

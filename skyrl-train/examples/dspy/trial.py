@@ -8,6 +8,13 @@ import dspy
 # ---------------------------
 # Result containers
 # ---------------------------
+
+class DSPyTimeoutError(asyncio.TimeoutError):
+    pass
+
+class VerifierTimeoutError(asyncio.TimeoutError):
+    pass
+
 @dataclass
 class AgentResult:
     """Holds the raw DSPy program output plus any metadata we want to pass downstream."""
@@ -157,12 +164,18 @@ class Trial:
         return kwargs
     # -------- public API --------
     async def run(self) -> TrialResults:
+        
         # kwargs = self._example_to_kwargs(self.example)
         results = TrialResults()
         try:
-            # import pdb; pdb.set_trace()
-            # 1) Run DSPy program
-            pred = self.program(self.example)
+            inference_timeout_seconds = 60
+            verification_timeout_seconds = 60
+            assert inspect.iscoroutinefunction(self.program.forward), "program.forward must be a coroutine function"
+            try:
+                pred = await asyncio.wait_for(self.program.forward(self.example), timeout=inference_timeout_seconds)
+            except asyncio.TimeoutError as e:
+                raise DSPyTimeoutError(f"TimeoutError: program.forward exceeded {inference_timeout_seconds} seconds")
+
             final_reward = 0
             # 2) Verify (optional)
             if self.final_reward_fn is not None:
@@ -170,18 +183,27 @@ class Trial:
                 # reward_input = kwargs.copy()
                 # Check if reward_fn is async
                 
-                if asyncio.iscoroutinefunction(self.final_reward_fn):
-                    final_reward = await self.final_reward_fn(self.example, pred)
-                else:
-                    final_reward = self.final_reward_fn(self.example, pred)
-                
+                assert inspect.iscoroutinefunction(self.final_reward_fn), "final_reward_fn must be a coroutine function"
+
+                try:
+                    print(f"[Trial] running final_reward_fn for task_id: {self.example.get('task_id')}")
+                    final_reward = await asyncio.wait_for(self.final_reward_fn(self.example, pred), timeout=verification_timeout_seconds)
+                    print(f"[Trial] final_reward_fn finished for task_id: {self.example.get('task_id')}. Got {final_reward}")
+                except asyncio.TimeoutError as e:
+                    raise VerifierTimeoutError(f"TimeoutError: final_reward_fn exceeded {verification_timeout_seconds} seconds")
                 # Update program reward if method exists
                 # if hasattr(self.program, "update_reward"):
                 #     self.program.update_reward(final_reward)
 
             # 3) Collect trace
             trace, trace_pred = self.program.collect_trace(self.example, pred)
-            local_reward = self.local_reward_fn(self.example, trace_pred) if self.local_reward_fn is not None else 0
+            assert inspect.iscoroutinefunction(self.local_reward_fn), "local_reward_fn must be a coroutine function"
+            try:
+                print(f"[Trial] running local_reward_fn for task_id: {self.example.get('task_id')}")
+                local_reward = await asyncio.wait_for(self.local_reward_fn(self.example, trace_pred), timeout=verification_timeout_seconds) if self.local_reward_fn is not None else 0
+                print(f"[Trial] local_reward_fn finished for task_id: {self.example.get('task_id')}. Got {local_reward}")
+            except asyncio.TimeoutError as e:
+                raise VerifierTimeoutError(f"TimeoutError: local_reward_fn exceeded {verification_timeout_seconds} seconds")
             results.reward = AgentResult(
                     output=final_reward + local_reward,
                     metadata={"reward_value": final_reward + local_reward}

@@ -860,8 +860,7 @@ def assert_dummy(pred, **kwargs):
 # with open("gold_preds_train.pkl", "rb") as f: #TODO: use test during test time
 #     gold_preds = pickle.load(f)
 
-def local_reward_fn(input, pred, trace=None):
-    print("pred", pred)
+async def local_reward_fn(input, pred, trace=None): 
 
 
     # TODO: add a check to see the output is empty
@@ -895,10 +894,9 @@ def local_reward_fn(input, pred, trace=None):
         passed = results[0]
         if passed:
             num_passed += 1
-    print("reward:", num_passed / len(tests))
     return num_passed / len(tests)
 
-def final_reward_fn(example, pred, trace=None):
+async def final_reward_fn(example, pred, trace=None):
     timeout = 50
     result_dict = check_correctness(
         example,

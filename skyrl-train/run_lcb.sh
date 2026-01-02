@@ -8,14 +8,14 @@ export WANDB_API_KEY="6a25ce5b41815c557d6fe8aecb8bac2dd6b1bea0"
 
 
 NUM_NODES=1
-NUM_GPUS=2
+NUM_GPUS=8
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-Coder-3B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-Coder-7B-Instruct"
 
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=2
+NUM_INFERENCE_ENGINES=8
 INFERENCE_ENGINE_TP=1
 
 train_data="$HOME/data/lcb/deepcoder_train_short.json"
