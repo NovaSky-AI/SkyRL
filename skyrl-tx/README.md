@@ -17,7 +17,7 @@ SkyRL tx is an open-source library that implements a backend for the [Tinker API
 
 - **Unified Training & Inference** — Single engine for forward passes, backward passes, and sampling
 - **Multi-User LoRA Support** — Efficient GPU sharing across users with individual adapters
-- **Full RL Support** — End-to-end reinforcement learning with PPO and custom loss functions
+- **SFT & RL Support** — Supervised fine-tuning and reinforcement learning with PPO and custom loss functions
 - **Multi-Node Training** — FSDP and tensor parallelism for distributed training
 - **Multiple Model Architectures** — Support for Qwen3 (dense & MoE) and Llama 3
 - **External Inference Engine** — Optional vLLM integration for optimized inference
