@@ -511,11 +511,12 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
         )
 
         # 3. Calculate overall metrics across all datasets
-        overall_avg_score, overall_pass_at_n = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
+        overall_metrics = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
         eval_metrics.update(
             {
-                "eval/all/avg_score": overall_avg_score,
-                f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_pass_at_n,
+                "eval/all/avg_score": overall_metrics["avg_score"],
+                f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics["pass_at_n"],
+                "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
             }
         )
 

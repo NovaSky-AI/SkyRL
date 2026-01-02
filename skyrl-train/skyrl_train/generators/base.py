@@ -43,6 +43,12 @@ class GeneratorOutput(TypedDict):
     is_last_step: Optional[List[bool]]
 
 
+class MetricsOutput(TypedDict):
+    avg_score: Optional[float]
+    pass_at_n: Optional[float]
+    mean_positive_reward: Optional[float]
+
+
 class GeneratorInterface(ABC):
     @abstractmethod
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
