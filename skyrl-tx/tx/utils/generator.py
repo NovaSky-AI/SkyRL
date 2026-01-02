@@ -168,7 +168,7 @@ class GeneratorMixin:
             scaled_logits = s.logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
 
             # Apply top_k and top_p filtering
-            if max_top_k:
+            if max_top_k > 0:
                 scaled_logits = apply_top_k_batch(scaled_logits, top_k_values, max_top_k)
             if use_top_p:
                 scaled_logits = apply_top_p_batch(scaled_logits, top_p_values)
