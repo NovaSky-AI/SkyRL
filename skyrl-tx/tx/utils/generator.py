@@ -355,7 +355,7 @@ def apply_top_k_batch(logits: jax.Array, k_values: jax.Array, max_k: int) -> jax
     Args:
         logits: Logits tensor of shape [batch_size, vocab_size]
         k_values: Per-example k values of shape [batch_size]. If k <= 0, no filtering.
-        max_k: Static maximum k value.
+        max_k: Static maximum k value, must be > 0.
 
     Returns:
         Filtered logits with the same shape.
