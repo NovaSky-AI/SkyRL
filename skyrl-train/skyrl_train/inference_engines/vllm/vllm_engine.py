@@ -274,7 +274,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
-        raise NotImplementedError("`chat_completion is only supported in AsyncVLLMInferenceEngine.")
+        raise NotImplementedError("`chat_completion` is only supported in AsyncVLLMInferenceEngine.")
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
