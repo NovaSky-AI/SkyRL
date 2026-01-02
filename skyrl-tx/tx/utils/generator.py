@@ -379,7 +379,7 @@ def apply_top_p_batch(logits: jax.Array, p_values: jax.Array) -> jax.Array:
     Returns:
         Filtered logits with the same shape.
     """
-    probs = jax.nn.softmax(logits, axis=-1)
+    probs = jnp.nan_to_num(jax.nn.softmax(logits, axis=-1))
     sorted_indices = jnp.argsort(-probs, axis=-1)
     sorted_probs = jnp.take_along_axis(probs, sorted_indices, axis=-1)
     cumulative_probs = jnp.cumsum(sorted_probs, axis=-1)
