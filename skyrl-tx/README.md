@@ -1,3 +1,5 @@
+<div align="center">
+
 # SkyRL tx: Unifying LLM training and inference
 
 <p align="center">
@@ -6,6 +8,8 @@
   <a href="https://github.com/thinking-machines-lab/tinker-cookbook">Cookbook</a> •
   <a href="https://skyrl.slack.com/archives/C09K1JGNPJS">Slack</a>
 </p>
+
+</div>
 
 SkyRL tx is an open-source library that implements a backend for the [Tinker API](https://thinkingmachines.ai/tinker/), allowing you to set up your own Tinker-like service running on your own hardware. It provides a unified interface for both training and inference, enabling seamless online learning, cost-effective multi-tenancy through LoRA, and simplified ML infrastructure.
 
