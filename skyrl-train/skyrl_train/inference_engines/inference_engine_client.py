@@ -694,6 +694,8 @@ def _parse_partial_response_and_inplace_update_accum(
     finish_reason: str = choice["finish_reason"]
     stop_reason: Optional[str] = choice.get("stop_reason", None)
     new_content: str = choice["message"]["content"]
+    if new_content is None:
+        new_content = ""
 
     assert (
         partial_response["usage"] is not None and partial_response["usage"]["completion_tokens"] is not None
