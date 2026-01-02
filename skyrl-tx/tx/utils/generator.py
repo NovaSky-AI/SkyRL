@@ -360,6 +360,7 @@ def apply_top_k_batch(logits: jax.Array, k_values: jax.Array, max_k: int) -> jax
     Returns:
         Filtered logits with the same shape.
     """
+    assert max_k > 0
     top_values, top_indices = jax.lax.top_k(logits, max_k)
 
     # Keep only first k values per example
