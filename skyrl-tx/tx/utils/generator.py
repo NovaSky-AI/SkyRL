@@ -379,6 +379,9 @@ def apply_top_p_batch(logits: jax.Array, p_values: jax.Array) -> jax.Array:
     Returns:
         Filtered logits with the same shape.
     """
+    if jnp.all(p_values >= 1.0):
+        return logits
+
     # Sort by logits (equivalent to sorting by probs since softmax is monotonic)
     sorted_indices = jnp.argsort(-logits, axis=-1)
     sorted_logits = jnp.take_along_axis(logits, sorted_indices, axis=-1)
