@@ -11,8 +11,8 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from pathlib import Path
 from .trial import TrialConfig, Trial, AgentResult
-from .lcb.utils import reward_fn
-from .lcb.programs import NaiveCodeGenerator
+from .lcb.utils import final_reward_fn, local_reward_fn
+from .lcb.programs import NaiveCodeGenerator, CodeGeneratorWithRanker_test
 
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
@@ -150,9 +150,10 @@ class DSPyGenerator(GeneratorInterface):
         
         # TODO: make each DSPy trial configurable.
         trial_config = TrialConfig(
-            dspy_program=NaiveCodeGenerator, 
+            dspy_program=CodeGeneratorWithRanker_test, 
             example=prompt, 
-            reward_fn=reward_fn,
+            final_reward_fn=final_reward_fn,
+            local_reward_fn=local_reward_fn,
             lm=self.dspy_lm
         )
 
@@ -219,7 +220,7 @@ class DSPyGenerator(GeneratorInterface):
         response_messages = chat_history[2:]
         assistant_logprobs = getattr(results.reward, "output_logprobs", None) if results.reward else None
         response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-            response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
+            response_messages, self.tokenizer, assistant_logprobs
         )
 
         # Determine stop reason

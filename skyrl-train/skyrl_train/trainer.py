@@ -234,7 +234,7 @@ class RayPPOTrainer:
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
                     log_example(
                         logger,
-                        prompt=generator_input["prompts"][0],
+                        # prompt=generator_input["prompts"][0],
                         response=vis,
                         reward=generator_output["rewards"][0],
                     )

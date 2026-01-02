@@ -35,9 +35,9 @@ def _color_block_format_and_kwargs(
 
 def log_example(
     logger: Any,
-    prompt: List[Dict[str, Any]],
     response: str,
     reward: Optional[Union[float, List[float]]] = None,
+    prompt: List[Dict[str, Any]] = None
 ) -> None:
     """
     Log a single example prompt and response with formatting and colors.
@@ -51,7 +51,7 @@ def log_example(
     reward_val = 0.0
     reward_str = "N/A"
     try:
-        prompt_str = str(prompt)
+        prompt_str = str(prompt) if prompt is not None else "N/A"
         response_str = str(response)
         # --- Reward handling ---
         if reward is not None:

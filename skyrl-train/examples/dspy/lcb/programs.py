@@ -108,7 +108,7 @@ class NaiveCodeGenerator(dspy.Module):
                     "role": "assistant",
                     "content": msg['content']
                 }
-        return chat_history
+        return chat_history, None
 
 
 class CodeGeneratorWithRanker(dspy.Module):
@@ -153,14 +153,15 @@ class CodeGeneratorWithRanker(dspy.Module):
         self.single_test_generator = dspy.ChainOfThought(GenerateTest_std_input)
         # self.single_test_generator = dspy.Predict(GenerateTest_std_input)
         # self.single_test_generator.set_lm(generator_lm)
+        self.adapter = XMLAdapter()
 
-    def forward(self, example):
-        prompt = example.prompt
-        canonical_solution = example.canonical_solution
-        task_id = example.task_id
-        test = example.test
-        entry_point = example.entry_point
-        is_stdin = example.is_stdin
+    def forward(self, **kwargs):
+        prompt = kwargs.get("prompt")
+        canonical_solution = kwargs.get("canonical_solution")
+        task_id = kwargs.get("task_id")
+        test = kwargs.get("test")
+        entry_point = kwargs.get("entry_point")
+        is_stdin = kwargs.get("is_stdin")
 
         generator = self.test_generator_stdin if is_stdin else self.test_generator
         
@@ -270,17 +271,14 @@ class CodeGeneratorWithRanker_prog(CodeGeneratorWithRanker):
                     "role": "assistant",
                     "content": msg['content']
                 }
-        return chat_history
+        return chat_history, None
 
 
 class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
     def forward(self, example):
-        prompt = example.prompt
-        canonical_solution = example.canonical_solution
-        task_id = example.task_id
-        test = example.test
-        entry_point = example.entry_point
-        is_stdin = example.is_stdin
+        prompt = example.get("prompt")  
+        task_id = example.get("task_id")
+        is_stdin = example.get("is_stdin")
 
         generator = self.test_generator_stdin if is_stdin else self.test_generator
         
@@ -294,7 +292,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
                 print(f"[Program] Time taken to generate tests: {end - start}")
                 break
             except Exception as e:
-                print(f"[Program] Error generating tests for example {example.task_id}: {e}")
+                print(f"[Program] Error generating tests for example {task_id}: {e}")
                 print(f"[Program] Retrying {retry + 1} out of 3")
                 continue
             
@@ -389,7 +387,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
                     "role": "assistant",
                     "content": msg['content']
                 }
-        return chat_history
+        return chat_history, self.raw_tests
 
     
     

@@ -8,17 +8,20 @@ export WANDB_API_KEY="6a25ce5b41815c557d6fe8aecb8bac2dd6b1bea0"
 
 
 NUM_NODES=1
-NUM_GPUS=1
+NUM_GPUS=2
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-7B-instruct"
+MODEL_NAME="Qwen/Qwen2.5-Coder-3B-Instruct"
 
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=1
+NUM_INFERENCE_ENGINES=2
 INFERENCE_ENGINE_TP=1
 
 train_data="$HOME/data/lcb/deepcoder_train_short.json"
+
+CKPTS_DIR="$HOME/ckpts"
+EXPORTS_DIR="$HOME/hf_ckpts"
 # train_data="['${DATA_DIR}/deepcoder_train_short.json']"
 # val_data="['${DATA_DIR}/test_livecodebench_short.json']"
 
@@ -41,17 +44,18 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.enable_http_endpoint=true \
   generator.http_endpoint_host="127.0.0.1" \
   generator.http_endpoint_port=8000 \
-  trainer.policy_mini_batch_size=4 \
-  trainer.train_batch_size=4 \
-  trainer.micro_forward_batch_size_per_gpu=2 \
-  trainer.micro_train_batch_size_per_gpu=2 \
+  trainer.policy_mini_batch_size=32 \
+  trainer.train_batch_size=32 \
+  trainer.micro_forward_batch_size_per_gpu=1 \
+  trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=29000 \
   generator.max_input_length=29000 \
   generator.sampling_params.max_generate_length=3000 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
-  trainer.ckpt_interval=100000 \
+  trainer.hf_save_interval=5 \
+  trainer.ckpt_interval=5 \
   trainer.flash_attn=$FLASH_ATTN \
   generator.backend=vllm \
   generator.run_engines_locally=true \
@@ -67,7 +71,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.project_name="skyrl" \
   trainer.run_name="skyrlcode_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/lcb_3B_ckpt" \
+  trainer.export_path=$EXPORTS_DIR \
+  trainer.ckpt_path=$CKPTS_DIR \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \

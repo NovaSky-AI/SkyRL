@@ -35,7 +35,8 @@ class TrialConfig:
     """
     dspy_program: dspy.Module
     example: Any
-    reward_fn: Optional[Callable[[Any, Any], float]] = None
+    final_reward_fn: Optional[Callable[[Any, Any], float]] = None
+    local_reward_fn: Optional[Callable[[Any, Any], float]] = None
     lm: Optional[Any] = None  # DSPy LM object
 # ---------------------------
 # Trial
@@ -70,7 +71,8 @@ class Trial:
                     self.program.functional_prog.set_lm(config.lm)
         
         self.example = config.example
-        self.reward_fn = config.reward_fn
+        self.final_reward_fn = config.final_reward_fn
+        self.local_reward_fn = config.local_reward_fn
     # -------- utilities --------
     def _example_to_kwargs(self, example: Any) -> Dict[str, Any]:
         """
@@ -155,38 +157,37 @@ class Trial:
         return kwargs
     # -------- public API --------
     async def run(self) -> TrialResults:
-        kwargs = self._example_to_kwargs(self.example)
+        # kwargs = self._example_to_kwargs(self.example)
         results = TrialResults()
         try:
             # import pdb; pdb.set_trace()
             # 1) Run DSPy program
-            pred = self.program(**kwargs)
-            
+            pred = self.program(self.example)
+            final_reward = 0
             # 2) Verify (optional)
-            if self.reward_fn is not None:
+            if self.final_reward_fn is not None:
                 # Prepare input for reward_fn (it expects a dict with prompt, task_id, is_stdin)
-                reward_input = kwargs.copy()
+                # reward_input = kwargs.copy()
                 # Check if reward_fn is async
-                if asyncio.iscoroutinefunction(self.reward_fn):
-                    final_reward = await self.reward_fn(reward_input, pred)
-                else:
-                    final_reward = self.reward_fn(reward_input, pred)
                 
-                # Store reward as AgentResult
-                results.reward = AgentResult(
-                    output=final_reward,
-                    metadata={"reward_value": final_reward}
-                )
+                if asyncio.iscoroutinefunction(self.final_reward_fn):
+                    final_reward = await self.final_reward_fn(self.example, pred)
+                else:
+                    final_reward = self.final_reward_fn(self.example, pred)
                 
                 # Update program reward if method exists
-                if hasattr(self.program, "update_reward"):
-                    self.program.update_reward(final_reward)
+                # if hasattr(self.program, "update_reward"):
+                #     self.program.update_reward(final_reward)
 
             # 3) Collect trace
-            if hasattr(self.program, "collect_trace"):
-                trace = self.program.collect_trace(kwargs, pred)
-                if trace:
-                    results.traces = trace if isinstance(trace, list) else [trace]
+            trace, trace_pred = self.program.collect_trace(self.example, pred)
+            local_reward = self.local_reward_fn(self.example, trace_pred) if self.local_reward_fn is not None else 0
+            results.reward = AgentResult(
+                    output=final_reward + local_reward,
+                    metadata={"reward_value": final_reward + local_reward}
+                )
+            if trace:
+                results.traces = trace if isinstance(trace, list) else [trace]
             
             return results
         except Exception as e:
