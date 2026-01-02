@@ -78,7 +78,7 @@ class ExternalInferenceClient:
             "max_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
             "top_p": request.sampling_params.top_p,
-            "top_k": request.sampling_params.top_k if request.sampling_params.top_k > 0 else -1,
+            "top_k": request.sampling_params.top_k,
             "logprobs": True,
             "stream": False,
             "return_token_ids": True,
