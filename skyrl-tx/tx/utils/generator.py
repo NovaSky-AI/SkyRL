@@ -385,9 +385,7 @@ def apply_top_p_batch(logits: jax.Array, p_values: jax.Array) -> jax.Array:
     cumulative_probs = jnp.cumsum(sorted_probs, axis=-1)
 
     # Shift right so the token that crosses threshold is included
-    cumulative_probs_shifted = jnp.concatenate(
-        [jnp.zeros((logits.shape[0], 1)), cumulative_probs[:, :-1]], axis=-1
-    )
+    cumulative_probs_shifted = jnp.concatenate([jnp.zeros((logits.shape[0], 1)), cumulative_probs[:, :-1]], axis=-1)
 
     keep_mask = cumulative_probs_shifted < p_values[:, None]
     keep_mask = keep_mask.at[:, 0].set(True)  # Always keep top token

@@ -2,7 +2,7 @@ from flax import nnx
 import jax.numpy as jnp
 from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
-from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch
+from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch, apply_top_p_batch
 
 
 class DummyModel(GeneratorMixin, nnx.Module):
@@ -156,3 +156,34 @@ def test_top_k_filtering():
         ]
     )
     assert jnp.array_equal(filtered, expected)
+
+
+def test_top_p_filtering():
+    """Test apply_top_p_batch function directly."""
+    logits = jnp.array([[0.0, 1.0, 2.0, 3.0, 4.0, 6.0]])
+
+    # Test p=1.0: should not filter anything
+    filtered = apply_top_p_batch(logits, p_values=jnp.array([1.0]))
+    assert jnp.array_equal(filtered, logits)
+
+    # Test p=0.0: should only keep the top token
+    filtered = apply_top_p_batch(logits, p_values=jnp.array([0.0]))
+    assert jnp.isfinite(filtered[0, 5])
+    assert jnp.all(filtered[0, :5] == -jnp.inf)
+
+    # Test p=0.9: keeps tokens until cumulative prob exceeds threshold
+    filtered = apply_top_p_batch(logits, p_values=jnp.array([0.9]))
+    assert jnp.isfinite(filtered[0, 5])
+    assert jnp.isfinite(filtered[0, 4])
+
+    # Test all-infinite input logits
+    inf_logits = jnp.array([[-jnp.inf, -jnp.inf, -jnp.inf, -jnp.inf]])
+    filtered = apply_top_p_batch(inf_logits, p_values=jnp.array([0.9]))
+    assert filtered.shape == inf_logits.shape
+
+    # Test per-example p values in batch
+    logits_batch = jnp.array([[0.0, 1.0, 2.0, 3.0, 4.0, 6.0], [0.0, 1.0, 2.0, 3.0, 4.0, 6.0]])
+    filtered = apply_top_p_batch(logits_batch, p_values=jnp.array([1.0, 0.0]))
+    assert jnp.array_equal(filtered[0], logits_batch[0])
+    assert jnp.isfinite(filtered[1, 5])
+    assert jnp.all(filtered[1, :5] == -jnp.inf)
