@@ -379,18 +379,16 @@ def apply_top_p_batch(logits: jax.Array, p_values: jax.Array) -> jax.Array:
     Returns:
         Filtered logits with the same shape.
     """
-    probs = jnp.nan_to_num(jax.nn.softmax(logits, axis=-1))
-    sorted_indices = jnp.argsort(-probs, axis=-1)
-    sorted_probs = jnp.take_along_axis(probs, sorted_indices, axis=-1)
-    cumulative_probs = jnp.cumsum(sorted_probs, axis=-1)
-
-    # Shift right so the token that crosses threshold is included
-    cumulative_probs_shifted = jnp.concatenate([jnp.zeros((logits.shape[0], 1)), cumulative_probs[:, :-1]], axis=-1)
-
-    keep_mask = cumulative_probs_shifted < p_values[:, None]
-    keep_mask = keep_mask.at[:, 0].set(True)  # Always keep top token
-
+    # Sort by logits (equivalent to sorting by probs since softmax is monotonic)
+    sorted_indices = jnp.argsort(-logits, axis=-1)
     sorted_logits = jnp.take_along_axis(logits, sorted_indices, axis=-1)
+    sorted_probs = jax.nn.softmax(sorted_logits, axis=-1)
+
+    # Exclusive cumsum: cumsum[i] - prob[i] gives sum of probs *before* position i
+    cumsum_exclusive = jnp.cumsum(sorted_probs, axis=-1) - sorted_probs
+
+    keep_mask = cumsum_exclusive < p_values[:, None]
+    keep_mask = keep_mask.at[:, 0].set(True)  # Always keep top token
     filtered_sorted_logits = jnp.where(keep_mask, sorted_logits, -jnp.inf)
 
     # Scatter back to original positions
