@@ -898,66 +898,16 @@ def local_reward_fn(input, pred, trace=None):
     print("reward:", num_passed / len(tests))
     return num_passed / len(tests)
 
-def final_reward_fn(input, pred, trace=None):
-    """
-    Reward function for DSPy code generation.
-    
-    Args:
-        input: Dictionary containing "prompt", "task_id", "is_stdin"
-        pred: DSPy prediction object with .tests attribute
-        trace: Optional trace (not used)
-    
-    Returns:
-        float: Reward score (0.0 to 1.0) representing fraction of tests passed
-    """
-    # Extract input parameters
-    prompt = input.get("prompt", "")
-    task_id = input.get("task_id", "")
-    is_stdin = input.get("is_stdin", False)
-    
-    # Get gold prediction for this task
-    gold_pred = gold_preds.get(task_id, None)
-    
-    # If no gold_pred available, return 0
-    if gold_pred is None:
-        return 0.0
-    
-    # Process tests from prediction
-    try:
-        tests = post_process_tests_inputs(pred.tests, is_stdin)
-    except Exception as e:
-        print(f"test parsing failed: {e}")
-        return 0.0
-    
-    if len(tests) == 0:
-        print("no test found!")
-        return 0.0
-    
-    # Deduplicate tests by converting to JSON strings
-    tests_as_strings = [json.dumps(test, sort_keys=True) for test in tests]
-    tests_counter = Counter(tests_as_strings)
-    tests = [
-        {"test": json.loads(test_str), "count": count}
-        for test_str, count in tests_counter.items()
-    ]
-    
-    # Check each test against gold prediction
-    num_passed = 0
-    for test in tests:
-        try:
-            results = check_test([test["test"]], gold_pred, 0, prompt, "dummy", runtime_debug=True)
-            passed = results[0]
-            if passed:
-                num_passed += 1
-        except Exception as e:
-            print(f"Error checking test: {e}")
-            continue
-    
-    if len(tests) == 0:
-        return 0.0
-    
-    reward = num_passed / len(tests)
-    return reward
+def final_reward_fn(example, pred, trace=None):
+    timeout = 50
+    result_dict = check_correctness(
+        example,
+        post_process_code(pred.code),
+        timeout,
+        is_extracted=True,
+        fast_check=True,
+    )
+    return result_dict["passed"]
 
 def assert_test_multiple_test(example, pred, **kwargs):
 

@@ -44,6 +44,7 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.enable_http_endpoint=true \
   generator.http_endpoint_host="127.0.0.1" \
   generator.http_endpoint_port=8000 \
+  trainer.epochs=20 \
   trainer.policy_mini_batch_size=32 \
   trainer.train_batch_size=32 \
   trainer.micro_forward_batch_size_per_gpu=1 \
