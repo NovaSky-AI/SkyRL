@@ -1,4 +1,4 @@
-# SkyRL tx: A unified training and inference engine implementing the Tinker API
+# SkyRL tx: Unified LLM training and inference
 
 <p align="center">
   <a href="https://github.com/NovaSky-AI/SkyRL">GitHub</a> •
