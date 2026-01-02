@@ -82,30 +82,6 @@ This comes with support for reloading checkpoints in a different parallelism sch
     └── global_step_30/                      # Checkpoint at training step 30
         └── ...
 
-DeepSpeed Checkpointing
-~~~~~~~~~~~~~~~~~~~~~~~
-
-DeepSpeed checkpoints follow a similar directory structure but the model checkpoint files under ``policy`` and ``critic`` are created by the DeepSpeed checkpoint API, and are not explicitly managed by SkyRL.
-
-.. code-block::
-
-    {ckpt_path}/
-    ├── latest_ckpt_global_step.txt          # Holds the global step of the latest checkpoint
-    ├── global_step_10/                      # Checkpoint at training step 10
-    │   ├── policy/                          # Policy model checkpoint directory
-    │   │   ├── huggingface/                 # HuggingFace config and tokenizer 
-    │   │   ├── global_step10/               # Deepspeed checkpoint directory
-    │   │   ├── ...                          # other deepspeed checkpointing files
-    │   ├── critic/                          # Critic model checkpoint (if enabled)
-    │   │   ├── huggingface/                 
-    │   │   ├── global_step10/               
-    │   │   ├── ...                          
-    ├── global_step_20/                      # Checkpoint at training step 20
-    │   └── ...
-    └── global_step_30/                      # Checkpoint at training step 30
-        └── ...
-
-
 Key Configuration Parameters
 ----------------------------
 

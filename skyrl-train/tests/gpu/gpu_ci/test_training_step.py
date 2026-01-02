@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/gpu_ci/test_training_step.py
+uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_training_step.py
 """
 
 import ray
@@ -36,10 +36,8 @@ def cfg() -> DictConfig:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("packed", "strategy"),
-    [(True, "deepspeed"), (False, "deepspeed"), (True, "fsdp"), (False, "fsdp"), (True, "fsdp2"), (False, "fsdp2")],
+    [(True, "fsdp"), (False, "fsdp"), (True, "fsdp2"), (False, "fsdp2")],
     ids=[
-        "packed-deepspeed",
-        "unpacked-deepspeed",
         "packed-fsdp",
         "unpacked-fsdp",
         "packed-fsdp2",
@@ -92,10 +90,8 @@ async def test_policy_training_step(ray_init_fixture, cfg, packed, strategy):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("packed", "strategy"),
-    [(True, "deepspeed"), (False, "deepspeed"), (True, "fsdp"), (False, "fsdp"), (True, "fsdp2"), (False, "fsdp2")],
+    [(True, "fsdp"), (False, "fsdp"), (True, "fsdp2"), (False, "fsdp2")],
     ids=[
-        "packed-deepspeed",
-        "unpacked-deepspeed",
         "packed-fsdp",
         "unpacked-fsdp",
         "packed-fsdp2",

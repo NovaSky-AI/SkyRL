@@ -61,9 +61,8 @@ def yield_module_grouped_chunks(
         module_size = 0
 
         # Prepare all tensors for this module
-        # TODO: Allow gather_tensor_fn to accept a list of params for batched gathering.
-        # This would be more efficient for DeepSpeed ZeRO-3 where GatheredParameters
-        # can gather multiple params in a single all-gather collective.
+        # TODO: Allow gather_tensor_fn to accept a list of params for batched gathering
+        # to improve efficiency for sharded backends that support multi-parameter collects.
         for param_name in param_names:
             param = params[param_name]
             tensor = gather_tensor_fn(param)

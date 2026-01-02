@@ -1,6 +1,6 @@
 """
-For FSDP and DeepSpeed, run:
-uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
+For FSDP and FSDP2, run:
+uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
 
 For Megatron, run:
 uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
@@ -66,7 +66,6 @@ def get_test_actor_config(strategy: str) -> DictConfig:
 @pytest.mark.parametrize(
     ("strategy", "lora"),
     [
-        ("deepspeed", False),
         ("fsdp", False),
         ("fsdp2", False),
         pytest.param("megatron", False, marks=pytest.mark.megatron),

@@ -104,9 +104,6 @@ megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev =
 
 
 [project.optional-dependencies]
-deepspeed = [
-    "deepspeed==0.17.6"
-]
 dev = [
     "ruff==0.11.9",
     "black==24.10.0",

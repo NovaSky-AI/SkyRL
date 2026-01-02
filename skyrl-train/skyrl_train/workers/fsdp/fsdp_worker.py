@@ -235,7 +235,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         raise NotImplementedError()
 
     def _set_pad_token_id(self, pad_token_id):
-        # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model -> DeepSpeedEngine, self.model.module -> AutoModelForCausalLM
+        # NOTE (sumanthrh): self.model -> HFModelWrapper; self.model.model -> AutoModelForCausalLM
         self.model.model.config.pad_token_id = pad_token_id
 
     def forward(

@@ -84,7 +84,7 @@ class DistributedTorchRayActor:
             )
 
         # setup device mesh
-        # TODO: Support TP / PP for DeepSpeed
+        # TODO: Support TP / PP for additional backends
         # NOTE (sumanthrh): Device mesh and mesh rank are rank specific attributes. For the current way the strategy is defined, it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
         # This device mesh can be common across all the strategies we use
         dp_size = self._world_size // self.sequence_parallel_size
@@ -640,7 +640,7 @@ class PolicyWorkerBase(Worker):
         loss_mask = experience.loss_mask
         rollout_action_logprobs = experience.rollout_logprobs
 
-        # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
+        # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(

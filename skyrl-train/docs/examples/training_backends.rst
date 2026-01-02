@@ -4,10 +4,9 @@ In SkyRL, you can switch between different training backends with minimal change
 
 Currently, we support the following training backends:
 
-- DeepSpeed
-- Megatron
 - FSDP
 - FSDP2
+- Megatron
 
 To switch to a different backend, simply set the ``trainer.strategy`` parameter to the desired backend. We use the ``fsdp2`` backend by default.
 
@@ -28,48 +27,6 @@ We provide baseline examples for GRPO training on GSM8K for each of these backen
         data.val_data="['$HOME/data/gsm8k/validation.parquet']" \
         trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
         ... # Other parameters (see `examples/gsm8k/run_gsm8k.sh` for more)
-
-DeepSpeed
-~~~~~~~~~
-
-DeepSpeed requires installing the optional ``deepspeed`` extra. You can either:
-
-1. Use the dedicated DeepSpeed script (which already includes the extra):
-
-.. code-block:: bash
-
-    bash examples/training_backends/deepspeed/run_deepspeed.sh
-
-2. Or modify the GSM8K script to include the deepspeed extra:
-
-.. code-block:: bash
-
-    # Modify the uv run command in examples/gsm8k/run_gsm8k.sh to include deepspeed extra:
-    # Change: uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
-    # To:     uv run --isolated --extra vllm --extra deepspeed -m skyrl_train.entrypoints.main_base \
-
-    # Then run with DeepSpeed strategy:
-    bash examples/gsm8k/run_gsm8k.sh trainer.strategy=deepspeed
-
-Additionally, you can tune `deepspeed specific configurations <https://www.deepspeed.ai/docs/config-json/>`_ as shown below:
-
-.. code-block:: bash
-
-    # enable offloading of model parameters to CPU during the forward pass
-    deepspeed_config.train.zero_optimization.offload_param.device=cpu \
-
-    # enable offloading of optimizer state to CPU during the forward pass
-    deepspeed_config.train.zero_optimization.offload_optimizer.device=cpu \
-
-    # sub group size for ZeRO3-Offload (default is 1e9)
-    deepspeed_config.train.zero_optimization.sub_group_size=1e8 \
-
-    # Number of elements reduced/allreduced at a time (default is 5e8)
-    deepspeed_config.train.zero_optimization.reduce_bucket_size=1e8 \
-
-You can also refer to additional details at :ref:`deepspeed-configurations`, and 
-you can find the full set of default values we provide for these configurations at :code_link:`skyrl_train/config/deepspeed_config/train.yaml` 
-and :code_link:`skyrl_train/config/deepspeed_config/eval.yaml`.
 
 FSDP and FSDP2
 ~~~~~~~~~~~~~~
