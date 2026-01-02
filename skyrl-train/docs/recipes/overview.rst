@@ -78,7 +78,7 @@ DAPO Recipes
 The code for the DAPO recipe is available at :code_link:`examples/algorithms/dapo/`. 
 
 For evals we report Pass@32 and Mean@32. In the WandB metrics we log "avg_score" - since reward is either -1 or 1 for the AIME task, mean@32 can be computed as mean@32 = (avg_score + 1) / 2. 
-In the table below we report the peak mean@32 and pass@32 over the course of the run.
+In the table below we report the peak mean@32 and pass@32 over the course of the run. All runs are DAPO but without Dynamic Sampling enabled (just clip-higher, overlong buffer, overlong filtering, and token level loss aggregation).
 
 All results can be reproduced with commit `cca7d96741f143ce6aa89a0f2cbb18d528cfcf33 <https://github.com/novasky-ai/SkyRL/commit/cca7d96741f143ce6aa89a0f2cbb18d528cfcf33>`_, and the WandB report for all runs is available `here <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/ijmo1v6q>`_.
 
