@@ -139,6 +139,7 @@ class GeneratorMixin:
         rngs: jax.Array,
         stop_tokens: jax.Array,
         top_k_values: jax.Array,
+        top_p_values: jax.Array,
         max_top_k: int,
         prompt_logprobs: bool = False,
     ):
@@ -167,6 +168,7 @@ class GeneratorMixin:
 
             # Apply top_k filtering using static max_top_k
             filtered_logits = apply_top_k_batch(scaled_logits, top_k_values, max_top_k)
+            filtered_logits = apply_top_p_batch(filtered_logits, top_p_values)
 
             sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
                 sample_keys, filtered_logits
@@ -244,6 +246,7 @@ class GeneratorMixin:
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
         top_k_values = jnp.array([sampling_param.top_k for sampling_param in sampling_params], dtype=jnp.int32)
+        top_p_values = jnp.array([sampling_param.top_p for sampling_param in sampling_params], dtype=jnp.float32)
 
         # One PRNGKey per provided seed
         seeds = [sampling_param.seed for sampling_param in sampling_params]
@@ -274,6 +277,7 @@ class GeneratorMixin:
             rngs,
             stop_tokens,
             top_k_values,
+            top_p_values,
             max_top_k,
             prompt_logprobs=prompt_logprobs,
         )
@@ -363,3 +367,36 @@ def apply_top_k_batch(logits: jax.Array, k_values: jax.Array, max_k: int) -> jax
     result = jnp.full_like(logits, -jnp.inf).at[batch_idx, top_indices].set(top_values)
 
     return jnp.where(k_values[:, None] <= 0, logits, result)
+
+
+def apply_top_p_batch(logits: jax.Array, p_values: jax.Array) -> jax.Array:
+    """Keep only tokens with cumulative probability up to p, set rest to -inf.
+
+    Args:
+        logits: Logits tensor of shape [batch_size, vocab_size]
+        p_values: Per-example p values of shape [batch_size]. If p >= 1.0, no filtering.
+
+    Returns:
+        Filtered logits with the same shape.
+    """
+    probs = jax.nn.softmax(logits, axis=-1)
+    sorted_indices = jnp.argsort(-probs, axis=-1)
+    sorted_probs = jnp.take_along_axis(probs, sorted_indices, axis=-1)
+    cumulative_probs = jnp.cumsum(sorted_probs, axis=-1)
+
+    # Shift right so the token that crosses threshold is included
+    cumulative_probs_shifted = jnp.concatenate(
+        [jnp.zeros((logits.shape[0], 1)), cumulative_probs[:, :-1]], axis=-1
+    )
+
+    keep_mask = cumulative_probs_shifted < p_values[:, None]
+    keep_mask = keep_mask.at[:, 0].set(True)  # Always keep top token
+
+    sorted_logits = jnp.take_along_axis(logits, sorted_indices, axis=-1)
+    filtered_sorted_logits = jnp.where(keep_mask, sorted_logits, -jnp.inf)
+
+    # Scatter back to original positions
+    batch_idx = jnp.arange(logits.shape[0])[:, None]
+    result = jnp.empty_like(logits).at[batch_idx, sorted_indices].set(filtered_sorted_logits)
+
+    return jnp.where(p_values[:, None] >= 1.0, logits, result)
