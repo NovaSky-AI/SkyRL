@@ -1,4 +1,4 @@
-# SkyRL tx: Unified LLM training and inference
+# SkyRL tx: Unifying LLM training and inference
 
 <p align="center">
   <a href="https://github.com/NovaSky-AI/SkyRL">GitHub</a> •
