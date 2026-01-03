@@ -61,10 +61,10 @@ git clone https://github.com/NovaSky-AI/SkyRL
 cd SkyRL/skyrl-tx
 
 # For GPU
-uv run --extra gpu --extra tinker -m tx.tinker.api
+uv run --extra gpu --extra tinker -m tx.tinker.api --base-model <model>
 
 # For TPU
-uv run --extra tpu --extra tinker -m tx.tinker.api
+uv run --extra tpu --extra tinker -m tx.tinker.api --base-model <model>
 ```
 
 ### Basic Training Example (Pig Latin)
@@ -136,19 +136,19 @@ for i, seq in enumerate(result.sequences):
 
 ## 📖 Usage Examples
 
-### Dense Model Training (Qwen3-4B on 8×H100)
+### Dense Model Training (Qwen3-8B on 8×H100)
 
 ```bash
 # Start the server
 uv run --extra gpu --extra tinker -m tx.tinker.api \
-    --base-model Qwen/Qwen3-4B \
-    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 2, "tensor_parallel_size": 8}'
+    --base-model Qwen/Qwen3-8B \
+    --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 1}'
 
 # Run training (using tinker-cookbook)
 export TINKER_API_KEY="dummy"
 uv run --with wandb --with tinker sl_loop.py \
     base_url=http://localhost:8000 \
-    lora_rank=2 max_length=512 batch_size=16
+    model_name=Qwen/Qwen3-8B lora_rank=1
 ```
 
 ### MoE Model Training (Qwen3-Coder-30B-A3B)
@@ -156,7 +156,7 @@ uv run --with wandb --with tinker sl_loop.py \
 ```bash
 uv run --extra gpu --extra tinker -m tx.tinker.api \
     --base-model Qwen/Qwen3-Coder-30B-A3B-Instruct \
-    --backend-config '{"max_lora_adapters": 1, "max_lora_rank": 1, "tensor_parallel_size": 8, "micro_batch_size": 1}'
+    --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "tensor_parallel_size": 8, "micro_batch_size": 1}'
 ```
 
 ### Reinforcement Learning
