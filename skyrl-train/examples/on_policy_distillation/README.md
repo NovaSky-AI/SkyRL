@@ -11,6 +11,8 @@ On-Policy Distillation is a technique recently highlighted by [Thinking Machines
 In `main_on_policy_distill.py` we provide a simple example for modifying SkyRL to implement On-Policy Distillation by replacing the ref model with a teacher model, and modifying the reward/advantage computation logic to use the reverse KL loss.
 <img width="471" height="51" alt="image" src="https://github.com/user-attachments/assets/4d5a9649-832a-4ba9-86af-5de063f2773f" />
 
+We provide a full writeup at https://novasky-ai.notion.site/on-policy-distillation.
+
 ## Quickstart
 To get started, first set up the dataset from the DAPO example:
 
