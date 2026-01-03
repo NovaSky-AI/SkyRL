@@ -156,7 +156,7 @@ uv run --with wandb --with tinker sl_loop.py \
 ```bash
 # Start the server
 uv run --extra gpu --extra tinker -m tx.tinker.api \
-    --base-model Qwen/Qwen3-Coder-30B-A3B-Instruct \
+    --base-model Qwen/Qwen3-30B-A3B \
     --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 1, "shard_attention_heads": false}'
 
 # Run training (using tinker-cookbook)
