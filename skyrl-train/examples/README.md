@@ -17,7 +17,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 ## Tasks
 
 - `gsm8k/`: Basic GSM8K math word-problem dataset utilities and baseline training/generation scripts.
-- `llm_as_a_judge/`: GSM8K training with an extermal LLM as a judge to produce rewards instead of strict exact-match grading.
+- `llm_as_a_judge/`: GSM8K training with an external LLM as a judge to produce rewards instead of strict exact-match grading.
 - `multiply/`: Toy arithmetic environment for multiplying numbers, useful for quick sanity checks and debugging.
 - `livecodebench/`: LiveCodeBench code-generation task setup and training scripts.
 - `text_to_sql/`: [Text-to-SQL (SkyRL-SQL)](https://skyrl.readthedocs.io/en/latest/examples/multi_turn_text2sql.html) environment and training scripts for mapping natural language questions to SQL queries.
@@ -29,8 +29,8 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 - `flash_rl/`: Integration with [FlashRL’s](https://fengyao.notion.site/flash-rl) patched vLLM inference engine for high-throughput RL training.
 - `terminal_bench/`: Custom [Terminal-Bench/Harbor](https://harborframework.com/) Generator for training agents to solve command-line tasks.
 - `mini_swe_agent/`: Integration with [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent) to train coding agents on SWE-Bench via SkyRL.
-- `../integrations/verfiers/`: Integration with PrimeIntellect's [Verifiers Library](https://github.com/PrimeIntellect-ai/verifiers) + [Environments Hub](https://app.primeintellect.ai/dashboard/environments?_gl=1*1vogwn8*_gcl_au*NjA1ODI2MTMxLjE3NjczOTkwMTM.)
-- `../ingegrations/openenv/`: Integration with HuggingFace/Meta [OpenEnv](https://github.com/meta-pytorch/OpenEnv)
+- `../integrations/verifiers/`: Integration with PrimeIntellect's [Verifiers Library](https://github.com/PrimeIntellect-ai/verifiers) + [Environments Hub](https://app.primeintellect.ai/dashboard/environments?_gl=1*1vogwn8*_gcl_au*NjA1ODI2MTMxLjE3NjczOTkwMTM)
+- `../integrations/openenv/`: Integration with HuggingFace/Meta [OpenEnv](https://github.com/meta-pytorch/OpenEnv)
 
 ## Large Scale Model Training
 - `megatron/`: Examples for running SkyRL with the Megatron Backend for 5D parallelism.
@@ -40,4 +40,4 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 ## Features and More
 - `lora/`: LoRA RL fine-tuning recipes.
 - `remote_inference_engine/`: Scripts for running remote vLLM/sglang inference servers and connecting them to SkyRL.
-- `training_backends/`: Runner scripts demonstrating different how to change training backends on SkyRL.
+- `training_backends/`: Runner scripts demonstrating how to use different training backends on SkyRL.

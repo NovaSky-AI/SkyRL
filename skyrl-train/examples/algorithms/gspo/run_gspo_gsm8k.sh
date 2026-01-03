@@ -6,4 +6,6 @@
 bash examples/gsm8k/run_gsm8k.sh \
   trainer.algorithm.policy_loss_type="gspo" \
   trainer.algorithm.loss_reduction="sequence_mean" \
+  trainer.micro_forward_batch_size_per_gpu=16 \
+  trainer.micro_train_batch_size_per_gpu=16 \
   trainer.run_name="gspo_gsm8k"
