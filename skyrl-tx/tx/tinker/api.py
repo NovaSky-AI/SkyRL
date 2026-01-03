@@ -147,6 +147,7 @@ class LoRAConfig(BaseModel):
 
 
 class CreateModelRequest(BaseModel):
+    session_id: str
     base_model: str
     lora_config: LoRAConfig
 
@@ -277,7 +278,16 @@ class OptimStepRequest(BaseModel):
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
-    path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+    path: str | None = Field(default=None, pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+    sampling_session_seq_id: int | None = None
+    seq_id: int | None = None
+    type: Literal["save_weights_for_sampler"] = "save_weights_for_sampler"
+
+    @model_validator(mode="after")
+    def check_path_or_ids(self):
+        if not self.path and (self.sampling_session_seq_id is None or self.seq_id is None):
+            raise ValueError("Either 'path' or both 'sampling_session_seq_id' and 'seq_id' must be provided")
+        return self
 
 
 class SamplingParams(BaseModel):
@@ -523,6 +533,11 @@ async def create_sampling_session(request: CreateSamplingSessionRequest, session
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
 async def create_model(request: CreateModelRequest, session: AsyncSession = Depends(get_session)):
     """Create a new model, optionally with a LoRA adapter."""
+    # Validate session exists
+    session_db = await session.get(SessionDB, request.session_id)
+    if session_db is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
     model_id = f"model_{uuid4().hex[:8]}"
 
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
@@ -540,6 +555,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         lora_config=lora_config.model_dump(),
         status="created",
         request_id=request_id,
+        session_id=request.session_id,
     )
     session.add(model_db)
 
@@ -701,11 +717,28 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
 async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
     """Saves weights in a format compatible with sampling/inference servers."""
-    # Create pending checkpoint entry (validates model exists)
+    # Get the model (validates it exists and gives us the session_id)
+    model = await get_model(session, request.model_id)
+
+    checkpoint_id = request.path or f"ss{request.sampling_session_seq_id}_seq{request.seq_id}"
+    sampling_session_id = None
+    if request.sampling_session_seq_id is not None and request.seq_id is not None:
+        # Create the sampling session using the model's session
+        sampling_session_id = f"sampling_{uuid4().hex[:8]}"
+        sampling_db = SamplingSessionDB(
+            sampling_session_id=sampling_session_id,
+            session_id=model.session_id,
+            sampling_session_seq_id=request.sampling_session_seq_id,
+            base_model=None,
+            model_path=f"tinker://{request.model_id}/sampler_weights/{checkpoint_id}",
+        )
+        session.add(sampling_db)
+
+    # Create pending checkpoint entry
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
-        checkpoint_id=request.path,
+        checkpoint_id=checkpoint_id,
         checkpoint_type=types.CheckpointType.SAMPLER,
     )
 
@@ -713,7 +746,12 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         session=session,
         request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
-        request_data=types.SaveWeightsForSamplerInput(path=request.path),
+        request_data=types.SaveWeightsForSamplerInput(
+            path=checkpoint_id,
+            sampling_session_seq_id=request.sampling_session_seq_id,
+            seq_id=request.seq_id,
+            sampling_session_id=sampling_session_id,
+        ),
     )
 
     await session.commit()

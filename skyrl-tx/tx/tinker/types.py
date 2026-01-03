@@ -129,12 +129,16 @@ class OptimStepOutput(BaseModel):
 
 
 class SaveWeightsForSamplerInput(BaseModel):
-    path: str
+    path: str | None = None
+    sampling_session_seq_id: int | None = None
+    seq_id: int | None = None
+    sampling_session_id: str | None = None
 
 
 class SaveWeightsForSamplerOutput(BaseModel):
-    path: str
+    path: str | None = None
     type: str
+    sampling_session_id: str | None = None
 
 
 class SaveWeightsInput(BaseModel):

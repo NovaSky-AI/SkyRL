@@ -183,8 +183,7 @@ def test_sample(service_client, use_lora):
 
     if use_lora:
         training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
-        sampling_path = training_client.save_weights_for_sampler(name="test_sample").result().path
-        sampling_client = service_client.create_sampling_client(sampling_path)
+        sampling_client = training_client.save_weights_and_get_sampling_client(name="test_sample")
     else:
         sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
 
