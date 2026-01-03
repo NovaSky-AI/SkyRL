@@ -39,6 +39,8 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
+- 📜 [Fully Async RL with In-Flight Weight Updates in SkyRL](https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html)
+- 📜 [Open Recipes on SkyRL](https://skyrl.readthedocs.io/en/latest/recipes/overview.html)
 - 📜 [SkyRL-Agent Paper](https://arxiv.org/pdf/2511.16108)
 - 📜 [On-Policy Distillation on SkyRL Blog Post](https://novasky-ai.notion.site/on-policy-distillation)
 - 📜 [Search-R1 on SkyRL Blog Post](https://novasky-ai.notion.site/skyrl-searchr1)

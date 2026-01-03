@@ -20,15 +20,18 @@
 ## Key Features
 The `skyrl-train` package supports:
 - PPO and GRPO
-- Training Backends: FSDP, FSDP2, Megatron, and DeepSpeed
+- Training Backends: FSDP, FSDP2, [Megatron](https://skyrl.readthedocs.io/en/latest/examples/megatron.html), and DeepSpeed
 - Inference backends: vLLM, SGLang, and any custom OpenAI API compatible endpoint that exposes a method to perform weight sync
 - Ulysses sequence parallelism for long-context training
-- Colocated or disaggregated training and generation (including on heterogeneous hardware)
-- Synchronous RL or async one-off pipelining
+- [Colocated or disaggregated](https://skyrl.readthedocs.io/en/latest/configuration/placement.html) training and generation (including on heterogeneous hardware)
+- Synchronous RL, [async one-off pipelining](https://skyrl.readthedocs.io/en/latest/tutorials/one_step_off_async.html), or [fully async RL with in-flight weight updates](https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html)
 - Simple batched rollouts or Asynchronous rollouts for multi-turn conversations
 - Weight sync via NCCL, gloo, or checkpoint-and-load
-- Integration with `skyrl-gym` to run any environment in the gymnasium
+- Integration with `skyrl-gym`, [verifiers](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/integrations/verifiers), [OpenEnv](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/integrations/openenv), [Harbor/Terminal-Bench](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/terminal_bench), and more!
 - Sequence packing and Flash Attention 2
+- Algorithmic support for RLOO, REINFORCE, GSPO, CISPO, SAPO
+- Step-wise training for fully on policy multi-turn RL
+- 5D Parallelism support for MoE models with the [Megatron backend](https://skyrl.readthedocs.io/en/latest/examples/megatron.html)
 
 ## Documentation
 
