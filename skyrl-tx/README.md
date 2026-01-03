@@ -72,7 +72,7 @@ uv run --extra tpu --extra tinker -m tx.tinker.api
 Start the server:
 
 ```bash
-uv run --extra tinker -m tx.tinker.api --base-model "Qwen/Qwen3-0.6B"
+uv run --extra gpu --extra tinker -m tx.tinker.api --base-model "Qwen/Qwen3-0.6B"
 ```
 
 Run a simple training loop:
