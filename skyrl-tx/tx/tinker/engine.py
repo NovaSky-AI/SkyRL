@@ -423,6 +423,7 @@ class TinkerEngine:
         return types.SaveWeightsForSamplerOutput(
             path=output_path_str,
             type="save_weights_for_sampler",
+            sampling_session_id=request_data.sampling_session_id,
         )
 
     def _complete_futures(self, results: dict[str, BaseModel]):

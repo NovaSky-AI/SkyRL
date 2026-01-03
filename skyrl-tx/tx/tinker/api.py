@@ -709,16 +709,41 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
 async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
     """Saves weights in a format compatible with sampling/inference servers."""
-    # Determine checkpoint path: use provided path or generate from session/seq IDs
-    if request.path is not None:
-        checkpoint_path = request.path
-    elif request.sampling_session_seq_id is not None and request.seq_id is not None:
-        checkpoint_path = f"ss{request.sampling_session_seq_id}_seq{request.seq_id}"
-    else:
+    if request.path is None and (request.sampling_session_seq_id is None or request.seq_id is None):
         raise HTTPException(
             status_code=400,
             detail="Either 'path' or both 'sampling_session_seq_id' and 'seq_id' must be provided",
         )
+
+    # Determine checkpoint path
+    if request.path is not None:
+        checkpoint_path = request.path
+    else:
+        checkpoint_path = f"ss{request.sampling_session_seq_id}_seq{request.seq_id}"
+
+    sampling_session_id = None
+    if request.sampling_session_seq_id is not None and request.seq_id is not None:
+        # Create a session for this sampling session
+        session_id = f"session_{uuid4().hex[:8]}"
+        session_db = SessionDB(
+            session_id=session_id,
+            tags=[],
+            user_metadata={},
+            sdk_version="unknown",
+            status="active",
+        )
+        session.add(session_db)
+
+        # Create the sampling session
+        sampling_session_id = f"sampling_{uuid4().hex[:8]}"
+        sampling_db = SamplingSessionDB(
+            sampling_session_id=sampling_session_id,
+            session_id=session_id,
+            sampling_session_seq_id=request.sampling_session_seq_id,
+            base_model=None,
+            model_path=f"tinker://{request.model_id}",
+        )
+        session.add(sampling_db)
 
     # Create pending checkpoint entry (validates model exists)
     await create_checkpoint(
@@ -736,6 +761,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             path=checkpoint_path,
             sampling_session_seq_id=request.sampling_session_seq_id,
             seq_id=request.seq_id,
+            sampling_session_id=sampling_session_id,
         ),
     )
 
