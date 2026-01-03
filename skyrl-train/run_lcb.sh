@@ -8,14 +8,14 @@ export WANDB_API_KEY="6a25ce5b41815c557d6fe8aecb8bac2dd6b1bea0"
 
 
 NUM_NODES=1
-NUM_GPUS=8
+NUM_GPUS=4
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-Coder-7B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-Coder-3B-Instruct"
 
 
 FLASH_ATTN=true
-NUM_INFERENCE_ENGINES=8
+NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TP=1
 
 train_data="$HOME/data/lcb/deepcoder_train_short.json"
@@ -55,8 +55,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
-  trainer.hf_save_interval=5 \
-  trainer.ckpt_interval=5 \
+  trainer.hf_save_interval=2 \
+  trainer.ckpt_interval=2 \
   trainer.flash_attn=$FLASH_ATTN \
   generator.backend=vllm \
   generator.run_engines_locally=true \
