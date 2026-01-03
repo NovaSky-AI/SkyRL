@@ -741,7 +741,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             session_id=session_id,
             sampling_session_seq_id=request.sampling_session_seq_id,
             base_model=None,
-            model_path=f"tinker://{request.model_id}",
+            model_path=f"tinker://{request.model_id}/sampler_weights/{checkpoint_path}",
         )
         session.add(sampling_db)
 
