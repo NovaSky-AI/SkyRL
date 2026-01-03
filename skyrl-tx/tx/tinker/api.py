@@ -147,6 +147,7 @@ class LoRAConfig(BaseModel):
 
 
 class CreateModelRequest(BaseModel):
+    session_id: str
     base_model: str
     lora_config: LoRAConfig
 
@@ -532,6 +533,11 @@ async def create_sampling_session(request: CreateSamplingSessionRequest, session
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
 async def create_model(request: CreateModelRequest, session: AsyncSession = Depends(get_session)):
     """Create a new model, optionally with a LoRA adapter."""
+    # Validate session exists
+    session_db = await session.get(SessionDB, request.session_id)
+    if session_db is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
     model_id = f"model_{uuid4().hex[:8]}"
 
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
@@ -549,6 +555,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         lora_config=lora_config.model_dump(),
         status="created",
         request_id=request_id,
+        session_id=request.session_id,
     )
     session.add(model_db)
 
@@ -710,6 +717,9 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
 async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
     """Saves weights in a format compatible with sampling/inference servers."""
+    # Get the model (validates it exists and gives us the session_id)
+    model = await get_model(session, request.model_id)
+
     # Determine checkpoint path
     if request.path is not None:
         checkpoint_path = request.path
@@ -718,29 +728,18 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
 
     sampling_session_id = None
     if request.sampling_session_seq_id is not None and request.seq_id is not None:
-        # Create a session for this sampling session
-        session_id = f"session_{uuid4().hex[:8]}"
-        session_db = SessionDB(
-            session_id=session_id,
-            tags=[],
-            user_metadata={},
-            sdk_version="unknown",
-            status="active",
-        )
-        session.add(session_db)
-
-        # Create the sampling session
+        # Create the sampling session using the model's session
         sampling_session_id = f"sampling_{uuid4().hex[:8]}"
         sampling_db = SamplingSessionDB(
             sampling_session_id=sampling_session_id,
-            session_id=session_id,
+            session_id=model.session_id,
             sampling_session_seq_id=request.sampling_session_seq_id,
             base_model=None,
             model_path=f"tinker://{request.model_id}/sampler_weights/{checkpoint_path}",
         )
         session.add(sampling_db)
 
-    # Create pending checkpoint entry (validates model exists)
+    # Create pending checkpoint entry
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
