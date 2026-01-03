@@ -720,12 +720,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     # Get the model (validates it exists and gives us the session_id)
     model = await get_model(session, request.model_id)
 
-    # Determine checkpoint path
-    if request.path is not None:
-        checkpoint_path = request.path
-    else:
-        checkpoint_path = f"ss{request.sampling_session_seq_id}_seq{request.seq_id}"
-
+    checkpoint_id = request.path or f"ss{request.sampling_session_seq_id}_seq{request.seq_id}"
     sampling_session_id = None
     if request.sampling_session_seq_id is not None and request.seq_id is not None:
         # Create the sampling session using the model's session
@@ -735,7 +730,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
             session_id=model.session_id,
             sampling_session_seq_id=request.sampling_session_seq_id,
             base_model=None,
-            model_path=f"tinker://{request.model_id}/sampler_weights/{checkpoint_path}",
+            model_path=f"tinker://{request.model_id}/sampler_weights/{checkpoint_id}",
         )
         session.add(sampling_db)
 
@@ -743,7 +738,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
-        checkpoint_id=checkpoint_path,
+        checkpoint_id=checkpoint_id,
         checkpoint_type=types.CheckpointType.SAMPLER,
     )
 
@@ -752,7 +747,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
         request_data=types.SaveWeightsForSamplerInput(
-            path=checkpoint_path,
+            path=checkpoint_id,
             sampling_session_seq_id=request.sampling_session_seq_id,
             seq_id=request.seq_id,
             sampling_session_id=sampling_session_id,
