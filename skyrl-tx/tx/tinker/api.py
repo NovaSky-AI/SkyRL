@@ -277,14 +277,9 @@ class OptimStepRequest(BaseModel):
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
-
     path: str | None = Field(default=None, pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
-    """A file/directory name for the weights"""
-
     sampling_session_seq_id: int | None = None
-
     seq_id: int | None = None
-
     type: Literal["save_weights_for_sampler"] = "save_weights_for_sampler"
 
     @model_validator(mode="after")
