@@ -277,7 +277,15 @@ class OptimStepRequest(BaseModel):
 
 class SaveWeightsForSamplerRequest(BaseModel):
     model_id: str
-    path: str = Field(..., pattern=ID_PATTERN, max_length=ID_MAX_LENGTH)
+
+    path: str | None = None
+    """A file/directory name for the weights"""
+
+    sampling_session_seq_id: int | None = None
+
+    seq_id: int | None = None
+
+    type: Literal["save_weights_for_sampler"] = "save_weights_for_sampler"
 
 
 class SamplingParams(BaseModel):
@@ -701,11 +709,30 @@ async def save_weights(request: SaveWeightsRequest, session: AsyncSession = Depe
 @app.post("/api/v1/save_weights_for_sampler", response_model=FutureResponse)
 async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, session: AsyncSession = Depends(get_session)):
     """Saves weights in a format compatible with sampling/inference servers."""
+    # Determine checkpoint path: use provided path or generate from session/seq IDs
+    if request.path is not None:
+        checkpoint_path = request.path
+    elif request.sampling_session_seq_id is not None and request.seq_id is not None:
+        # Look up sampling session by sampling_session_seq_id
+        statement = select(SamplingSessionDB).where(
+            SamplingSessionDB.sampling_session_seq_id == request.sampling_session_seq_id
+        )
+        result = await session.exec(statement)
+        sampling_session = result.first()
+        if sampling_session is None:
+            raise HTTPException(status_code=404, detail="Sampling session not found")
+        checkpoint_path = f"ss{request.sampling_session_seq_id}_seq{request.seq_id}"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Either 'path' or both 'sampling_session_seq_id' and 'seq_id' must be provided",
+        )
+
     # Create pending checkpoint entry (validates model exists)
     await create_checkpoint(
         session=session,
         model_id=request.model_id,
-        checkpoint_id=request.path,
+        checkpoint_id=checkpoint_path,
         checkpoint_type=types.CheckpointType.SAMPLER,
     )
 
@@ -713,7 +740,7 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         session=session,
         request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
-        request_data=types.SaveWeightsForSamplerInput(path=request.path),
+        request_data=types.SaveWeightsForSamplerInput(path=checkpoint_path),
     )
 
     await session.commit()
