@@ -151,7 +151,7 @@ uv run --with wandb --with tinker sl_loop.py \
     model_name=Qwen/Qwen3-8B lora_rank=1
 ```
 
-### MoE Model Training (Qwen3-Coder-30B-A3B)
+### MoE Model Training (Qwen/Qwen3-30B-A3B)
 
 ```bash
 # Start the server
@@ -172,7 +172,7 @@ uv run --with wandb --with tinker sl_loop.py \
 # Start server
 uv run --extra gpu --extra tinker -m tx.tinker.api \
     --base-model Qwen/Qwen3-4B \
-    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 8}'
+    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 8, "sample_max_num_sequences": 256}'
 
 # Run RL loop
 uv run --with wandb --with tinker rl_loop.py \
