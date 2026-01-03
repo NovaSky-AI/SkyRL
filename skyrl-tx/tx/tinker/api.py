@@ -732,7 +732,11 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
         session=session,
         request_type=types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER,
         model_id=request.model_id,
-        request_data=types.SaveWeightsForSamplerInput(path=checkpoint_path),
+        request_data=types.SaveWeightsForSamplerInput(
+            path=checkpoint_path,
+            sampling_session_seq_id=request.sampling_session_seq_id,
+            seq_id=request.seq_id,
+        ),
     )
 
     await session.commit()
