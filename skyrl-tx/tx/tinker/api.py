@@ -713,14 +713,6 @@ async def save_weights_for_sampler(request: SaveWeightsForSamplerRequest, sessio
     if request.path is not None:
         checkpoint_path = request.path
     elif request.sampling_session_seq_id is not None and request.seq_id is not None:
-        # Look up sampling session by sampling_session_seq_id
-        statement = select(SamplingSessionDB).where(
-            SamplingSessionDB.sampling_session_seq_id == request.sampling_session_seq_id
-        )
-        result = await session.exec(statement)
-        sampling_session = result.first()
-        if sampling_session is None:
-            raise HTTPException(status_code=404, detail="Sampling session not found")
         checkpoint_path = f"ss{request.sampling_session_seq_id}_seq{request.seq_id}"
     else:
         raise HTTPException(
