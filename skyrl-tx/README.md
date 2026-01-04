@@ -166,18 +166,18 @@ uv run --with wandb --with tinker sl_loop.py \
     model_name=Qwen/Qwen3-30B-A3B lora_rank=1 max_length=512
 ```
 
-### Reinforcement Learning
+### Reinforcement Learning (Qwen/Qwen3-8B)
 
 ```bash
 # Start server
 uv run --extra gpu --extra tinker -m tx.tinker.api \
-    --base-model Qwen/Qwen3-4B \
-    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 8, "sample_max_num_sequences": 256}'
+    --base-model Qwen/Qwen3-8B \
+    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 8, "sample_max_num_sequences": 256}' > out.log
 
 # Run RL loop
 uv run --with wandb --with tinker rl_loop.py \
     base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-4B" \
+    model_name="Qwen/Qwen3-8B" \
     lora_rank=1 max_length=1024
 ```
 
