@@ -31,7 +31,7 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   data.train_data=$train_data \
   data.val_data=$train_data \
   +dspy.max_num_examples=400 \
-  +dspy.program="PAPILLON_request_gen" \
+  +dspy.program="papillon_request_gen" \
   +dspy.benchmark_name="papillon" \
   +dspy.local_reward_fn="papillon_query_leakage" \
   +dspy.final_reward_fn="papillon_final_reward_fn" \
@@ -80,5 +80,5 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval_interval=-1 \
   $@

@@ -51,7 +51,7 @@ class DSPyGenerator(GeneratorInterface):
 
         # Create DSPy LM for the program
         # Disable DSPy cache/logs
-        dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
+        # dspy.configure_cache(enable_disk_cache=False, enable_memory_cache=False)
         dspy.disable_logging()
         
         # Create LM pointing to the inference engine endpoint

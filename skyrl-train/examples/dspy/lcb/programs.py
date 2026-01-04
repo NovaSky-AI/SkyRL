@@ -327,6 +327,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
 
 
         print(f"[Program] running tests for task_id: {task_id}")
+        start = time.time()
         preds_pass = [
             list(
                 map(
@@ -340,7 +341,8 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
             )
             for pred in preds
         ]
-
+        end = time.time()
+        print(f"[Program] Time taken to run tests: {end - start}")
         print(f"[Program] tests finished for task_id: {task_id}")
         
         zipped_stats = sorted(zip([p.code for p in preds], map(sum, preds_pass)), key=lambda x: x[1])

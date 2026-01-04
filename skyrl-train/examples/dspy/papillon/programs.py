@@ -26,7 +26,7 @@ class RespondToQuery(dspy.Signature):
 
 
 class PAPILLON(dspy.Module):
-    def __init__(self, untrusted_model):
+    def __init__(self, untrusted_model=dspy.LM(model="openai/gpt-4.1-mini"), cache=True):
         self.craft_redacted_request = dspy.ChainOfThought(CraftRedactedRequest)
         self.respond_to_query = dspy.Predict(RespondToQuery)
         self.untrusted_model = untrusted_model

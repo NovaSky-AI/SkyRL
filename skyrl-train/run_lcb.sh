@@ -80,5 +80,5 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
-  trainer.eval_interval=5 \
+  trainer.eval_interval=-1 \
   $@

@@ -124,8 +124,7 @@ class DSPyDataset:
         """
         
         self.benchmark_name = benchmark_name
-        self.data_function = get_benchmark_data(benchmark_name)
-        self.train_set, self.test_set = self.data_function()
+        self.train_set, self.test_set = get_benchmark_data(benchmark_name)
         self.examples = self.train_set[:max_num_examples]
 
         # self.data_file = data_file

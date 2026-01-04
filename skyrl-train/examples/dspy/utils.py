@@ -18,7 +18,7 @@ from .lcb.lcb_utils import (
     CodeGeneratorWithSelfDebug,
 )
 from .hover.programs import Hover
-from .papillon.programs import PAPILLON
+from .papillon.programs import PAPILLON, PAPILLON_request_gen
 
 # Import reward functions from different modules
 from .lcb.utils import (
@@ -26,7 +26,7 @@ from .lcb.utils import (
     final_reward_fn,
 )
 from .papillon.utils import (
-    compute_metrics,
+    compute_overall_score,
     compute_query_leakage,
 )
 
@@ -43,14 +43,14 @@ DSPY_PROGRAM_MAP: Dict[str, Type[dspy.Module]] = {
     "CodeGeneratorWithIteratedRanker": CodeGeneratorWithIteratedRanker,
     "CodeGeneratorWithSelfDebug": CodeGeneratorWithSelfDebug,
     "Hover": Hover,
-    "PAPILLON": PAPILLON,
+    "papillon_request_gen": PAPILLON_request_gen,
 }
 
 # Mapping from reward function name (string) to reward function
 REWARD_FUNCTION_MAP: Dict[str, Callable[..., Any]] = {
     "lcb_assert_test_gen": local_reward_fn,
     "lcb_final_reward_fn": final_reward_fn,
-    "papillon_final_reward_fn": compute_metrics,
+    "papillon_final_reward_fn": compute_overall_score,
     "papillon_query_leakage": compute_query_leakage,
 }
 

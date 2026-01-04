@@ -40,7 +40,7 @@ class LLMJudge(dspy.Module):
 
         return dspy.Prediction(quality=judgment, leakage=pii_score)
 
-openai_lm = dspy.LM(model="openai/gpt-4.1-mini")
+openai_lm = dspy.LM(model="openai/gpt-4.1-mini", cache=True)
 llm_judge = LLMJudge()
 llm_judge.set_lm(openai_lm)
 

@@ -49,9 +49,9 @@ class DSPyExp(BasePPOExp):
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
             prompts_dataset = DSPyDataset(
-                data_file=self.cfg.data.val_data,
-                max_num_examples=self.cfg.data.max_num_examples,
-            )   
+                benchmark_name=self.cfg.dspy.benchmark_name,
+                max_num_examples=self.cfg.dspy.max_num_examples,
+            )
             return prompts_dataset
         return None
 
