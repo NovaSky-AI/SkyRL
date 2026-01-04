@@ -197,7 +197,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api 
     }'
 
 # Node 1 (worker)
-CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.backends.jax \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --extra gpu --extra tinker -m tx.tinker.backends.jax \
     --coordinator-address "node0:7777" \
     --num-processes 2 \
     --process-id 1
