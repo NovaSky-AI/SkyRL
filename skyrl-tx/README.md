@@ -119,7 +119,7 @@ for _ in range(6):
     print(f"Loss: {-np.dot(logprobs, weights) / weights.sum():.4f}")
 ```
 
-### Training with Sampling
+### Sampling
 
 ```python
 # After training, create a sampling client
