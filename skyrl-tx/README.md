@@ -211,6 +211,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --extra gpu --extra tinker -m tx.tinker.back
 # Start vLLM
 VLLM_ALLOW_RUNTIME_LORA_UPDATING=True \
 VLLM_PLUGINS=lora_filesystem_resolver \
+VLLM_LORA_RESOLVER_CACHE_DIR=/tmp/lora_models/ \
 CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --with vllm vllm serve Qwen/Qwen3-4B \
     --tensor-parallel-size 4 --port 7999 --enable-lora
 
