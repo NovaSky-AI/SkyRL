@@ -9,6 +9,7 @@ import base64
 import zlib
 from pydantic import BaseModel
 from .lcb.data import lcb_data
+from .utils import get_benchmark_data
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,7 @@ class DSPyDataset:
 
     def __init__(
         self,
-        data_file: str,
+        benchmark_name: str,
         max_num_examples: int = None,
     ):
         """
@@ -121,18 +122,21 @@ class DSPyDataset:
             data_file: JSON file path (e.g., "/path/to/livecodebench.json")
             max_num_examples: Maximum number of examples to return. If None, returns all examples.
         """
-        if data_file is None:
-            raise ValueError("'data_file' must be provided")
         
-        self.data_file = data_file
-        self.max_num_examples = max_num_examples
-        print('loading dspy dataset...')
-        pkl_path = "/home/ray/data/lcb/live_code_bench_dataset_test.pkl"
-        with open(pkl_path, "rb") as f:
-            examples = pickle.load(f)
-        train_set, test_set = examples[:400], examples[400:]
-        self.examples = train_set
-        print('done loading dspy dataset')
+        self.benchmark_name = benchmark_name
+        self.data_function = get_benchmark_data(benchmark_name)
+        self.train_set, self.test_set = self.data_function()
+        self.examples = self.train_set[:max_num_examples]
+
+        # self.data_file = data_file
+        # self.max_num_examples = max_num_examples
+        # print('loading dspy dataset...')
+        # pkl_path = "/home/ray/data/lcb/live_code_bench_dataset_test.pkl"
+        # with open(pkl_path, "rb") as f:
+        #     examples = pickle.load(f)
+        # train_set, test_set = examples[:400], examples[400:]
+        # self.examples = train_set
+        # print('done loading dspy dataset')
 
         logger.info(f"DSPyDataset initialized with {len(self.examples)} examples")
 

@@ -178,5 +178,12 @@ def get_split(split="test"):
 
 def lcb_data():
     # return None, get_split("test")
+
+    pkl_path = "/home/ray/data/lcb/live_code_bench_dataset_test.pkl"
+    with open(pkl_path, "rb") as f:
+        examples = pickle.load(f)
+    train_set, test_set = examples[:400], examples[400:]
+    return train_set, test_set
+    
     testset = get_split("test")
     return testset[:400], testset[400:]

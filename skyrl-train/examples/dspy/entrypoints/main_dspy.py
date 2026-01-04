@@ -20,6 +20,7 @@ class DSPyExp(BasePPOExp):
       
         return DSPyGenerator(
             generator_cfg=cfg.generator,
+            dspy_cfg=cfg.dspy,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
         )
@@ -31,8 +32,8 @@ class DSPyExp(BasePPOExp):
             TerminalBenchTaskDataset: The training dataset.
         """
         prompts_dataset = DSPyDataset(
-            data_file=self.cfg.data.train_data,
-            max_num_examples=self.cfg.data.max_num_examples,
+            benchmark_name=self.cfg.dspy.benchmark_name,
+            max_num_examples=self.cfg.dspy.max_num_examples,
         )
         # make sure the dataset is large enough to train on
         assert (

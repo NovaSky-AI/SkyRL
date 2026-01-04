@@ -13,6 +13,7 @@ from pathlib import Path
 from .trial import TrialConfig, Trial, AgentResult
 from .lcb.utils import final_reward_fn, local_reward_fn
 from .lcb.programs import NaiveCodeGenerator, CodeGeneratorWithRanker_test
+from .utils import get_program, get_reward_function
 
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
@@ -32,6 +33,7 @@ class DSPyGenerator(GeneratorInterface):
     def __init__(
         self,
         generator_cfg: DictConfig,
+        dspy_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
     ):
@@ -43,6 +45,7 @@ class DSPyGenerator(GeneratorInterface):
         """
         self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
         self.generator_cfg = generator_cfg
+        self.dspy_cfg = dspy_cfg
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
 
@@ -151,10 +154,10 @@ class DSPyGenerator(GeneratorInterface):
         
         # TODO: make each DSPy trial configurable.
         trial_config = TrialConfig(
-            dspy_program=CodeGeneratorWithRanker_test, 
+            dspy_program=get_program(self.dspy_cfg.program), 
             example=prompt, 
-            final_reward_fn=final_reward_fn,
-            local_reward_fn=local_reward_fn,
+            final_reward_fn=get_reward_function(self.dspy_cfg.final_reward_fn),
+            local_reward_fn=get_reward_function(self.dspy_cfg.local_reward_fn),
             lm=self.dspy_lm
         )
 

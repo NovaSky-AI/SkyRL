@@ -11,7 +11,7 @@ NUM_NODES=1
 NUM_GPUS=1
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-Coder-1.5B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct"
 
 
 FLASH_ATTN=true
@@ -20,8 +20,8 @@ INFERENCE_ENGINE_TP=1
 
 train_data="$HOME/data/lcb/deepcoder_train_short.json"
 
-CKPTS_DIR="$HOME/ckpts"
-EXPORTS_DIR="$HOME/hf_ckpts"
+CKPTS_DIR="$HOME/ckpts_papillon"
+EXPORTS_DIR="$HOME/hf_ckpts_papillon"
 # train_data="['${DATA_DIR}/deepcoder_train_short.json']"
 # val_data="['${DATA_DIR}/test_livecodebench_short.json']"
 
@@ -31,10 +31,10 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   data.train_data=$train_data \
   data.val_data=$train_data \
   +dspy.max_num_examples=400 \
-  +dspy.program="CodeGeneratorWithRanker_test" \
-  +dspy.benchmark_name="lcb" \
-  +dspy.local_reward_fn="lcb_assert_test_gen" \
-  +dspy.final_reward_fn="lcb_final_reward_fn" \
+  +dspy.program="PAPILLON_request_gen" \
+  +dspy.benchmark_name="papillon" \
+  +dspy.local_reward_fn="papillon_query_leakage" \
+  +dspy.final_reward_fn="papillon_final_reward_fn" \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
