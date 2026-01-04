@@ -229,6 +229,7 @@ class MegatronWorker:
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
         provider.moe_token_dispatcher_type = "alltoall"
+        provider.moe_router_load_balancing_type = "none"
 
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
