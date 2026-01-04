@@ -192,9 +192,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api 
         "max_lora_rank": 1,
         "tensor_parallel_size": 4,
         "fully_sharded_data_parallel_size": 2,
+        "train_micro_batch_size": 8,
+        "sample_max_num_sequences": 256,
         "coordinator_address": "node0:7777",
         "num_processes": 2
-    }'
+    }' > out.log
 
 # Node 1 (worker)
 CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --extra gpu --extra tinker -m tx.tinker.backends.jax \
