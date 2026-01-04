@@ -193,8 +193,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api 
         "tensor_parallel_size": 4,
         "fully_sharded_data_parallel_size": 2,
         "coordinator_address": "node0:7777",
-        "num_processes": 2,
-        "process_id": 0
+        "num_processes": 2
     }'
 
 # Node 1 (worker)
