@@ -10,7 +10,7 @@ from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
 from examples.terminal_bench.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
-
+from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 
 class TerminalBenchExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, inference_engine_client):
@@ -51,6 +51,28 @@ class TerminalBenchExp(BasePPOExp):
             )
             return prompts_dataset
         return None
+
+    def get_trainer(
+        self,
+        cfg,
+        tracker,
+        tokenizer,
+        train_dataset,
+        eval_dataset,
+        inference_engine_client,
+        generator,
+        colocate_pg,
+    ):
+        return FullyAsyncRayPPOTrainer(
+            cfg=cfg,
+            tracker=tracker,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            inference_engine_client=inference_engine_client,
+            generator=generator,
+            colocate_pg=colocate_pg,
+        )
 
 
 @ray.remote(num_cpus=1)

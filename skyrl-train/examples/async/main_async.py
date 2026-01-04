@@ -5,7 +5,7 @@ Main entrypoint for async training.
 import hydra
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from .async_trainer import AsyncRayPPOTrainer
+from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
 import asyncio
 from skyrl_train.utils import initialize_ray
 import ray
@@ -23,7 +23,7 @@ class AsyncPPOExp(BasePPOExp):
         generator,
         colocate_pg,
     ):
-        return AsyncRayPPOTrainer(
+        return FullyAsyncRayPPOTrainer(
             cfg=cfg,
             tracker=tracker,
             tokenizer=tokenizer,
@@ -33,7 +33,7 @@ class AsyncPPOExp(BasePPOExp):
             generator=generator,
             colocate_pg=colocate_pg,
         )
-
+        
     def run(self):
         trainer = self._setup_trainer()
         # Start the async training loop

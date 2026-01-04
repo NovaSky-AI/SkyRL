@@ -366,6 +366,7 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = request_payload["json"].pop("session_id", None)
+        # print(f"CHARLIE session_id: {session_id}")
         if session_id is None:
             # if session_id is not provided, we'll use a random engine
             engine_idx = random.randint(0, len(self.engines) - 1)
