@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
+from skyrl_train.generators.context_folding import ContextFolder
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
@@ -56,33 +57,6 @@ class AgentLoopState:
     rollout_logprobs: Optional[List[float]]
     response_end_idx: Optional[int]
     done: bool
-
-    def summarize_chat_history(self, initial_chat_history_length: int) -> ConversationType:
-        """
-        Summarize the chat history.
-        """
-        summary_prompt = """
-        Your operational context is full. Generate a concise summary by populating the template below. 
-        This summary will be your sole context for continuing this task. Be brief but ensure all critical data is present.
-        - Mission Objective
-            – Original query: [State the user's verbatim query.] 
-            – Verification checklist: [Status (VERIFIED/PENDING)] [Checklist item]
-        - Key Findings
-            – Sources: [List the most critical, verified facts with sources.]
-            – Discrepancies: [Note any conflicting information found between sources.] 
-        - Tactical Plan
-            - Promising leads: [List the best remaining keywords, sources, or angles to investigate.] 
-            – Known dead ends: [List queries or sources that proved useless to avoid repetition.] 
-            – Immediate next action: [State the exact tool call or query you were about to execute next.] 
-        Now generate the summary, and put your summary inside tag <summary></summary>.
-        """
-
-        history_to_summarize = self.chat_history[initial_chat_history_length:]
-        summarize_request = self.chat_history[:initial_chat_history_length].copy()
-        summarize_request.extend(history_to_summarize)
-        summarize_request.append({"role": "user", "content": summary_prompt})
-        
-        return summarize_request
 
 @dataclass
 class TurnOutput:
@@ -145,11 +119,21 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.max_turns = generator_cfg.max_turns
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
-        self.summarize_chat = generator_cfg.summarize_chat
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
         self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
+        self.context_folder = None
+        context_folding_cfg = getattr(generator_cfg, "context_folding", None)
+        if context_folding_cfg is not None and context_folding_cfg.get("enabled", False):
+            self.context_folder = ContextFolder(
+                context_folding_cfg,
+                tokenizer=self.tokenizer,
+                inference_engine_client=self.inference_engine_client,
+                backend=self.generator_cfg.backend,
+                base_sampling_params=self.generator_cfg.sampling_params,
+                chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
+            )
         if self.skyrl_gym_cfg.max_env_workers > 0:
             self.env_executor = ThreadPoolExecutor(
                 max_workers=self.skyrl_gym_cfg.max_env_workers, thread_name_prefix="skyrl-gym-env-"
@@ -203,64 +187,19 @@ class SkyRLGymGenerator(GeneratorInterface):
             if not self.use_conversation_multi_turn:
                 raise ValueError("`step_wise_trajectories` doesn't support `use_conversation_multi_turn=False`")
 
+        context_folding_cfg = getattr(generator_cfg, "context_folding", None)
+        if context_folding_cfg is not None and context_folding_cfg.get("enabled", False):
+            if not self.generator_cfg.step_wise_trajectories:
+                raise ValueError("`context_folding.enabled` requires `step_wise_trajectories=True`")
+            if self.custom_chat_template is not None:
+                raise ValueError("`context_folding.enabled` doesn't support custom chat templates")
+
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(executor, func, *args, **kwargs)
         else:
             return func(*args, **kwargs)
-    
-    async def _summarize_and_compress_history(
-        self,
-        agent_loop_state: AgentLoopState,
-        initial_chat_history_length: int,
-        session_id: str,
-        sampling_params: Optional[Dict[str, Any]] = None,
-    ) -> AgentLoopState:
-
-        summarize_request = agent_loop_state.summarize_chat_history(initial_chat_history_length)
-    
-        summary_input_ids = self.tokenizer.apply_chat_template(
-            summarize_request,
-            add_generation_prompt=True,
-            tokenize=True,
-            **self.generator_cfg.chat_template_kwargs,
-        )
-        
-        engine_input = InferenceEngineInput(
-            prompt_token_ids=[summary_input_ids],
-            session_ids=[session_id],
-            sampling_params=sampling_params
-        )
-
-        engine_output = await self.inference_engine_client.generate(engine_input)
-        summary_text = engine_output["responses"][0]
-        
-        match = re.search(r'<summary>(.*?)</summary>', summary_text, re.DOTALL)
-        if match:
-            summary_text = match.group(1).strip()
-        
-        new_chat_history = agent_loop_state.chat_history[:initial_chat_history_length].copy()
-        new_chat_history.append({
-            "role": "user", 
-            "content": f"[Previous conversation summary]:\n{summary_text}\n\nPlease continue the task."
-        })
-        
-        # re-tokenize the compressed history
-        new_input_ids = self.tokenizer.apply_chat_template(
-            new_chat_history,
-            add_generation_prompt=True,
-            tokenize=True,
-            **self.generator_cfg.chat_template_kwargs,
-        )
-        
-        agent_loop_state.chat_history = new_chat_history
-        agent_loop_state.input_ids = new_input_ids
-        agent_loop_state.loss_mask = []
-        if agent_loop_state.rollout_logprobs is not None:
-            agent_loop_state.rollout_logprobs = []
-        
-        return agent_loop_state
 
     async def agent_loop(
         self,
@@ -347,17 +286,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             response_end_idx=None,
             done=False,
         )
-
-        threshold = int(max_input_length * 0.8)
+        context_folder = self.context_folder
+        fold_count = 0
 
         while not agent_loop_state.done:
-            
-            logger.info(f"[AgentLoop] Running context length (tokens): {len(agent_loop_state.input_ids)}")
-            
-            if self.summarize_chat and len(agent_loop_state.input_ids) > threshold:
-                agent_loop_state = await self._summarize_and_compress_history(agent_loop_state, initial_chat_history_length, session_id, sampling_params)
-                logger.info(f"Summarized chat history. New length: {len(agent_loop_state.input_ids)}")
-
+         
             if len(agent_loop_state.input_ids) > max_input_length:
                 stop_reason = "length"
                 break
@@ -473,6 +406,54 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
 
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
+
+            if context_folder is not None and not agent_loop_state.done:
+                fold_result = await context_folder.fold(
+                    chat_history=agent_loop_state.chat_history,
+                    current_input_length=len(agent_loop_state.input_ids),
+                    max_input_length=max_input_length,
+                    initial_chat_history_length=initial_chat_history_length,
+                    session_id=session_id,
+                    fold_count=fold_count,
+                )
+                if fold_result.folded:
+                    fold_count += 1
+                    if is_step_wise and context_folder.include_summary_in_training:
+                        if fold_result.summary_prompt_ids is None or fold_result.summary_output_ids is None:
+                            raise ValueError("Context folding summary output is missing prompt or response IDs")
+                        summary_turn_output = TurnOutput(
+                            output=fold_result.summary_text,
+                            output_ids=fold_result.summary_output_ids,
+                            output_logprobs=fold_result.summary_logprobs,
+                            new_obs=[],
+                            reward=0.0,
+                            obs_ids=[],
+                        )
+                        if not summary_turn_output.output_ids:
+                            logger.warning("Context folding summary produced empty output IDs; skipping summary step")
+                        else:
+                            summary_loss_mask = summary_turn_output.get_turn_loss_mask()
+                            summary_rollout_logprobs = summary_turn_output.get_turn_rollout_logprobs()
+                            summary_step_output = TrajectoryOutput(
+                                response_ids=summary_turn_output.output_ids,
+                                reward=0.0,
+                                stop_reason=fold_result.summary_stop_reason or "summary",
+                                loss_mask=summary_loss_mask,
+                                prompt_ids=fold_result.summary_prompt_ids,
+                                rollout_logprobs=summary_rollout_logprobs,
+                                env_metrics={},
+                            )
+                            agent_loop_output.step_outputs.append(summary_step_output)
+                            per_step_rewards.append((0.0, len(summary_turn_output.output_ids) - 1))
+                    elif context_folder.include_summary_in_training:
+                        logger.warning(
+                            "Context folding summary steps require `step_wise_trajectories=True`; skipping summary output"
+                        )
+
+                    agent_loop_state.chat_history = fold_result.new_chat_history
+                    if fold_result.new_input_ids is not None:
+                        agent_loop_state.input_ids = fold_result.new_input_ids
+                    agent_loop_state.response_end_idx = None
 
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
