@@ -217,7 +217,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --with vllm vllm serve Qwen/Qwen3-4B \
 # Start SkyRL tx with external inference
 CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api \
     --base-model Qwen/Qwen3-4B \
-    --backend-config '{"tensor_parallel_size": 4, "external_inference_url": "http://0.0.0.0:7999"}'
+    --external-inference-url "http://0.0.0.0:7999" \
+    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1, "tensor_parallel_size": 4, "train_micro_batch_size": 8}' > out.log
 ```
 
 ## 🎯 Supported Features
