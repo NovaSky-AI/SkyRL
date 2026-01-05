@@ -15,4 +15,8 @@ def pop_openai_kwargs(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     if tool_parser is not None:
         openai_kwargs["tool_parser"] = tool_parser
 
+    reasoning_parser = engine_kwargs.pop("reasoning_parser", None)
+    if reasoning_parser is not None:
+        openai_kwargs["reasoning_parser"] = reasoning_parser
+
     return openai_kwargs

@@ -172,13 +172,18 @@ def validate_consistency_for_latest_checkpoint(
         if checkpoint_dirs:
             global_step_values = [extract_step_from_path(d) for d in checkpoint_dirs]
             max_global_step_in_folder = max(global_step_values)
-            # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
+            # NOTE (sumanthrh): We allow a checkpoint folder to be `save_interval` steps ahead of the latest checkpoint
+            # in `latest_checkpoint_file`. This is because the last checkpoint can be an incomplete checkpoint.
             if max_global_step_in_folder - ckpt_iteration > save_interval:
                 max_global_step_in_folder_path = os.path.join(
                     root_ckpt_folder, f"{GLOBAL_STEP_PREFIX}{max_global_step_in_folder}"
                 )
                 raise ValueError(
-                    f"Inconsistent checkpoint folder. Latest checkpoint file {latest_checkpoint_file} points to {ckpt_iteration}, but the folder has checkpoints with higher global step - Found global steps {max_global_step_in_folder_path}. This is likely because checkpoint {max_global_step_in_folder_path} was created in a previous run while the latest run is at {checkpoint_path}. Please delete/move checkpoints from older runs and try again."
+                    f"Inconsistent checkpoint folder. Latest checkpoint file {latest_checkpoint_file} points to "
+                    f"{ckpt_iteration}, but the folder has checkpoints with higher global step - Found global steps "
+                    f"{max_global_step_in_folder_path}. This is likely because checkpoint "
+                    f"{max_global_step_in_folder_path} was created in a previous run while the latest run is at "
+                    f"{checkpoint_path}. Please delete/move checkpoints from older runs and try again."
                 )
 
 
@@ -218,12 +223,13 @@ def calculate_per_dataset_metrics(
         subset_uids = [concat_uids[i] for i in indices]
 
         # Calculate metrics for this subset
-        avg_score, pass_at_n = get_metrics_from_generator_output(subset_generator_output, subset_uids)
+        overall_metrics = get_metrics_from_generator_output(subset_generator_output, subset_uids)
 
         # Add to eval metrics with proper naming
         sanitized_data_source = sanitize_data_source(data_source)
-        eval_metrics[f"eval/{sanitized_data_source}/avg_score"] = avg_score
-        eval_metrics[f"eval/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = pass_at_n
+        eval_metrics[f"eval/{sanitized_data_source}/avg_score"] = overall_metrics["avg_score"]
+        eval_metrics[f"eval/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = overall_metrics["pass_at_n"]
+        eval_metrics[f"eval/{sanitized_data_source}/mean_positive_reward"] = overall_metrics["mean_positive_reward"]
 
     return eval_metrics
 
@@ -329,7 +335,8 @@ def handle_dynamic_sampling(
         )
         return processed_output, processed_uids, keep_sampling, collected_state
     elif sampling_type == "filter":
-        # For filter strategies, accumulate the generator output and UIDs across batches in collected_state if we are sampling repeatedly.
+        # For filter strategies, accumulate the generator output and UIDs
+        # across batches in collected_state if we are sampling repeatedly.
         return handle_filter_sampling(generator_output, uids, sampling_config, collected_state)
     else:
         raise ValueError(f"Invalid dynamic sampling type: {sampling_type}")
@@ -556,6 +563,31 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
     return filtered
 
 
+def zero_variance_filter(rewards: List[float], uids: List[str]) -> List[int]:
+    """
+    Given a list of trajectory level rewards and uids, return the indices of the trajectories with non-zero variance rewards.
+
+    Args:
+        rewards: List[float]
+        uids: List[str]
+
+    Returns:
+        List[int]
+    """
+    # Group by UID and calculate standard deviation
+    uid2metric_vals = defaultdict(list)
+    for uid, reward in zip(uids, rewards):
+        uid2metric_vals[uid].append(reward)
+
+    # Identify UIDs to keep: non-zero variance or singletons
+    kept_uids_set = {
+        uid for uid, metric_vals in uid2metric_vals.items() if np.std(metric_vals) > 0 or len(metric_vals) == 1
+    }
+
+    # Return indices of trajectories with kept UIDs
+    return [i for i, uid in enumerate(uids) if uid in kept_uids_set]
+
+
 def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput):
     """Validate the generator output.
 
@@ -582,26 +614,31 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "rewards",
             "rollout_logprobs",
         ]:
-            assert len(generator_output[key]) == len(
-                generator_output["response_ids"]
-            ), f"Generator output {key} length must be equal to response_ids length, got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+            assert len(generator_output[key]) == len(generator_output["response_ids"]), (
+                f"Generator output {key} length must be equal to response_ids length, "
+                f"got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+            )
 
-    # make sure that each element of response ids and loss masks are all the same length (and token level rewards if used)
+    # make sure that each element of response ids and loss masks are all the same length
+    # (and token level rewards if used)
     for i, (response_ids, loss_masks, rewards) in enumerate(
         zip(generator_output["response_ids"], generator_output["loss_masks"], generator_output["rewards"])
     ):
-        assert len(response_ids) == len(
-            loss_masks
-        ), f"Response ids and loss masks must have the same length, for sample {i} got {len(response_ids)} and {len(loss_masks)}"
+        assert len(response_ids) == len(loss_masks), (
+            f"Response ids and loss masks must have the same length, "
+            f"for sample {i} got {len(response_ids)} and {len(loss_masks)}"
+        )
         if isinstance(rewards, list):
-            assert len(rewards) == len(
-                response_ids
-            ), f"Token rewards and response ids must have the same length, for sample {i} got {len(rewards)} and {len(response_ids)}"
+            assert len(rewards) == len(response_ids), (
+                f"Token rewards and response ids must have the same length, "
+                f"for sample {i} got {len(rewards)} and {len(response_ids)}"
+            )
 
         if generator_output["rollout_logprobs"]:
-            assert len(response_ids) == len(
-                generator_output["rollout_logprobs"][i]
-            ), f"Response ids and rollout logprobs must have the same length, for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
+            assert len(response_ids) == len(generator_output["rollout_logprobs"][i]), (
+                f"Response ids and rollout logprobs must have the same length, "
+                f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
+            )
 
     # loss masks should be non-zero for at least one element for trainer
     if np.concatenate(generator_output["loss_masks"]).sum() == 0:

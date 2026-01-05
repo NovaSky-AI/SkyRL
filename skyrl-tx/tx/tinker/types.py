@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 from urllib.parse import urlparse
@@ -130,12 +129,16 @@ class OptimStepOutput(BaseModel):
 
 
 class SaveWeightsForSamplerInput(BaseModel):
-    path: str
+    path: str | None = None
+    sampling_session_seq_id: int | None = None
+    seq_id: int | None = None
+    sampling_session_id: str | None = None
 
 
 class SaveWeightsForSamplerOutput(BaseModel):
-    path: str
+    path: str | None = None
     type: str
+    sampling_session_id: str | None = None
 
 
 class SaveWeightsInput(BaseModel):
@@ -163,6 +166,7 @@ class SamplingParams(BaseModel):
     stop_tokens: list[int] | None = None
     stop_strings: list[str] | None = None
     top_k: int = -1  # -1 for no limit
+    top_p: float = 1.0  # 1.0 for no filtering
 
 
 class ModelMetadata(BaseModel):
@@ -201,8 +205,7 @@ class EngineMetrics(BaseModel):
 # These are prepared by the engine and passed to the backend
 
 
-@dataclass
-class PreparedModelPassBatch:
+class PreparedModelPassBatch(BaseModel):
     """Prepared batch data for forward/forward_backward operations.
 
     Engine extracts this from requests, backend converts to JAX arrays and computes.
@@ -223,8 +226,7 @@ class PreparedModelPassBatch:
     request_batch_slices: list[tuple[str, str, int, int]]
 
 
-@dataclass
-class PreparedSampleBatch:
+class PreparedSampleBatch(BaseModel):
     """Prepared batch data for sample operations.
 
     Engine extracts this from requests, backend converts to JAX arrays and computes.

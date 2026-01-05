@@ -381,17 +381,35 @@ def test_get_metrics_from_generator_output():
         "rollout_logprobs": None,
     }
     uids = ["a", "b"]
-    avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
-    assert avg_score == 1.5
-    assert pass_at_n == 1.0
+    metrics = get_metrics_from_generator_output(generator_output, uids)
+    assert metrics["avg_score"] == 1.5
+    assert metrics["pass_at_n"] == 1.0
+    assert metrics["mean_positive_reward"] == 1.5
 
     # Per token rewards, where rewards are List[List[float]], so for pass_at_n we use the last
     # token's reward to signify the trajectory's reward
     generator_output["rewards"] = [[1.0, 0.0], [0.0, 1.0]]
     uids = ["a", "b"]
-    avg_score, pass_at_n = get_metrics_from_generator_output(generator_output, uids)
-    assert avg_score == 1.0
-    assert pass_at_n == 0.5
+    metrics = get_metrics_from_generator_output(generator_output, uids)
+    assert metrics["avg_score"] == 1.0
+    assert metrics["pass_at_n"] == 0.5
+    assert metrics["mean_positive_reward"] == 1.0
+
+    # Mixed rewards with some negative rewards
+    generator_output["rewards"] = [-1.0, 2.0]
+    uids = ["a", "b"]
+    metrics = get_metrics_from_generator_output(generator_output, uids)
+    assert metrics["avg_score"] == 0.5
+    assert metrics["pass_at_n"] == 0.5
+    assert metrics["mean_positive_reward"] == 1.0
+
+    # Mixed per-token rewards with negatives - per-token rewards
+    generator_output["rewards"] = [[1.0, -1.0], [-0.5, 0.5]]
+    uids = ["a", "b"]
+    metrics = get_metrics_from_generator_output(generator_output, uids)
+    assert metrics["avg_score"] == 0.0
+    assert metrics["pass_at_n"] == 0.5
+    assert metrics["mean_positive_reward"] == 0.75
 
 
 @pytest.mark.asyncio

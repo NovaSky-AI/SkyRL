@@ -17,7 +17,7 @@ SkyRL is a full-stack RL library that provides the following components:
 - [`skyrl-agent`](./skyrl-agent): Our agent layer for training long-horizon, real-world agents. For exact reproduction of [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0) results, please checkout to commit a0d50c482436af7fac8caffa4533616a78431d66.
 - [`skyrl-train`](./skyrl-train): Our modular, performant training framework for RL.
 - [`skyrl-gym`](./skyrl-gym): Our gymnasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
-- (**EXPERIMENTAL**) [`skyrl-tx`](./skyrl-tx): A cross-platform library to enable users to expose a local [Tinker](https://thinkingmachines.ai/tinker/)-like REST API for model post-training.
+- [`skyrl-tx`](./skyrl-tx): A cross-platform library to enable users to expose a local [Tinker](https://thinkingmachines.ai/tinker/)-like REST API for model post-training.
 
 # Getting Started
 
@@ -39,6 +39,8 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
+- 📜 [Fully Async RL with In-Flight Weight Updates in SkyRL](https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html)
+- 📜 [Open Recipes on SkyRL](https://skyrl.readthedocs.io/en/latest/recipes/overview.html)
 - 📜 [SkyRL-Agent Paper](https://arxiv.org/pdf/2511.16108)
 - 📜 [On-Policy Distillation on SkyRL Blog Post](https://novasky-ai.notion.site/on-policy-distillation)
 - 📜 [Search-R1 on SkyRL Blog Post](https://novasky-ai.notion.site/skyrl-searchr1)

@@ -13,8 +13,7 @@ from sqlmodel import create_engine, Session, select, update, func
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.tinker.backends import JaxBackend
-from tx.tinker.backends.jax import JaxBackendConfig
+from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
@@ -415,9 +414,16 @@ class TinkerEngine:
             self.backend.save_sampler_checkpoint(output_path, model_id)
             logger.info(f"Saved LoRA adapter weights for model {model_id} to {output_path}")
 
+        # Return path=None when using sampling_session_seq_id and seq_id (SDK expects this)
+        if request_data.sampling_session_seq_id is not None and request_data.seq_id is not None:
+            output_path_str = None
+        else:
+            output_path_str = f"tinker://{model_id}/{checkpoint_id}"
+
         return types.SaveWeightsForSamplerOutput(
-            path=f"tinker://{model_id}/{checkpoint_id}",
+            path=output_path_str,
             type="save_weights_for_sampler",
+            sampling_session_id=request_data.sampling_session_id,
         )
 
     def _complete_futures(self, results: dict[str, BaseModel]):

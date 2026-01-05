@@ -32,7 +32,8 @@ class InferenceEngineClient(InferenceEngineInterface):
     """
     Client to talk to a set of InferenceEngines.
 
-    Note that InferenceEngineClient sub-classes InferenceEngineInterface so it can be used as if talking to a single engine.
+    Note that InferenceEngineClient sub-classes InferenceEngineInterface so it can be used as if talking to a single
+    engine.
     """
 
     def __init__(
@@ -174,7 +175,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
 
         For the final response, we return `InferenceEngineOutput` with:
-        - `responses`: decoded at the end from `response_ids` if generation is completed in > 1 turns, otherwise the text response of the first turn.
+        - `responses`: decoded at the end from `response_ids` if generation is completed in > 1 turns, otherwise
+            the text response of the first turn.
         - `response_ids`: the accumulated output tokens
         - `stop_reasons`: the stop reason of the final response
         - `response_logprobs`: the accumulated logprobs
@@ -255,15 +257,17 @@ class InferenceEngineClient(InferenceEngineInterface):
         self, engine_idx: int, original_request_payload: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not "abort".
+        Keep sending `chat_completion` requests (with previous responses accumulated) until the finish_reason is not
+        "abort".
 
-        The retry mechanism is intended to be used in combination with `pause_generation()` and `resume_generation()` for
-        in-flight weight updates and partial rollouts.
+        The retry mechanism is intended to be used in combination with `pause_generation()` and `resume_generation()`
+        for in-flight weight updates and partial rollouts.
 
         This method is equivalent to a single `chat_completion()` call if we do not use `pause_generation()`.
 
         For subsequent retry requests, we can reuse the original request with the following exceptions:
-        - Update the last assistant message content to accumulated content, where the role uses the first non-empty response's role.
+        - Update the last assistant message content to accumulated content, where the role uses the first non-empty
+          response's role.
         - Set continue_final_message=True and add_generation_prompt=False.
         - Adjust remaining max tokens if `max_tokens` or `max_completion_tokens` is present.
         - If no tokens have been generated yet, resend the original request unchanged.
@@ -344,9 +348,11 @@ class InferenceEngineClient(InferenceEngineInterface):
             if base_response is None:
                 if finish_reason != "abort":
                     # If we only made one request and it is not aborted, return the partial result directly.
-                    # This is the codepath that will hit when we do not use `pause_generation()` or `resume_generation()`.
+                    # This is the codepath that will hit when we do not use `pause_generation()`
+                    # or `resume_generation()`.
                     return partial_response
-                # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when modifying this.
+                # NOTE(Charlie): not doing deepcopy here to avoid copying large logprobs, so be careful when
+                # modifying this.
                 base_response = partial_response.copy()
 
         # 2. Build final response by combining fields
@@ -434,9 +440,10 @@ class InferenceEngineClient(InferenceEngineInterface):
                 error_details = result.get("error", result)  # resolves vllm/sglang format difference
                 error_code = error_details["code"]
                 error_type = error_details["type"]
+                error_message = error_details["message"]
                 return ErrorResponse(
                     error=ErrorInfo(
-                        message=f"In one of the engines that SkyRL manages, an error occurred: {error_details['message']}",
+                        message=f"In one of the engines that SkyRL manages, an error occurred: {error_message}",
                         type=error_type,
                         code=error_code,
                     ),
@@ -686,7 +693,7 @@ def _parse_partial_response_and_inplace_update_accum(
     choice = partial_response["choices"][0]
     finish_reason: str = choice["finish_reason"]
     stop_reason: Optional[str] = choice.get("stop_reason", None)
-    new_content: str = choice["message"]["content"]
+    new_content: str = choice["message"]["content"] or ""
 
     assert (
         partial_response["usage"] is not None and partial_response["usage"]["completion_tokens"] is not None

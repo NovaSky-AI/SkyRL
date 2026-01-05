@@ -1,22 +1,24 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen3-1.7B-Base on DAPO training data and validate on AIME 2024.
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/algorithms/dapo/run_dapo_qwen3_1.7b_aime.sh
+# Colocated DAPO training+generation for Qwen3-30B-A3B-Base on DAPO with Megatron.
+# Should run on 2 node of 8xH100s
 
-MODEL_NAME="Qwen/Qwen3-1.7B-Base"
+# bash examples/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/megatron/run_megatron_dapo_qwen3_30b_a3b.sh
+
+MODEL_NAME="Qwen/Qwen3-30B-A3B-Base"
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
-NUM_NODES=1
+NUM_NODES=2
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=8
-INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
+NUM_INFERENCE_ENGINES=2
+INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="wandb"  # change to "console" to print to stdout
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
-# use dr. grpo loss reduction
+# use token mean loss reduction
 LOSS_REDUCTION="token_mean"
 # applies overlong filtering (but not soft overlong punishment)
 APPLY_OVERLONG_FILTERING=true
@@ -41,7 +43,19 @@ EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
 LR=1e-6
 
-uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
+# megatron config
+MEGATRON_TP=4
+MEGATRON_PP=1
+MEGATRON_CP=1
+MEGATRON_EP=8
+MEGATRON_ETP=1
+
+
+# TIS parameters
+TIS_IMP_RATIO_CAP=2.0
+USE_TIS=true
+
+uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -59,12 +73,18 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.policy.model.path="$MODEL_NAME" \
   trainer.placement.colocate_all=true \
-  trainer.strategy=fsdp2 \
+  trainer.strategy=megatron \
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
-  trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
+  trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
+  trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
+  trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
+  trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
+  trainer.algorithm.use_tis=$USE_TIS \
+  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
   trainer.epochs=20 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
@@ -74,8 +94,8 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=8 \
-  trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
@@ -91,13 +111,13 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
-  generator.gpu_memory_utilization=0.8 \
+  generator.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_1.7b_base" \
-  trainer.export_path="$HOME/exports/dapo_qwen3_1.7b_base" \
-  trainer.hf_save_interval=10 \
+  trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
+  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
+  trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_1.7b_base" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   $@

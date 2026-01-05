@@ -13,9 +13,9 @@ from omegaconf import DictConfig
 from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
+import numpy as np
 from collections import defaultdict
 
-import numpy as np
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -56,6 +56,7 @@ from skyrl_train.utils.trainer_utils import (
     ResumeMode,
     DynamicSamplingState,
     build_dataloader,
+    zero_variance_filter,
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
@@ -674,7 +675,7 @@ class RayPPOTrainer:
 
         # only use `generator_output_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
-        mean_raw_reward, pass_at_n = get_metrics_from_generator_output(
+        overall_metrics = get_metrics_from_generator_output(
             generator_output_for_metrics,
             uids_for_metrics,
         )
@@ -689,6 +690,12 @@ class RayPPOTrainer:
             # Token-level rewards: rewards is List[List[float]]
             per_token_rewards = rewards
         else:
+            if self.cfg.trainer.algorithm.zero_variance_filter:
+                kept_indices_set = set(zero_variance_filter(rewards, uids))
+                generator_output["loss_masks"] = [
+                    [0] * len(mask) if i not in kept_indices_set else mask
+                    for i, mask in enumerate(generator_output["loss_masks"])
+                ]
             # Response-level rewards: rewards is List[float], convert to per-token rewards
             for reward, response in zip(rewards, responses):
                 per_token_reward = [0.0] * len(response)
@@ -698,12 +705,14 @@ class RayPPOTrainer:
         n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
 
         reward_metrics = {
-            f"reward/avg_pass_at_{n_samples_per_prompt}": pass_at_n,
-            "reward/avg_raw_reward": mean_raw_reward,
+            f"reward/avg_pass_at_{n_samples_per_prompt}": overall_metrics["pass_at_n"],
+            "reward/avg_raw_reward": overall_metrics["avg_score"],
+            "reward/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
         self.all_metrics.update(reward_metrics)
-        logger.info(f"reward/avg_pass_at_{n_samples_per_prompt}: {pass_at_n}, reward/avg_raw_reward: {mean_raw_reward}")
-
+        logger.info(
+            f"reward/avg_pass_at_{n_samples_per_prompt}: {overall_metrics['pass_at_n']}, reward/avg_raw_reward: {overall_metrics['avg_score']}, reward/mean_positive_reward: {overall_metrics['mean_positive_reward']}"
+        )
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
         return generator_output

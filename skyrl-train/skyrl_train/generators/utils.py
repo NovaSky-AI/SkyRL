@@ -2,11 +2,19 @@ import torch
 from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
-from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.generators.base import (
+    GeneratorOutput,
+    GeneratorInput,
+    TrajectoryID,
+    BatchMetadata,
+    TrainingPhase,
+    MetricsOutput,
+)
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
+
 
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 that preserves thinking tokens
@@ -101,9 +109,9 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 
 
 @torch.no_grad()
-def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
+def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> MetricsOutput:
     """
-    Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
+    Get `mean_raw_reward` (or avg_score), `pass_at_n`, and `mean_positive_reward` from generator output.
 
     The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
     calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
@@ -122,6 +130,12 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         # Token-level rewards: rewards is List[List[float]]
         # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
         mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
+
+        # For each trajectory, we sum over the positive token rewards for mean_positive_reward computation
+        mean_positive_reward = float(
+            np.mean([sum(max(r, 0) for r in trajectory_rewards) for trajectory_rewards in rewards])
+        )
+
         # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
         for i, cur_trajectory_rewards in enumerate(rewards):
             if len(cur_trajectory_rewards) == 0:
@@ -129,6 +143,7 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
             uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
     else:
         mean_raw_reward = float(np.mean(rewards))
+        mean_positive_reward = float(np.mean(np.maximum(rewards, 0.0)))
         for i, reward in enumerate(rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)
 
@@ -138,7 +153,11 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         uid_to_trajectory_rewards
     )
 
-    return mean_raw_reward, pass_at_n
+    return MetricsOutput(
+        avg_score=mean_raw_reward,
+        pass_at_n=pass_at_n,
+        mean_positive_reward=mean_positive_reward,
+    )
 
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:

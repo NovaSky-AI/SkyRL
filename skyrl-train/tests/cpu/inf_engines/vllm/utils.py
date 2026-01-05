@@ -9,11 +9,12 @@ def test_pop_openai_kwargs():
     engine_kwargs = {
         "enable_auto_tools": 1,
         "tool_parser": "json",
+        "reasoning_parser": "my_parser",
         "other": "keep",
     }
     openai_kwargs = pop_openai_kwargs(engine_kwargs)
 
-    assert openai_kwargs == {"enable_auto_tools": True, "tool_parser": "json"}
+    assert openai_kwargs == {"enable_auto_tools": True, "tool_parser": "json", "reasoning_parser": "my_parser"}
     assert engine_kwargs == {"other": "keep"}
 
     engine_kwargs = {"enable_auto_tool_choice": 0, "tool_call_parser": "proto"}

@@ -127,7 +127,9 @@ class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnames=("max_length", "max_new_tokens", "max_top_k", "prompt_logprobs"))
+    @functools.partial(
+        jax.jit, static_argnames=("max_length", "max_new_tokens", "max_top_k", "use_top_p", "prompt_logprobs")
+    )
     def _prefill_and_decode(
         model,
         input_ids: jax.Array,
@@ -139,7 +141,9 @@ class GeneratorMixin:
         rngs: jax.Array,
         stop_tokens: jax.Array,
         top_k_values: jax.Array,
+        top_p_values: jax.Array,
         max_top_k: int,
+        use_top_p: bool,
         prompt_logprobs: bool = False,
     ):
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
@@ -165,11 +169,14 @@ class GeneratorMixin:
             zero_temp_mask = temperatures == 0.0
             scaled_logits = s.logits / jnp.where(zero_temp_mask, 1.0, temperatures)[:, None]
 
-            # Apply top_k filtering using static max_top_k
-            filtered_logits = apply_top_k_batch(scaled_logits, top_k_values, max_top_k)
+            # Apply top_k and top_p filtering
+            if max_top_k > 0:
+                scaled_logits = apply_top_k_batch(scaled_logits, top_k_values, max_top_k)
+            if use_top_p:
+                scaled_logits = apply_top_p_batch(scaled_logits, top_p_values)
 
             sampled = jax.vmap(lambda key, logit: jax.random.categorical(key, logit, axis=-1))(
-                sample_keys, filtered_logits
+                sample_keys, scaled_logits
             )
             greedy = jnp.argmax(s.logits, axis=-1)
             next_token = jnp.where(zero_temp_mask[:, None], greedy[:, None], sampled[:, None])
@@ -244,6 +251,7 @@ class GeneratorMixin:
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
         top_k_values = jnp.array([sampling_param.top_k for sampling_param in sampling_params], dtype=jnp.int32)
+        top_p_values = jnp.array([sampling_param.top_p for sampling_param in sampling_params], dtype=jnp.float32)
 
         # One PRNGKey per provided seed
         seeds = [sampling_param.seed for sampling_param in sampling_params]
@@ -260,8 +268,9 @@ class GeneratorMixin:
         # Capture prompt lengths for prompt_logprobs if requested
         prompt_lengths = attention_mask.sum(axis=1) if prompt_logprobs else None
 
-        # Compute max_top_k as static value (0 means no filtering)
+        # Compute static flags for top_k and top_p filtering
         max_top_k = max((sp.top_k for sp in sampling_params if sp.top_k > 0), default=0)
+        use_top_p = any(sp.top_p < 1.0 for sp in sampling_params)
 
         new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = self._prefill_and_decode(
             self,
@@ -274,7 +283,9 @@ class GeneratorMixin:
             rngs,
             stop_tokens,
             top_k_values,
+            top_p_values,
             max_top_k,
+            use_top_p,
             prompt_logprobs=prompt_logprobs,
         )
 
@@ -282,6 +293,15 @@ class GeneratorMixin:
         # stop_pos is -1 if no stop token found; has_stop is true only if found within limit
         has_stop = (stop_pos != -1) & (stop_pos <= max_tokens)
         end_positions = jnp.where(has_stop, stop_pos, max_tokens)
+
+        # In multi-host mode, gather all shards before device_get
+        if jax.process_count() > 1:
+            from jax.experimental import multihost_utils
+
+            (new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths) = jax.tree.map(
+                lambda x: multihost_utils.process_allgather(x, tiled=True),
+                (new_tokens, has_stop, new_logprobs, end_positions, prompt_logprobs_array, prompt_lengths),
+            )
 
         # Single device-to-host transfer
         (
@@ -335,14 +355,12 @@ def apply_top_k_batch(logits: jax.Array, k_values: jax.Array, max_k: int) -> jax
     Args:
         logits: Logits tensor of shape [batch_size, vocab_size]
         k_values: Per-example k values of shape [batch_size]. If k <= 0, no filtering.
-        max_k: Static maximum k value (must be > 0 if any filtering is applied).
+        max_k: Static maximum k value, must be > 0.
 
     Returns:
         Filtered logits with the same shape.
     """
-    if max_k <= 0:
-        return logits
-
+    assert max_k > 0
     top_values, top_indices = jax.lax.top_k(logits, max_k)
 
     # Keep only first k values per example
@@ -354,3 +372,32 @@ def apply_top_k_batch(logits: jax.Array, k_values: jax.Array, max_k: int) -> jax
     result = jnp.full_like(logits, -jnp.inf).at[batch_idx, top_indices].set(top_values)
 
     return jnp.where(k_values[:, None] <= 0, logits, result)
+
+
+def apply_top_p_batch(logits: jax.Array, p_values: jax.Array) -> jax.Array:
+    """Keep only tokens with cumulative probability up to p, set rest to -inf.
+
+    Args:
+        logits: Logits tensor of shape [batch_size, vocab_size]
+        p_values: Per-example p values of shape [batch_size]. If p >= 1.0, no filtering.
+
+    Returns:
+        Filtered logits with the same shape.
+    """
+    # Sort by logits (equivalent to sorting by probs since softmax is monotonic)
+    sorted_indices = jnp.argsort(-logits, axis=-1)
+    sorted_logits = jnp.take_along_axis(logits, sorted_indices, axis=-1)
+    sorted_probs = jax.nn.softmax(sorted_logits, axis=-1)
+
+    # Exclusive cumsum: cumsum[i] - prob[i] gives sum of probs *before* position i
+    cumsum_exclusive = jnp.cumsum(sorted_probs, axis=-1) - sorted_probs
+
+    keep_mask = cumsum_exclusive < p_values[:, None]
+    keep_mask = keep_mask.at[:, 0].set(True)  # Always keep top token
+    filtered_sorted_logits = jnp.where(keep_mask, sorted_logits, -jnp.inf)
+
+    # Scatter back to original positions
+    batch_idx = jnp.arange(logits.shape[0])[:, None]
+    result = jnp.empty_like(logits).at[batch_idx, sorted_indices].set(filtered_sorted_logits)
+
+    return jnp.where(p_values[:, None] >= 1.0, logits, result)
