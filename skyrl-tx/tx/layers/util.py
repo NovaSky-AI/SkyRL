@@ -120,7 +120,7 @@ def expert_parallel_dispatch_combine(
     sharded_fn = jax.shard_map(
         _shard_body,
         mesh=mesh,
-        in_specs=jax.tree.map(_replicated_spec_like, args),
+        in_specs=(jax.tree.map(_replicated_spec_like, args),),
         out_specs=_replicated_spec_like(hidden_states),
         axis_names={"ep"},
     )
