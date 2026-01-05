@@ -32,96 +32,116 @@ def prepare_routing(
     return sorted_tokens, group_sizes, unsort_indices, sorted_adapter_indices
 
 
-def _replicated_spec_like(x: jax.Array) -> PartitionSpec:
-    """Return a PartitionSpec that mirrors an array's sharding but omits 'ep'."""
-    spec = getattr(getattr(x, "sharding", None), "spec", (None,) * x.ndim)
-    return PartitionSpec(*[
-        tuple(a for a in s if a != "ep") or None if isinstance(s, tuple) else (None if s == "ep" else s)
-        for s in spec
-    ])
-
-
-def _local_expert_computation(
-    hidden_states: jax.Array,
+def _run_expert_logic(
+    module: nnx.Module,
+    expert_op,
+    x: jax.Array,
     selected_experts: jax.Array,
     routing_weights: jax.Array,
-    expert_fn,
     num_experts: int,
     num_experts_per_tok: int,
     hidden_size: int,
-    adapter_indices: jax.Array | None = None,
-    expert_kwargs: dict | None = None,
+    adapter_indices: jax.Array | None,
 ) -> jax.Array:
-    """Run expert computation locally without expert-parallel sharding."""
-    hidden_states_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
-    adapter_indices_expanded = (
-        jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
-    )
-    hidden_states_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
-        hidden_states_expanded,
-        selected_experts.reshape(-1),
-        num_experts,
-        adapter_indices=adapter_indices_expanded,
+    """Run the routing and expert computation on the current device."""
+    # Expand inputs for routing
+    x_expanded = jnp.repeat(x, num_experts_per_tok, axis=0)
+    adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
+
+    # Prepare routing
+    x_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
+        x_expanded, selected_experts.reshape(-1), num_experts, adapter_indices=adapter_expanded
     )
 
-    expert_out = expert_fn(hidden_states_sorted, group_sizes, adapter_indices_sorted, **(expert_kwargs or {}))
+    # Call the expert operation
+    expert_out = expert_op(module, x_sorted, group_sizes, adapter_sorted)
+
+    # Unsort and combine
     reshaped_out = expert_out[unsort_indices].reshape(-1, num_experts_per_tok, hidden_size)
     return jnp.sum(reshaped_out * routing_weights[..., None], axis=1)
 
 
 def expert_parallel_dispatch_combine(
+    module: nnx.Module,
+    expert_op,
     hidden_states: jax.Array,
     selected_experts: jax.Array,
     routing_weights: jax.Array,
-    expert_fn,
     num_experts: int,
     num_experts_per_tok: int,
     hidden_size: int,
     adapter_indices: jax.Array | None = None,
 ) -> jax.Array:
-    """Dispatch tokens to experts and combine outputs, optionally across EP shards."""
+    """Dispatch tokens to experts and combine outputs.
+
+    Supports automatic EP sharding via nnx.split/shard_map.
+
+    Args:
+        module: The expert module (e.g., Qwen3Experts) to split and shard
+        expert_op: A function (module, x, groups, adapter_idx) -> output
+        hidden_states: Input hidden states
+        selected_experts: Top-k expert indices per token
+        routing_weights: Routing weights per token
+        num_experts: Total number of experts (global)
+        num_experts_per_tok: Number of experts selected per token
+        hidden_size: Hidden dimension size
+        adapter_indices: Optional adapter indices for LoRA
+    """
     mesh = get_abstract_mesh()
     ep_size = mesh.shape.get("ep", 1) if mesh is not None else 1
 
+    # Functionalize the module: separate static Graph from State (weights)
+    graph, state = nnx.split(module)
+
     if ep_size == 1:
-        return _local_expert_computation(
-            hidden_states, selected_experts, routing_weights, expert_fn,
-            num_experts, num_experts_per_tok, hidden_size, adapter_indices
+        # Local execution - merge back and run
+        local_module = nnx.merge(graph, state)
+        return _run_expert_logic(
+            local_module, expert_op, hidden_states, selected_experts,
+            routing_weights, num_experts, num_experts_per_tok, hidden_size, adapter_indices
         )
 
+    # Calculate experts per rank
     assert num_experts % ep_size == 0, f"num_experts {num_experts} not divisible by ep {ep_size}"
     experts_per_rank = num_experts // ep_size
 
-    def _shard_body(payload):
-        shard_h, shard_s, shard_r, *opt_adapter = payload
-        shard_a = opt_adapter[0] if opt_adapter else None
+    def _shard_body(local_state, x, s_exp, r_weights, adapt_idx):
+        # Merge the LOCAL state shard back into the graph
+        # The module now thinks it only has `experts_per_rank` experts
+        local_module = nnx.merge(graph, local_state)
 
+        # Calculate local routing info
         axis_idx = jax.lax.axis_index("ep")
         shard_start = axis_idx * experts_per_rank
         shard_end = shard_start + experts_per_rank
 
-        # Mask out experts not on this rank
-        local_mask = (shard_s >= shard_start) & (shard_s < shard_end)
-        local_selected = jnp.where(local_mask, shard_s - shard_start, 0)
-        local_routing = shard_r * local_mask.astype(shard_r.dtype)
+        # Mask out experts not on this rank and map global expert IDs to local IDs [0, experts_per_rank)
+        local_mask = (s_exp >= shard_start) & (s_exp < shard_end)
+        local_selected = jnp.where(local_mask, s_exp - shard_start, 0)
 
-        local_out = _local_expert_computation(
-            shard_h, local_selected, local_routing, expert_fn,
-            experts_per_rank, num_experts_per_tok, hidden_size, shard_a,
-            expert_kwargs={"expert_start": jax.lax.stop_gradient(shard_start), "num_experts_chunk": experts_per_rank}
+        # Zero out weights for invalid experts so they don't affect the sum
+        local_routing = r_weights * local_mask.astype(r_weights.dtype)
+
+        # Run computation
+        local_out = _run_expert_logic(
+            local_module, expert_op, x, local_selected,
+            local_routing, experts_per_rank, num_experts_per_tok, hidden_size, adapt_idx
         )
+
+        # Sum results across EP dimension
         return jax.lax.psum(local_out, axis_name="ep")
 
-    # Pack args (handle optional adapter_indices to keep specs clean)
-    args = (hidden_states, selected_experts, routing_weights)
-    if adapter_indices is not None:
-        args += (adapter_indices,)
-
-    sharded_fn = jax.shard_map(
+    # JAX automatically shards the 'state' based on its PartitionSpecs
+    # We replicate the inputs (hidden_states, etc) across the 'ep' axis
+    return jax.shard_map(
         _shard_body,
         mesh=mesh,
-        in_specs=(jax.tree.map(_replicated_spec_like, args),),
-        out_specs=_replicated_spec_like(hidden_states),
-        axis_names={"ep"},
-    )
-    return sharded_fn(args)
+        in_specs=(
+            nnx.get_partition_spec(state),  # State follows its defined partitioning (EP)
+            PartitionSpec(),                 # Replicate x
+            PartitionSpec(),                 # Replicate selected_experts
+            PartitionSpec(),                 # Replicate routing_weights
+            PartitionSpec(),                 # Replicate adapter_indices
+        ),
+        out_specs=PartitionSpec(),  # Output is replicated
+    )(state, hidden_states, selected_experts, routing_weights, adapter_indices)
