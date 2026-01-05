@@ -306,3 +306,25 @@ def update_adapter_config(model: ModelForCausalLM, adapter_index: int, lora_conf
 
     updated_state = jax.tree.map_with_path(update_lora_config, state)
     nnx.update(model, updated_state)
+
+
+def clear_adapter_config(model: ModelForCausalLM, adapter_index: int):
+    """Clear/reset a LoRA adapter, freeing it for reuse.
+
+    Sets rank=0, scaling=0, and zeros out lora_A and lora_B for the adapter.
+    """
+    state = nnx.state(model)
+
+    def clear_adapter(path, value):
+        if path[-2].key == "lora_ranks":
+            return value.at[adapter_index].set(0)
+        if path[-2].key == "lora_scaling":
+            return value.at[adapter_index].set(0.0)
+        if path[-2].key == "lora_A":
+            return value.at[adapter_index].set(0.0)
+        if path[-2].key == "lora_B":
+            return value.at[adapter_index].set(0.0)
+        return value
+
+    updated_state = jax.tree.map_with_path(clear_adapter, state)
+    nnx.update(model, updated_state)
