@@ -1,8 +1,8 @@
 """
 Test save_hf_model and load_hf_model functionality for different strategies.
 
-For FSDP and DeepSpeed, run with:
-uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/test_save_load_model.py -m "not megatron"
+For FSDP and FSDP2, run with:
+uv run --isolated --extra dev -- pytest tests/gpu/test_save_load_model.py -m "not megatron"
 
 For Megatron, run with:
 uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_save_load_model.py -m "megatron"
@@ -75,7 +75,6 @@ def run_one_training_step(
 @pytest.mark.parametrize(
     "strategy",
     [
-        "deepspeed",
         "fsdp",
         "fsdp2",
         pytest.param("megatron", marks=pytest.mark.megatron),
