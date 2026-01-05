@@ -92,10 +92,7 @@ def expert_parallel_dispatch_combine(
     assert num_experts % ep_size == 0, f"num_experts {num_experts} not divisible by ep {ep_size}"
     experts_per_rank = num_experts // ep_size
 
-    def _shard_body(payload):
-        shard_h, shard_s, shard_r, *opt_adapter = payload
-        shard_a = opt_adapter[0] if opt_adapter else None
-
+    def _shard_body(shard_h, shard_s, shard_r, shard_a):
         axis_idx = jax.lax.axis_index("ep")
         shard_start = axis_idx * experts_per_rank
         shard_end = shard_start + experts_per_rank
@@ -112,16 +109,12 @@ def expert_parallel_dispatch_combine(
         )
         return jax.lax.psum(local_out, axis_name="ep")
 
-    # Pack args (handle optional adapter_indices to keep specs clean)
-    args = (hidden_states, selected_experts, routing_weights)
-    if adapter_indices is not None:
-        args += (adapter_indices,)
-
+    in_specs = jax.tree.map(_replicated_spec_like, (hidden_states, selected_experts, routing_weights, adapter_indices))
     sharded_fn = jax.shard_map(
         _shard_body,
         mesh=mesh,
-        in_specs=(jax.tree.map(_replicated_spec_like, args),),
+        in_specs=in_specs,
         out_specs=_replicated_spec_like(hidden_states),
         axis_names={"ep"},
     )
-    return sharded_fn(args)
+    return sharded_fn(hidden_states, selected_experts, routing_weights, adapter_indices)
