@@ -810,7 +810,7 @@ class PolicyWorkerBase(Worker):
         all_metrics.pop("response_length", None)
 
         status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = num_minibatches
+        status_mean["policy_update_steps"] = num_minibatches * self.cfg.trainer.update_epochs_per_batch
 
         # should return an `TrainingOutputBatch`
         output = TrainingOutputBatch()
