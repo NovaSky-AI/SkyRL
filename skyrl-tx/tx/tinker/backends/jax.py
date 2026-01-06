@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
-from tx.layers.lora import update_adapter_config
+from tx.layers.lora import clear_adapter_config, update_adapter_config
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
@@ -440,6 +440,26 @@ class JaxBackendImpl(AbstractBackend):
         # Configure adapter
         update_adapter_config(self.model, adapter_index, lora_config)
         logger.info(f"Created model {model_id} with adapter_index={adapter_index}, config={lora_config}")
+
+    def delete_model(self, model_id: str) -> None:
+        """Delete a model and free all associated resources."""
+        if model_id not in self.models:
+            raise ValueError(f"Model {model_id} not found")
+
+        # Get adapter index before deleting metadata
+        adapter_index = self.models[model_id].adapter_index
+
+        # Clear LoRA adapter weights
+        with jax.set_mesh(self.mesh):
+            clear_adapter_config(self.model, adapter_index)
+
+        # Delete optimizer
+        del self.optimizers[model_id]
+
+        # Delete model metadata
+        del self.models[model_id]
+
+        logger.info(f"Deleted model {model_id} (adapter_index={adapter_index})")
 
     def _model_pass(
         self,
