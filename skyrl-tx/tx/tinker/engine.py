@@ -349,8 +349,10 @@ class TinkerEngine:
 
     def process_unload_model(self, model_id: str, request_data: types.UnloadModelInput) -> types.UnloadModelOutput:
         """Unload a model and free all resources."""
-        if not self.backend.has_model(model_id):
-            raise ValueError(f"Model {model_id} not found")
+        if self.backend.has_model(model_id):
+            self.backend.delete_model(model_id)
+        else:
+            logger.warning(f"Ignoring unload request for model {model_id} that is not loaded.")
 
         self.backend.delete_model(model_id)
 

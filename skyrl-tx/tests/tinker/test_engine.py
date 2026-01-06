@@ -533,19 +533,6 @@ def test_process_unload_model():
     assert not engine.backend.has_model(model_id)
 
 
-def test_process_unload_non_existent_model():
-    """Test that process_unload_model raises ValueError for non-existent model."""
-    config = EngineConfig(
-        base_model=BASE_MODEL,
-        checkpoints_base=AnyPath(""),
-        backend_config={"max_lora_adapters": 4, "max_lora_rank": 32},
-    )
-    engine = TinkerEngine(config)
-
-    with pytest.raises(ValueError, match="not found"):
-        engine.process_unload_model("nonexistent", types.UnloadModelInput())
-
-
 def test_cleanup_stale_sessions():
     """Test that cleanup_stale_sessions unloads models from expired sessions."""
     config = EngineConfig(
