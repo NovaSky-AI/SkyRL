@@ -243,16 +243,18 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         for _ in range(self._num_padding_microbatches):
             yield self._create_padding_microbatch()
 
-    def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
-        """Reorder microbatch data into a single batch with the same order as the original data.
+    def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
+        """Reorder and combine output batches into a single batch with
+        the same order as the original input data.
+
         Example: [[0, 2], [1, 3]] -> [0, 1, 2, 3]
+
         Args:
-            microbatches: List of microbatches to reorder.
+            batches: List of microbatches to reorder.
         Returns:
             A single reordered batch.
         """
-        # TODO: Move this stuff to utility functions.
-        non_padding_microbatches = microbatches[: len(microbatches) - self._num_padding_microbatches]
+        non_padding_microbatches = batches[: len(batches) - self._num_padding_microbatches]
 
         if not non_padding_microbatches:
             # TODO: Can this happen?
