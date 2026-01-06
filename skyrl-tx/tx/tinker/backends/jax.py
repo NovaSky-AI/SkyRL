@@ -417,11 +417,13 @@ class JaxBackendImpl(AbstractBackend):
         Creates optimizer and configures LoRA adapter. Allocates adapter_index internally.
         """
         # Allocate adapter index for this model_id (find first available slot)
+        # Index 0 is reserved for base model, so user models use indices 1 to max_lora_adapters-1
         used_indices = {m.adapter_index for m in self.models.values()}
-        available_indices = set(range(1, self.config.max_lora_adapters + 1)) - used_indices
+        available_indices = set(range(1, self.config.max_lora_adapters)) - used_indices
         if not available_indices:
             raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
         adapter_index = min(available_indices)
+        assert 1 <= adapter_index <= self.config.max_lora_adapters - 1
 
         # Validate rank doesn't exceed max
         if not (0 < lora_config.rank <= self.config.max_lora_rank):

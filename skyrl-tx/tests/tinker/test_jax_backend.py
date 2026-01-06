@@ -9,6 +9,7 @@ from tx.layers.lora import LoRALinear
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 MAX_LORA_ADAPTERS = 4
+LORA_RANK = 8
 
 
 def create_backend():
@@ -19,7 +20,7 @@ def create_backend():
 
 def create_model(backend: JaxBackend, model_id: str) -> int:
     """Create a model and return its adapter index."""
-    lora_config = LoraConfig(rank=8, alpha=16)
+    lora_config = LoraConfig(rank=LORA_RANK, alpha=16)
     backend.create_model(model_id, lora_config)
     return backend.models[model_id].adapter_index
 
@@ -69,11 +70,13 @@ def test_adapter_slot_reuse():
 
 
 def test_max_adapters_limit():
-    """Test that creating more than max_lora_adapters raises ValueError."""
+    """Test that creating more than available adapters raises ValueError."""
     backend = create_backend()
-    # Create max number of models
-    for i in range(MAX_LORA_ADAPTERS):
-        _ = create_model(backend, f"model_{i}")
+
+    # Index 0 is reserved for base model, so we have max_lora_adapters - 1 slots
+    num_available = MAX_LORA_ADAPTERS - 1
+    for i in range(num_available):
+        adapter_idx = create_model(backend, f"model_{i}")
 
     # Try to create one more - should fail
     with pytest.raises(ValueError, match="Maximum number of LoRA adapters"):
@@ -83,8 +86,9 @@ def test_max_adapters_limit():
 def test_max_adapters_after_delete():
     """Test that deleting a model frees a slot for new models."""
     backend = create_backend()
-    # Create max number of models
-    for i in range(MAX_LORA_ADAPTERS):
+    # Index 0 is reserved for base model, so we have max_lora_adapters - 1 slots
+    num_available = MAX_LORA_ADAPTERS - 1
+    for i in range(num_available):
         _ = create_model(backend, f"model_{i}")
 
     # Delete one model
