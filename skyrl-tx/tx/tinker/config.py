@@ -41,6 +41,14 @@ class EngineConfig(BaseModel):
         default=Path("/tmp/lora_models"),
         description="Directory where LoRA models will be extracted for external inference engines",
     )
+    session_cleanup_interval_sec: int = Field(
+        default=60,
+        description="How often to check for stale sessions (seconds)",
+    )
+    session_timeout_sec: int = Field(
+        default=300,
+        description="Seconds without heartbeat before session is considered stale",
+    )
 
 
 def convert_env_var(env_name: str, env_value: str, expected_type: type):

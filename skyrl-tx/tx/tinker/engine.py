@@ -23,10 +23,6 @@ BACKENDS = {
     "jax": (JaxBackend, JaxBackendConfig),
 }
 
-# Stale session cleanup settings
-SESSION_CLEANUP_INTERVAL_SEC = 60  # How often to check for stale sessions
-SESSION_TIMEOUT_SEC = 300  # Seconds without heartbeat before session is considered stale
-
 
 class TinkerEngine:
     """Background engine for processing training requests.
@@ -367,16 +363,13 @@ class TinkerEngine:
 
         return types.UnloadModelOutput(model_id=model_id, status="unloaded")
 
-    def cleanup_stale_sessions(self, timeout_sec: int = SESSION_TIMEOUT_SEC) -> int:
+    def cleanup_stale_sessions(self) -> int:
         """Cleanup sessions with no recent heartbeat and unload their models.
-
-        Args:
-            timeout_sec: Seconds since last heartbeat before a session is considered stale
 
         Returns:
             Number of models unloaded
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_sec)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.config.session_timeout_sec)
         unloaded_count = 0
 
         with Session(self.db_engine) as session:
@@ -610,7 +603,7 @@ class TinkerEngine:
             self.process_single_requests(other_requests)
 
             # Periodically cleanup stale sessions
-            if time.time() - self._last_cleanup_time > SESSION_CLEANUP_INTERVAL_SEC:
+            if time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
                 self.cleanup_stale_sessions()
                 self._last_cleanup_time = time.time()
 

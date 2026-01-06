@@ -3,9 +3,11 @@
 import os
 import subprocess
 import tempfile
+import time
 import urllib.request
 from urllib.parse import urlparse
 
+import httpx
 import pytest
 import tinker
 from tinker import types
@@ -13,6 +15,54 @@ from transformers import AutoTokenizer
 
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
+
+# Test server settings
+TEST_SERVER_PORT = 8000
+TEST_SERVER_PORT_FAST_CLEANUP = 8001
+
+# Cleanup test settings
+CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
+CLEANUP_TIMEOUT_SEC = 2  # Seconds without heartbeat before session is stale
+CLEANUP_WAIT_SEC = 5  # Time to wait for cleanup to run in tests
+MAX_LORA_ADAPTERS = 4  # Max number of LoRA adapters
+
+# Future polling settings
+FUTURE_POLL_INTERVAL_SEC = 0.1
+FUTURE_POLL_MAX_ATTEMPTS = 50  # 5 seconds max
+
+
+def verify_training_client(training_client):
+    """Verify a training client works with a forward pass."""
+    tokenizer = training_client.get_tokenizer()
+    data = [make_datum(tokenizer, "Hello", " world")]
+    result = training_client.forward(data, "cross_entropy").result()
+    assert result is not None
+
+
+def create_service_and_training_clients(base_url: str, num_training_clients: int):
+    """Create a service client and N training clients, verifying each works."""
+    service_client = tinker.ServiceClient(base_url=base_url, api_key="dummy")
+    training_clients = []
+    for _ in range(num_training_clients):
+        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+        verify_training_client(training_client)
+        training_clients.append(training_client)
+    return service_client, training_clients
+
+
+def poll_future_until_done(client: httpx.Client, request_id: str) -> dict:
+    """Poll a future until it completes or fails."""
+    for _ in range(FUTURE_POLL_MAX_ATTEMPTS):
+        response = client.post(
+            "/api/v1/retrieve_future",
+            json={"request_id": request_id},
+        )
+        assert response.status_code == 200
+        future_data = response.json()
+        if future_data["status"] in ("completed", "failed"):
+            return future_data
+        time.sleep(FUTURE_POLL_INTERVAL_SEC)
+    pytest.fail("Future did not complete in time")
 
 
 @pytest.fixture(scope="module")
@@ -29,12 +79,12 @@ def api_server():
             "--host",
             "0.0.0.0",
             "--port",
-            "8000",
+            str(TEST_SERVER_PORT),
             "--base-model",
             BASE_MODEL,
             # Set number of LoRA adapters lower to avoid OOMs in the CI
             "--backend-config",
-            '{"max_lora_adapters": 4}',
+            f'{{"max_lora_adapters": {MAX_LORA_ADAPTERS}}}',
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -50,7 +100,7 @@ def api_server():
 @pytest.fixture
 def service_client(api_server):
     """Create a service client connected to the test server."""
-    return tinker.ServiceClient(base_url="http://0.0.0.0:8000/", api_key="dummy")
+    return tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", api_key="dummy")
 
 
 def make_datum(tokenizer, prompt: str, completion: str, weight: tuple[float, float] | None = (0.0, 1.0)):
@@ -298,44 +348,62 @@ def test_sample_with_stop_strings(service_client):
     assert stop_string in stopped_text
 
 
-def test_unload_model(service_client):
-    """Test that unload_model properly unloads a model."""
-    import httpx
-    import time
+@pytest.fixture(scope="function")
+def api_server_fast_cleanup():
+    """Start the FastAPI server with fast cleanup settings for testing."""
+    process = subprocess.Popen(
+        [
+            "uv",
+            "run",
+            "--extra",
+            "tinker",
+            "-m",
+            "tx.tinker.api",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(TEST_SERVER_PORT_FAST_CLEANUP),
+            "--base-model",
+            BASE_MODEL,
+            "--backend-config",
+            f'{{"max_lora_adapters": {MAX_LORA_ADAPTERS}}}',
+            "--session-cleanup-interval-sec",
+            str(CLEANUP_INTERVAL_SEC),
+            "--session-timeout-sec",
+            str(CLEANUP_TIMEOUT_SEC),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
-    # Create a training client (which creates a model)
-    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+    yield process
+
+    process.terminate()
+    process.wait(timeout=5)
+
+
+def test_unload_model(api_server):
+    """Test that unload_model properly unloads a model."""
+    # Create a training client (which creates a model) and verify it works
+    _, training_clients = create_service_and_training_clients(
+        base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", num_training_clients=1
+    )
+    training_client = training_clients[0]
+    verify_training_client(training_client)
+
     model_id = training_client.model_id
 
-    # Verify model works before unload
-    tokenizer = training_client.get_tokenizer()
-    data = [make_datum(tokenizer, "Hello", " world")]
-    result = training_client.forward(data, "cross_entropy").result()
-    assert result is not None
-
     # Call unload_model endpoint directly
-    with httpx.Client(base_url="http://0.0.0.0:8000/") as client:
+    with httpx.Client(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/") as client:
         response = client.post(
             "/api/v1/unload_model",
             json={"model_id": model_id},
         )
         assert response.status_code == 200
-        unload_response = response.json()
-        request_id = unload_response["request_id"]
+        request_id = response.json()["request_id"]
 
         # Poll for completion
-        for _ in range(50):  # 5 seconds max
-            future_response = client.post(
-                "/api/v1/retrieve_future",
-                json={"request_id": request_id},
-            )
-            assert future_response.status_code == 200
-            future_data = future_response.json()
-            if future_data["status"] == "completed":
-                break
-            time.sleep(0.1)
-        else:
-            pytest.fail("Unload request did not complete in time")
+        future_data = poll_future_until_done(client, request_id)
 
         # Verify result
         assert future_data["status"] == "completed"
@@ -344,4 +412,29 @@ def test_unload_model(service_client):
 
     # Verify model no longer works after unload
     with pytest.raises(Exception):
-        training_client.forward(data, "cross_entropy").result()
+        verify_training_client(training_client)
+
+
+def test_stale_session_cleanup(api_server_fast_cleanup):
+    """Test that stale sessions are automatically cleaned up and models are unloaded."""
+    # Create MAX_LORA_ADAPTERS clients to use all adapter slots
+    base_url = f"http://0.0.0.0:{TEST_SERVER_PORT_FAST_CLEANUP}/"
+    service_client, training_clients = create_service_and_training_clients(
+        base_url=base_url, num_training_clients=MAX_LORA_ADAPTERS
+    )
+
+    # Verify that creating another client fails (all slots used)
+    with pytest.raises(Exception):
+        service_client.create_lora_training_client(base_model=BASE_MODEL)
+
+    # Stop heartbeating by deleting the clients
+    # This simulates a client crash/disconnect
+    del training_clients
+    del service_client
+
+    # Wait for cleanup to run
+    time.sleep(CLEANUP_WAIT_SEC)
+
+    # Create a new client and verify it works - this succeeds because cleanup freed adapter slots
+    _, new_training_clients = create_service_and_training_clients(base_url=base_url, num_training_clients=1)
+    verify_training_client(new_training_clients[0])
