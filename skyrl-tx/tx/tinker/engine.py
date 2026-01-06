@@ -381,28 +381,33 @@ class TinkerEngine:
                 )
             ).all()
 
-            for sess in stale_sessions:
-                # Find all models for this session
-                models = session.exec(
-                    select(ModelDB).where(
-                        ModelDB.session_id == sess.session_id,
-                        ModelDB.status != "unloaded",
-                    )
-                ).all()
+            if not stale_sessions:
+                return 0
 
-                for model in models:
-                    if self.backend.has_model(model.model_id):
-                        try:
-                            self.backend.delete_model(model.model_id)
-                            model.status = "unloaded"
-                            unloaded_count += 1
-                            logger.info(f"Auto-unloaded stale model {model.model_id} from session {sess.session_id}")
-                        except Exception as e:
-                            logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
-                    else:
-                        # Model not in backend but status not unloaded - fix DB state
+            stale_session_ids = {s.session_id for s in stale_sessions}
+
+            # Find all models for all stale sessions in one query
+            models_to_process = session.exec(
+                select(ModelDB).where(
+                    ModelDB.session_id.in_(stale_session_ids),
+                    ModelDB.status != "unloaded",
+                )
+            ).all()
+
+            for model in models_to_process:
+                if self.backend.has_model(model.model_id):
+                    try:
+                        self.backend.delete_model(model.model_id)
                         model.status = "unloaded"
+                        unloaded_count += 1
+                        logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
+                else:
+                    # Model not in backend but status not unloaded - fix DB state
+                    model.status = "unloaded"
 
+            for sess in stale_sessions:
                 sess.status = "expired"
                 logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
 
