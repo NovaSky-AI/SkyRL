@@ -3,14 +3,14 @@
 import argparse
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, ModelDB
+from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, ModelDB, SessionDB
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
@@ -22,6 +22,10 @@ from tx.utils.log import logger
 BACKENDS = {
     "jax": (JaxBackend, JaxBackendConfig),
 }
+
+# Stale session cleanup settings
+SESSION_CLEANUP_INTERVAL_SEC = 60  # How often to check for stale sessions
+SESSION_TIMEOUT_SEC = 300  # Seconds without heartbeat before session is considered stale
 
 
 class TinkerEngine:
@@ -191,6 +195,9 @@ class TinkerEngine:
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
 
+        # Track last cleanup time for periodic stale session cleanup
+        self._last_cleanup_time = time.time()
+
         logger.info(f"Initialized TinkerEngine with backend={type(self.backend).__name__}")
 
     @property
@@ -359,6 +366,56 @@ class TinkerEngine:
         logger.info(f"Unloaded model {model_id}")
 
         return types.UnloadModelOutput(model_id=model_id, status="unloaded")
+
+    def cleanup_stale_sessions(self, timeout_sec: int = SESSION_TIMEOUT_SEC) -> int:
+        """Cleanup sessions with no recent heartbeat and unload their models.
+
+        Args:
+            timeout_sec: Seconds since last heartbeat before a session is considered stale
+
+        Returns:
+            Number of models unloaded
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_sec)
+        unloaded_count = 0
+
+        with Session(self.db_engine) as session:
+            # Find stale sessions (active sessions with heartbeat older than cutoff)
+            stale_sessions = session.exec(
+                select(SessionDB).where(
+                    SessionDB.status == "active",
+                    SessionDB.last_heartbeat_at < cutoff,
+                )
+            ).all()
+
+            for sess in stale_sessions:
+                # Find all models for this session
+                models = session.exec(
+                    select(ModelDB).where(
+                        ModelDB.session_id == sess.session_id,
+                        ModelDB.status != "unloaded",
+                    )
+                ).all()
+
+                for model in models:
+                    if self.backend.has_model(model.model_id):
+                        try:
+                            self.backend.delete_model(model.model_id)
+                            model.status = "unloaded"
+                            unloaded_count += 1
+                            logger.info(f"Auto-unloaded stale model {model.model_id} from session {sess.session_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
+                    else:
+                        # Model not in backend but status not unloaded - fix DB state
+                        model.status = "unloaded"
+
+                sess.status = "expired"
+                logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
+
+            session.commit()
+
+        return unloaded_count
 
     def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
@@ -551,6 +608,11 @@ class TinkerEngine:
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
+
+            # Periodically cleanup stale sessions
+            if time.time() - self._last_cleanup_time > SESSION_CLEANUP_INTERVAL_SEC:
+                self.cleanup_stale_sessions()
+                self._last_cleanup_time = time.time()
 
             # Poll every 100ms
             time.sleep(0.1)
