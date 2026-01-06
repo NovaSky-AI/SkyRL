@@ -623,8 +623,17 @@ class PolicyWorkerBase(Worker):
         )
 
     def forward_backward(self, experience: Experience, microbatch_weight: float) -> Dict[str, float]:
-        """
-        Perform the forward and backward pass for one micro-batch.
+        """Perform the forward and backward pass for one micro-batch.
+
+        Args:
+            experience: The microbatch data to run the forward and backward pass on.
+            microbatch_weight: Weight of the microbatch, used to scale the loss contribution
+                for the microbatch. For example, if you accumulate gradients over 2 microbatches,
+                then each microbatch should have a weight of 1/2.
+
+        Returns:
+            Dict containing the status (including loss and some other metrics)
+            for the microbatch.
         """
         self.model.train()
         experience.to_device(torch.cuda.current_device())
