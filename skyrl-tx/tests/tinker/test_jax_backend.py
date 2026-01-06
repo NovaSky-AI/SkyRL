@@ -76,7 +76,7 @@ def test_max_adapters_limit():
     # Index 0 is reserved for base model, so we have max_lora_adapters - 1 slots
     num_available = MAX_LORA_ADAPTERS - 1
     for i in range(num_available):
-        adapter_idx = create_model(backend, f"model_{i}")
+        _ = create_model(backend, f"model_{i}")
 
     # Try to create one more - should fail
     with pytest.raises(ValueError, match="Maximum number of LoRA adapters"):
