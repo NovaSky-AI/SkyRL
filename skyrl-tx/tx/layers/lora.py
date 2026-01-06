@@ -316,13 +316,10 @@ def clear_adapter_config(model: ModelForCausalLM, adapter_index: int):
     state = nnx.state(model)
 
     def clear_adapter(path, value):
-        if path[-2].key == "lora_ranks":
+        key = path[-2].key
+        if key == "lora_ranks":
             return value.at[adapter_index].set(0)
-        if path[-2].key == "lora_scaling":
-            return value.at[adapter_index].set(0.0)
-        if path[-2].key == "lora_A":
-            return value.at[adapter_index].set(0.0)
-        if path[-2].key == "lora_B":
+        if key in ("lora_scaling", "lora_A", "lora_B"):
             return value.at[adapter_index].set(0.0)
         return value
 
