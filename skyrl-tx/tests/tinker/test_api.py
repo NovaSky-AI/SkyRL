@@ -7,7 +7,6 @@ import time
 import urllib.request
 from urllib.parse import urlparse
 
-import httpx
 import pytest
 import tinker
 from tinker import types
@@ -28,7 +27,7 @@ MAX_LORA_ADAPTERS = 4  # Max number of LoRA adapters
 
 # Future polling settings
 FUTURE_POLL_INTERVAL_SEC = 0.1
-FUTURE_POLL_MAX_ATTEMPTS = 50  # 5 seconds max
+FUTURE_POLL_TIMEOUT_SEC = 5
 
 
 def verify_training_client(training_client):
@@ -48,21 +47,6 @@ def create_service_and_training_clients(base_url: str, num_training_clients: int
         verify_training_client(training_client)
         training_clients.append(training_client)
     return service_client, training_clients
-
-
-def poll_future_until_done(client: httpx.Client, request_id: str) -> dict:
-    """Poll a future until it completes or fails."""
-    for _ in range(FUTURE_POLL_MAX_ATTEMPTS):
-        response = client.post(
-            "/api/v1/retrieve_future",
-            json={"request_id": request_id},
-        )
-        assert response.status_code == 200
-        future_data = response.json()
-        if future_data["status"] in ("completed", "failed"):
-            return future_data
-        time.sleep(FUTURE_POLL_INTERVAL_SEC)
-    pytest.fail("Future did not complete in time")
 
 
 @pytest.fixture(scope="module")
@@ -384,35 +368,31 @@ def api_server_fast_cleanup():
 
 def test_unload_model(api_server):
     """Test that unload_model properly unloads a model."""
+    from tinker.lib.client_connection_pool_type import ClientConnectionPoolType
+
     # Create a training client (which creates a model) and verify it works
     _, training_clients = create_service_and_training_clients(
         base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", num_training_clients=1
     )
     training_client = training_clients[0]
-    verify_training_client(training_client)
 
-    model_id = training_client.model_id
+    # Call unload_model API
+    async def _unload():
+        # Use the internal async client since no public sync method exists
+        with training_client.holder.aclient(ClientConnectionPoolType.TRAIN) as client:
+            await client.models.unload(request=types.UnloadModelRequest(model_id=training_client.model_id))
 
-    # Call unload_model endpoint directly
-    with httpx.Client(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/") as client:
-        response = client.post(
-            "/api/v1/unload_model",
-            json={"model_id": model_id},
-        )
-        assert response.status_code == 200
-        request_id = response.json()["request_id"]
+    training_client.holder.run_coroutine_threadsafe(_unload()).result()
 
-        # Poll for completion
-        future_data = poll_future_until_done(client, request_id)
-
-        # Verify result
-        assert future_data["status"] == "completed"
-        assert future_data["result"]["status"] == "unloaded"
-        assert future_data["result"]["model_id"] == model_id
-
-    # Verify model no longer works after unload
-    with pytest.raises(Exception):
-        verify_training_client(training_client)
+    # Poll until model stops working
+    start_time = time.time()
+    while time.time() - start_time < FUTURE_POLL_TIMEOUT_SEC:
+        try:
+            verify_training_client(training_client)
+            time.sleep(FUTURE_POLL_INTERVAL_SEC)
+        except Exception:
+            return  # Model unloaded successfully
+    raise TimeoutError(f"Model did not unload within {FUTURE_POLL_TIMEOUT_SEC}s")
 
 
 def test_stale_session_cleanup(api_server_fast_cleanup):
