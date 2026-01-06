@@ -3,8 +3,6 @@
 import os
 import subprocess
 import tempfile
-import time
-from typing import Callable
 import urllib.request
 from contextlib import contextmanager
 from urllib.parse import urlparse
@@ -13,6 +11,8 @@ import pytest
 import tinker
 from tinker import types
 from transformers import AutoTokenizer
+
+from tests.tinker.conftest import wait_for_condition
 
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -26,20 +26,6 @@ TEST_SERVER_PORT_FAST_CLEANUP = 8001
 CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
 CLEANUP_TIMEOUT_SEC = 2  # Seconds without heartbeat before session is stale
 MAX_LORA_ADAPTERS = 4  # Max number of LoRA adapters
-
-
-def wait_for_condition(
-    condition_fn: Callable[[], bool],
-    timeout_sec: float = 10,
-    poll_interval_sec: float = 0.1,
-) -> bool:
-    """Poll until condition_fn returns True or timeout is reached. Returns True if condition was met."""
-    start_time = time.time()
-    while time.time() - start_time < timeout_sec:
-        if condition_fn():
-            return True
-        time.sleep(poll_interval_sec)
-    return False
 
 
 def verify_training_client(training_client):
