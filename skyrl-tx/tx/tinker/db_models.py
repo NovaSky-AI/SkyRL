@@ -60,7 +60,7 @@ class ModelDB(SQLModel, table=True):
     model_id: str = Field(primary_key=True)
     base_model: str
     lora_config: types.LoraConfig = Field(sa_type=JSON)
-    status: str
+    status: str = Field(index=True)
     request_id: int
     session_id: str = Field(foreign_key="sessions.session_id", index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
