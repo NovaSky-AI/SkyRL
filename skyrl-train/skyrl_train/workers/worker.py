@@ -319,9 +319,10 @@ class Worker(DistributedTorchRayActor):
     ) -> TrainingOutputBatch:
         """Run forward pass on the input batch in inference mode.
 
-        This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
+        This is a wrapper around `_forward_micro_batch` that runs in micro batches.
+        Uses token-based chunking if `max_tokens_per_microbatch` is configured, otherwise
+        falls back to sample-based chunking with `micro_forward_batch_size_per_gpu`.
         """
-        # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
         microbatch_iterator = _get_microbatch_iterator(
             data,
