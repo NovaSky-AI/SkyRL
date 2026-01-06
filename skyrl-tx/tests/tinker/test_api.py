@@ -18,14 +18,12 @@ from tests.tinker.conftest import wait_for_condition
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
 
-# Test server settings
 TEST_SERVER_PORT = 8000
-TEST_SERVER_PORT_FAST_CLEANUP = 8001
 
-# Cleanup test settings
-CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
-CLEANUP_TIMEOUT_SEC = 2  # Seconds without heartbeat before session is stale
-MAX_LORA_ADAPTERS = 4  # Max number of LoRA adapters
+# Configs for the fast cleanup test
+TEST_SERVER_PORT_FAST_CLEANUP = 8001
+FAST_CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
+FAST_CLEANUP_TIMEOUT_SEC = 2  # Seconds without heartbeat before session is stale
 
 
 def verify_training_client(training_client):
@@ -55,7 +53,7 @@ def start_api_server(overrides: dict[str, str] | None = None):
         "host": "0.0.0.0",
         "port": str(TEST_SERVER_PORT),
         "base-model": BASE_MODEL,
-        "backend-config": f'{{"max_lora_adapters": {MAX_LORA_ADAPTERS}}}',
+        "backend-config": '{"max_lora_adapters": 4}',
         "database-url": f"sqlite:///{db_file.name}",
     }
     if overrides:
@@ -342,8 +340,8 @@ def api_server_fast_cleanup():
     with start_api_server(
         overrides={
             "port": str(TEST_SERVER_PORT_FAST_CLEANUP),
-            "session-cleanup-interval-sec": str(CLEANUP_INTERVAL_SEC),
-            "session-timeout-sec": str(CLEANUP_TIMEOUT_SEC),
+            "session-cleanup-interval-sec": str(FAST_CLEANUP_INTERVAL_SEC),
+            "session-timeout-sec": str(FAST_CLEANUP_TIMEOUT_SEC),
         },
     ) as server:
         yield server
