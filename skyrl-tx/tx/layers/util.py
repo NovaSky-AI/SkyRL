@@ -79,54 +79,38 @@ def expert_parallel_dispatch_combine(
     hidden_size: int,
     adapter_indices: jax.Array | None = None,
 ) -> jax.Array:
-    """Dispatch tokens to experts and combine outputs, optionally across EP shards."""
+    """Dispatch tokens to experts and combine outputs using group_offset."""
     mesh = get_abstract_mesh()
     ep_size = mesh.shape.get("ep", 1) if mesh is not None else 1
 
     if ep_size == 1:
         return _local_expert_computation(
-            hidden_states,
-            selected_experts,
-            routing_weights,
-            expert_fn,
-            num_experts,
-            num_experts_per_tok,
-            hidden_size,
-            adapter_indices,
+            hidden_states, selected_experts, routing_weights, expert_fn,
+            num_experts, num_experts_per_tok, hidden_size, adapter_indices,
         )
 
-    assert num_experts % ep_size == 0, f"num_experts {num_experts} not divisible by ep {ep_size}"
+    assert num_experts % ep_size == 0
     experts_per_rank = num_experts // ep_size
 
     def _shard_body(shard_h, shard_s, shard_r, shard_a):
         axis_idx = jax.lax.axis_index("ep")
         shard_start = axis_idx * experts_per_rank
-        shard_end = shard_start + experts_per_rank
-
-        # Mask out experts not on this rank
-        local_mask = (shard_s >= shard_start) & (shard_s < shard_end)
-        local_selected = jnp.where(local_mask, shard_s - shard_start, 0)
-        local_routing = shard_r * local_mask.astype(shard_r.dtype)
+        group_offset = jnp.array([shard_start], dtype=jnp.int32)
 
         local_out = _local_expert_computation(
-            shard_h,
-            local_selected,
-            local_routing,
-            expert_fn,
-            experts_per_rank,
-            num_experts_per_tok,
-            hidden_size,
-            shard_a,
-            expert_kwargs={"expert_start": jax.lax.stop_gradient(shard_start), "num_experts_chunk": experts_per_rank},
+            shard_h, shard_s, shard_r, expert_fn,
+            num_experts, num_experts_per_tok, hidden_size, shard_a,
+            expert_kwargs={
+                "expert_start": jax.lax.stop_gradient(shard_start),
+                "num_experts_chunk": experts_per_rank,
+                "group_offset": group_offset,
+            },
         )
         return jax.lax.psum(local_out, axis_name="ep")
 
     in_specs = jax.tree.map(_replicated_spec_like, (hidden_states, selected_experts, routing_weights, adapter_indices))
     sharded_fn = jax.shard_map(
-        _shard_body,
-        mesh=mesh,
-        in_specs=in_specs,
-        out_specs=_replicated_spec_like(hidden_states),
-        axis_names={"ep"},
+        _shard_body, mesh=mesh, in_specs=in_specs,
+        out_specs=_replicated_spec_like(hidden_states), axis_names={"ep"},
     )
     return sharded_fn(hidden_states, selected_experts, routing_weights, adapter_indices)

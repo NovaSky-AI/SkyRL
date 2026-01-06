@@ -235,6 +235,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         *,
         expert_start: int | None = None,
         num_experts_chunk: int | None = None,
+        group_offset: jax.Array | None = None,
     ) -> jax.Array:
         def _slice(p, axis=0):
             return (
@@ -243,7 +244,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
                 else p
             )
 
-        base_out = jax.lax.ragged_dot(x, _slice(self.weight.value, 0), group_sizes)
+        base_out = jax.lax.ragged_dot(x, _slice(self.weight.value, 0), group_sizes, group_offset=group_offset)
 
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
