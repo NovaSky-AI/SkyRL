@@ -10,7 +10,7 @@ from typing import Callable
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
+from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, ModelDB
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
@@ -350,6 +350,12 @@ class TinkerEngine:
             raise ValueError(f"Model {model_id} not found")
 
         self.backend.delete_model(model_id)
+
+        # Update model status in DB
+        with Session(self.db_engine) as session:
+            _ = session.execute(update(ModelDB).where(ModelDB.model_id == model_id).values(status="unloaded"))
+            session.commit()
+
         logger.info(f"Unloaded model {model_id}")
 
         return types.UnloadModelOutput(model_id=model_id, status="unloaded")

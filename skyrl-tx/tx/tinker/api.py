@@ -160,6 +160,16 @@ class CreateModelResponse(BaseModel):
     request_id: str
 
 
+class UnloadModelRequest(BaseModel):
+    model_id: str
+    type: str | None = None
+
+
+class UnloadModelResponse(BaseModel):
+    request_id: str
+    model_id: str
+
+
 class ModelData(BaseModel):
     base_model: str
     lora_config: LoRAConfig | None = None
@@ -568,6 +578,30 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         status="created",
         request_id=str(request_id),
     )
+
+
+@app.post("/api/v1/unload_model", response_model=UnloadModelResponse)
+async def unload_model(request: UnloadModelRequest, session: AsyncSession = Depends(get_session)):
+    """Unload a model and free all associated resources."""
+    # Validate model exists
+    model_db = await session.get(ModelDB, request.model_id)
+    if model_db is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # Update model status
+    model_db.status = "unloading"
+
+    # Create future request
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.UNLOAD_MODEL,
+        model_id=request.model_id,
+        request_data=types.UnloadModelInput(),
+    )
+
+    await session.commit()
+
+    return UnloadModelResponse(request_id=str(request_id), model_id=request.model_id)
 
 
 class GetInfoRequest(BaseModel):
