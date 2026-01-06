@@ -29,8 +29,8 @@ class BaseBatchIterator:
     def __iter__(self):
         return self
 
-    def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
-        """Reorder and combine output microbatches to form a single minibatch output."""
+    def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
+        """Reorder and combine output batches to form a single output."""
         raise NotImplementedError
 
     @staticmethod
@@ -58,8 +58,8 @@ class BaseBatchIterator:
         return exp
 
 
-class SampleBasedBatchIterator:
-    """A simple iterator to yield microbatches of the same size from the training batch."""
+class SampleBasedBatchIterator(BaseBatchIterator):
+    """A simple iterator to yield batches of the same size from the training input."""
 
     def __init__(self, data: TrainingInputBatch, sample_batch_size: int, drop_last: bool = False):
         self.data = data
@@ -86,9 +86,9 @@ class SampleBasedBatchIterator:
             self._iter = iter(self._chunks)
             raise StopIteration
 
-    def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
-        """Concatenate output microbatches to form a single minibatch output.
+    def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
+        """Concatenate output batches to form a single output.
 
-        This iterator evenly splits the minibatch into microbatches of the same size,
+        This iterator evenly splits the input into batches of the same size,
         so there's no need to reorder."""
-        return TensorBatch.cat(microbatches)
+        return TensorBatch.cat(batches)
