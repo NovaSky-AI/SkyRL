@@ -30,7 +30,7 @@ from skyrl_train.distributed.megatron.megatron_utils import print_model_size, br
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.workers.worker_utils import SampleBasedBatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BaseBatchIterator, SampleBasedBatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -538,7 +538,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # TODO: Convert this into 2 loops for minibatches and microbatches.
             micro_buffer = []
             for local_step, microbatch in enumerate(pbar):
-                experience = SampleBasedBatchIterator.batch_to_experience(microbatch)
+                experience = BaseBatchIterator.batch_to_experience(microbatch)
                 experience.to_device(torch.cuda.current_device())
                 sequences = experience.sequences
                 attention_mask = experience.attention_mask

@@ -32,7 +32,7 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import SampleBasedBatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BaseBatchIterator, SampleBasedBatchIterator, reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -794,7 +794,7 @@ class PolicyWorkerBase(Worker):
                 microbatch_weight = 1.0 / num_microbatches
 
                 for microbatch_idx, microbatch in enumerate(microbatch_iterator):
-                    microbatch_experience = SampleBasedBatchIterator.batch_to_experience(microbatch)
+                    microbatch_experience = BaseBatchIterator.batch_to_experience(microbatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
                     # Record status for all but the last microbatch in the minibatch.
@@ -1029,7 +1029,7 @@ class CriticWorkerBase(Worker):
                 microbatch_weight = 1.0 / num_microbatches
 
                 for microbatch_idx, microbatch in enumerate(microbatch_iterator):
-                    microbatch_experience = SampleBasedBatchIterator.batch_to_experience(microbatch)
+                    microbatch_experience = BaseBatchIterator.batch_to_experience(microbatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
                     if microbatch_idx < num_microbatches - 1:
