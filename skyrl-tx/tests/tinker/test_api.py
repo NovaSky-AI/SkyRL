@@ -296,3 +296,52 @@ def test_sample_with_stop_strings(service_client):
     assert len(stopped_tokens) <= len(baseline_tokens)
     # The stop string should appear at or near the end of the decoded text
     assert stop_string in stopped_text
+
+
+def test_unload_model(service_client):
+    """Test that unload_model properly unloads a model."""
+    import httpx
+    import time
+
+    # Create a training client (which creates a model)
+    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+    model_id = training_client.model_id
+
+    # Verify model works before unload
+    tokenizer = training_client.get_tokenizer()
+    data = [make_datum(tokenizer, "Hello", " world")]
+    result = training_client.forward(data, "cross_entropy").result()
+    assert result is not None
+
+    # Call unload_model endpoint directly
+    with httpx.Client(base_url="http://0.0.0.0:8000/") as client:
+        response = client.post(
+            "/api/v1/unload_model",
+            json={"model_id": model_id},
+        )
+        assert response.status_code == 200
+        unload_response = response.json()
+        request_id = unload_response["request_id"]
+
+        # Poll for completion
+        for _ in range(50):  # 5 seconds max
+            future_response = client.post(
+                "/api/v1/retrieve_future",
+                json={"request_id": request_id},
+            )
+            assert future_response.status_code == 200
+            future_data = future_response.json()
+            if future_data["status"] == "completed":
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("Unload request did not complete in time")
+
+        # Verify result
+        assert future_data["status"] == "completed"
+        assert future_data["result"]["status"] == "unloaded"
+        assert future_data["result"]["model_id"] == model_id
+
+    # Verify model no longer works after unload
+    with pytest.raises(Exception):
+        training_client.forward(data, "cross_entropy").result()
