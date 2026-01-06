@@ -4,7 +4,9 @@ import os
 import subprocess
 import tempfile
 import time
+from typing import Callable
 import urllib.request
+from contextlib import contextmanager
 from urllib.parse import urlparse
 
 import pytest
@@ -15,6 +17,7 @@ from transformers import AutoTokenizer
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 
+
 # Test server settings
 TEST_SERVER_PORT = 8000
 TEST_SERVER_PORT_FAST_CLEANUP = 8001
@@ -22,12 +25,21 @@ TEST_SERVER_PORT_FAST_CLEANUP = 8001
 # Cleanup test settings
 CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
 CLEANUP_TIMEOUT_SEC = 2  # Seconds without heartbeat before session is stale
-CLEANUP_WAIT_SEC = 5  # Time to wait for cleanup to run in tests
 MAX_LORA_ADAPTERS = 4  # Max number of LoRA adapters
 
-# Future polling settings
-FUTURE_POLL_INTERVAL_SEC = 0.1
-FUTURE_POLL_TIMEOUT_SEC = 5
+
+def wait_for_condition(
+    condition_fn: Callable[[], bool],
+    timeout_sec: float = 10,
+    poll_interval_sec: float = 0.1,
+) -> bool:
+    """Poll until condition_fn returns True or timeout is reached. Returns True if condition was met."""
+    start_time = time.time()
+    while time.time() - start_time < timeout_sec:
+        if condition_fn():
+            return True
+        time.sleep(poll_interval_sec)
+    return False
 
 
 def verify_training_client(training_client):
@@ -38,47 +50,53 @@ def verify_training_client(training_client):
     assert result is not None
 
 
-def create_service_and_training_clients(base_url: str, num_training_clients: int):
-    """Create a service client and N training clients, verifying each works."""
+def create_service_and_training_client(base_url: str):
+    """Create a service client and a training client, verifying it works."""
     service_client = tinker.ServiceClient(base_url=base_url, api_key="dummy")
-    training_clients = []
-    for _ in range(num_training_clients):
-        training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
-        verify_training_client(training_client)
-        training_clients.append(training_client)
-    return service_client, training_clients
+    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+    verify_training_client(training_client)
+    return service_client, training_client
+
+
+@contextmanager
+def start_api_server(overrides: dict[str, str] | None = None):
+    """Start the FastAPI server with optional config overrides. Prints log on failure."""
+    log_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".log")
+    # Create a temporary DB file to isolate test runs.
+    db_file = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    db_file.close()
+    defaults = {
+        "host": "0.0.0.0",
+        "port": str(TEST_SERVER_PORT),
+        "base-model": BASE_MODEL,
+        "backend-config": f'{{"max_lora_adapters": {MAX_LORA_ADAPTERS}}}',
+        "database-url": f"sqlite:///{db_file.name}",
+    }
+    if overrides:
+        defaults.update(overrides)
+    cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.api"]
+    for key, value in defaults.items():
+        cmd.extend([f"--{key}", value])
+    process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
+    print(f"Starting API server: {' '.join(cmd)}")
+    try:
+        yield process, log_file.name
+    except Exception:
+        with open(log_file.name) as f:
+            print(f"=== Test failed. Server log ({log_file.name}) ===\n{f.read()}")
+        raise
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+        os.unlink(log_file.name)
+        os.unlink(db_file.name)
 
 
 @pytest.fixture(scope="module")
 def api_server():
     """Start the FastAPI server for testing."""
-    process = subprocess.Popen(
-        [
-            "uv",
-            "run",
-            "--extra",
-            "tinker",
-            "-m",
-            "tx.tinker.api",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(TEST_SERVER_PORT),
-            "--base-model",
-            BASE_MODEL,
-            # Set number of LoRA adapters lower to avoid OOMs in the CI
-            "--backend-config",
-            f'{{"max_lora_adapters": {MAX_LORA_ADAPTERS}}}',
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    yield process
-
-    # Cleanup
-    process.terminate()
-    process.wait(timeout=5)
+    with start_api_server() as server:
+        yield server
 
 
 @pytest.fixture
@@ -335,35 +353,14 @@ def test_sample_with_stop_strings(service_client):
 @pytest.fixture(scope="function")
 def api_server_fast_cleanup():
     """Start the FastAPI server with fast cleanup settings for testing."""
-    process = subprocess.Popen(
-        [
-            "uv",
-            "run",
-            "--extra",
-            "tinker",
-            "-m",
-            "tx.tinker.api",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(TEST_SERVER_PORT_FAST_CLEANUP),
-            "--base-model",
-            BASE_MODEL,
-            "--backend-config",
-            f'{{"max_lora_adapters": {MAX_LORA_ADAPTERS}}}',
-            "--session-cleanup-interval-sec",
-            str(CLEANUP_INTERVAL_SEC),
-            "--session-timeout-sec",
-            str(CLEANUP_TIMEOUT_SEC),
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    yield process
-
-    process.terminate()
-    process.wait(timeout=5)
+    with start_api_server(
+        overrides={
+            "port": str(TEST_SERVER_PORT_FAST_CLEANUP),
+            "session-cleanup-interval-sec": str(CLEANUP_INTERVAL_SEC),
+            "session-timeout-sec": str(CLEANUP_TIMEOUT_SEC),
+        },
+    ) as server:
+        yield server
 
 
 def test_unload_model(api_server):
@@ -371,10 +368,7 @@ def test_unload_model(api_server):
     from tinker.lib.client_connection_pool_type import ClientConnectionPoolType
 
     # Create a training client (which creates a model) and verify it works
-    _, training_clients = create_service_and_training_clients(
-        base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", num_training_clients=1
-    )
-    training_client = training_clients[0]
+    _, training_client = create_service_and_training_client(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/")
 
     # Call unload_model API
     async def _unload():
@@ -385,36 +379,37 @@ def test_unload_model(api_server):
     training_client.holder.run_coroutine_threadsafe(_unload()).result()
 
     # Poll until model stops working
-    start_time = time.time()
-    while time.time() - start_time < FUTURE_POLL_TIMEOUT_SEC:
+    def model_is_unloaded():
         try:
             verify_training_client(training_client)
-            time.sleep(FUTURE_POLL_INTERVAL_SEC)
+            return False
         except Exception:
-            return  # Model unloaded successfully
-    raise TimeoutError(f"Model did not unload within {FUTURE_POLL_TIMEOUT_SEC}s")
+            return True
+
+    assert wait_for_condition(
+        model_is_unloaded,
+    ), "Model did not unload in time"
 
 
 def test_stale_session_cleanup(api_server_fast_cleanup):
-    """Test that stale sessions are automatically cleaned up and models are unloaded."""
-    # Create MAX_LORA_ADAPTERS clients to use all adapter slots
-    base_url = f"http://0.0.0.0:{TEST_SERVER_PORT_FAST_CLEANUP}/"
-    service_client, training_clients = create_service_and_training_clients(
-        base_url=base_url, num_training_clients=MAX_LORA_ADAPTERS
-    )
+    """Test that stale sessions are automatically cleaned up and models are unloaded.
 
-    # Verify that creating another client fails (all slots used)
-    with pytest.raises(Exception):
-        service_client.create_lora_training_client(base_model=BASE_MODEL)
+    This test only checks server logs for cleanup messages rather than verifying
+    adapter slot reuse, since that behavior is already covered by unit tests in
+    test_jax_backend.py and test_engine.py.
+    """
+    process, log_path = api_server_fast_cleanup
+    base_url = f"http://0.0.0.0:{TEST_SERVER_PORT_FAST_CLEANUP}/"
+    service_client, training_client = create_service_and_training_client(base_url=base_url)
 
     # Stop heartbeating by deleting the clients
-    # This simulates a client crash/disconnect
-    del training_clients
+    del training_client
     del service_client
 
-    # Wait for cleanup to run
-    time.sleep(CLEANUP_WAIT_SEC)
+    # Poll for cleanup log messages
+    def cleanup_logs_found():
+        with open(log_path) as f:
+            log_output = f.read()
+        return "Auto-unloaded stale model" in log_output and "Deleted model" in log_output
 
-    # Create a new client and verify it works - this succeeds because cleanup freed adapter slots
-    _, new_training_clients = create_service_and_training_clients(base_url=base_url, num_training_clients=1)
-    verify_training_client(new_training_clients[0])
+    assert wait_for_condition(cleanup_logs_found, timeout_sec=10, poll_interval_sec=1), "Cleanup logs not found"
