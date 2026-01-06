@@ -237,7 +237,11 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         num_experts_chunk: int | None = None,
     ) -> jax.Array:
         def _slice(p, axis=0):
-            return jax.lax.dynamic_slice_in_dim(p, expert_start, num_experts_chunk, axis) if expert_start is not None else p
+            return (
+                jax.lax.dynamic_slice_in_dim(p, expert_start, num_experts_chunk, axis)
+                if expert_start is not None
+                else p
+            )
 
         base_out = jax.lax.ragged_dot(x, _slice(self.weight.value, 0), group_sizes)
 

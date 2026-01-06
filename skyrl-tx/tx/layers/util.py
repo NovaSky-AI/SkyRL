@@ -35,10 +35,12 @@ def prepare_routing(
 def _replicated_spec_like(x: jax.Array) -> PartitionSpec:
     """Return a PartitionSpec that mirrors an array's sharding but omits 'ep'."""
     spec = getattr(getattr(x, "sharding", None), "spec", (None,) * x.ndim)
-    return PartitionSpec(*[
-        tuple(a for a in s if a != "ep") or None if isinstance(s, tuple) else (None if s == "ep" else s)
-        for s in spec
-    ])
+    return PartitionSpec(
+        *[
+            tuple(a for a in s if a != "ep") or None if isinstance(s, tuple) else (None if s == "ep" else s)
+            for s in spec
+        ]
+    )
 
 
 def _local_expert_computation(
@@ -54,9 +56,7 @@ def _local_expert_computation(
 ) -> jax.Array:
     """Run expert computation locally without expert-parallel sharding."""
     hidden_states_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
-    adapter_indices_expanded = (
-        jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
-    )
+    adapter_indices_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
     hidden_states_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
         hidden_states_expanded,
         selected_experts.reshape(-1),
@@ -85,8 +85,14 @@ def expert_parallel_dispatch_combine(
 
     if ep_size == 1:
         return _local_expert_computation(
-            hidden_states, selected_experts, routing_weights, expert_fn,
-            num_experts, num_experts_per_tok, hidden_size, adapter_indices
+            hidden_states,
+            selected_experts,
+            routing_weights,
+            expert_fn,
+            num_experts,
+            num_experts_per_tok,
+            hidden_size,
+            adapter_indices,
         )
 
     assert num_experts % ep_size == 0, f"num_experts {num_experts} not divisible by ep {ep_size}"
@@ -103,9 +109,15 @@ def expert_parallel_dispatch_combine(
         local_routing = shard_r * local_mask.astype(shard_r.dtype)
 
         local_out = _local_expert_computation(
-            shard_h, local_selected, local_routing, expert_fn,
-            experts_per_rank, num_experts_per_tok, hidden_size, shard_a,
-            expert_kwargs={"expert_start": jax.lax.stop_gradient(shard_start), "num_experts_chunk": experts_per_rank}
+            shard_h,
+            local_selected,
+            local_routing,
+            expert_fn,
+            experts_per_rank,
+            num_experts_per_tok,
+            hidden_size,
+            shard_a,
+            expert_kwargs={"expert_start": jax.lax.stop_gradient(shard_start), "num_experts_chunk": experts_per_rank},
         )
         return jax.lax.psum(local_out, axis_name="ep")
 
