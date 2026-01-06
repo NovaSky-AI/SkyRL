@@ -71,7 +71,8 @@ def start_api_server(overrides: dict[str, str] | None = None):
         raise
     finally:
         process.terminate()
-        process.wait(timeout=5)
+        _ = process.wait(timeout=5)
+        log_file.close()
         os.unlink(log_file.name)
         os.unlink(db_file.name)
 
