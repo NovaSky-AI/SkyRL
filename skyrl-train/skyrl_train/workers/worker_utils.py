@@ -1,7 +1,7 @@
 import math
 from skyrl_train.dataset.replay_buffer import Experience
 from typing import List, Dict
-from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.training_batch import TrainingInputBatch, TensorBatch
 
 
 def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
@@ -16,8 +16,50 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     return reduced_metrics
 
 
-class BatchIterator:
-    """A simple iterator to yield micro batches of data from the training batch."""
+class BaseBatchIterator:
+    def __init__(self, data: TrainingInputBatch):
+        self.data = data
+
+    def __len__(self):
+        raise NotImplementedError
+
+    def __next__(self) -> TrainingInputBatch:
+        raise NotImplementedError
+
+    def __iter__(self):
+        return self
+
+    def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
+        """Reorder and combine output microbatches to form a single minibatch output."""
+        raise NotImplementedError
+
+    @staticmethod
+    def batch_to_experience(batch: TrainingInputBatch):
+        # TODO (sumanthrh): other keys are not permitted right now, can go into info
+        # TODO: this conversion is hidden right now, might need to be surfaced in worker explicitly.
+        exp = Experience(
+            sequences=batch["sequences"],
+            action_log_probs=batch["action_log_probs"],
+            base_action_log_probs=batch["base_action_log_probs"],
+            values=batch["values"],
+            returns=batch["returns"],
+            advantages=batch["advantages"],
+            attention_mask=batch["attention_mask"],
+            loss_mask=batch["loss_mask"],
+            action_mask=batch["response_mask"],
+            num_actions=batch.metadata["response_length"],  # int
+            rollout_logprobs=batch["rollout_logprobs"] if "rollout_logprobs" in batch else None,
+            # additional info
+            # can be used to log metrics etc for micro-batches in the worker
+            info={},
+            # propagate metadata as is
+            metadata=batch.metadata,
+        )
+        return exp
+
+
+class SampleBasedBatchIterator:
+    """A simple iterator to yield microbatches of the same size from the training batch."""
 
     def __init__(self, data: TrainingInputBatch, sample_batch_size: int, drop_last: bool = False):
         self.data = data
@@ -44,26 +86,9 @@ class BatchIterator:
             self._iter = iter(self._chunks)
             raise StopIteration
 
-    @staticmethod
-    def batch_to_experience(batch: TrainingInputBatch):
-        # TODO (sumanthrh): other keys are not permitted right now, can go into info
-        # TODO: this conversion is hidden right now, might need to be surfaced in worker explicitly.
-        exp = Experience(
-            sequences=batch["sequences"],
-            action_log_probs=batch["action_log_probs"],
-            base_action_log_probs=batch["base_action_log_probs"],
-            values=batch["values"],
-            returns=batch["returns"],
-            advantages=batch["advantages"],
-            attention_mask=batch["attention_mask"],
-            loss_mask=batch["loss_mask"],
-            action_mask=batch["response_mask"],
-            num_actions=batch.metadata["response_length"],  # int
-            rollout_logprobs=batch["rollout_logprobs"] if "rollout_logprobs" in batch else None,
-            # additional info
-            # can be used to log metrics etc for micro-batches in the worker
-            info={},
-            # propagate metadata as is
-            metadata=batch.metadata,
-        )
-        return exp
+    def reorder_microbatches(self, microbatches: List[TensorBatch]) -> TensorBatch:
+        """Concatenate output microbatches to form a single minibatch output.
+
+        This iterator evenly splits the minibatch into microbatches of the same size,
+        so there's no need to reorder."""
+        return TensorBatch.cat(microbatches)
