@@ -1057,7 +1057,7 @@ class CriticWorkerBase(Worker):
         torch.distributed.barrier()
 
         status_mean = reduce_metrics(all_metrics)
-        status_mean["critic_update_steps"] = num_minibatches
+        status_mean["critic_update_steps"] = num_minibatches * self.cfg.trainer.update_epochs_per_batch
 
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
