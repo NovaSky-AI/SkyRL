@@ -32,7 +32,12 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import BaseBatchIterator, SampleBasedBatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import (
+    BaseBatchIterator,
+    SampleBasedBatchIterator,
+    TokenBasedBatchIterator,
+    reduce_metrics,
+)
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -787,11 +792,18 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for minibatch in minibatch_pbar:
-                microbatch_iterator = SampleBasedBatchIterator(
-                    minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-                )
-                num_microbatches = len(microbatch_iterator)
-                microbatch_weight = 1.0 / num_microbatches
+                if self.cfg.trainer.max_tokens_per_microbatch > 0:
+                    microbatch_iterator = TokenBasedBatchIterator(
+                        minibatch, max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch
+                    )
+                    num_microbatches = len(microbatch_iterator)
+                    microbatch_weight = 1.0 / num_microbatches  # TODO: return the correct weight from the iterator
+                else:
+                    microbatch_iterator = SampleBasedBatchIterator(
+                        minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+                    )
+                    num_microbatches = len(microbatch_iterator)
+                    microbatch_weight = 1.0 / num_microbatches
 
                 for microbatch_idx, microbatch in enumerate(microbatch_iterator):
                     microbatch_experience = BaseBatchIterator.batch_to_experience(microbatch)
