@@ -344,6 +344,16 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
+    def process_unload_model(self, model_id: str, request_data: types.UnloadModelInput) -> types.UnloadModelOutput:
+        """Unload a model and free all resources."""
+        if not self.backend.has_model(model_id):
+            raise ValueError(f"Model {model_id} not found")
+
+        self.backend.delete_model(model_id)
+        logger.info(f"Unloaded model {model_id}")
+
+        return types.UnloadModelOutput(model_id=model_id, status="unloaded")
+
     def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
         if not self.backend.has_model(model_id):
@@ -461,6 +471,8 @@ class TinkerEngine:
                 return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:
                 return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
+            case types.RequestType.UNLOAD_MODEL:
+                return self.process_unload_model(model_id, types.UnloadModelInput.model_validate(request_data))
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
