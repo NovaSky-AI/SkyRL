@@ -287,7 +287,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
         for retry in range(3):
             try:
                 start = time.time()
-                self.raw_tests = generator(prompt=prompt)
+                self.raw_tests = generator.acall(prompt=prompt)
                 end = time.time()
                 print(f"[Program] Time taken to generate tests: {end - start}")
                 break
@@ -304,10 +304,10 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
         print(f"[Program] Generating programs for task_id: {task_id}")
         if len(tests) == 0:
             print(f"No tests found for prompt: {prompt.splitlines()[0]}")
-            return self.prog(prompt=prompt)
+            return self.prog.acall(prompt=prompt)
 
         preds = [
-            self.prog(
+            self.prog.acall(
                 prompt=prompt,
                 config=dict(temperature=self.temperature + (TEMPARATURE_STEP * i)),
             )

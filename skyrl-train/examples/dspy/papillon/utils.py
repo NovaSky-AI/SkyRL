@@ -29,7 +29,7 @@ class LLMJudge(dspy.Module):
         self.quality_judge = dspy.ChainOfThought(JudgeQuality)
         self.fact_checker = dspy.ChainOfThought(JudgeLeakage)
 
-    def forward(self, user_query, og_resp, new_resp=None, updated_query=None, pii_str=None):
+    async def forward(self, user_query, og_resp, new_resp=None, updated_query=None, pii_str=None):
         judgment_1 = self.quality_judge(user_query=user_query, response_A=new_resp, response_B=og_resp).judgment
         judgment_2 = self.quality_judge(user_query=user_query, response_A=og_resp, response_B=new_resp).judgment
         judgment = judgment_1 or (judgment_1 == judgment_2)  # True if better or if judge is inconsistent
@@ -44,12 +44,12 @@ openai_lm = dspy.LM(model="openai/gpt-4.1-mini", cache=True)
 llm_judge = LLMJudge()
 llm_judge.set_lm(openai_lm)
 
-def compute_metrics(gold, pred, trace=None):
-    return llm_judge(
+async def compute_metrics(gold, pred, trace=None):
+    return await llm_judge(
         user_query=gold.user_query,
-        new_resp=pred.output,
+        new_resp=pred.response,
         og_resp=gold.target_response,
-        updated_query=pred.prompt,
+        updated_query=pred.llm_request,
         pii_str=gold.pii_str,
     )
 
@@ -59,13 +59,13 @@ def compute_quality(gold, pred, trace=None):
 def compute_leakage(gold, pred, trace=None):
     return compute_metrics(gold, pred, trace).leakage
 
-def compute_overall_score(gold, pred, trace=None):
-    metrics = compute_metrics(gold, pred, trace)
+async def compute_overall_score(gold, pred, trace=None):
+    metrics = await compute_metrics(gold, pred, trace)
     overall_score = (metrics.quality + (1 - metrics.leakage)) / 2.0
     return overall_score >= 1.0 if trace is not None else overall_score
 
 
-def compute_query_leakage(example, pred, trace=None):
+async def compute_query_leakage(example, pred, trace=None):
     """
     Compute privacy leakage of the redacted LLM request.
 

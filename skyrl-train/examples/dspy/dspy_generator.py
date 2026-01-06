@@ -91,7 +91,20 @@ class DSPyGenerator(GeneratorInterface):
                 )
             )
 
-        all_outputs: List[DSPyOutput] = await asyncio.gather(*tasks)
+        batch_size = 10
+        semaphore = asyncio.Semaphore(batch_size)
+
+        async def run_with_limit(coro):
+            async with semaphore:
+                return await coro
+
+        # Wrap each original task with a semaphore-limited task
+        limited_tasks = [run_with_limit(t) for t in tasks]
+
+        # Run all tasks (but concurrency is now limited!)
+        all_outputs: List[DSPyOutput] = await asyncio.gather(*limited_tasks)
+
+        # all_outputs: List[DSPyOutput] = await asyncio.gather(*tasks)
 
         # For a group of trajectories (n_samples_per_prompt trajectories for the same prompt), if one
         # of the trajectories fails, we skip the entire group. We also skip the group for rollout metric aggregation

@@ -1,4 +1,5 @@
 import dspy
+from dspy.adapters.xml_adapter import XMLAdapter
 
 
 class CraftRedactedRequest(dspy.Signature):
@@ -30,6 +31,7 @@ class PAPILLON(dspy.Module):
         self.craft_redacted_request = dspy.ChainOfThought(CraftRedactedRequest)
         self.respond_to_query = dspy.Predict(RespondToQuery)
         self.untrusted_model = untrusted_model
+        self.adapter = XMLAdapter()
 
     def forward(self, user_query):
         llm_request = self.craft_redacted_request(user_query=user_query).llm_request
@@ -49,14 +51,19 @@ class PAPILLON(dspy.Module):
 class PAPILLON_request_gen(PAPILLON):
     async def forward(self, example):
         user_query = example.get("user_query")
-        llm_request = self.craft_redacted_request(user_query=user_query).llm_request
-        self.llm_request = llm_request
-        llm_response = self.untrusted_model(llm_request)[0]
-        response = self.respond_to_query(
+        print("[Program] Generating LLM request")
+        self.llm_request = await self.craft_redacted_request.acall(user_query=user_query)
+        llm_request = self.llm_request.llm_request
+        print("[Program] Generating untrusted response")
+        llm_response = await self.untrusted_model.acall(llm_request)
+        llm_response = llm_response[0]
+        print("[Program] Generating response")
+        response = await self.respond_to_query.acall(
             related_llm_request=llm_request,
             related_llm_response=llm_response,
             user_query=user_query,
-        ).response
+        )
+        response = response.response
 
         return dspy.Prediction(
             llm_request=llm_request,

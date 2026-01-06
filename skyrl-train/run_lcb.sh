@@ -11,14 +11,14 @@ NUM_NODES=1
 NUM_GPUS=1
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-Coder-1.5B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-Coder-0.5B-Instruct"
 
 
 FLASH_ATTN=true
 NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TP=1
 
-train_data="$HOME/data/lcb/deepcoder_train_short.json"
+train_data="$HOME/Liheng/data/lcb/deepcoder_train_short.json"
 
 CKPTS_DIR="$HOME/ckpts"
 EXPORTS_DIR="$HOME/hf_ckpts"
