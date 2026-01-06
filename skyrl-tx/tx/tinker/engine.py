@@ -394,6 +394,7 @@ class TinkerEngine:
                 )
             ).all()
 
+            sessions_with_failed_unloads = set()
             for model in models_to_process:
                 if self.backend.has_model(model.model_id):
                     try:
@@ -403,13 +404,15 @@ class TinkerEngine:
                         logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
                     except Exception as e:
                         logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
+                        sessions_with_failed_unloads.add(model.session_id)
                 else:
                     # Model not in backend but status not unloaded - fix DB state
                     model.status = "unloaded"
 
             for sess in stale_sessions:
-                sess.status = "expired"
-                logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
+                if sess.session_id not in sessions_with_failed_unloads:
+                    sess.status = "expired"
+                    logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
 
             session.commit()
 
