@@ -602,8 +602,9 @@ class TinkerEngine:
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
 
-            # Periodically cleanup stale sessions
-            if time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
+            # Periodically cleanup stale sessions (disabled if either config is negative)
+            cleanup_enabled = self.config.session_cleanup_interval_sec >= 0 and self.config.session_timeout_sec >= 0
+            if cleanup_enabled and time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
                 self.cleanup_stale_sessions()
                 self._last_cleanup_time = time.time()
 

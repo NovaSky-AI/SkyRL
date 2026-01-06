@@ -43,11 +43,11 @@ class EngineConfig(BaseModel):
     )
     session_cleanup_interval_sec: int = Field(
         default=60,
-        description="How often to check for stale sessions (seconds)",
+        description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",
     )
     session_timeout_sec: int = Field(
         default=300,
-        description="Seconds without heartbeat before session is considered stale",
+        description="Seconds without heartbeat before session is considered stale. Set to -1 to disable cleanup.",
     )
 
 
