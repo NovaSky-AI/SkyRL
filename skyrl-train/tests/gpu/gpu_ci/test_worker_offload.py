@@ -41,16 +41,12 @@ def cfg() -> DictConfig:
 @pytest.mark.parametrize(
     ("worker_type", "strategy"),
     [
-        ("policy", "deepspeed"),
-        ("critic", "deepspeed"),
         ("policy", "fsdp"),
         ("critic", "fsdp"),
         ("policy", "fsdp2"),
         ("critic", "fsdp2"),
     ],
     ids=[
-        "deepspeed_policy",
-        "deepspeed_critic",
         "fsdp_policy",
         "fsdp_critic",
         "fsdp2_policy",
@@ -97,13 +93,9 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
         get_rank_0_memory(actor_group, "Before training")
 
         dummy_experience = make_dummy_experience()
-        # Run first training step to get optimizer initialized and stepped
-        global_step, local_step, accumulation_steps = 0, 0, 1
-        results = ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step, local_step, accumulation_steps
-            )
-        )
+        # Run first forward_backward + optim_step to get optimizer initialized and stepped
+        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience, 1))
+        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         after_training = get_rank_0_memory(actor_group, "After training")
 
@@ -118,10 +110,9 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
         actor_group.offload_to_cpu(offload_optimizer=False, offload_model=True)
         after_offload = get_rank_0_memory(actor_group, "After model offload")
 
-        if strategy != "deepspeed":  # deepspeed currently just supports offloading optimizer
-            assert (
-                after_offload < after_offload_optimizer
-            ), f"Memory after offload model should be less than after offload optimizer: {after_offload} bytes, after offload optimizer: {after_offload_optimizer} bytes"
+        assert (
+            after_offload < after_offload_optimizer
+        ), f"Memory after offload model should be less than after offload optimizer: {after_offload} bytes, after offload optimizer: {after_offload_optimizer} bytes"
 
         # check that allocated memory is similar to initial offload memory
         delta = abs(initial_offload_mem - after_offload)
@@ -144,17 +135,15 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
 
         actor_group.backload_to_gpu(backload_optimizer=False, backload_model=True)
         after_backload = get_rank_0_memory(actor_group, "After backload model")
-        if strategy != "deepspeed":  # deepspeed currently just supports offloading optimizer
-            assert (
-                after_backload > after_backload_optimizer
-            ), f"Memory after backload model should be greater than after backload optimizer: {after_backload} bytes, after backload optimizer: {after_backload_optimizer} bytes"
+        assert (
+            after_backload > after_backload_optimizer
+        ), f"Memory after backload model should be greater than after backload optimizer: {after_backload} bytes, after backload optimizer: {after_backload_optimizer} bytes"
 
         # Run training again and ensure output consistency
         results_backload = ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step + 1, local_step, accumulation_steps
-            )
+            actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience, 1)
         )
+        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for i, result in enumerate(results):
             result_backload = results_backload[i]
@@ -183,8 +172,7 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
 async def test_fsdp_ref_offload_memory_and_correctness(ray_init_fixture, cfg, worker_type, strategy):
     """
     Test that offloading model memory to cpu lowers memory usage and that correctness
-    is maintained after backloading and running a forward pass. Note we don't test
-    deepspeed ref here because deepspeed doesn't support offloading params manually!
+    is maintained after backloading and running a forward pass.
 
     steps:
     1. Initialize actor group with the specified worker class.
@@ -313,7 +301,6 @@ async def test_cpu_offload_correctness(ray_init_fixture, cfg, worker_type, strat
 @pytest.mark.parametrize(
     "strategy",
     [
-        "deepspeed",
         "fsdp",
         "fsdp2",
     ],
@@ -345,14 +332,10 @@ def test_offload_after_ckpt(ray_init_fixture, strategy):
 
         # Create dummy experiences for training steps
         dummy_experience_1 = make_dummy_experience()  # First training step
-        global_step, local_step, accumulation_steps = 0, 0, 1
 
-        # Step 1: Do initial training step
-        ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_1, global_step, local_step, accumulation_steps
-            )
-        )
+        # Step 1: Do initial forward_backward + optim_step
+        ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience_1, 1))
+        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         get_rank_0_memory(actor_group, "After training step 1")
 
         checkpoint_path = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1", "policy"))

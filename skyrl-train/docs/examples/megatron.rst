@@ -10,7 +10,7 @@ For details on configuring the Megatron backend, and enabling checkpointing, see
 When to use the Megatron backend
 --------------------------------
 
-SkyRL supports efficient data-parallel training with the FSDP and the DeepSpeed backend, with support for Ulysses sequence parallelism for long context training. The Megatron backend is useful to stack additional parallelism strategies (TP, PP, EP) on top of data and sequence/context parallelism. This is helpful both for fitting larger models into memory and for training throughput for MoE models (with EP). The Megatron backend is thus useful for efficient training of small MoE models like ``Qwen3-30B-A3B`` as well as large-scale training with large models such as ``Qwen3-235B-A22B`` and/or large datasets. For resources on understanding different parallelism strategies, see :ref:`parallelism-resources`.
+SkyRL supports efficient data-parallel training with the FSDP backend, with support for Ulysses sequence parallelism for long context training. The Megatron backend is useful to stack additional parallelism strategies (TP, PP, EP) on top of data and sequence/context parallelism. This is helpful both for fitting larger models into memory and for training throughput for MoE models (with EP). The Megatron backend is thus useful for efficient training of small MoE models like ``Qwen3-30B-A3B`` as well as large-scale training with large models such as ``Qwen3-235B-A22B`` and/or large datasets. For resources on understanding different parallelism strategies, see :ref:`parallelism-resources`.
 
 Comparison to FSDP
 ------------------
@@ -141,5 +141,4 @@ the `The Mesh Parallelism Zoo <https://blog.ezyang.com/2025/08/the-parallelism-m
 Below, we show a diagram displaying how all 5 parallelism strategies - tensor, pipeline, context, expert, and data parallelism - can be utilized in SkyRL, as well as how dispatching data across these parallel groups works.
 
 .. image:: images/parallelism.svg
-
 

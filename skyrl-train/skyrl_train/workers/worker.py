@@ -84,7 +84,7 @@ class DistributedTorchRayActor:
             )
 
         # setup device mesh
-        # TODO: Support TP / PP for DeepSpeed
+        # TODO: Support TP / PP for additional backends
         # NOTE (sumanthrh): Device mesh and mesh rank are rank specific attributes. For the current way the strategy is defined, it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
         # This device mesh can be common across all the strategies we use
         dp_size = self._world_size // self.sequence_parallel_size
@@ -649,7 +649,7 @@ class PolicyWorkerBase(Worker):
         loss_mask = experience.loss_mask
         rollout_action_logprobs = experience.rollout_logprobs
 
-        # TODO (sumanthrh): don't think this does anything for deepspeed or fsdp rn because autocast happens internally
+        # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
             action_log_probs, output = self.model(
@@ -825,25 +825,6 @@ class PolicyWorkerBase(Worker):
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
         return output
-
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
-        """
-        Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
-        """
-        # TODO: Is this method actually used?
-        status = self.forward_backward(experience, microbatch_weight=1.0 / accumulation_steps)
-
-        if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.optim_step()
-            if grad_norm is not None:
-                status["raw_grad_norm"] = grad_norm
-
-        if self.record_memory:
-            self.save_memory_snapshot(global_step, local_step)
-
-        status["policy_lr"] = self.scheduler.get_last_lr()[0]
-
-        return status
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
         self.strategy.save_checkpoint(
@@ -1071,26 +1052,6 @@ class CriticWorkerBase(Worker):
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
         return output
-
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
-        """
-        Perform one micro-batch of training, accumulate gradients, and step the optimizer only
-        after `accumulation_steps` micro-batches.
-        """
-        # TODO: Is this method actually used?
-        status = self.forward_backward(experience, microbatch_weight=1.0 / accumulation_steps)
-
-        if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.optim_step()
-            if grad_norm is not None:
-                status["raw_grad_norm"] = grad_norm
-
-        if self.record_memory:
-            self.save_memory_snapshot(global_step, local_step)
-
-        status["critic_lr"] = self.scheduler.get_last_lr()[0]
-
-        return status
 
     def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
         self.strategy.save_checkpoint(

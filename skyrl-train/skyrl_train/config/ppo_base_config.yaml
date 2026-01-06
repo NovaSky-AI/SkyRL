@@ -1,7 +1,5 @@
 defaults:
   - _self_
-  - deepspeed_config@deepspeed_config.train: train
-  - deepspeed_config@deepspeed_config.eval: eval
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
   - megatron_config@trainer.policy.megatron_config: policy
   - megatron_config@trainer.ref.megatron_config: ref
@@ -36,7 +34,6 @@ trainer:
         # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights
         # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
         init_method: "kaiming"
-    deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 1.0e-6
       adam_betas: [0.9, 0.999]
@@ -54,19 +51,18 @@ trainer:
     use_torch_compile: false
     # saves memory snapshots to os.path.join(ckpt_path, "memory_snapshots") - can visualize by dragging pickle files to https://docs.pytorch.org/memory_viz
     record_memory: false
-    # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
+    # pass through kwargs to the HuggingFace model config for FSDP training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
     model_config_kwargs: {}
   ref:
     model:
       path: ${trainer.policy.model.path}
     sequence_parallel_size: 1
-    deepspeed_config: ${deepspeed_config.eval}
     fsdp_config:
       cpu_offload: false
       reshard_after_forward: true
       fsdp_size: -1
     # pass through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
-    # pass through kwargs to the HuggingFace model config for FSDP/Deepspeed training backends (i.e. for overriding vocab size, etc) - for megatron, use ref.megatron_config.transformer_config_kwargs instead
+    # pass through kwargs to the HuggingFace model config for FSDP training backends (i.e. for overriding vocab size, etc) - for megatron, use ref.megatron_config.transformer_config_kwargs instead
     model_config_kwargs: {}
   critic:
     model:
@@ -78,7 +74,6 @@ trainer:
         target_modules: "all-linear"
         exclude_modules: null
         init_method: "kaiming"
-    deepspeed_config: ${deepspeed_config.train}
     optimizer_config:
       lr: 5.0e-6
       adam_betas: [0.9, 0.999]

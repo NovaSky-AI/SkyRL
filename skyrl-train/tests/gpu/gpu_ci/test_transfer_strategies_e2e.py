@@ -121,7 +121,7 @@ class SenderActor:
         dtype = str_to_torch_dtype(dtype_str)
 
         # All ranks generate tensors because:
-        # - Broadcast strategy: All ranks iterate through chunks (simulating FSDP/DeepSpeed collective ops
+        # - Broadcast strategy: All ranks iterate through chunks (simulating FSDP collective ops
         #   during weight extraction), but only rank 0's tensor values are actually broadcast
         # - CUDA IPC strategy: All ranks create IPC handles from their tensors
         # Use same seed on all ranks so they generate identical tensors for easier testing

@@ -40,7 +40,7 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
     - Contains expected training metrics
     """
     try:
-        cfg.trainer.strategy = "fsdp"  # Strategy logic is not tested here.
+        cfg.trainer.strategy = "fsdp2"  # Strategy logic is not tested here.
         if use_entropy_loss:
             cfg.trainer.algorithm.use_entropy_loss = True
             cfg.trainer.algorithm.entropy_loss_coef = 0.01
@@ -96,7 +96,7 @@ def test_ppo_train_critic_worker(ray_init_fixture, cfg):
     Test that ppo_train works for critic worker as well.
     """
     try:
-        cfg.trainer.strategy = "fsdp"  # Strategy logic is not tested here.
+        cfg.trainer.strategy = "fsdp2"  # Strategy logic is not tested here.
 
         actor_group = init_worker_with_type(
             "critic",
@@ -162,7 +162,7 @@ def test_gradient_accumulation_scenarios(
     """
     try:
         cfg = get_test_actor_config()
-        cfg.trainer.strategy = "fsdp"  # Strategy logic is not tested here.
+        cfg.trainer.strategy = "fsdp2"  # Strategy logic is not tested here.
         cfg.trainer.placement.policy_num_gpus_per_node = 2
 
         # Set scenario-specific config

@@ -406,4 +406,3 @@ Evaluation results for `Qwen3-30B-A3B <https://huggingface.co/Qwen/Qwen3-30B-A3B
       </tr>
     </tbody>
   </table>
-
