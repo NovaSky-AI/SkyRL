@@ -1040,14 +1040,16 @@ class CriticWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for minibatch in minibatch_pbar:
-                microbatch_iterator = SampleBasedBatchIterator(
-                    minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+                microbatch_iterator = _get_microbatch_iterator(
+                    minibatch,
+                    micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                    max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
                 )
                 num_microbatches = len(microbatch_iterator)
-                microbatch_weight = 1.0 / num_microbatches
 
                 for microbatch_idx, microbatch in enumerate(microbatch_iterator):
                     microbatch_experience = BaseBatchIterator.batch_to_experience(microbatch)
+                    microbatch_weight = len(microbatch) / len(minibatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
                     if microbatch_idx < num_microbatches - 1:
