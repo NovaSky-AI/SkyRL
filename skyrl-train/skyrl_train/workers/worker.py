@@ -309,12 +309,15 @@ class Worker(DistributedTorchRayActor):
         """
         # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+        microbatch_iterator = SampleBasedBatchIterator(
+            data, sample_batch_size=self.cfg.trainer.micro_forward_batch_size_per_gpu, drop_last=False
+        )
 
         outputs = []
-        for micro_batch in micro_batches:
-            outputs.append(self._forward_micro_batch(micro_batch))
-        output = TrainingOutputBatch.cat(outputs)
+        for microbatch in microbatch_iterator:
+            outputs.append(self._forward_micro_batch(microbatch))
+        output = microbatch_iterator.reorder_and_combine_batches(outputs)
+
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
         return output
