@@ -45,6 +45,8 @@ class EngineConfig(BaseModel):
         default=60,
         description="How often to check for stale sessions (seconds). Set to -1 to disable cleanup.",
     )
+    # The tinker client sends heartbeats every 10 seconds by default.
+    # https://github.com/thinking-machines-lab/tinker/blob/2d8e9d5e00f746f39148a5d0cb760dff3f2eed43/src/tinker/lib/internal_client_holder.py#L182
     session_timeout_sec: int = Field(
         default=300,
         description="Seconds without heartbeat before session is considered stale. Set to -1 to disable cleanup.",
