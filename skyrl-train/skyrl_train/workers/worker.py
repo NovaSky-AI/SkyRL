@@ -801,24 +801,6 @@ class PolicyWorkerBase(Worker):
         output.metadata = {"train_status": status_mean}
         return output
 
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
-        """
-        Perform one micro-batch of training, accumulate gradients, and step the optimizer only after `accumulation_steps` micro-batches.
-        """
-        status = self.forward_backward(experience, accumulation_steps)
-
-        if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.optim_step()
-            if grad_norm is not None:
-                status["raw_grad_norm"] = grad_norm
-
-        if self.record_memory:
-            self.save_memory_snapshot(global_step, local_step)
-
-        status["policy_lr"] = self.scheduler.get_last_lr()[0]
-
-        return status
-
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
         self.strategy.save_checkpoint(
             model=self.model,
@@ -1032,21 +1014,6 @@ class CriticWorkerBase(Worker):
         output = TrainingOutputBatch()
         output.metadata = {"train_status": status_mean}
         return output
-
-    def training_step(self, experience: Experience, global_step, local_step, accumulation_steps) -> Dict[str, float]:
-        """
-        Perform one micro-batch of training, accumulate gradients, and step the optimizer only
-        after `accumulation_steps` micro-batches.
-        """
-        status = self.forward_backward(experience, accumulation_steps)
-
-        if (local_step + 1) % accumulation_steps == 0:
-            grad_norm = self.optim_step()
-            if grad_norm is not None:
-                status["raw_grad_norm"] = grad_norm
-
-        status["critic_lr"] = self.scheduler.get_last_lr()[0]
-        return status
 
     def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
         self.strategy.save_checkpoint(

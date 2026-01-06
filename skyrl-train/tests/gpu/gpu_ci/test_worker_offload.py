@@ -93,13 +93,9 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
         get_rank_0_memory(actor_group, "Before training")
 
         dummy_experience = make_dummy_experience()
-        # Run first training step to get optimizer initialized and stepped
-        global_step, local_step, accumulation_steps = 0, 0, 1
-        results = ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step, local_step, accumulation_steps
-            )
-        )
+        # Run first forward_backward + optim_step to get optimizer initialized and stepped
+        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience, 1))
+        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         after_training = get_rank_0_memory(actor_group, "After training")
 
@@ -145,10 +141,9 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
 
         # Run training again and ensure output consistency
         results_backload = ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience, global_step + 1, local_step, accumulation_steps
-            )
+            actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience, 1)
         )
+        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for i, result in enumerate(results):
             result_backload = results_backload[i]
@@ -337,14 +332,10 @@ def test_offload_after_ckpt(ray_init_fixture, strategy):
 
         # Create dummy experiences for training steps
         dummy_experience_1 = make_dummy_experience()  # First training step
-        global_step, local_step, accumulation_steps = 0, 0, 1
 
-        # Step 1: Do initial training step
-        ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", dummy_experience_1, global_step, local_step, accumulation_steps
-            )
-        )
+        # Step 1: Do initial forward_backward + optim_step
+        ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience_1, 1))
+        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         get_rank_0_memory(actor_group, "After training step 1")
 
         checkpoint_path = os.path.expandvars(os.path.join(cfg.trainer.ckpt_path, "global_step_1", "policy"))
