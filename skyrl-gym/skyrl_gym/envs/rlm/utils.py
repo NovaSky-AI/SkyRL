@@ -1,6 +1,34 @@
 import textwrap
 
 
+_ALLOWED_IMPORTS = {
+    "collections",
+    "datetime",
+    "functools",
+    "itertools",
+    "json",
+    "math",
+    "random",
+    "re",
+    "statistics",
+    "string",
+}
+
+
+def safe_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+
+    if level != 0:
+        raise ImportError("Relative imports are disabled in this environment")
+    if not isinstance(name, str) or not name:
+        raise ImportError("Invalid module name")
+
+    top_level = name.split(".", 1)[0]
+    if top_level not in _ALLOWED_IMPORTS:
+        raise ImportError(f"Import of '{top_level}' is not allowed")
+
+    return __import__(name, globals, locals, fromlist, level)
+
+
 SAFE_BUILTINS = {
     # Core types and functions
     "print": print,
@@ -61,8 +89,7 @@ SAFE_BUILTINS = {
     "property": property,
     "staticmethod": staticmethod,
     "classmethod": classmethod,
-    "__import__": None,
-    "open": None,
+    "__import__": safe_import,
     # Exceptions
     "Exception": Exception,
     "BaseException": BaseException,
@@ -90,6 +117,7 @@ SAFE_BUILTINS = {
     "compile": None,
     "globals": None,
     "locals": None,
+    "open": None,
 }
 
 

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import tempfile
+import itertools
 import uuid
 from typing import Optional
 
@@ -17,15 +18,21 @@ class RLMEnvironment(BaseTextEnv):
     RLM Loop Environment for SkyRL Gym
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        max_turns: int = 10,
+        max_tokens: int = 1024,
+        max_repl_output_chars: int = 4000,
+    ):
         super().__init__()
         self.temp_dir = tempfile.mkdtemp(prefix=f"repl_env_{uuid.uuid4()}_")
         self.globals_dict: dict = {}
         self.locals_dict: dict = {}
 
-        self.max_turns = 10
-        self.max_tokens = 1024
-        self.max_repl_output_chars = 4000
+        self.max_turns = max_turns
+        self.max_tokens = max_tokens
+        self.max_repl_output_chars = max_repl_output_chars
         self._reset_repl_namespace()
 
         self.lm_client: OpenAI | None = None
@@ -49,7 +56,7 @@ class RLMEnvironment(BaseTextEnv):
             total = sum(len(str(x)) for x in ctx)
             preview = [len(str(x)) for x in ctx[:10]]
         elif isinstance(ctx, dict):
-            total = sum(len(str(k)) + len(str(v)) for k, v in list(ctx.items())[:1000])
+            total = sum(len(str(k)) + len(str(v)) for k, v in itertools.islice(ctx.items(), 1000))
             preview = [len(ctx)]
         else:
             total = len(str(ctx)) if ctx is not None else 0
@@ -59,20 +66,19 @@ class RLMEnvironment(BaseTextEnv):
 
     def _engine_setup(
         self,
-        env_cfg: DictConfig | dict,
+        env_cfg: DictConfig,
     ):
         """Setup the inference engine."""
-        if isinstance(env_cfg, dict):
-            openai_api_key = env_cfg.get("openai_api_key")
-        else:
-            openai_api_key = os.getenv("OPENAI_API_KEY")
 
+        openai_api_key = env_cfg.openai_api_key or os.getenv("OPENAI_API_KEY")
         if openai_api_key is None:
             raise ValueError("`OPENAI_API_KEY` must be set (as parameter, in env_cfg, or as environment variable)")
 
         base_url = env_cfg.base_url
         model = env_cfg.model
         init_prompt = env_cfg.init_prompt
+        if not base_url or not model or not init_prompt:
+            raise ValueError("env_cfg must include base_url, model, and init_prompt")
 
         self.lm_client = OpenAI(base_url=base_url, api_key=openai_api_key)
         self.model = model
@@ -138,9 +144,7 @@ class RLMEnvironment(BaseTextEnv):
             response_text = response.choices[0].message.content or ""
             messages.append({"role": "assistant", "content": response_text})
 
-            has_final_answer = bool(
-                re.search(r"\bFINAL_VAR\b|\bFINAL_ANSWER\b|\bFINAL\s*\(", response_text, re.IGNORECASE)
-            )
+            has_final_answer = bool(re.search(r"\bFINAL_VAR\b|\bFINAL\s*\(", response_text, re.IGNORECASE))
 
             # Find ALL <repl> blocks in the response
             code_matches = re.findall(r"<repl>(.*?)</repl>", response_text, re.DOTALL | re.IGNORECASE)
@@ -210,7 +214,7 @@ class RLMEnvironment(BaseTextEnv):
             done = self.turns >= self.max_turns or has_final_answer
             final_answer_value = None
             if has_final_answer:
-                final_answer_value = self._extract_final_answer(response_text, last_execution_result)
+                final_answer_value = self._extract_final_answer(response_text)
 
             if done:
                 break
@@ -242,12 +246,12 @@ class RLMEnvironment(BaseTextEnv):
 
         if isinstance(context_payload, str):
             context_path = os.path.join(self.temp_dir, "context.txt")
-            with open(context_path, "w") as f:
+            with open(context_path, "w", encoding="utf-8") as f:
                 f.write(context_payload)
         else:
             context_path = os.path.join(self.temp_dir, "context.json")
-            with open(context_path, "w") as f:
-                json.dump(context_payload, f)
+            with open(context_path, "w", encoding="utf-8") as f:
+                json.dump(context_payload, f, ensure_ascii=False)
 
         self.locals_dict["context_path"] = context_path
 
@@ -255,7 +259,7 @@ class RLMEnvironment(BaseTextEnv):
         """Public wrapper: execute Python in the REPL namespace."""
         return self._execute_code(code)
 
-    def _extract_final_answer(self, response: str, execution_result: dict | None) -> Optional[str]:
+    def _extract_final_answer(self, response: str) -> Optional[str]:
         final_var_match = re.search(
             r"FINAL_VAR\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)",
             response,
@@ -291,12 +295,10 @@ class RLMEnvironment(BaseTextEnv):
         start_time = time.perf_counter()
 
         old_stdout, old_stderr = sys.stdout, sys.stderr
-        old_cwd = os.getcwd()
         stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
 
         try:
             sys.stdout, sys.stderr = stdout_buf, stderr_buf
-            os.chdir(self.temp_dir)
 
             combined = {**self.globals_dict, **self.locals_dict}
             exec(code, combined, combined)
@@ -312,7 +314,6 @@ class RLMEnvironment(BaseTextEnv):
             stderr = stderr_buf.getvalue() + f"\n{type(e).__name__}: {e}"
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
-            os.chdir(old_cwd)
 
         execution_time = time.perf_counter() - start_time
         return {
@@ -323,8 +324,20 @@ class RLMEnvironment(BaseTextEnv):
         }
 
     def close(self):
+        if getattr(self, "temp_dir", None) and os.path.exists(self.temp_dir):
+            import shutil
+
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+        self.temp_dir = None
         self.globals_dict.clear()
         self.locals_dict.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
     def __del__(self):
         self.close()
