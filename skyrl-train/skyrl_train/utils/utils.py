@@ -295,7 +295,11 @@ def validate_cfg(cfg: DictConfig):
             "please set `offload_after_step` to `true` for both policy and critic"
         )
 
+    # Legacy TIS validation (deprecated)
     if cfg.trainer.algorithm.use_tis:
+        logger.warning(
+            "`trainer.algorithm.use_tis` is deprecated. Please use `trainer.algorithm.rollout_correction` instead."
+        )
         if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
             raise ValueError(
                 f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` "
@@ -315,6 +319,47 @@ def validate_cfg(cfg: DictConfig):
             "regular",
             "dual_clip",
         ], "TIS is only implemented for regular and dual_clip policy loss types"
+
+    # New rollout_correction validation
+    rollout_corr = cfg.trainer.algorithm.get("rollout_correction", None)
+    if rollout_corr is not None:
+        tis_ratio_type = rollout_corr.get("tis_ratio_type", "null")
+        rejection_mask_type = rollout_corr.get("rejection_mask_type", "null")
+
+        uses_rollout_correction = tis_ratio_type != "null" or rejection_mask_type != "null"
+
+        if uses_rollout_correction:
+            # Validate tis_ratio_type
+            assert tis_ratio_type in [
+                "null",
+                "token",
+                "sequence",
+            ], f"`tis_ratio_type` must be 'null', 'token', or 'sequence', got {tis_ratio_type}"
+
+            # Validate rejection_mask_type
+            assert rejection_mask_type in [
+                "null",
+                "sequence",
+                "geometric",
+            ], f"`rejection_mask_type` must be 'null', 'sequence', or 'geometric', got {rejection_mask_type}"
+
+            # Ensure logprobs are enabled for rollout correction
+            if cfg.generator.sampling_params.logprobs is None:
+                logger.warning(
+                    "`generator.sampling_params.logprobs` is `None` but rollout_correction is enabled."
+                    " Setting `logprobs` to `True`."
+                )
+                cfg.generator.sampling_params.logprobs = 0
+
+            if cfg.generator.backend == "sglang":
+                raise NotImplementedError(
+                    "`trainer.algorithm.rollout_correction` doesn't support Sglang backend, please use vLLM"
+                )
+
+            assert cfg.trainer.algorithm.policy_loss_type in [
+                "regular",
+                "dual_clip",
+            ], "rollout_correction is only implemented for regular and dual_clip policy loss types"
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
