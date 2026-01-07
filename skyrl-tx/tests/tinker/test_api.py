@@ -51,7 +51,7 @@ def start_api_server(overrides: dict[str, str] | None = None):
         "port": str(TEST_SERVER_PORT),
         "base-model": BASE_MODEL,
         "backend-config": '{"max_lora_adapters": 4}',
-        "database-url": "sqlite:///:memory",  # Use in-memory DB for test isolation
+        "database-url": "sqlite:///:memory:",  # Use in-memory DB for test isolation
     }
     if overrides:
         defaults.update(overrides)
