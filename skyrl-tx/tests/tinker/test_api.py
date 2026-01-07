@@ -352,7 +352,7 @@ def test_unload_model(api_server):
     # Create a training client (which creates a model) and verify it works
     _, training_client = create_service_and_training_client(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/")
 
-    async def _unload():
+    async def unload_model():
         async with tinker._client.AsyncTinker(
             api_key="dummy", base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/"
         ) as client:
@@ -365,8 +365,7 @@ def test_unload_model(api_server):
                     return result
                 await asyncio.sleep(0.1)
 
-    result = asyncio.run(_unload())
-    assert isinstance(result, types.UnloadModelResponse)
+    assert isinstance(asyncio.run(unload_model()), types.UnloadModelResponse)
 
     # Verify model no longer works after unload
     with pytest.raises(Exception):

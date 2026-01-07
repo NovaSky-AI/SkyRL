@@ -50,23 +50,18 @@ def test_adapter_slot_reuse():
     """Test that deleted adapter slots are reused."""
     backend = create_backend()
 
-    # Create 3 models
-    idx1 = create_model(backend, "model_1")
-    idx2 = create_model(backend, "model_2")
-    idx3 = create_model(backend, "model_3")
-    assert idx1 == 1
-    assert idx2 == 2
-    assert idx3 == 3
+    # Create 3 models and check adapter indices
+    assert create_model(backend, "model_1") == 1
+    assert create_model(backend, "model_2") == 2
+    assert create_model(backend, "model_3") == 3
 
     # Delete first model, new model should reuse index 1
     backend.delete_model("model_1")
-    idx4 = create_model(backend, "model_4")
-    assert idx4 == 1
+    assert create_model(backend, "model_4") == 1
 
     # Delete middle model, new model should fill gap at index 1
     backend.delete_model("model_2")
-    idx5 = create_model(backend, "model_5")
-    assert idx5 == 2
+    assert create_model(backend, "model_5") == 2
 
 
 def test_max_adapters_limit():
@@ -94,9 +89,8 @@ def test_max_adapters_after_delete():
     # Delete one model
     backend.delete_model("model_0")
 
-    # Now we should be able to create a new model
-    idx = create_model(backend, "model_new")
-    assert idx == 1  # Should reuse the freed slot
+    # Now we should be able to create a new model which should reuse the freed slot
+    assert create_model(backend, "model_new") == 1
 
 
 def test_clear_adapter_config():

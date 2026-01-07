@@ -579,8 +579,6 @@ def test_cleanup_stale_sessions():
         )
         session.commit()
 
-    # Run cleanup
-    unloaded_count = engine.cleanup_stale_sessions()
-
-    assert unloaded_count == 1
+    # Run cleanup and assert one model was unloaded
+    assert engine.cleanup_stale_sessions() == 1
     assert not engine.backend.has_model(model_id)
