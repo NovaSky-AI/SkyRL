@@ -19,6 +19,58 @@ from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
 
 
+def prepare_model_pass_batch(
+    requests: dict[str, tuple[str, types.ForwardBackwardInput]],
+) -> types.PreparedModelPassBatch:
+    """Prepare batch data for forward/forward_backward operations.
+
+    Extracts tokens, targets, and metadata from requests into lists
+    that the backend will convert to arrays.
+
+    Args:
+        requests: Dict mapping request_id to (model_id, request_data) tuples
+
+    Returns:
+        PreparedModelPassBatch with all data extracted from requests
+    """
+    all_input_ids = []
+    all_targets = []
+    all_token_weights = []
+    all_model_ids = []
+    all_sampling_logprobs = []
+    all_advantages = []
+    all_loss_fn_types = []
+    request_batch_slices = []
+
+    for request_id, (model_id, request_data) in requests.items():
+        loss_fn_type = LOSS_TYPES[request_data.loss_fn]
+
+        request_start = len(all_input_ids)
+        for item in request_data.data:
+            tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
+            all_input_ids.append(tokens)
+            loss_fn_inputs = item.loss_fn_inputs
+            all_targets.append(loss_fn_inputs.target_tokens.data)
+            all_token_weights.append(loss_fn_inputs.weights.data)
+            all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
+            all_advantages.append(loss_fn_inputs.advantages.data)
+            all_model_ids.append(model_id)
+            all_loss_fn_types.append(loss_fn_type)
+
+        request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
+
+    return types.PreparedModelPassBatch(
+        all_input_ids=all_input_ids,
+        all_targets=all_targets,
+        all_token_weights=all_token_weights,
+        all_sampling_logprobs=all_sampling_logprobs,
+        all_advantages=all_advantages,
+        all_model_ids=all_model_ids,
+        all_loss_fn_types=all_loss_fn_types,
+        request_batch_slices=request_batch_slices,
+    )
+
+
 BACKENDS = {
     "jax": (JaxBackend, JaxBackendConfig),
 }
@@ -67,58 +119,6 @@ class TinkerEngine:
                 valid_requests[request_id] = (model_id, request_data)
 
         return results, valid_requests
-
-    def _prepare_model_pass_batch(
-        self,
-        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
-    ) -> types.PreparedModelPassBatch:
-        """Prepare batch data for forward/forward_backward operations.
-
-        Extracts tokens, targets, and metadata from requests into lists
-        that the backend will convert to arrays.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
-
-        Returns:
-            PreparedModelPassBatch with all data extracted from requests
-        """
-        all_input_ids = []
-        all_targets = []
-        all_token_weights = []
-        all_model_ids = []
-        all_sampling_logprobs = []
-        all_advantages = []
-        all_loss_fn_types = []
-        request_batch_slices = []
-
-        for request_id, (model_id, request_data) in requests.items():
-            loss_fn_type = LOSS_TYPES[request_data.loss_fn]
-
-            request_start = len(all_input_ids)
-            for item in request_data.data:
-                tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
-                all_input_ids.append(tokens)
-                loss_fn_inputs = item.loss_fn_inputs
-                all_targets.append(loss_fn_inputs.target_tokens.data)
-                all_token_weights.append(loss_fn_inputs.weights.data)
-                all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
-                all_advantages.append(loss_fn_inputs.advantages.data)
-                all_model_ids.append(model_id)
-                all_loss_fn_types.append(loss_fn_type)
-
-            request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
-
-        return types.PreparedModelPassBatch(
-            all_input_ids=all_input_ids,
-            all_targets=all_targets,
-            all_token_weights=all_token_weights,
-            all_sampling_logprobs=all_sampling_logprobs,
-            all_advantages=all_advantages,
-            all_model_ids=all_model_ids,
-            all_loss_fn_types=all_loss_fn_types,
-            request_batch_slices=request_batch_slices,
-        )
 
     def _prepare_sample_batch(
         self,
@@ -427,12 +427,12 @@ class TinkerEngine:
 
     def process_forward_backward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
         """Run forward and backward pass on a batch of requests."""
-        prepared = self._prepare_model_pass_batch(requests)
+        prepared = prepare_model_pass_batch(requests)
         return self.backend.forward_backward(prepared)
 
     def process_forward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
         """Run forward-only pass on a batch of requests."""
-        prepared = self._prepare_model_pass_batch(requests)
+        prepared = prepare_model_pass_batch(requests)
         return self.backend.forward(prepared)
 
     def process_sample(self, requests: dict[str, tuple[str, types.SampleInput]]) -> dict:
