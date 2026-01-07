@@ -24,7 +24,7 @@ TEST_SERVER_PORT = 8000
 # Configs for the fast cleanup test
 TEST_SERVER_PORT_FAST_CLEANUP = 8001
 FAST_CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
-FAST_CLEANUP_TIMEOUT_SEC = 10  # Seconds without heartbeat before session is stale
+FAST_CLEANUP_TIMEOUT_SEC = 3  # Seconds without heartbeat before session is stale
 
 
 def verify_training_client(training_client: tinker.TrainingClient):
@@ -35,11 +35,12 @@ def verify_training_client(training_client: tinker.TrainingClient):
     assert result is not None
 
 
-def create_service_and_training_client(base_url: str):
+def create_service_and_training_client(base_url: str, skip_verify: bool = False):
     """Create a service client and a training client, verifying it works."""
     service_client = tinker.ServiceClient(base_url=base_url, api_key="dummy")
     training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
-    verify_training_client(training_client)
+    if not skip_verify:
+        verify_training_client(training_client)
     return service_client, training_client
 
 
@@ -381,7 +382,13 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
     """
     _, log_path = api_server_fast_cleanup
     base_url = f"http://0.0.0.0:{TEST_SERVER_PORT_FAST_CLEANUP}/"
-    service_client, training_client = create_service_and_training_client(base_url=base_url)
+    # Skip verification because we've reduced cleanup timeout in this test.
+    # When running on a slow machine, the model may have already be cleaned
+    # up at verification time.
+    service_client, training_client = create_service_and_training_client(
+        base_url=base_url,
+        skip_verify=True,
+    )
 
     # Stop heartbeating by deleting the clients
     del training_client
