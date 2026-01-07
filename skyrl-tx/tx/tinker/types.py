@@ -87,7 +87,7 @@ class UnloadModelInput(BaseModel):
 
 class UnloadModelOutput(BaseModel):
     model_id: str
-    status: str = "unloaded"
+    status: str
 
 
 class ModelInputChunk(BaseModel):
