@@ -12,9 +12,9 @@ MAX_LORA_ADAPTERS = 4
 LORA_RANK = 8
 
 
-def create_backend():
+def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS):
     """Create a JaxBackend."""
-    config = JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32)
+    config = JaxBackendConfig(max_lora_adapters=max_lora_adapters, max_lora_rank=32)
     return JaxBackend(BASE_MODEL, config)
 
 
@@ -112,3 +112,38 @@ def test_clear_adapter_config():
     assert lora_layer.lora_scaling[adapter_idx] == 0.0
     assert (lora_layer.lora_A[adapter_idx] == 0.0).all()
     assert (lora_layer.lora_B[adapter_idx] == 0.0).all()
+
+
+def test_adapter_reuse_reinitializes_lora_adapter():
+    """Test that reusing an adapter slot reinitializes the lora adapter properly."""
+    # Use max_lora_adapters=2 so only slot 1 is available
+    # (slot 0 is reserved for base model)
+    backend = create_backend(max_lora_adapters=2)
+    model = backend.model
+    lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+
+    # Create first model
+    model_id_1 = "model_1"
+    adapter_idx = create_model(backend, model_id_1)
+
+    # Verify lora_A is non-zero after creation
+    assert not (
+        lora_layer.lora_A[adapter_idx, :, :LORA_RANK] == 0.0
+    ).all(), "lora_A should be initialized with he_uniform (non-zero)"
+
+    # Delete the model (clears both lora_A and lora_B to zeros)
+    backend.delete_model(model_id_1)
+    assert (lora_layer.lora_A[adapter_idx] == 0.0).all(), "lora_A should be zeroed after clear_adapter"
+
+    # Create a new model that reuses the same adapter slot
+    model_id_2 = "model_2"
+    new_adapter_idx = create_model(backend, model_id_2)
+    assert new_adapter_idx == adapter_idx, "Should reuse the same adapter slot"
+
+    # Verify lora_A is reinitialized (non-zero)
+    assert not (
+        lora_layer.lora_A[adapter_idx, :, :LORA_RANK] == 0.0
+    ).all(), "lora_A should be reinitialized with he_uniform after adapter reuse"
+
+    # Verify lora_B is reset to 0
+    assert (lora_layer.lora_B[adapter_idx] == 0.0).all(), "lora_B should be zeros"
