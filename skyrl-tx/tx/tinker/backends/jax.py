@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
-from tx.layers.lora import clear_adapter_config, update_adapter_config
+from tx.layers.lora import clear_adapter, reinitialize_adapter
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
@@ -178,7 +178,7 @@ class JaxBackendImpl(AbstractBackend):
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
 
             # Initialize adapter 0 with dummy config (required for base model sampling path)
-            update_adapter_config(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0))
+            reinitialize_adapter(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0))
 
             # Initialize global accumulated gradients
             self.accumulated_grads = AccumulatedGradients.create(self.lora_params, config.max_lora_adapters)
@@ -441,7 +441,7 @@ class JaxBackendImpl(AbstractBackend):
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Configure adapter
-        update_adapter_config(self.model, adapter_index, lora_config)
+        reinitialize_adapter(self.model, adapter_index, lora_config)
         logger.info(f"Created model {model_id} with adapter_index={adapter_index}, config={lora_config}")
 
     def delete_model(self, model_id: str) -> None:
@@ -454,7 +454,7 @@ class JaxBackendImpl(AbstractBackend):
 
         # Clear LoRA adapter weights
         with jax.set_mesh(self.mesh):
-            clear_adapter_config(self.model, adapter_index)
+            clear_adapter(self.model, adapter_index)
 
         # Delete optimizer
         del self.optimizers[model_id]

@@ -372,6 +372,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
+        self.rngs = rngs
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
         if not self.config.tie_word_embeddings:
             self.lm_head = LoRALinear(

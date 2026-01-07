@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import jax
+from flax import nnx
 from transformers import PretrainedConfig
 
 from tx.utils.generator import KVCache
@@ -12,6 +13,7 @@ from tx.utils.generator import KVCache
 
 class ModelForCausalLM(Protocol):
     config: PretrainedConfig
+    rngs: nnx.Rngs
 
 
 @jax.tree_util.register_dataclass

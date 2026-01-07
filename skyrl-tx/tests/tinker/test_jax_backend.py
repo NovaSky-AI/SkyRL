@@ -94,7 +94,7 @@ def test_max_adapters_after_delete():
 
 
 def test_clear_adapter_config():
-    """Test that clear_adapter_config zeros out adapter state."""
+    """Test that clear_adapter zeros out adapter state."""
     backend = create_backend()
     model_id = "test_model"
     adapter_idx = create_model(backend, model_id)
@@ -104,7 +104,7 @@ def test_clear_adapter_config():
     lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
     assert lora_layer.lora_ranks[adapter_idx] > 0
 
-    # Delete the model (calls clear_adapter_config internally)
+    # Delete the model (calls clear_adapter internally)
     backend.delete_model(model_id)
 
     # Verify adapter state is zeroed
