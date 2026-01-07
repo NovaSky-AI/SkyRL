@@ -17,8 +17,12 @@ We provide a full writeup at https://novasky-ai.notion.site/on-policy-distillati
 To get started, first set up the dataset from the DAPO example:
 
 ```bash
+<<<<<<< HEAD
+uv run examples/algorithms/dapo/prepare_dapo_data.sh
+=======
 # Run from the `skyrl-train` directory
 bash examples/algorithms/dapo/prepare_dapo_data.sh
+>>>>>>> main
 ```
 
 Then, just make sure to set the path to your desired teacher model, and you're ready to kick off training!

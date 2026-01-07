@@ -18,7 +18,7 @@ from skyrl_train.entrypoints.main_base import (
     config_dir,
 )
 from skyrl_train.generators.base import GeneratorInput
-from examples.terminal_bench.generator.terminal_bench_generator import TerminalBenchGenerator
+from examples.terminal_bench.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
 
 

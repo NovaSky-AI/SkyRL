@@ -23,6 +23,34 @@ from typing import Any, Dict, List, Union
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import pprint
+import ray
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+
+@ray.remote
+class WandbNodeLogger:
+    """
+    A Ray actor that initializes wandb on a specific node to capture system metrics.
+    """
+    def __init__(self, project_name, experiment_name, config, run_id, group_name, x_label):
+        import wandb
+        # Initialize wandb with the same run ID to aggregate system metrics
+        run = wandb.init(
+            project=project_name,
+            name=experiment_name,
+            id=run_id,
+            config=config,
+            resume="allow",
+            group=group_name,
+            job_type="worker_monitor",
+            settings=wandb.Settings(
+                mode="shared",
+                x_primary=False,
+                x_update_finish_state=False,
+                x_label=x_label,
+            )
+        )
+        self.wandb = run
 
 
 # TODO(tgriggs): Test all backends.
@@ -41,8 +69,28 @@ class Tracking:
             import wandb
             from omegaconf import OmegaConf
 
-            wandb.init(project=project_name, name=experiment_name, config=OmegaConf.to_container(config, resolve=True))
-            self.logger["wandb"] = wandb
+            current_node_ip = "head"
+            if ray.is_initialized():
+                try:
+                    current_node_ip = ray.util.get_node_ip_address()
+                except Exception as e:
+                    logger.warning(f"Failed to get node IP address, defaulting to 'head'. Error: {e}")
+
+            run = wandb.init(
+                project=project_name,
+                name=experiment_name,
+                config=OmegaConf.to_container(config, resolve=True),
+                group=experiment_name,
+                resume="allow",
+                settings=wandb.Settings(
+                    mode="shared",  # mainly for multi-node training's systems metrics aggregation
+                    x_primary=True,
+                    x_label=f"node-{current_node_ip}"
+                )
+            )
+            run_id = run.id
+            self.logger["wandb"] = run
+            self._prepare_worker_nodes_systems_logging_wandb(project_name, experiment_name, run_id, config, current_node_ip)
 
         if "mlflow" in backends:
             self.logger["mlflow"] = _MlflowLoggingAdapter(project_name, experiment_name, config)
@@ -72,6 +120,58 @@ class Tracking:
         if "console" in backends:
             self.console_logger = ConsoleLogger()
             self.logger["console"] = self.console_logger
+
+
+    def _prepare_worker_nodes_systems_logging_wandb(self, project_name, experiment_name, run_id, config, current_node_ip):
+        """
+        In multi-node training, we spawn WandbNodeLogger actors on each worker node to capture system metrics like
+        GPU utilization. We use `mode="shared"` to aggregate system metrics from all nodes to the same Wandb run.
+        However, with this approach, the systems metrics panels do not appear in the Wandb UI automatically but requires
+        us to manually create the panels. The alternative is to create a run for each node and group them by group_name.
+        We prefer to keep all nodes metrics to the same run.
+        """
+        # Start WandB loggers on other nodes using Ray
+        if ray.is_initialized():
+            try:
+                # current_node_ip (head) is already set in __init__
+                nodes = ray.nodes()
+                self.remote_loggers = []
+
+                for node in nodes:
+                    if not node["Alive"]:
+                        continue
+
+                    node_ip = node["NodeManagerAddress"]
+                    # Skip the current node as it's already logging
+                    if node_ip == current_node_ip:
+                        continue
+
+                    try:
+                        # Launch a logger on this node
+                        logger_actor = WandbNodeLogger.options(
+                            num_cpus=0,
+                            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                                node_id=node["NodeID"],
+                                soft=False,  # fail if that node is gone or infeasible
+                            ),
+                        ).remote(
+                            project_name=project_name,
+                            experiment_name=experiment_name,
+                            config=OmegaConf.to_container(config, resolve=True),
+                            run_id=run_id,
+                            group_name=experiment_name,
+                            x_label=f"node-{node_ip}"
+                        )
+                        self.remote_loggers.append(logger_actor)
+                    except Exception as e:
+                        logger.warning(f"Failed to spawn WandbNodeLogger on {node_ip}: {e}")
+                    logger.info(f"WandbNodeLogger initialized on 'node-{node_ip}'")
+
+            except Exception as e:
+                logger.warning(f"Failed to setup distributed wandb logging: {e}")
+        else:
+            logger.warning("Ray is not initialized, skipping distributed wandb logging")
+
 
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():

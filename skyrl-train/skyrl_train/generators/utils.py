@@ -95,13 +95,13 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
         raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
-def get_generation_prompt_ids(tokenizer) -> List[int]:
+def get_generation_prompt_ids(tokenizer, custom_chat_template=None) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
     """
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True)
+    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True, chat_template=custom_chat_template)
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
+        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=custom_chat_template
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]

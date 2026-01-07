@@ -27,6 +27,16 @@ class ConditionalWeightsManager:
             return self.weights_manager.__exit__(exc_type, exc_val, exc_tb)
         return False
 
+    async def __aenter__(self):
+        if self.condition:
+            await self.weights_manager.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.condition:
+            return await self.weights_manager.__aexit__(exc_type, exc_val, exc_tb)
+        return False
+
 
 class InferenceWeightsManager:
     """Manages weight syncing and offloading/backloading between the policy model and the InferenceEngines.
