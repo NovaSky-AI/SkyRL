@@ -301,11 +301,11 @@ def test_process_optim_step_hyperparams_behavior():
 
     tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
 
-    def apply_step(request_id: int, model_id: str, adam_params: AdamParams) -> float:
+    def apply_step(request_id: int, model_id: str, optim_input: OptimStepInput) -> float:
         reqs = {str(request_id): (model_id, make_fwd_bwd_input(tokens))}
         backend.forward_backward(prepare_model_pass_batch(reqs))
         params_before = jax.tree.map(jnp.copy, backend.lora_params)
-        backend.optim_step(model_id, OptimStepInput(adam_params=adam_params))
+        backend.optim_step(model_id, optim_input)
         delta = jax.tree.map(
             lambda old, new: (new - old).astype(jnp.float32),
             params_before,
@@ -313,15 +313,15 @@ def test_process_optim_step_hyperparams_behavior():
         )
         return float(optax.global_norm(delta))
 
-    tiny_request = types.OptimStepInput(
+    tiny_input = OptimStepInput(
         adam_params=types.AdamParams(learning_rate=1e-8, beta1=1e-8, beta2=1e-8, eps=1e-9, weight_decay=0.0)
     )
-    default_request = types.OptimStepInput(adam_params=api.AdamParams().to_types())
+    default_input = OptimStepInput(adam_params=api.AdamParams().to_types())
     # Apply override step on the first adapter.
-    tiny_norm = apply_step(1, low_adapter, tiny_request)
+    tiny_norm = apply_step(1, low_adapter, tiny_input)
 
     # Apply fallback/default step on the second adapter (same engine).
-    default_norm = apply_step(2, default_adapter, default_request)
+    default_norm = apply_step(2, default_adapter, default_input)
 
     # Expect a large gap in update magnitude between the two adapters.
     assert tiny_norm > 0

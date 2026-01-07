@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
