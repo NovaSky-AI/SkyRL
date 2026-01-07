@@ -13,6 +13,7 @@ from skyrl_train.utils.ppo_utils import (
     masked_mean,
     compute_tis_ratio,
     compute_rejection_mask,
+    compute_outlier_token_mask,
     apply_rollout_correction,
 )
 
@@ -797,14 +798,12 @@ def test_compute_rejection_mask_sequence():
             "rejection_mask_type": "sequence",
             "sequence_rejection_mask_ratio_cap_high": 2.0,
             "sequence_rejection_mask_ratio_cap_low": 0.5,
-            "sequence_mask_low": 1e-4,
-            "sequence_mask_high": 100.0,
         }
     )
 
     rejection_mask = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
 
-    # Sequence ratio ≈ 1.35, which is within [0.5, 2.0], and all token ratios are in bounds
+    # Sequence ratio ≈ 1.35, which is within [0.5, 2.0]
     # Shape is [batch, 1] for sequence-level mask
     expected = torch.tensor([[1.0]], device=device)
     torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
@@ -824,8 +823,6 @@ def test_compute_rejection_mask_sequence_rejects_by_seq_ratio():
             "rejection_mask_type": "sequence",
             "sequence_rejection_mask_ratio_cap_high": 2.0,
             "sequence_rejection_mask_ratio_cap_low": 0.5,
-            "sequence_mask_low": 1e-4,
-            "sequence_mask_high": 100.0,
         }
     )
 
@@ -837,33 +834,78 @@ def test_compute_rejection_mask_sequence_rejects_by_seq_ratio():
     torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
 
 
-def test_compute_rejection_mask_sequence_rejects_by_token_bounds():
-    """Tests sequence rejection mask rejects when a token ratio is out of bounds."""
+def test_compute_outlier_token_mask_rejects_by_token_bounds():
+    """Tests outlier token mask rejects when a token ratio is out of bounds."""
     device = "cpu"
 
     # Token log ratios: [0.0, 0.0, 5.0] -> token ratios = [1.0, 1.0, 148.4]
-    # Sequence ratio = exp(5.0) ≈ 148.4 (in bounds if cap is high enough)
-    # But third token ratio 148.4 > 100.0, so should reject
+    # Third token ratio 148.4 > 100.0, so should reject
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
     rollout_logprobs = torch.tensor([[-1.0, -1.0, -6.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
     config = DictConfig(
         {
-            "rejection_mask_type": "sequence",
-            "sequence_rejection_mask_ratio_cap_high": 200.0,  # High enough to not reject by seq ratio
-            "sequence_rejection_mask_ratio_cap_low": 0.01,
-            "sequence_mask_low": 1e-4,
-            "sequence_mask_high": 100.0,  # This should cause rejection
+            "outlier_token_is_threshold_low": 1e-4,
+            "outlier_token_is_threshold_high": 100.0,  # This should cause rejection
         }
     )
 
-    rejection_mask = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+    outlier_mask = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
 
     # Token ratio 148.4 > 100.0, so mask should be 0.0
     # Shape is [batch, 1] for sequence-level mask
     expected = torch.tensor([[0.0]], device=device)
-    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(outlier_mask, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_outlier_token_mask_accepts_in_bounds():
+    """Tests outlier token mask accepts when all token ratios are in bounds."""
+    device = "cpu"
+
+    # Token log ratios: [0.5, -0.5, 0.0] -> token ratios = [1.65, 0.61, 1.0]
+    # All token ratios within [1e-4, 100.0], so should accept
+    old_log_probs = torch.tensor([[-1.0, -1.5, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.5, -1.0, -1.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "outlier_token_is_threshold_low": 1e-4,
+            "outlier_token_is_threshold_high": 100.0,
+        }
+    )
+
+    outlier_mask = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
+
+    # All token ratios in bounds, so mask should be 1.0
+    # Shape is [batch, 1] for sequence-level mask
+    expected = torch.tensor([[1.0]], device=device)
+    torch.testing.assert_close(outlier_mask, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_outlier_token_mask_respects_loss_mask():
+    """Tests outlier token mask ignores out-of-bounds tokens that are masked."""
+    device = "cpu"
+
+    # Token log ratios: [0.0, 0.0, 5.0] -> token ratios = [1.0, 1.0, 148.4]
+    # Third token ratio 148.4 > 100.0, but it's masked, so should accept
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.0, -1.0, -6.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 0.0]], device=device)  # Third token masked
+
+    config = DictConfig(
+        {
+            "outlier_token_is_threshold_low": 1e-4,
+            "outlier_token_is_threshold_high": 100.0,
+        }
+    )
+
+    outlier_mask = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
+
+    # Third token is masked, so even though ratio is out of bounds, sequence should be accepted
+    expected = torch.tensor([[1.0]], device=device)
+    torch.testing.assert_close(outlier_mask, expected, rtol=1e-3, atol=1e-4)
 
 
 def test_apply_rollout_correction_null_configs():

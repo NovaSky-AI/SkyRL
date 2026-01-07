@@ -150,9 +150,9 @@ trainer:
       sequence_rejection_mask_ratio_cap_high: 2.0
       sequence_rejection_mask_ratio_cap_low: 0.5
 
-      # masks out sequences with any token having importance ratio below the cap
-      sequence_mask_low: 1e-4
-      sequence_mask_high: 100
+      # masks out sequences with any token having importance ration far outside an acceptable range
+      outlier_token_is_threshold_low: 1e-4
+      outlier_token_is_threshold_high: 100
 
     # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
     sapo:

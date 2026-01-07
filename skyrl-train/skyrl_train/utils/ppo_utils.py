@@ -592,6 +592,44 @@ def compute_tis_ratio(
         raise ValueError(f"Unknown tis_ratio_type: {tis_ratio_type}")
 
 
+def compute_outlier_token_mask(
+    old_log_probs: torch.Tensor,
+    rollout_logprobs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    rollout_corr: DictConfig,
+) -> torch.Tensor:
+    """
+    Compute outlier token mask that rejects sequences with any token having
+    importance ratio outside acceptable bounds.
+
+    This is applied independently of TIS ratio type or rejection mask type,
+    whenever rollout correction is enabled.
+
+    Args:
+        old_log_probs: Log probabilities from the old policy (before update).
+        rollout_logprobs: Log probabilities from the rollout policy.
+        loss_mask: Mask indicating valid tokens.
+        rollout_corr: Rollout correction config containing threshold values.
+
+    Returns:
+        Outlier token mask tensor (float) to multiply with the loss.
+        Shape is [batch, 1] (sequence-level mask).
+    """
+    # Compute token-level importance ratio
+    token_tis_log_ratio = old_log_probs - rollout_logprobs
+    token_tis_ratio = _safe_exp_delta(token_tis_log_ratio, clip=20.0, out_dtype=old_log_probs.dtype)
+
+    # Check per-token bounds
+    token_mask_low = rollout_corr.outlier_token_is_threshold_low
+    token_mask_high = rollout_corr.outlier_token_is_threshold_high
+    token_in_bounds = (token_tis_ratio >= token_mask_low) & (token_tis_ratio <= token_mask_high)
+
+    # A sequence is valid if all tokens are in bounds (considering only masked positions)
+    all_tokens_valid = (token_in_bounds | (loss_mask == 0)).all(dim=-1, keepdim=True)
+
+    return all_tokens_valid.float()
+
+
 def compute_rejection_mask(
     old_log_probs: torch.Tensor,
     rollout_logprobs: torch.Tensor,
@@ -619,7 +657,6 @@ def compute_rejection_mask(
     """
     # Compute token-level importance ratio
     token_tis_log_ratio = old_log_probs - rollout_logprobs
-    token_tis_ratio = _safe_exp_delta(token_tis_log_ratio, clip=20.0, out_dtype=old_log_probs.dtype)
 
     if rejection_mask_type == "geometric":
         # Compute geometric mean of importance ratios per sequence
@@ -636,15 +673,8 @@ def compute_rejection_mask(
         seq_tis_ratio = _safe_exp_delta(seq_tis_log_ratio, clip=20.0, out_dtype=old_log_probs.dtype)
         seq_cap_high = rollout_corr.sequence_rejection_mask_ratio_cap_high
         seq_cap_low = rollout_corr.sequence_rejection_mask_ratio_cap_low
-        # Also check per-token bounds
-        token_mask_low = rollout_corr.sequence_mask_low
-        token_mask_high = rollout_corr.sequence_mask_high
-        token_in_bounds = (token_tis_ratio >= token_mask_low) & (token_tis_ratio <= token_mask_high)
-        # A sequence is valid if all tokens are in bounds (considering only masked positions)
-        all_tokens_valid = (token_in_bounds | (loss_mask == 0)).all(dim=-1, keepdim=True)
         seq_in_bounds = (seq_tis_ratio >= seq_cap_low) & (seq_tis_ratio <= seq_cap_high)
-        seq_rejection_mask = seq_in_bounds & all_tokens_valid
-        return seq_rejection_mask.float()
+        return seq_in_bounds.float()
     else:
         raise ValueError(f"Unknown rejection_mask_type: {rejection_mask_type}")
 
@@ -657,9 +687,10 @@ def apply_rollout_correction(
     rollout_corr: DictConfig,
 ) -> torch.Tensor:
     """
-    Apply rollout correction to the loss using TIS ratio and rejection mask.
+    Apply rollout correction to the loss using TIS ratio, rejection mask, and outlier token mask.
 
-    This is a convenience function that combines compute_tis_ratio and compute_rejection_mask.
+    This is a convenience function that combines compute_tis_ratio, compute_rejection_mask,
+    and compute_outlier_token_mask.
 
     Args:
         loss: The loss tensor to correct.
@@ -682,6 +713,11 @@ def apply_rollout_correction(
     # Early return if no correction needed
     if not apply_tis and not apply_rejection:
         return loss
+
+    # Apply outlier token mask whenever rollout correction is enabled
+    # This rejects sequences with any token having importance ratio outside acceptable bounds
+    outlier_mask = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+    loss = loss * outlier_mask
 
     # Apply TIS ratio if enabled
     if apply_tis:
