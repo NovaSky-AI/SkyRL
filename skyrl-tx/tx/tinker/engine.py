@@ -19,6 +19,63 @@ from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
 
 
+def prepare_sample_batch(
+    requests: dict[str, tuple[str, types.SampleInput]],
+    checkpoints_base: AnyPath | None = None,
+) -> types.PreparedSampleBatch:
+    """Prepare batch data for sample operations.
+
+    Extracts prompts and sampling params from requests into lists
+    that the backend will convert to arrays.
+
+    Args:
+        requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
+        checkpoints_base: Base path for checkpoints (optional, needed for LoRA sampling)
+
+    Returns:
+        PreparedSampleBatch with all data extracted from requests
+    """
+    all_prompts = []
+    all_sampling_params = []
+    all_model_ids = []
+    all_checkpoint_ids = []
+    all_checkpoint_paths = []
+    request_batch_slices = []
+
+    needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
+
+    for request_id, (model_id, request_data) in requests.items():
+        request_start = len(all_prompts)
+
+        # Expand requests for num_samples
+        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+        checkpoint_path = ""
+        if model_id and request_data.checkpoint_id and checkpoints_base:
+            checkpoint_path = str(
+                checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
+            )
+        for _ in range(request_data.num_samples):
+            all_prompts.append(prompt_tokens)
+            all_sampling_params.append(request_data.sampling_params)
+            all_model_ids.append(model_id)
+            all_checkpoint_ids.append(request_data.checkpoint_id)
+            all_checkpoint_paths.append(checkpoint_path)
+
+        request_batch_slices.append(
+            (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
+        )
+
+    return types.PreparedSampleBatch(
+        all_prompts=all_prompts,
+        all_sampling_params=all_sampling_params,
+        all_model_ids=all_model_ids,
+        all_checkpoint_ids=all_checkpoint_ids,
+        all_checkpoint_paths=all_checkpoint_paths,
+        needs_prompt_logprobs=needs_prompt_logprobs,
+        request_batch_slices=request_batch_slices,
+    )
+
+
 def prepare_model_pass_batch(
     requests: dict[str, tuple[str, types.ForwardBackwardInput]],
 ) -> types.PreparedModelPassBatch:
@@ -124,56 +181,8 @@ class TinkerEngine:
         self,
         requests: dict[str, tuple[str, types.SampleInput]],
     ) -> types.PreparedSampleBatch:
-        """Prepare batch data for sample operations.
-
-        Extracts prompts and sampling params from requests into lists
-        that the backend will convert to arrays.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
-
-        Returns:
-            PreparedSampleBatch with all data extracted from requests
-        """
-        all_prompts = []
-        all_sampling_params = []
-        all_model_ids = []
-        all_checkpoint_ids = []
-        all_checkpoint_paths = []
-        request_batch_slices = []
-
-        needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
-
-        for request_id, (model_id, request_data) in requests.items():
-            request_start = len(all_prompts)
-
-            # Expand requests for num_samples
-            prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
-            checkpoint_path = ""
-            if model_id and request_data.checkpoint_id:
-                checkpoint_path = str(
-                    self.config.checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
-                )
-            for _ in range(request_data.num_samples):
-                all_prompts.append(prompt_tokens)
-                all_sampling_params.append(request_data.sampling_params)
-                all_model_ids.append(model_id)
-                all_checkpoint_ids.append(request_data.checkpoint_id)
-                all_checkpoint_paths.append(checkpoint_path)
-
-            request_batch_slices.append(
-                (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
-            )
-
-        return types.PreparedSampleBatch(
-            all_prompts=all_prompts,
-            all_sampling_params=all_sampling_params,
-            all_model_ids=all_model_ids,
-            all_checkpoint_ids=all_checkpoint_ids,
-            all_checkpoint_paths=all_checkpoint_paths,
-            needs_prompt_logprobs=needs_prompt_logprobs,
-            request_batch_slices=request_batch_slices,
-        )
+        """Prepare batch data for sample operations."""
+        return prepare_sample_batch(requests, self.config.checkpoints_base)
 
     def __init__(
         self,
