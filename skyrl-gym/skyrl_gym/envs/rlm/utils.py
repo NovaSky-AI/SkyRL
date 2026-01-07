@@ -61,8 +61,8 @@ SAFE_BUILTINS = {
     "property": property,
     "staticmethod": staticmethod,
     "classmethod": classmethod,
-    "__import__": __import__,
-    "open": open,
+    "__import__": None,
+    "open": None,
     # Exceptions
     "Exception": Exception,
     "BaseException": BaseException,
