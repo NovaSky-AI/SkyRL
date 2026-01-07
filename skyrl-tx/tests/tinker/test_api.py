@@ -379,7 +379,7 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
     adapter slot reuse, since that behavior is already covered by unit tests in
     test_jax_backend.py and test_engine.py.
     """
-    _, log_path: str = api_server_fast_cleanup
+    process, log_path: str = api_server_fast_cleanup
     base_url = f"http://0.0.0.0:{TEST_SERVER_PORT_FAST_CLEANUP}/"
     service_client, training_client = create_service_and_training_client(base_url=base_url)
 
