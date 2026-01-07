@@ -128,7 +128,7 @@ trainer:
     # reference: https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
     rollout_correction:
       # type of importance ratio to use for ppo loss correction
-      # here importance ratio refers to logprobs_{rollout} - logprobs_{policy_old}
+      # here importance ratio refers to logprobs_{policy_old} - logprobs_{rollout_policy}
       tis_ratio_type: "null" # "null", "token", "sequence"
 
       # cap for the importance ratio

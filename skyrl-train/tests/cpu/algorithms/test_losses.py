@@ -8,7 +8,13 @@ import pytest
 import torch
 from omegaconf import DictConfig
 
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean
+from skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+    masked_mean,
+    compute_tis_ratio,
+    compute_rejection_mask,
+    apply_rollout_correction,
+)
 
 
 # Adapted a good test from NeMO-RL
@@ -621,3 +627,465 @@ def test_sapo_policy_loss_basic():
 
     # SAPO should always report clip_ratio = 0.0
     assert actual_clip_ratio == 0.0
+
+
+# ============================================================================
+# Rollout Correction Tests
+# ============================================================================
+
+
+def test_compute_tis_ratio_token_level():
+    """Tests token-level TIS ratio computation with capping."""
+    device = "cpu"
+
+    # old_log_probs - rollout_logprobs gives the log importance ratio
+    # Token ratios: exp([0.5, -0.5, 1.0]) = [1.6487, 0.6065, 2.7183]
+    old_log_probs = torch.tensor([[-1.0, -1.5, -0.5]], device=device)
+    rollout_logprobs = torch.tensor([[-1.5, -1.0, -1.5]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "token",
+            "token_tis_ratio_cap_high": 2.0,
+        }
+    )
+
+    tis_ratio = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "token", config)
+
+    # Expected: [1.6487, 0.6065, 2.0] (third token capped at 2.0)
+    expected = torch.tensor([[1.6487, 0.6065, 2.0]], device=device)
+    torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_tis_ratio_sequence_level():
+    """Tests sequence-level TIS ratio computation with capping."""
+    device = "cpu"
+
+    # Token log ratios: [0.5, -0.5, 1.0]
+    # Sequence log ratio (sum of masked): 0.5 + (-0.5) + 1.0 = 1.0
+    # Sequence ratio: exp(1.0) = 2.7183
+    old_log_probs = torch.tensor([[-1.0, -1.5, -0.5]], device=device)
+    rollout_logprobs = torch.tensor([[-1.5, -1.0, -1.5]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "sequence",
+            "sequence_tis_ratio_cap_high": 5.0,
+        }
+    )
+
+    tis_ratio = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+
+    # Expected: exp(1.0) = 2.7183, shape [batch, 1] for sequence-level
+    expected = torch.tensor([[2.7183]], device=device)
+    torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_tis_ratio_sequence_level_with_cap():
+    """Tests sequence-level TIS ratio capping."""
+    device = "cpu"
+
+    # Token log ratios: [1.0, 1.0, 1.0]
+    # Sequence log ratio: 3.0
+    # Sequence ratio: exp(3.0) = 20.09, should be capped at 5.0
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "sequence",
+            "sequence_tis_ratio_cap_high": 5.0,
+        }
+    )
+
+    tis_ratio = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+
+    # Expected: capped at 5.0, shape [batch, 1] for sequence-level
+    expected = torch.tensor([[5.0]], device=device)
+    torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_tis_ratio_with_mask():
+    """Tests that loss_mask correctly excludes tokens from sequence-level computation."""
+    device = "cpu"
+
+    # Token log ratios: [0.5, -0.5, 1.0]
+    # With mask [1, 0, 1], sequence log ratio = 0.5 + 1.0 = 1.5
+    old_log_probs = torch.tensor([[-1.0, -1.5, -0.5]], device=device)
+    rollout_logprobs = torch.tensor([[-1.5, -1.0, -1.5]], device=device)
+    loss_mask = torch.tensor([[1.0, 0.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "sequence",
+            "sequence_tis_ratio_cap_high": 10.0,
+        }
+    )
+
+    tis_ratio = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+
+    # Expected: exp(1.5) = 4.4817, shape [batch, 1] for sequence-level
+    expected_val = torch.exp(torch.tensor(1.5))
+    expected = expected_val.reshape(1, 1)
+    torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_rejection_mask_geometric():
+    """Tests geometric rejection mask computation."""
+    device = "cpu"
+
+    # Token log ratios: [0.1, -0.1, 0.0] -> sum = 0.0, geometric mean = exp(0/3) = 1.0
+    old_log_probs = torch.tensor([[-1.0, -1.1, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.1, -1.0, -1.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "rejection_mask_type": "geometric",
+            "geo_rejection_mask_ratio_cap_high": 1.1,
+            "geo_rejection_mask_ratio_cap_low": 0.9,
+        }
+    )
+
+    rejection_mask = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "geometric", config)
+
+    # Geometric mean ≈ 1.0, which is within [0.9, 1.1], so mask should be 1.0
+    # Shape is [batch, 1] for sequence-level mask
+    expected = torch.tensor([[1.0]], device=device)
+    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_rejection_mask_geometric_rejects():
+    """Tests geometric rejection mask correctly rejects sequences outside bounds."""
+    device = "cpu"
+
+    # Token log ratios: [0.5, 0.5, 0.5] -> sum = 1.5, geometric mean = exp(1.5/3) = exp(0.5) ≈ 1.6487
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "rejection_mask_type": "geometric",
+            "geo_rejection_mask_ratio_cap_high": 1.1,
+            "geo_rejection_mask_ratio_cap_low": 0.9,
+        }
+    )
+
+    rejection_mask = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "geometric", config)
+
+    # Geometric mean ≈ 1.6487, which is outside [0.9, 1.1], so mask should be 0.0
+    # Shape is [batch, 1] for sequence-level mask
+    expected = torch.tensor([[0.0]], device=device)
+    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_rejection_mask_sequence():
+    """Tests sequence rejection mask computation."""
+    device = "cpu"
+
+    # Token log ratios: [0.2, 0.1, 0.0] -> sum = 0.3, seq ratio = exp(0.3) ≈ 1.35
+    old_log_probs = torch.tensor([[-1.0, -1.1, -1.2]], device=device)
+    rollout_logprobs = torch.tensor([[-1.2, -1.2, -1.2]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "rejection_mask_type": "sequence",
+            "sequence_rejection_mask_ratio_cap_high": 2.0,
+            "sequence_rejection_mask_ratio_cap_low": 0.5,
+            "sequence_mask_low": 1e-4,
+            "sequence_mask_high": 100.0,
+        }
+    )
+
+    rejection_mask = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+
+    # Sequence ratio ≈ 1.35, which is within [0.5, 2.0], and all token ratios are in bounds
+    # Shape is [batch, 1] for sequence-level mask
+    expected = torch.tensor([[1.0]], device=device)
+    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_rejection_mask_sequence_rejects_by_seq_ratio():
+    """Tests sequence rejection mask rejects when sequence ratio is out of bounds."""
+    device = "cpu"
+
+    # Token log ratios: [1.0, 1.0, 1.0] -> sum = 3.0, seq ratio = exp(3.0) ≈ 20.09
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "rejection_mask_type": "sequence",
+            "sequence_rejection_mask_ratio_cap_high": 2.0,
+            "sequence_rejection_mask_ratio_cap_low": 0.5,
+            "sequence_mask_low": 1e-4,
+            "sequence_mask_high": 100.0,
+        }
+    )
+
+    rejection_mask = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+
+    # Sequence ratio ≈ 20.09, which is outside [0.5, 2.0], so mask should be 0.0
+    # Shape is [batch, 1] for sequence-level mask
+    expected = torch.tensor([[0.0]], device=device)
+    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_compute_rejection_mask_sequence_rejects_by_token_bounds():
+    """Tests sequence rejection mask rejects when a token ratio is out of bounds."""
+    device = "cpu"
+
+    # Token log ratios: [0.0, 0.0, 5.0] -> token ratios = [1.0, 1.0, 148.4]
+    # Sequence ratio = exp(5.0) ≈ 148.4 (in bounds if cap is high enough)
+    # But third token ratio 148.4 > 100.0, so should reject
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.0, -1.0, -6.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "rejection_mask_type": "sequence",
+            "sequence_rejection_mask_ratio_cap_high": 200.0,  # High enough to not reject by seq ratio
+            "sequence_rejection_mask_ratio_cap_low": 0.01,
+            "sequence_mask_low": 1e-4,
+            "sequence_mask_high": 100.0,  # This should cause rejection
+        }
+    )
+
+    rejection_mask = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+
+    # Token ratio 148.4 > 100.0, so mask should be 0.0
+    # Shape is [batch, 1] for sequence-level mask
+    expected = torch.tensor([[0.0]], device=device)
+    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_apply_rollout_correction_null_configs():
+    """Tests that apply_rollout_correction returns loss unchanged when both configs are null."""
+    device = "cpu"
+
+    loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "null",
+            "rejection_mask_type": "null",
+        }
+    )
+
+    corrected_loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+
+    # Should return the same tensor (early return)
+    assert corrected_loss is loss
+
+
+def test_apply_rollout_correction_tis_only():
+    """Tests apply_rollout_correction with only TIS enabled."""
+    device = "cpu"
+
+    loss = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+    # Token log ratios: [0.5, 0.5, 0.5] -> token ratios = [1.6487, 1.6487, 1.6487]
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "token",
+            "token_tis_ratio_cap_high": 2.0,
+            "rejection_mask_type": "null",
+        }
+    )
+
+    corrected_loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+
+    # Expected: loss * 1.6487 (no capping needed)
+    expected = loss * torch.exp(torch.tensor(0.5))
+    torch.testing.assert_close(corrected_loss, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_apply_rollout_correction_rejection_only():
+    """Tests apply_rollout_correction with only rejection mask enabled."""
+    device = "cpu"
+
+    loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
+    # Token log ratios: [0.0, 0.0, 0.0] -> geometric mean = 1.0
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "null",
+            "rejection_mask_type": "geometric",
+            "geo_rejection_mask_ratio_cap_high": 1.1,
+            "geo_rejection_mask_ratio_cap_low": 0.9,
+        }
+    )
+
+    corrected_loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+
+    # Geometric mean = 1.0, within bounds, so loss unchanged
+    torch.testing.assert_close(corrected_loss, loss, rtol=1e-3, atol=1e-4)
+
+
+def test_apply_rollout_correction_both_enabled():
+    """Tests apply_rollout_correction with both TIS and rejection mask enabled."""
+    device = "cpu"
+
+    loss = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+    # Token log ratios: [0.1, 0.1, 0.1] -> token ratios ≈ [1.105, 1.105, 1.105]
+    # Geometric mean ≈ 1.105
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.1, -1.1, -1.1]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "token",
+            "token_tis_ratio_cap_high": 2.0,
+            "rejection_mask_type": "geometric",
+            "geo_rejection_mask_ratio_cap_high": 1.2,
+            "geo_rejection_mask_ratio_cap_low": 0.8,
+        }
+    )
+
+    corrected_loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+
+    # TIS ratio ≈ 1.105, geometric mean ≈ 1.105 (within bounds, mask=1)
+    # Expected: loss * 1.105 * 1.0 = loss * 1.105
+    expected = loss * torch.exp(torch.tensor(0.1))
+    torch.testing.assert_close(corrected_loss, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_apply_rollout_correction_rejection_zeros_loss():
+    """Tests that rejection mask can zero out the loss entirely."""
+    device = "cpu"
+
+    loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
+    # Token log ratios: [1.0, 1.0, 1.0] -> geometric mean = exp(1.0) ≈ 2.718
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "tis_ratio_type": "null",
+            "rejection_mask_type": "geometric",
+            "geo_rejection_mask_ratio_cap_high": 1.1,
+            "geo_rejection_mask_ratio_cap_low": 0.9,
+        }
+    )
+
+    corrected_loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+
+    # Geometric mean ≈ 2.718, outside [0.9, 1.1], so loss should be zeroed
+    expected = torch.tensor([[0.0, 0.0, 0.0]], device=device)
+    torch.testing.assert_close(corrected_loss, expected, rtol=1e-3, atol=1e-4)
+
+
+def test_ppo_policy_loss_with_rollout_correction():
+    """Integration test for PPO policy loss with rollout correction enabled."""
+    device = "cpu"
+
+    advantages = torch.tensor([[1.0, -1.0, 0.5]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    log_probs = torch.tensor([[-1.1, -0.9, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.05, -1.05, -1.05]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig(
+        {
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "policy_loss_type": "regular",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+            "rollout_correction": {
+                "tis_ratio_type": "token",
+                "token_tis_ratio_cap_high": 2.0,
+                "rejection_mask_type": "null",
+            },
+        }
+    )
+
+    loss_fn = PolicyLossRegistry.get("regular")
+
+    # Loss with rollout correction
+    loss_with_correction, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        loss_mask=loss_mask,
+        rollout_logprobs=rollout_logprobs,
+    )
+
+    # Loss without rollout correction
+    config_no_correction = DictConfig(
+        {
+            "eps_clip_low": 0.2,
+            "eps_clip_high": 0.2,
+            "policy_loss_type": "regular",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+            "rollout_correction": {
+                "tis_ratio_type": "null",
+                "rejection_mask_type": "null",
+            },
+        }
+    )
+
+    loss_without_correction, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config_no_correction,
+        loss_mask=loss_mask,
+        rollout_logprobs=rollout_logprobs,
+    )
+
+    # TIS correction should modify the loss
+    assert not torch.allclose(loss_with_correction, loss_without_correction, rtol=1e-3), (
+        f"Rollout correction should change the loss: "
+        f"with={loss_with_correction:.6f} vs without={loss_without_correction:.6f}"
+    )
+
+
+def test_compute_tis_ratio_invalid_type():
+    """Tests that compute_tis_ratio raises error for invalid tis_ratio_type."""
+    device = "cpu"
+
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig({"tis_ratio_type": "invalid"})
+
+    with pytest.raises(ValueError, match="Unknown tis_ratio_type"):
+        compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "invalid", config)
+
+
+def test_compute_rejection_mask_invalid_type():
+    """Tests that compute_rejection_mask raises error for invalid rejection_mask_type."""
+    device = "cpu"
+
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+
+    config = DictConfig({"rejection_mask_type": "invalid"})
+
+    with pytest.raises(ValueError, match="Unknown rejection_mask_type"):
+        compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "invalid", config)
