@@ -266,7 +266,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def reinitialize_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
+def reinit_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
     """Reinitialize a LoRA adapter for training.
 
     Fully reinitializes the adapter: lora_A with he_uniform, lora_B with zeros,
@@ -314,11 +314,11 @@ def reinitialize_adapter(model: ModelForCausalLM, adapter_index: int, lora_confi
     nnx.update(model, updated_state)
 
 
-def clear_adapter(model: ModelForCausalLM, adapter_index: int):
+def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     """Clear/reset a LoRA adapter, freeing it for reuse.
 
     Sets rank=0, scaling=0, and zeros out lora_A and lora_B for the adapter.
-    Before reusing this adapter for training again, `reinitialize_adapter` must be called.
+    Before reusing this adapter for training again, `reinit_lora_adapter` must be called.
     """
     state = nnx.state(model)
 
