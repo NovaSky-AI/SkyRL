@@ -88,6 +88,7 @@ class UnloadModelInput(BaseModel):
 class UnloadModelOutput(BaseModel):
     model_id: str
     status: str
+    type: str = "unload_model"
 
 
 class ModelInputChunk(BaseModel):

@@ -1,5 +1,6 @@
 """Tests for the Tinker API mock server using the real tinker client."""
 
+import asyncio
 import os
 import subprocess
 import tempfile
@@ -348,30 +349,28 @@ def api_server_fast_cleanup():
 
 def test_unload_model(api_server):
     """Test that unload_model properly unloads a model."""
-    from tinker.lib.client_connection_pool_type import ClientConnectionPoolType
-
     # Create a training client (which creates a model) and verify it works
     _, training_client = create_service_and_training_client(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/")
 
-    # Call unload_model API
     async def _unload():
-        # Use the internal async client since no public sync method exists
-        with training_client.holder.aclient(ClientConnectionPoolType.TRAIN) as client:
-            _ = await client.models.unload(request=types.UnloadModelRequest(model_id=training_client.model_id))
+        async with tinker._client.AsyncTinker(
+            api_key="dummy", base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/"
+        ) as client:
+            future = await client.models.unload(request=types.UnloadModelRequest(model_id=training_client.model_id))
+            while True:
+                result = await client.futures.retrieve(
+                    request=types.FutureRetrieveRequest(request_id=future.request_id)
+                )
+                if isinstance(result, types.UnloadModelResponse):
+                    return result
+                await asyncio.sleep(0.1)
 
-    training_client.holder.run_coroutine_threadsafe(_unload()).result()
+    result = asyncio.run(_unload())
+    assert isinstance(result, types.UnloadModelResponse)
 
-    # Poll until model stops working
-    def model_is_unloaded():
-        try:
-            verify_training_client(training_client)
-            return False
-        except Exception:
-            return True
-
-    assert wait_for_condition(
-        model_is_unloaded,
-    ), "Model did not unload in time"
+    # Verify model no longer works after unload
+    with pytest.raises(Exception):
+        verify_training_client(training_client)
 
 
 def test_stale_session_cleanup(api_server_fast_cleanup):
