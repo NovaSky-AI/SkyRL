@@ -26,7 +26,9 @@ async def simple_generation(
     }
 
     env = RLMEnvironment()
-    env.load_context(open(os.path.join(examples_dir, "context.txt"), "r").read())
+    with open(os.path.join(examples_dir, "context.txt"), "r") as f:
+        context_data = f.read()
+    env.load_context(context_data)
     env._engine_setup(DictConfig(env_cfg))
     out = env.step(prompt)
     env.close()
