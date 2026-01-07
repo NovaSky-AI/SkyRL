@@ -267,14 +267,16 @@ class LoRAExpert(LoRAMixin, nnx.Module):
 
 
 def reinit_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
-    """Reinitialize a LoRA adapter for training.
+    """Fully reinitializes the adapter: lora_A with he_uniform, lora_B with zeros,
+    and sets the appropriate rank and scaling.
 
-    Fully reinitializes the adapter: lora_A with he_uniform, lora_B with zeros,
-    and sets the appropriate rank and scaling. This should be called before
-    training begins on an adapter slot.
+    Note: This method needs to be called BEFORE any training happens, you should not update
+    the config for the same adapter index multiple times throughout training (e.g. it will
+    invalidate your current training progress and also violate the assumption that lora_B
+    is zero).
 
     Args:
-        model: The model containing LoRA layers (must have model.rngs)
+        model: The model containing LoRA layers
         adapter_index: Index of the adapter to reinitialize
         lora_config: LoraConfig object containing rank, alpha, and training flags
     """
