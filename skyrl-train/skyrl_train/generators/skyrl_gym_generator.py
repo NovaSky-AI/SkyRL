@@ -156,10 +156,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
     def _validate_cfg(self, generator_cfg: DictConfig):
-<<<<<<< HEAD
-
-=======
->>>>>>> 10c8a85f22980871f1cdaf06978c6362b403ac96
         if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
@@ -252,17 +248,12 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         initial_prompt_length = len(initial_input_ids)
         loss_mask = []  # this excludes the prompt
+        rollout_logprobs = None
 
-        current_sampling_params = sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
-
-        if sampling_params is not None:
-            # Runtime override (dict)
-            get_logprobs = sampling_params.get("logprobs") is not None
-        else:
-            # Config (DictConfig or MagicMock in tests)
-            get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
-
-        rollout_logprobs = [] if get_logprobs else None
+        current_sampling_params = (
+            sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
+        )
+        
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
 
@@ -317,7 +308,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
-
             stop_strs = current_sampling_params.get("stop", None)
             added_eos = False
             if (
