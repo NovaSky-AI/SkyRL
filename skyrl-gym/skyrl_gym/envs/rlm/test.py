@@ -16,10 +16,12 @@ async def simple_generation(
     openai_api_key: Optional[str] = None,
 ):
     examples_dir = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(examples_dir, "rlm_system_prompt.txt"), "r") as f:
+        init_prompt = f.read()
     env_cfg = {
         "base_url": "https://api.openai.com/v1",
         "model": "gpt-5-mini",
-        "init_prompt": open(os.path.join(examples_dir, "rlm_system_prompt.txt"), "r").read(),
+        "init_prompt": init_prompt,
         "openai_api_key": openai_api_key,
     }
 
