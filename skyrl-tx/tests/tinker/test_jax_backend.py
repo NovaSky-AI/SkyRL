@@ -8,7 +8,7 @@ import optax
 
 from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
 from tx.tinker.engine import prepare_model_pass_batch, prepare_sample_batch
-from tx.tinker.types import LoraConfig, OptimStepInput, AdamParams
+from tx.tinker.types import LoraConfig, OptimStepInput
 from tx.tinker import api
 from tx.tinker import types
 from tx.layers.lora import LoRALinear
@@ -374,9 +374,7 @@ def test_gradient_checkpointing():
     assert abs(losses[0] - losses[1]) / abs(losses[0]) < 5e-3
 
 
-def make_sample_input(
-    tokens: list[int], prompt_logprobs: bool = False, max_tokens: int = 16
-) -> types.SampleInput:
+def make_sample_input(tokens: list[int], prompt_logprobs: bool = False, max_tokens: int = 16) -> types.SampleInput:
     """Build a SampleInput for testing."""
     return types.SampleInput(
         base_model=BASE_MODEL,  # Sample from base model (no LoRA)

@@ -86,7 +86,7 @@ def prepare_model_pass_batch(
     that the backend will convert to arrays.
 
     Args:
-        requests: Dict mapping request_id to (model_id, request_data) tuples
+        requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
 
     Returns:
         PreparedModelPassBatch with all data extracted from requests
