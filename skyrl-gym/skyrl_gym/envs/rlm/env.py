@@ -22,7 +22,7 @@ class RLMEnvironment(BaseTextEnv):
         self.temp_dir = tempfile.mkdtemp(prefix=f"repl_env_{uuid.uuid4()}_")
         self.globals_dict: dict = {}
         self.locals_dict: dict = {}
-        
+
         self.max_turns = 10
         self.max_tokens = 1024
         self.max_repl_output_chars = 4000
@@ -55,10 +55,7 @@ class RLMEnvironment(BaseTextEnv):
             total = len(str(ctx)) if ctx is not None else 0
             preview = []
 
-        return (
-            f"Your context is a {ctx_type} with {total} total characters. "
-            f"(Preview lens: {preview})"
-        )
+        return f"Your context is a {ctx_type} with {total} total characters. " f"(Preview lens: {preview})"
 
     def _engine_setup(
         self,
@@ -71,9 +68,7 @@ class RLMEnvironment(BaseTextEnv):
             openai_api_key = os.getenv("OPENAI_API_KEY")
 
         if openai_api_key is None:
-            raise ValueError(
-                "`OPENAI_API_KEY` must be set (as parameter, in env_cfg, or as environment variable)"
-            )
+            raise ValueError("`OPENAI_API_KEY` must be set (as parameter, in env_cfg, or as environment variable)")
 
         base_url = env_cfg.base_url
         model = env_cfg.model
@@ -195,9 +190,7 @@ class RLMEnvironment(BaseTextEnv):
                 )
 
             observation_content = "\n\n".join(all_results)
-            observation_content, obs_trunc = utils.truncate_text(
-                observation_content, self.max_repl_output_chars * 2
-            )
+            observation_content, obs_trunc = utils.truncate_text(observation_content, self.max_repl_output_chars * 2)
             if obs_trunc:
                 observation_content += "\n[observation truncated]"
 
@@ -205,7 +198,7 @@ class RLMEnvironment(BaseTextEnv):
                 observation_content = (
                     "No <repl>...</repl> blocks were found in your last message. "
                     "If you need to run Python, wrap it in <repl> tags. "
-                    "If you are done, respond with FINAL(\"...\") or FINAL_VAR(name)."
+                    'If you are done, respond with FINAL("...") or FINAL_VAR(name).'
                 )
             messages.append({"role": "user", "content": observation_content})
 
@@ -290,7 +283,7 @@ class RLMEnvironment(BaseTextEnv):
         return None
 
     def _execute_code(self, code: str) -> dict:
-        """Code Execution in REPL Environment """
+        """Code Execution in REPL Environment"""
         import io
         import sys
         import time
@@ -335,4 +328,3 @@ class RLMEnvironment(BaseTextEnv):
 
     def __del__(self):
         self.close()
-

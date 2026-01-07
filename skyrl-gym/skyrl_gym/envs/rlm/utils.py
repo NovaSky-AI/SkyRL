@@ -107,9 +107,7 @@ def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
         tail = max(0, max_chars - head)
 
     truncated = (
-        text[:head]
-        + f"\n... <truncated {len(text) - (head + tail)} chars> ...\n"
-        + (text[-tail:] if tail else "")
+        text[:head] + f"\n... <truncated {len(text) - (head + tail)} chars> ...\n" + (text[-tail:] if tail else "")
     )
     return truncated, True
 
@@ -167,4 +165,3 @@ def print_box(title: str, content: str, *, color: str = "cyan", width: int = 96)
     for line in _wrap_lines(content):
         print(c + "│" + reset + line[:inner_w].ljust(inner_w) + c + "│" + reset)
     print(c + bot + reset)
-

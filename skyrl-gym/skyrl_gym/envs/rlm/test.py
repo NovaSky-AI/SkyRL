@@ -33,11 +33,12 @@ async def simple_generation(
 
 @ray.remote(num_cpus=1)
 def run_simple_test(prompt: str):
-    
+
     import dotenv
+
     dotenv.load_dotenv()
     openai_api_key = os.getenv("OPENAI_API_KEY")
-    
+
     return asyncio.run(
         simple_generation(
             prompt=prompt,
@@ -72,4 +73,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
