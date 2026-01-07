@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ErrorResponse,
+    ErrorInfo,
     CompletionRequest,
     CompletionResponse,
 )
@@ -618,22 +619,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 request = CompletionRequest(**body)
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
-            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
-
-                return ErrorResponse(
-                    error=ErrorInfo(
-                        message=str(e),
-                        type=HTTPStatus.BAD_REQUEST.phrase,
-                        code=HTTPStatus.BAD_REQUEST.value,
-                    ),
-                ).model_dump()
-            else:
-                return ErrorResponse(
+            return ErrorResponse(
+                error=ErrorInfo(
                     message=str(e),
                     type=HTTPStatus.BAD_REQUEST.phrase,
                     code=HTTPStatus.BAD_REQUEST.value,
-                ).model_dump()
+                ),
+            ).model_dump()
 
         # 2. Call vllm engine
         try:
@@ -649,22 +641,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
-            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
-
-                return ErrorResponse(
-                    error=ErrorInfo(
-                        message=str(e),
-                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                    ),
-                ).model_dump()
-            else:
-                return ErrorResponse(
+            return ErrorResponse(
+                error=ErrorInfo(
                     message=str(e),
                     type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
                     code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                ).model_dump()
+                ),
+            ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """OpenAI-compatible HTTP endpoint for handling `/chat/completions` in Python vLLM engine.

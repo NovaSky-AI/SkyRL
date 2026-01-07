@@ -385,7 +385,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # NOTE(Charlie): do not reuse headers here as the single request may become various new requests
         headers = {"Content-Type": "application/json"}
 
-        # 1. Postprocess prompt, session_id, and validate request.
+        # 0. Postprocess prompt, session_id, and validate request.
         prompt = body.get("prompt")
         session_id_value = body.pop("session_id", None)
         ret = postprocess_completion_request(prompt, session_id_value)
