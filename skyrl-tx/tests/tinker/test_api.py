@@ -45,36 +45,34 @@ def create_service_and_training_client(base_url: str):
 @contextmanager
 def start_api_server(overrides: dict[str, str] | None = None):
     """Start the FastAPI server with optional config overrides. Prints log on failure."""
-    log_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".log")
-    # Create a temp DB file for test isolation
-    db_file = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    db_file.close()
-    defaults = {
-        "host": "0.0.0.0",
-        "port": str(TEST_SERVER_PORT),
-        "base-model": BASE_MODEL,
-        "backend-config": '{"max_lora_adapters": 4}',
-        "database-url": f"sqlite:///{db_file.name}",
-    }
-    if overrides:
-        defaults.update(overrides)
-    cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.api"]
-    for key, value in defaults.items():
-        cmd.extend([f"--{key}", value])
-    process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
-    print(f"Starting API server: {' '.join(cmd)}")
-    try:
-        yield process, log_file.name
-    except Exception:
-        with open(log_file.name) as f:
-            print(f"=== Test failed. Server log ({log_file.name}) ===\n{f.read()}")
-        raise
-    finally:
-        process.terminate()
-        _ = process.wait(timeout=5)
-        log_file.close()
-        os.unlink(log_file.name)
-        os.unlink(db_file.name)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        log_path = os.path.join(tmp_dir, "server.log")
+        db_path = os.path.join(tmp_dir, "server.db")
+
+        with open(log_path, "w") as log_file:
+            defaults = {
+                "host": "0.0.0.0",
+                "port": str(TEST_SERVER_PORT),
+                "base-model": BASE_MODEL,
+                "backend-config": '{"max_lora_adapters": 4}',
+                "database-url": f"sqlite:///{db_path}",
+            }
+            if overrides:
+                defaults.update(overrides)
+            cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.api"]
+            for key, value in defaults.items():
+                cmd.extend([f"--{key}", value])
+            process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
+            print(f"Starting API server: {' '.join(cmd)}")
+            try:
+                yield process, log_path
+            except Exception:
+                with open(log_path) as f:
+                    print(f"=== Test failed. Server log ({log_path}) ===\n{f.read()}")
+                raise
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
 
 
 @pytest.fixture(scope="module")
