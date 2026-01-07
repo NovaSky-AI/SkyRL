@@ -32,7 +32,7 @@ MEGATRON_ETP=null
 
 # TIS parameters
 TIS_IMP_RATIO_CAP=2.0
-USE_TIS=true
+TIS_TYPE=token
 
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -63,8 +63,8 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.policy.optimizer_config.lr=3.0e-5 \
   trainer.policy_mini_batch_size=256 \
   trainer.algorithm.use_kl_loss=false \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_TYPE \
+  trainer.algorithm.rollout_correction.token_tis_ratio_cap_high=$TIS_IMP_RATIO_CAP \
   trainer.ckpt_interval=60 \
   trainer.hf_save_interval=30 \
   trainer.dump_data_batch=true \

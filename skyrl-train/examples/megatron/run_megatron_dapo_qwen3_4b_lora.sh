@@ -55,7 +55,7 @@ LORA_A_INIT_METHOD="kaiming"
 
 # TIS parameters
 TIS_IMP_RATIO_CAP=2.0
-USE_TIS=true
+TIS_TYPE=token
 
 uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -85,7 +85,8 @@ uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
-  trainer.algorithm.use_tis=$USE_TIS \
+  trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_TYPE \
+  trainer.algorithm.rollout_correction.token_tis_ratio_cap_high=2.0 \
   trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.lora.rank=$LORA_RANK \
   trainer.policy.model.lora.alpha=$LORA_ALPHA \

@@ -60,12 +60,13 @@ We highlight some important training parameters configured for FlashRL from our 
     DATA_DIR="$HOME/data/dapo"
 
     # TIS parameters
-    USE_TIS=true
+    TIS_TYPE=token
     TIS_IMP_RATIO_CAP=8.0
 
     uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.int8 -m examples.flash_rl.main_dapo_flashrl \
         ...
-        trainer.algorithm.use_tis=$USE_TIS \
+        trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_TYPE \
+        trainer.algorithm.rollout_correction.token_tis_ratio_cap_high=$TIS_IMP_RATIO_CAP \
         trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
         generator.sampling_params.logprobs=0 \
         ...

@@ -18,7 +18,7 @@ DATA_DIR="$HOME/data/searchR1"
 
 RUN_NAME="skyrl-search_4turns_maxgeneratelen_500"
 
-USE_TIS=true
+TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
 uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
@@ -30,8 +30,8 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.policy.optimizer_config.num_warmup_steps=94 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_TYPE \
+  trainer.algorithm.rollout_correction.token_tis_ratio_cap_high=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
