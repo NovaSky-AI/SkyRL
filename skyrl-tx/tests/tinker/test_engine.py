@@ -540,6 +540,7 @@ def test_cleanup_stale_sessions():
         checkpoints_base=AnyPath(""),
         backend_config={"max_lora_adapters": 4, "max_lora_rank": 32},
         session_timeout_sec=60,
+        database_url="sqlite:///:memory:",  # Use in-memory DB for test isolation
     )
     engine = TinkerEngine(config)
     SQLModel.metadata.create_all(engine.db_engine)

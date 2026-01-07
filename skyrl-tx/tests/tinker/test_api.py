@@ -46,15 +46,12 @@ def create_service_and_training_client(base_url: str):
 def start_api_server(overrides: dict[str, str] | None = None):
     """Start the FastAPI server with optional config overrides. Prints log on failure."""
     log_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".log")
-    # Create a temporary DB file to isolate test runs.
-    db_file = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
-    db_file.close()
     defaults = {
         "host": "0.0.0.0",
         "port": str(TEST_SERVER_PORT),
         "base-model": BASE_MODEL,
         "backend-config": '{"max_lora_adapters": 4}',
-        "database-url": f"sqlite:///{db_file.name}",
+        "database-url": "sqlite:///:memory",  # Use in-memory DB for test isolation
     }
     if overrides:
         defaults.update(overrides)
@@ -74,7 +71,6 @@ def start_api_server(overrides: dict[str, str] | None = None):
         _ = process.wait(timeout=5)
         log_file.close()
         os.unlink(log_file.name)
-        os.unlink(db_file.name)
 
 
 @pytest.fixture(scope="module")
