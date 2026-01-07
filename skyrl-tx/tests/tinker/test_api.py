@@ -23,7 +23,7 @@ TEST_SERVER_PORT = 8000
 # Configs for the fast cleanup test
 TEST_SERVER_PORT_FAST_CLEANUP = 8001
 FAST_CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
-FAST_CLEANUP_TIMEOUT_SEC = 2  # Seconds without heartbeat before session is stale
+FAST_CLEANUP_TIMEOUT_SEC = 5  # Seconds without heartbeat before session is stale
 
 
 def verify_training_client(training_client: tinker.TrainingClient):
