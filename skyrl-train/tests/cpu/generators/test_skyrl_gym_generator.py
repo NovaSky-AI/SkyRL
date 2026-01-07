@@ -302,7 +302,6 @@ async def test_agent_loop_single_turn(
             # No EOS: just add it
             expected_response_ids = mock_llm_output_ids + [mock_tokenizer.eos_token_id]
 
-        # In single-turn, final EOS ALWAYS has mask=0 (whether original or added)
         expected_loss_mask = [1] * (len(expected_response_ids))
 
     if logprobs_setting is not None:
