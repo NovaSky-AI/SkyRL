@@ -17,7 +17,7 @@ from .lcb.lcb_utils import (
     CodeGeneratorWithIteratedRanker,
     CodeGeneratorWithSelfDebug,
 )
-from .hover.programs import Hover
+from .hover.programs import Hover, Hover_query_gen
 from .papillon.programs import PAPILLON, PAPILLON_request_gen
 
 # Import reward functions from different modules
@@ -29,10 +29,15 @@ from .papillon.utils import (
     compute_overall_score,
     compute_query_leakage,
 )
+from .hover.utils import (
+    hover_final_reward_fn,
+    hover_query_reward_fn,
+)
 
 # Import data functions from different modules
 from .lcb.data import lcb_data
 from .papillon.data import papillon_data
+from .hover.data import hover_data
 
 # Mapping from program name (string) to program class
 DSPY_PROGRAM_MAP: Dict[str, Type[dspy.Module]] = {
@@ -42,7 +47,7 @@ DSPY_PROGRAM_MAP: Dict[str, Type[dspy.Module]] = {
     "CodeGeneratorWithRanker_test": CodeGeneratorWithRanker_test,
     "CodeGeneratorWithIteratedRanker": CodeGeneratorWithIteratedRanker,
     "CodeGeneratorWithSelfDebug": CodeGeneratorWithSelfDebug,
-    "Hover": Hover,
+    "Hover_query_gen": Hover_query_gen,
     "papillon_request_gen": PAPILLON_request_gen,
 }
 
@@ -52,12 +57,15 @@ REWARD_FUNCTION_MAP: Dict[str, Callable[..., Any]] = {
     "lcb_final_reward_fn": final_reward_fn,
     "papillon_final_reward_fn": compute_overall_score,
     "papillon_query_leakage": compute_query_leakage,
+    "hover_final_reward_fn": hover_final_reward_fn,
+    "hover_query_reward_fn": hover_query_reward_fn,
 }
 
 # Mapping from benchmark name (string) to data function
 BENCHMARK_DATA_MAP: Dict[str, Callable[[], tuple]] = {
     "lcb": lcb_data,
     "papillon": papillon_data,
+    "hover": hover_data,
 }
 
 

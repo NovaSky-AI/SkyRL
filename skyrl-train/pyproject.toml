@@ -34,7 +34,7 @@ dependencies = [
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
-    "datasets==4.0.0",
+    "datasets<4.0.0",
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
@@ -45,7 +45,6 @@ dependencies = [
     "uvicorn",
     "pybind11",
     "setuptools",
-    "dspy>=3.1.0b1",
 ]
 
 [tool.uv]
@@ -81,7 +80,8 @@ override-dependencies = [
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.9.0",
-    "megatron-core==0.15.0"
+    "megatron-core==0.15.0",
+    "litellm==1.74.9"
 ]
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
@@ -118,6 +118,10 @@ dev = [
 ]
 dspy = [
     "dspy @ git+https://github.com/stanfordnlp/dspy.git",
+    "ujson",
+    "PyStemmer",
+    "bm25s",
+    "litellm==1.74.9",
 ]
 docs = [
     "sphinx>=7.0.0",

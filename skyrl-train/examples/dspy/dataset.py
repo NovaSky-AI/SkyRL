@@ -8,7 +8,6 @@ import os
 import base64
 import zlib
 from pydantic import BaseModel
-from .lcb.data import lcb_data
 from .utils import get_benchmark_data
 
 logger = logging.getLogger(__name__)

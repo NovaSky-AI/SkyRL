@@ -1,6 +1,10 @@
+from re import S
 import dspy
 from typing import List
-
+from dspy.adapters import XMLAdapter
+from dspy.dsp.utils import deduplicate
+from .utils import BM25Searcher
+from dspy.adapters.xml_adapter import XMLAdapter
 
 class GenerateThreeQueries(dspy.Signature):
     """
@@ -37,81 +41,111 @@ class AppendNotes(dspy.Signature):
     new_key_facts = dspy.OutputField()
 
 
+instr1 = """
+Given a claim and some key facts, generate a follow-up search query to find the next most essential clue towards verifying or refuting the claim. The goal ultimately is to find all documents implicated by the claim.
+""".strip()
+
+instr2 = """
+Given a claim, some key facts, and new search results, identify any new learnings from the new search results, which will extend the key facts known so far about the whether the claim is true or false. The goal is to ultimately collect all facts that would help us find all documents implicated by the claim.
+""".strip()
+
+
 class Hover(dspy.Module):
-    def __init__(
-        self,
-        num_hops: int = 4,
-        k_per_search_query: int = 10,
-        k_per_search_query_last_hop: int = 30,
-        num_total_passages: int = 100,
-    ):
-        # Value is fixed to simplify signature construction in presented snippet
-        self.num_search_queries_per_hop = 3
+    def __init__(self, num_docs=4, num_hops=2):
+        self.num_docs, self.num_hops = num_docs, num_hops
+        self.generate_query_sig = dspy.Signature("claim, key_facts -> followup_search_query", instr1)
+        self.generate_query = dspy.ChainOfThought(self.generate_query_sig)
+        self.append_notes = dspy.ChainOfThought(dspy.Signature("claim, key_facts, new_search_results -> new_key_facts", instr2))
+        self.bm25_retriever = BM25Searcher()
+        self.adapter = XMLAdapter()
 
-        self.num_hops = num_hops
-        self.k_per_search_query = k_per_search_query
-        self.k_per_search_query_last_hop = k_per_search_query_last_hop
-        self.num_total_passages = num_total_passages
-
-        self.rm = dspy.ColBERTv2()
-        self.generate_query = dspy.ChainOfThought(GenerateThreeQueries)
-        self.append_notes = dspy.ChainOfThought(AppendNotes)
-
-    def forward(self, claim: str) -> List[str]:
+    def forward(self, claim: str) -> list[str]:
         key_facts = []
-        committed_docs = []
+        retrieved_docs = []
 
-        for hop_ind in range(self.num_hops):
-            is_last_hop = hop_ind == self.num_hops - 1
-            is_first_hop = hop_ind == 0
+        for hop_idx in range(self.num_hops):
+            query = self.generate_query(claim=claim, key_facts=key_facts).followup_search_query if hop_idx else claim
+            search_results = self.bm25_retriever.search(query, k=self.num_docs)
+            retrieved_docs.extend(search_results)
 
-            hop_k = (
-                self.k_per_search_query_last_hop
-                if is_last_hop
-                else self.k_per_search_query
-            )
+            if hop_idx == self.num_hops - 1:
+                break
+                
+            prediction = self.append_notes(claim=claim, key_facts=key_facts, new_search_results=search_results)
+            key_facts.append(prediction.new_key_facts)
 
-            num_docs_to_keep = (
-                self.num_total_passages - len(committed_docs)
-                if is_last_hop
-                else self.k_per_search_query
-            )
+        return dspy.Prediction(key_facts=key_facts, retrieved_docs=retrieved_docs)
+    
+class Hover_query_gen(Hover):
+    def __init__(self):
+        super().__init__()
+        self.query_gen_traces = []
+        self.queries = []
 
-            if is_first_hop:
-                search_queries = [claim]
+    async def forward(self, example) -> list[str]:
+        claim = example.get("claim")
+        key_facts = []
+        retrieved_docs = []
+
+        for hop_idx in range(self.num_hops):
+            if hop_idx:
+                query = await self.generate_query.acall(claim=claim, key_facts=key_facts)
+                self.append_trace(example, query)
+                query = query.followup_search_query
             else:
-                pred = self.generate_query(claim=claim, key_facts=key_facts)
-                search_queries = [
-                    pred.search_query1,
-                    pred.search_query2,
-                    pred.search_query3,
-                ]
-                search_queries = deduplicate(search_queries)
+                query = claim
+            
+            
+            search_results = self.bm25_retriever.search(query, k=self.num_docs)
+            retrieved_docs.extend(search_results)
 
-            search_results = [
-                r
-                for q in search_queries
-                for r in search_raw(q, k=hop_k, rm=self.rm)
-            ]
+            if hop_idx == self.num_hops - 1:
+                break
+                
+            prediction = await self.append_notes.acall(claim=claim, key_facts=key_facts, new_search_results=search_results)
+            key_facts.append(prediction.new_key_facts)
 
-            search_results = sorted(
-                search_results, key=lambda r: r["score"], reverse=True
-            )
+        return dspy.Prediction(key_facts=key_facts, retrieved_docs=retrieved_docs)
 
-            unique_docs = []
-            for result in search_results:
-                if result["long_text"] not in unique_docs:
-                    unique_docs.append(result["long_text"])
+    def append_trace(self, example, pred):
+        original_sig = GenerateThreeQueries
+        # Get formatted finetune data which contains both input and output messages
+        finetune_data = self.adapter.format_finetune_data(
+                                signature=self.generate_query_sig,
+                                inputs=example,
+                                outputs=pred,
+                                demos=[] # TODO: Add support for demos
+                            )
+        
+        all_messages = finetune_data.get('messages', [])
+        
+        # Extract user and assistant messages
+        chat_history = [None, None, None]
 
-            unique_docs = unique_docs[:num_docs_to_keep]
-            committed_docs.extend(unique_docs)
-
-            if not is_last_hop:
-                pred = self.append_notes(
-                    claim=claim,
-                    key_facts=key_facts,
-                    new_search_results=unique_docs,
-                )
-                key_facts.append(pred.new_key_facts)
-
-        return dspy.Prediction(key_facts=key_facts, retrieved_docs=committed_docs)
+        for msg in all_messages:
+            if msg.get("role") == "system":
+                chat_history[0] = {
+                    "role": "system",
+                    "content": msg['content']
+                }
+            if msg.get("role") == "user":
+                chat_history[1] = {
+                    "role": "user",
+                    "content": msg['content']
+                }
+            elif msg.get("role") == "assistant":
+                chat_history[2] = {
+                    "role": "assistant",
+                    "content": msg['content']
+                }
+        self.query_gen_traces.extend(chat_history)
+        self.queries.append(pred)
+    
+    def collect_trace(self, example, pred):
+        # Remove all system prompts in self.query_gen_traces starting from the second element
+        cleaned_traces = []
+        for i, msg in enumerate(self.query_gen_traces):
+            if i == 0 or (msg is not None and msg.get("role") != "system"):
+                cleaned_traces.append(msg)
+        
+        return cleaned_traces, self.queries

@@ -87,7 +87,7 @@ class Trial:
         # kwargs = self._example_to_kwargs(self.example)
         results = TrialResults()
         try:
-            inference_timeout_seconds = 100
+            inference_timeout_seconds = 600
             verification_timeout_seconds = 60
             assert inspect.iscoroutinefunction(self.program.forward), "program.forward must be a coroutine function"
             try:
