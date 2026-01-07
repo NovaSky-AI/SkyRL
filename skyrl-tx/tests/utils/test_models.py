@@ -11,7 +11,7 @@ from flax import nnx
 from peft import PeftModel
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from tx.layers.lora import reinit_lora_adapter
+from tx.layers.lora import init_lora_adapter
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.tinker.types import LoraConfig
@@ -34,7 +34,7 @@ def create_test_model(base_model_name: str, rank: int, alpha: int, adapter_index
     mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        reinit_lora_adapter(model, adapter_index=adapter_index, lora_config=LoraConfig(rank=rank, alpha=alpha))
+        init_lora_adapter(model, adapter_index=adapter_index, lora_config=LoraConfig(rank=rank, alpha=alpha))
 
     return config, base_config, model
 

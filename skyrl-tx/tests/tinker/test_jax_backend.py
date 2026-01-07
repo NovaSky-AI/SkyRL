@@ -114,8 +114,8 @@ def test_clear_adapter_config():
     assert (lora_layer.lora_B[adapter_idx] == 0.0).all()
 
 
-def test_adapter_reuse_reinitializes_lora_adapter():
-    """Test that reusing an adapter slot reinitializes the lora adapter properly."""
+def test_adapter_reuse_initializes_lora_adapter():
+    """Test that reusing an adapter slot initializes the lora adapter properly."""
     # Use max_lora_adapters=2 so only slot 1 is available
     # (slot 0 is reserved for base model)
     backend = create_backend(max_lora_adapters=2)
@@ -128,22 +128,22 @@ def test_adapter_reuse_reinitializes_lora_adapter():
 
     # Verify lora_A is non-zero after creation
     assert not (
-        lora_layer.lora_A[adapter_idx, :, :LORA_RANK] == 0.0
+        lora_layer.lora_A[adapter_idx, ..., :LORA_RANK] == 0.0
     ).all(), "lora_A should be initialized with he_uniform (non-zero)"
 
     # Delete the model (clears both lora_A and lora_B to zeros)
     backend.delete_model(model_id_1)
-    assert (lora_layer.lora_A[adapter_idx] == 0.0).all(), "lora_A should be zeroed after clear_adapter"
+    assert (lora_layer.lora_A[adapter_idx] == 0.0).all(), "lora_A should be zeroed after clear_lora_adapter"
 
     # Create a new model that reuses the same adapter slot
     model_id_2 = "model_2"
     new_adapter_idx = create_model(backend, model_id_2)
     assert new_adapter_idx == adapter_idx, "Should reuse the same adapter slot"
 
-    # Verify lora_A is reinitialized (non-zero)
+    # Verify lora_A is initialized (non-zero)
     assert not (
-        lora_layer.lora_A[adapter_idx, :, :LORA_RANK] == 0.0
-    ).all(), "lora_A should be reinitialized with he_uniform after adapter reuse"
+        lora_layer.lora_A[adapter_idx, ..., :LORA_RANK] == 0.0
+    ).all(), "lora_A should be initialized with he_uniform after adapter reuse"
 
-    # Verify lora_B is reset to 0
+    # Verify lora_B is zeros
     assert (lora_layer.lora_B[adapter_idx] == 0.0).all(), "lora_B should be zeros"

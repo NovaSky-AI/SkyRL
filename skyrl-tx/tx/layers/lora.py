@@ -32,6 +32,12 @@ class LoRAMixin:
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ) -> None:
+        """Initialize LoRA parameter tensors.
+
+        Note: lora_A and lora_B are initialized to zeros here. The actual weight
+        initialization (he_uniform for lora_A, zeros for lora_B) happens in
+        init_lora_adapter(), which must be called before training.
+        """
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
 
@@ -46,7 +52,7 @@ class LoRAMixin:
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_A),
                 rngs=rngs,
             )
             self.lora_B = Param(
@@ -266,23 +272,21 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def reinit_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
-    """Fully reinitializes the adapter: lora_A with he_uniform, lora_B with zeros,
-    and sets the appropriate rank and scaling.
+def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
+    """Initialize a LoRA adapter for training.
 
-    Note: This method needs to be called BEFORE any training happens, you should not update
-    the config for the same adapter index multiple times throughout training (e.g. it will
-    invalidate your current training progress and also violate the assumption that lora_B
-    is zero).
+    Initializes the adapter: lora_A with he_uniform, lora_B with zeros,
+    and sets the appropriate rank and scaling. This must be called BEFORE
+    training begins on an adapter slot.
 
     Args:
         model: The model containing LoRA layers
-        adapter_index: Index of the adapter to reinitialize
+        adapter_index: Index of the adapter to initialize
         lora_config: LoraConfig object containing rank, alpha, and training flags
     """
     state = nnx.state(model)
 
-    def reinit_adapter(path, value):
+    def init_adapter(path, value):
         effective_rank = lora_config.rank
         normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
 
@@ -312,7 +316,7 @@ def reinit_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config
             return value.at[adapter_index].set(0.0)
         return value
 
-    updated_state = jax.tree.map_with_path(reinit_adapter, state)
+    updated_state = jax.tree.map_with_path(init_adapter, state)
     nnx.update(model, updated_state)
 
 
@@ -320,7 +324,7 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     """Clear/reset a LoRA adapter, freeing it for reuse.
 
     Sets rank=0, scaling=0, and zeros out lora_A and lora_B for the adapter.
-    Before reusing this adapter for training again, `reinit_lora_adapter` must be called.
+    Before reusing this adapter for training again, `init_lora_adapter` must be called.
     """
     state = nnx.state(model)
 
