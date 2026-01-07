@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from enum import Enum
+
 from sqlmodel import SQLModel, Field, JSON
 from sqlalchemy import DateTime
 from sqlalchemy.engine import url as sqlalchemy_url
@@ -59,7 +60,7 @@ class ModelDB(SQLModel, table=True):
 
     model_id: str = Field(primary_key=True)
     base_model: str
-    lora_config: types.LoraConfig = Field(sa_type=JSON)
+    lora_config: dict[str, object] = Field(sa_type=JSON)
     status: str = Field(index=True)
     request_id: int
     session_id: str = Field(foreign_key="sessions.session_id", index=True)

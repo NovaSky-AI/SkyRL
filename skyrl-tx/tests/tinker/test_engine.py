@@ -525,7 +525,9 @@ def test_process_unload_model():
     SQLModel.metadata.create_all(engine.db_engine)
 
     model_id = "test_model"
-    engine.process_single_request(types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16}})
+    _ = engine.process_single_request(
+        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16}}
+    )
     assert engine.backend.has_model(model_id)
 
     result = engine.process_unload_model(model_id, types.UnloadModelInput())
@@ -549,7 +551,9 @@ def test_cleanup_stale_sessions():
     session_id = "stale_session"
 
     # Create model in backend
-    engine.process_single_request(types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16}})
+    _ = engine.process_single_request(
+        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16}}
+    )
     assert engine.backend.has_model(model_id)
 
     # Insert stale session and model into DB

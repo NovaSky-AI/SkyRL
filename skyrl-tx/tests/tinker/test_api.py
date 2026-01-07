@@ -26,7 +26,7 @@ FAST_CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
 FAST_CLEANUP_TIMEOUT_SEC = 2  # Seconds without heartbeat before session is stale
 
 
-def verify_training_client(training_client):
+def verify_training_client(training_client: tinker.TrainingClient):
     """Verify a training client works with a forward pass."""
     tokenizer = training_client.get_tokenizer()
     data = [make_datum(tokenizer, "Hello", " world")]
@@ -355,7 +355,7 @@ def test_unload_model(api_server):
     async def _unload():
         # Use the internal async client since no public sync method exists
         with training_client.holder.aclient(ClientConnectionPoolType.TRAIN) as client:
-            await client.models.unload(request=types.UnloadModelRequest(model_id=training_client.model_id))
+            _ = await client.models.unload(request=types.UnloadModelRequest(model_id=training_client.model_id))
 
     training_client.holder.run_coroutine_threadsafe(_unload()).result()
 
@@ -379,7 +379,7 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
     adapter slot reuse, since that behavior is already covered by unit tests in
     test_jax_backend.py and test_engine.py.
     """
-    process, log_path = api_server_fast_cleanup
+    _, log_path: str = api_server_fast_cleanup
     base_url = f"http://0.0.0.0:{TEST_SERVER_PORT_FAST_CLEANUP}/"
     service_client, training_client = create_service_and_training_client(base_url=base_url)
 

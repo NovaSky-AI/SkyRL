@@ -192,7 +192,7 @@ class TinkerEngine:
         self.backend = backend_class(config.base_model, backend_config)
 
         # Track last cleanup time for periodic stale session cleanup
-        self._last_cleanup_time = time.time()
+        self._last_cleanup_time: float = time.time()
 
         logger.info(f"Initialized TinkerEngine with backend={type(self.backend).__name__}")
 
@@ -356,7 +356,7 @@ class TinkerEngine:
 
             # Update model status in DB
             with Session(self.db_engine) as session:
-                _ = session.execute(update(ModelDB).where(ModelDB.model_id == model_id).values(status="unloaded"))
+                _ = session.exec(update(ModelDB).where(ModelDB.model_id == model_id).values(status="unloaded"))
                 session.commit()
 
             logger.info(f"Unloaded model {model_id}")
@@ -613,7 +613,7 @@ class TinkerEngine:
             # Periodically cleanup stale sessions (disabled if either config is negative)
             cleanup_enabled = self.config.session_cleanup_interval_sec >= 0 and self.config.session_timeout_sec >= 0
             if cleanup_enabled and time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
-                self.cleanup_stale_sessions()
+                _ = self.cleanup_stale_sessions()
                 self._last_cleanup_time = time.time()
 
             # Poll every 100ms
