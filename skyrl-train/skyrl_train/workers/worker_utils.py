@@ -202,17 +202,22 @@ class TokenBasedBatchIterator(BaseBatchIterator):
 
     def _create_padding_microbatch(self) -> TrainingInputBatch:
         """Create a padding microbatch."""
+        seq_len = 2
+        num_actions = self._data.metadata["response_length"]
+        batch_size = 1
+
         data = TrainingInputBatch(
             {
-                "sequences": torch.ones((1, 1), dtype=int, device="cpu"),
-                "attention_mask": torch.zeros((1, 1), dtype=int, device="cpu"),
-                "action_log_probs": torch.zeros((1, 1), device="cpu"),
-                "base_action_log_probs": torch.zeros((1, 1), device="cpu"),
-                "values": torch.zeros((1, 1), device="cpu"),
-                "returns": torch.zeros((1, 1), device="cpu"),
-                "advantages": torch.zeros((1, 1), device="cpu"),
-                "loss_mask": torch.zeros((1, 1), dtype=int, device="cpu"),
-                "response_mask": torch.zeros((1, 1), dtype=int, device="cpu"),
+                "sequences": torch.randint(0, 100, (batch_size, seq_len), device="cpu"),
+                "attention_mask": torch.ones((batch_size, seq_len), dtype=int, device="cpu"),
+                "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device="cpu"),
+                "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device="cpu"),
+                "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
+                "returns": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
+                "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
+                # Loss mask is all zeros because we don't want padding samples to contribute to the loss.
+                "loss_mask": torch.zeros((batch_size, num_actions), dtype=int, device="cpu"),
+                "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
             }
         )
         data.metadata = self._data.metadata
@@ -239,9 +244,12 @@ class TokenBasedBatchIterator(BaseBatchIterator):
 
     def __iter__(self):
         for microbatch in self._microbatches:
-            yield self._create_microbatch_from_indices(microbatch)
+            microbatch_data = self._create_microbatch_from_indices(microbatch)
+            yield microbatch_data
+
         for _ in range(self._num_padding_microbatches):
-            yield self._create_padding_microbatch()
+            padding_microbatch = self._create_padding_microbatch()
+            yield padding_microbatch
 
     def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
         """Reorder and combine output batches into a single batch with

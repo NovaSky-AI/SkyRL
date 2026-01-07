@@ -811,10 +811,15 @@ class PolicyWorkerBase(Worker):
                 )
                 num_microbatches = len(microbatch_iterator)
 
+                temp = []
                 for microbatch_idx, microbatch in enumerate(microbatch_iterator):
                     microbatch_experience = BaseBatchIterator.batch_to_experience(microbatch)
                     microbatch_weight = len(microbatch) / len(minibatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
+
+                    print("!!! loss", self.mesh_rank, status["final_loss"])
+
+                    temp.append(microbatch["attention_mask"].sum().item())
 
                     # Record status for all but the last microbatch in the minibatch.
                     # The last microbatch should be recorded after the optimizer step.
@@ -829,6 +834,8 @@ class PolicyWorkerBase(Worker):
                 grad_norm = self.optim_step()
                 if grad_norm is not None:
                     status["raw_grad_norm"] = grad_norm
+
+                # print(self.mesh_rank, temp)
 
                 if self.record_memory:
                     self.save_memory_snapshot(global_step, local_step)

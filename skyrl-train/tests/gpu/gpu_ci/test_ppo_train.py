@@ -218,3 +218,75 @@ def test_gradient_accumulation_scenarios(
         print(f"   - Actual optimizer steps: {actual_optimizer_steps}")
     finally:
         ray.shutdown()
+
+
+import torch
+from skyrl_train.training_batch import TrainingInputBatch
+
+def make_dummy_batch(seq_lens, num_actions=4) -> TrainingInputBatch:
+    """Create a dummy TrainingInputBatch"""
+
+    batch_size = len(seq_lens)
+    max_seq_len = max(seq_lens)
+
+    sequences = torch.zeros((batch_size, max_seq_len), dtype=int, device="cpu")
+    attention_mask = torch.zeros((batch_size, max_seq_len), dtype=int, device="cpu")
+    for i, seq_len in enumerate(seq_lens):
+        sequences[i, :seq_len] = torch.randint(0, 100, (seq_len,), dtype=int, device="cpu")
+        attention_mask[i, :seq_len] = 1
+
+    print(sequences)
+    print(attention_mask)
+
+    # Add all the required fields for training
+    data = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": attention_mask,
+            "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device="cpu"),
+            "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device="cpu"),
+            "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
+            "returns": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
+            "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
+            "loss_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+            "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+        }
+    )
+    data.metadata = {"response_length": num_actions}
+    return data
+
+
+
+@pytest.mark.parametrize("worker_type", ["policy", "critic"])
+def test_max_tokens_per_microbatch(ray_init_fixture, cfg, worker_type):
+    try:
+        cfg.trainer.strategy = "fsdp2"  # Strategy logic is not tested here.
+        cfg.trainer.max_tokens_per_microbatch = 15
+
+        # Hard-code to a single worker for simplicity
+        cfg.trainer.placement.policy_num_gpus_per_node = 2
+        cfg.trainer.policy_mini_batch_size = 8
+
+        actor_group = init_worker_with_type(
+            worker_type,
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        train_data = make_dummy_batch([10, 10, 6, 5, 10, 10, 5, 5], num_actions=4)
+        # Expect:
+        # - dp=0: 3 microbatches with [10],    [10],    [11]
+        # - dp=1: 3 microbatches with [10, 5], [10, 5], [<dummy padding batch>]
+        train_data.metadata["global_step"] = 0
+
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward", train_data))
+        results = ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", train_data))
+        assert len(results) == cfg.trainer.placement.policy_num_gpus_per_node, "Should get result from each GPU"
+
+        print(results)
+        # TODO: Add assertions for the results.
+
+    finally:
+        ray.shutdown()
