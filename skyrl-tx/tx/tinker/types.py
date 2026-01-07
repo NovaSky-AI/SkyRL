@@ -23,6 +23,7 @@ class RequestType(str, Enum):
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
+    UNLOAD_MODEL = "unload_model"
 
     # External request that should not be processed by the engine
     EXTERNAL = "external"
@@ -78,6 +79,16 @@ class CreateModelOutput(BaseModel):
     model_id: str
     base_model: str
     lora_config: LoraConfig
+
+
+class UnloadModelInput(BaseModel):
+    pass
+
+
+class UnloadModelOutput(BaseModel):
+    model_id: str
+    status: str
+    type: str = "unload_model"
 
 
 class ModelInputChunk(BaseModel):

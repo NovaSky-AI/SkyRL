@@ -3,14 +3,14 @@
 import argparse
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
+from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, ModelDB, SessionDB
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
@@ -191,6 +191,9 @@ class TinkerEngine:
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
 
+        # Track last cleanup time for periodic stale session cleanup
+        self._last_cleanup_time: float = time.time()
+
         logger.info(f"Initialized TinkerEngine with backend={type(self.backend).__name__}")
 
     @property
@@ -344,6 +347,77 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
+    def process_unload_model(self, model_id: str, request_data: types.UnloadModelInput) -> types.UnloadModelOutput:
+        """Unload a model and free all resources."""
+        if not self.backend.has_model(model_id):
+            logger.warning(f"Ignoring unload request for model {model_id} that is not loaded.")
+        else:
+            self.backend.delete_model(model_id)
+
+            # Update model status in DB
+            with Session(self.db_engine) as session:
+                _ = session.exec(update(ModelDB).where(ModelDB.model_id == model_id).values(status="unloaded"))
+                session.commit()
+
+            logger.info(f"Unloaded model {model_id}")
+
+        return types.UnloadModelOutput(model_id=model_id, status="unloaded")
+
+    def cleanup_stale_sessions(self) -> int:
+        """Cleanup sessions with no recent heartbeat and unload their models.
+
+        Returns:
+            Number of models unloaded
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.config.session_timeout_sec)
+        unloaded_count = 0
+
+        with Session(self.db_engine) as session:
+            # Find stale sessions (active sessions with heartbeat older than cutoff)
+            stale_sessions = session.exec(
+                select(SessionDB).where(
+                    SessionDB.status == "active",
+                    SessionDB.last_heartbeat_at < cutoff,
+                )
+            ).all()
+
+            if not stale_sessions:
+                return 0
+
+            stale_session_ids = {s.session_id for s in stale_sessions}
+
+            # Find all models for all stale sessions in one query
+            models_to_process = session.exec(
+                select(ModelDB).where(
+                    ModelDB.session_id.in_(stale_session_ids),
+                    ModelDB.status != "unloaded",
+                )
+            ).all()
+
+            sessions_with_failed_unloads = set()
+            for model in models_to_process:
+                if self.backend.has_model(model.model_id):
+                    try:
+                        self.backend.delete_model(model.model_id)
+                        model.status = "unloaded"
+                        unloaded_count += 1
+                        logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
+                        sessions_with_failed_unloads.add(model.session_id)
+                else:
+                    # Model not in backend but status not unloaded - fix DB state
+                    model.status = "unloaded"
+
+            for sess in stale_sessions:
+                if sess.session_id not in sessions_with_failed_unloads:
+                    sess.status = "expired"
+                    logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
+
+            session.commit()
+
+        return unloaded_count
+
     def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
         if not self.backend.has_model(model_id):
@@ -461,6 +535,8 @@ class TinkerEngine:
                 return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:
                 return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
+            case types.RequestType.UNLOAD_MODEL:
+                return self.process_unload_model(model_id, types.UnloadModelInput.model_validate(request_data))
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
@@ -533,6 +609,12 @@ class TinkerEngine:
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
+
+            # Periodically cleanup stale sessions (disabled if either config is negative)
+            cleanup_enabled = self.config.session_cleanup_interval_sec >= 0 and self.config.session_timeout_sec >= 0
+            if cleanup_enabled and time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
+                _ = self.cleanup_stale_sessions()
+                self._last_cleanup_time = time.time()
 
             # Poll every 100ms
             time.sleep(0.1)

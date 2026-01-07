@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
-from tx.layers.lora import update_adapter_config
+from tx.layers.lora import clear_adapter_config, update_adapter_config
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
@@ -416,11 +416,14 @@ class JaxBackendImpl(AbstractBackend):
 
         Creates optimizer and configures LoRA adapter. Allocates adapter_index internally.
         """
-        # Allocate adapter index for this model_id
-        adapter_index = max((m.adapter_index for m in self.models.values()), default=0) + 1
-
-        if adapter_index >= self.config.max_lora_adapters:
+        # Allocate adapter index for this model_id (find first available slot)
+        # Index 0 is reserved for base model, so user models use indices 1 to max_lora_adapters-1
+        used_indices = {m.adapter_index for m in self.models.values()}
+        available_indices = set(range(1, self.config.max_lora_adapters)) - used_indices
+        if not available_indices:
             raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
+        adapter_index = min(available_indices)
+        assert 1 <= adapter_index <= self.config.max_lora_adapters - 1
 
         # Validate rank doesn't exceed max
         if not (0 < lora_config.rank <= self.config.max_lora_rank):
@@ -440,6 +443,26 @@ class JaxBackendImpl(AbstractBackend):
         # Configure adapter
         update_adapter_config(self.model, adapter_index, lora_config)
         logger.info(f"Created model {model_id} with adapter_index={adapter_index}, config={lora_config}")
+
+    def delete_model(self, model_id: str) -> None:
+        """Delete a model and free all associated resources."""
+        if model_id not in self.models:
+            raise ValueError(f"Model {model_id} not found")
+
+        # Get adapter index before deleting metadata
+        adapter_index = self.models[model_id].adapter_index
+
+        # Clear LoRA adapter weights
+        with jax.set_mesh(self.mesh):
+            clear_adapter_config(self.model, adapter_index)
+
+        # Delete optimizer
+        del self.optimizers[model_id]
+
+        # Delete model metadata
+        del self.models[model_id]
+
+        logger.info(f"Deleted model {model_id} (adapter_index={adapter_index})")
 
     def _model_pass(
         self,

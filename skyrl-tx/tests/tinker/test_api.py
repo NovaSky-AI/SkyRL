@@ -1,9 +1,11 @@
 """Tests for the Tinker API mock server using the real tinker client."""
 
+import asyncio
 import os
 import subprocess
 import tempfile
 import urllib.request
+from contextlib import contextmanager
 from urllib.parse import urlparse
 
 import pytest
@@ -11,46 +13,80 @@ import tinker
 from tinker import types
 from transformers import AutoTokenizer
 
+from tests.tinker.conftest import wait_for_condition
+
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
+
+
+TEST_SERVER_PORT = 8000
+
+# Configs for the fast cleanup test
+TEST_SERVER_PORT_FAST_CLEANUP = 8001
+FAST_CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
+FAST_CLEANUP_TIMEOUT_SEC = 5  # Seconds without heartbeat before session is stale
+
+
+def verify_training_client(training_client: tinker.TrainingClient):
+    """Verify a training client works with a forward pass."""
+    tokenizer = training_client.get_tokenizer()
+    data = [make_datum(tokenizer, "Hello", " world")]
+    result = training_client.forward(data, "cross_entropy").result()
+    assert result is not None
+
+
+def create_service_and_training_client(base_url: str):
+    """Create a service client and a training client, verifying it works."""
+    service_client = tinker.ServiceClient(base_url=base_url, api_key="dummy")
+    training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
+    verify_training_client(training_client)
+    return service_client, training_client
+
+
+@contextmanager
+def start_api_server(overrides: dict[str, str] | None = None):
+    """Start the FastAPI server with optional config overrides. Prints log on failure."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        log_path = os.path.join(tmp_dir, "server.log")
+        db_path = os.path.join(tmp_dir, "server.db")
+
+        with open(log_path, "w") as log_file:
+            defaults = {
+                "host": "0.0.0.0",
+                "port": str(TEST_SERVER_PORT),
+                "base-model": BASE_MODEL,
+                "backend-config": '{"max_lora_adapters": 4}',
+                "database-url": f"sqlite:///{db_path}",
+            }
+            if overrides:
+                defaults.update(overrides)
+            cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.api"]
+            for key, value in defaults.items():
+                cmd.extend([f"--{key}", value])
+            process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file)
+            print(f"Starting API server: {' '.join(cmd)}")
+            try:
+                yield process, log_path
+            except Exception:
+                with open(log_path) as f:
+                    print(f"=== Test failed. Server log ({log_path}) ===\n{f.read()}")
+                raise
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
 
 
 @pytest.fixture(scope="module")
 def api_server():
     """Start the FastAPI server for testing."""
-    process = subprocess.Popen(
-        [
-            "uv",
-            "run",
-            "--extra",
-            "tinker",
-            "-m",
-            "tx.tinker.api",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "8000",
-            "--base-model",
-            BASE_MODEL,
-            # Set number of LoRA adapters lower to avoid OOMs in the CI
-            "--backend-config",
-            '{"max_lora_adapters": 4}',
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    yield process
-
-    # Cleanup
-    process.terminate()
-    process.wait(timeout=5)
+    with start_api_server() as server:
+        yield server
 
 
 @pytest.fixture
 def service_client(api_server):
     """Create a service client connected to the test server."""
-    return tinker.ServiceClient(base_url="http://0.0.0.0:8000/", api_key="dummy")
+    return tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", api_key="dummy")
 
 
 def make_datum(tokenizer, prompt: str, completion: str, weight: tuple[float, float] | None = (0.0, 1.0)):
@@ -296,3 +332,65 @@ def test_sample_with_stop_strings(service_client):
     assert len(stopped_tokens) <= len(baseline_tokens)
     # The stop string should appear at or near the end of the decoded text
     assert stop_string in stopped_text
+
+
+@pytest.fixture(scope="function")
+def api_server_fast_cleanup():
+    """Start the FastAPI server with fast cleanup settings for testing."""
+    with start_api_server(
+        overrides={
+            "port": str(TEST_SERVER_PORT_FAST_CLEANUP),
+            "session-cleanup-interval-sec": str(FAST_CLEANUP_INTERVAL_SEC),
+            "session-timeout-sec": str(FAST_CLEANUP_TIMEOUT_SEC),
+        },
+    ) as server:
+        yield server
+
+
+def test_unload_model(api_server):
+    """Test that unload_model properly unloads a model."""
+    # Create a training client (which creates a model) and verify it works
+    _, training_client = create_service_and_training_client(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/")
+
+    async def unload_model():
+        async with tinker._client.AsyncTinker(
+            api_key="dummy", base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/"
+        ) as client:
+            future = await client.models.unload(request=types.UnloadModelRequest(model_id=training_client.model_id))
+            while True:
+                result = await client.futures.retrieve(
+                    request=types.FutureRetrieveRequest(request_id=future.request_id)
+                )
+                if isinstance(result, types.UnloadModelResponse):
+                    return result
+                await asyncio.sleep(0.1)
+
+    assert isinstance(asyncio.run(unload_model()), types.UnloadModelResponse)
+
+    # Verify model no longer works after unload
+    with pytest.raises(Exception):
+        verify_training_client(training_client)
+
+
+def test_stale_session_cleanup(api_server_fast_cleanup):
+    """Test that stale sessions are automatically cleaned up and models are unloaded.
+
+    This test only checks server logs for cleanup messages rather than verifying
+    adapter slot reuse, since that behavior is already covered by unit tests in
+    test_jax_backend.py and test_engine.py.
+    """
+    _, log_path = api_server_fast_cleanup
+    base_url = f"http://0.0.0.0:{TEST_SERVER_PORT_FAST_CLEANUP}/"
+    service_client, training_client = create_service_and_training_client(base_url=base_url)
+
+    # Stop heartbeating by deleting the clients
+    del training_client
+    del service_client
+
+    # Poll for cleanup log messages
+    def cleanup_logs_found():
+        with open(log_path) as f:
+            log_output = f.read()
+        return "Auto-unloaded stale model" in log_output and "Deleted model" in log_output
+
+    assert wait_for_condition(cleanup_logs_found, timeout_sec=10, poll_interval_sec=1), "Cleanup logs not found"

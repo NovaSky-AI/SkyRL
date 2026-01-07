@@ -70,7 +70,7 @@ class LoRAMixin:
 
         (batch_size, seq_len, *dims) = x.shape
         assert len(self.lora_A.shape) == 3
-        assert len(dims) == 0 if isinstance(self, nnx.Embed) else tuple(dims) == self.lora_A.value.shape[1:-1]
+        assert len(dims) == 0 if isinstance(self, nnx.Embed) else tuple(dims) == self.lora_A[...].shape[1:-1]
         assert adapter_indices.shape[0] == batch_size
 
         x_flat = x.reshape(-1, *dims)
@@ -84,15 +84,15 @@ class LoRAMixin:
         # Apply LoRA using ragged_dot: x @ A @ B
         if isinstance(self, nnx.Embed):
             # Embedding path: A[x]
-            intermediate = self.lora_A.value[adapter_indices_sorted, x_sorted, :]
+            intermediate = self.lora_A[...][adapter_indices_sorted, x_sorted, :]
         else:
             # Linear path: x @ A
-            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A.value, group_sizes)
-        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B.value, group_sizes)
+            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A[...], group_sizes)
+        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
         lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
-        lora_output = lora_output * self.lora_scaling.value[adapter_indices, None, None]
+        lora_output = lora_output * self.lora_scaling[...][adapter_indices, None, None]
         return base_output + lora_output.reshape(base_output.shape)
 
 
@@ -122,9 +122,9 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             rngs=rngs,
         )
         assert (
-            self.embedding.value.sharding is not None
+            self.embedding[...].sharding is not None
         ), "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
-        sharding = self.embedding.value.sharding.spec
+        sharding = self.embedding[...].sharding.spec
 
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
@@ -174,9 +174,9 @@ class LoRALinear(LoRAMixin, nnx.Linear):
             rngs=rngs,
         )
         assert (
-            self.kernel.value.sharding is not None
+            self.kernel[...].sharding is not None
         ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
-        sharding = self.kernel.value.sharding.spec
+        sharding = self.kernel[...].sharding.spec
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
@@ -305,4 +305,23 @@ def update_adapter_config(model: ModelForCausalLM, adapter_index: int, lora_conf
         return value
 
     updated_state = jax.tree.map_with_path(update_lora_config, state)
+    nnx.update(model, updated_state)
+
+
+def clear_adapter_config(model: ModelForCausalLM, adapter_index: int):
+    """Clear/reset a LoRA adapter, freeing it for reuse.
+
+    Sets rank=0, scaling=0, and zeros out lora_A and lora_B for the adapter.
+    """
+    state = nnx.state(model)
+
+    def clear_adapter(path, value):
+        key = path[-2].key
+        if key == "lora_ranks":
+            return value.at[adapter_index].set(0)
+        if key in ("lora_scaling", "lora_A", "lora_B"):
+            return value.at[adapter_index].set(0.0)
+        return value
+
+    updated_state = jax.tree.map_with_path(clear_adapter, state)
     nnx.update(model, updated_state)
