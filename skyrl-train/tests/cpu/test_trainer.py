@@ -548,8 +548,8 @@ def test_ppo_train_batch_calculations():
     # Mock forward_backward and optim_step to track calls and verify accumulation behavior
     policy_forward_backward_calls = []
 
-    def mock_policy_forward_backward(experience, accumulation_steps):
-        policy_forward_backward_calls.append({"accumulation_steps": accumulation_steps})
+    def mock_policy_forward_backward(experience, microbatch_weight):
+        policy_forward_backward_calls.append({"microbatch_weight": microbatch_weight})
         return {"policy_loss": 0.5, "ppo_clip_ratio": 0.1, "policy_entropy": 2.0, "response_length": response_length}
 
     policy_worker.forward_backward = mock_policy_forward_backward
@@ -568,6 +568,7 @@ def test_ppo_train_batch_calculations():
     )  # 6 // 2 = 3
     # New logic: accumulation_steps = micro_batches_per_mini_batch (accumulate within mini-batch)
     expected_accumulation_steps = micro_batches_per_mini_batch  # Should be 3
+    expected_microbatch_weight = 1.0 / expected_accumulation_steps
 
     # Run policy ppo_train with minimal mocking
     with (
@@ -584,8 +585,8 @@ def test_ppo_train_batch_calculations():
     # Verify accumulation_steps are consistent (should equal micro_batches_per_mini_batch)
     for call in policy_forward_backward_calls:
         assert (
-            call["accumulation_steps"] == expected_accumulation_steps
-        ), f"PolicyWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
+            call["microbatch_weight"] == expected_microbatch_weight
+        ), f"PolicyWorker: Expected microbatch_weight={expected_microbatch_weight}, got {call['microbatch_weight']}"
 
     # Verify result structure
     assert "train_status" in result.metadata
@@ -602,8 +603,8 @@ def test_ppo_train_batch_calculations():
     # Mock forward_backward and optim_step for critic
     critic_forward_backward_calls = []
 
-    def mock_critic_forward_backward(experience, accumulation_steps):
-        critic_forward_backward_calls.append({"accumulation_steps": accumulation_steps})
+    def mock_critic_forward_backward(experience, microbatch_weight):
+        critic_forward_backward_calls.append({"microbatch_weight": microbatch_weight})
         return {"critic_loss": 0.3, "values": 1.0}
 
     critic_worker.forward_backward = mock_critic_forward_backward
@@ -627,8 +628,8 @@ def test_ppo_train_batch_calculations():
     # Verify accumulation_steps are consistent for critic (should equal micro_batches_per_mini_batch)
     for call in critic_forward_backward_calls:
         assert (
-            call["accumulation_steps"] == expected_accumulation_steps
-        ), f"CriticWorker: Expected accumulation_steps={expected_accumulation_steps}, got {call['accumulation_steps']}"
+            call["microbatch_weight"] == expected_microbatch_weight
+        ), f"CriticWorker: Expected microbatch_weight={expected_microbatch_weight}, got {call['microbatch_weight']}"
 
     # Verify result structure for critic
     assert "train_status" in result.metadata

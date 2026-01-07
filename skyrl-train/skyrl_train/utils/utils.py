@@ -231,11 +231,6 @@ def validate_cfg(cfg: DictConfig):
             cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
         ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
-    if cfg.trainer.strategy == "deepspeed":
-        assert (
-            cfg.trainer.policy.deepspeed_config.zero_optimization.stage == 3
-        ), "only deepspeed stage 3 is currently supported!"
-
     validate_batch_sizes(cfg)
 
     if cfg.trainer.max_ckpts_to_keep == 0:
@@ -285,15 +280,6 @@ def validate_cfg(cfg: DictConfig):
         logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
-
-    if cfg.trainer.strategy == "deepspeed" and not (
-        cfg.trainer.policy.optimizer_config.offload_after_step
-        and cfg.trainer.critic.optimizer_config.offload_after_step
-    ):
-        raise ValueError(
-            "`offload_after_step=False` is not supported for DeepSpeed, "
-            "please set `offload_after_step` to `true` for both policy and critic"
-        )
 
     # Legacy TIS validation (deprecated)
     if cfg.trainer.algorithm.use_tis:

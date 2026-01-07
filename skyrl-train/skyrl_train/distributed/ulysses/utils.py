@@ -1,5 +1,4 @@
 # DeepSpeed Ulysses Sequence Parallelism borrowed from VERL
-# https://github.com/volcengine/verl/blob/main/verl/utils/ulysses.py
 # The original copyright is reproduced below:
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 #
