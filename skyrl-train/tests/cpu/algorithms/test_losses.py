@@ -12,14 +12,14 @@ from skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     masked_mean,
     compute_tis_ratio,
-    compute_rejection_mask,
+    compute_sequence_mask,
     compute_outlier_token_mask,
-    apply_rollout_correction,
+    apply_off_policy_correction,
 )
 
-NULL_ROLLOUT_CORR = {
-    "tis_ratio_type": "null",
-    "rejection_mask_type": "null",
+NULL_OFF_POLICY_CORR = {
+    "tis_ratio_type": None,
+    "sequence_mask_metric": None,
     "outlier_token_is_threshold_low": 1e-4,
     "outlier_token_is_threshold_high": 100.0,
 }
@@ -47,7 +47,7 @@ def test_policy_loss_dual_clip():
             "policy_loss_type": "dual_clip",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -100,7 +100,7 @@ def test_policy_loss_cispo():
             "policy_loss_type": "cispo",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -178,7 +178,7 @@ def test_policy_loss_reduction_modes():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -190,7 +190,7 @@ def test_policy_loss_reduction_modes():
             "policy_loss_type": "regular",
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -263,7 +263,7 @@ def test_policy_loss_reduction_edge_cases():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -275,7 +275,7 @@ def test_policy_loss_reduction_edge_cases():
             "policy_loss_type": "regular",
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -361,7 +361,7 @@ def test_gspo_importance_sampling_levels():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
     ppo_loss_fn = PolicyLossRegistry.get("regular")
@@ -376,7 +376,7 @@ def test_gspo_importance_sampling_levels():
             "policy_loss_type": "gspo",
             "loss_reduction": "sequence_mean",  # GSPO recommended reduction
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
     gspo_loss_fn = PolicyLossRegistry.get("gspo")
@@ -483,7 +483,7 @@ def test_clip_cov_policy_loss():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "clip_cov": {"clip_ratio": 0.5, "clip_cov_lb": -5.0, "clip_cov_ub": 5.0},  # Large ratio for testing
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -492,11 +492,11 @@ def test_clip_cov_policy_loss():
 
     # Calculate loss
     loss, loss_metrics = clip_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
-    clip_frac = loss_metrics["clip_frac"]
+    clip_ratio = loss_metrics["clip_ratio"]
 
     # Basic sanity checks
     assert torch.isfinite(loss), "Loss should be finite"
-    assert 0 <= clip_frac <= 1, f"Clip fraction should be between 0 and 1, got {clip_frac}"
+    assert 0 <= clip_ratio <= 1, f"Clip ratio should be between 0 and 1, got {clip_ratio}"
 
     # Compare with regular PPO (should be different due to covariance correction)
     regular_config = DictConfig(
@@ -506,7 +506,7 @@ def test_clip_cov_policy_loss():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -547,7 +547,7 @@ def test_kl_cov_policy_loss():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "kl_cov": {"kl_cov_frac": 0.5, "ppo_kl_coef": 1.0},  # Apply KL to 50% of tokens
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -555,11 +555,11 @@ def test_kl_cov_policy_loss():
     kl_cov_fn = PolicyLossRegistry.get("kl_cov")
 
     # Calculate loss
-    loss, clip_frac = kl_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+    loss, loss_metrics = kl_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
 
     # Basic sanity checks
     assert torch.isfinite(loss), "Loss should be finite"
-    assert clip_frac == 0.0, "KL-Cov should return 0.0 for clipfrac value"
+    assert loss_metrics["clip_ratio"] == 0.0, "KL-Cov should return 0.0 for clip_ratio value"
 
     # Compare with regular PPO (should be different due to KL regularization)
     regular_config = DictConfig(
@@ -569,7 +569,7 @@ def test_kl_cov_policy_loss():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -602,7 +602,7 @@ def test_sapo_policy_loss_basic():
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
             "sapo": {"tau_pos": 1.0, "tau_neg": 2.0},
-            "rollout_correction": NULL_ROLLOUT_CORR,
+            "off_policy_correction": NULL_OFF_POLICY_CORR,
         }
     )
 
@@ -659,7 +659,7 @@ def test_compute_tis_ratio_token_level():
     config = DictConfig(
         {
             "tis_ratio_type": "token",
-            "token_tis_ratio_cap_high": 2.0,
+            "token_tis_ratio_clip_high": 2.0,
         }
     )
 
@@ -669,8 +669,8 @@ def test_compute_tis_ratio_token_level():
     expected = torch.tensor([[1.6487, 0.6065, 2.0]], device=device)
     torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
     # One token out of 3 was capped
-    assert "tis_token_capped_frac" in metrics
-    assert abs(metrics["tis_token_capped_frac"] - 1 / 3) < 0.01
+    assert "tis_token_clip_high_ratio" in metrics
+    assert abs(metrics["tis_token_clip_high_ratio"] - 1 / 3) < 0.01
 
 
 def test_compute_tis_ratio_sequence_level():
@@ -687,7 +687,7 @@ def test_compute_tis_ratio_sequence_level():
     config = DictConfig(
         {
             "tis_ratio_type": "sequence",
-            "sequence_tis_ratio_cap_high": 5.0,
+            "sequence_tis_ratio_clip_high": 5.0,
         }
     )
 
@@ -697,8 +697,8 @@ def test_compute_tis_ratio_sequence_level():
     expected = torch.tensor([[2.7183]], device=device)
     torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
     # No sequence was capped (2.7183 < 5.0)
-    assert "tis_seq_capped_frac" in metrics
-    assert metrics["tis_seq_capped_frac"] == 0.0
+    assert "tis_seq_clip_high_ratio" in metrics
+    assert metrics["tis_seq_clip_high_ratio"] == 0.0
 
 
 def test_compute_tis_ratio_sequence_level_with_cap():
@@ -715,7 +715,7 @@ def test_compute_tis_ratio_sequence_level_with_cap():
     config = DictConfig(
         {
             "tis_ratio_type": "sequence",
-            "sequence_tis_ratio_cap_high": 5.0,
+            "sequence_tis_ratio_clip_high": 5.0,
         }
     )
 
@@ -725,8 +725,8 @@ def test_compute_tis_ratio_sequence_level_with_cap():
     expected = torch.tensor([[5.0]], device=device)
     torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
     # One sequence out of 1 was capped
-    assert "tis_seq_capped_frac" in metrics
-    assert metrics["tis_seq_capped_frac"] == 1.0
+    assert "tis_seq_clip_high_ratio" in metrics
+    assert metrics["tis_seq_clip_high_ratio"] == 1.0
 
 
 def test_compute_tis_ratio_with_mask():
@@ -742,7 +742,7 @@ def test_compute_tis_ratio_with_mask():
     config = DictConfig(
         {
             "tis_ratio_type": "sequence",
-            "sequence_tis_ratio_cap_high": 10.0,
+            "sequence_tis_ratio_clip_high": 10.0,
         }
     )
 
@@ -753,12 +753,12 @@ def test_compute_tis_ratio_with_mask():
     expected = expected_val.reshape(1, 1)
     torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
     # No sequence was capped (4.4817 < 10.0)
-    assert "tis_seq_capped_frac" in metrics
-    assert metrics["tis_seq_capped_frac"] == 0.0
+    assert "tis_seq_clip_high_ratio" in metrics
+    assert metrics["tis_seq_clip_high_ratio"] == 0.0
 
 
-def test_compute_rejection_mask_geometric():
-    """Tests geometric rejection mask computation."""
+def test_compute_sequence_mask_geometric():
+    """Tests geometric sequence mask computation."""
     device = "cpu"
 
     # Token log ratios: [0.1, -0.1, 0.0] -> sum = 0.0, geometric mean = exp(0/3) = 1.0
@@ -768,26 +768,26 @@ def test_compute_rejection_mask_geometric():
 
     config = DictConfig(
         {
-            "rejection_mask_type": "geometric",
-            "geo_rejection_mask_ratio_cap_high": 1.1,
-            "geo_rejection_mask_ratio_cap_low": 0.9,
+            "sequence_mask_metric": "geometric",
+            "geo_mask_high": 1.1,
+            "geo_mask_low": 0.9,
         }
     )
 
-    rejection_mask, metrics = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "geometric", config)
+    sequence_mask, metrics = compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "geometric", config)
 
     # Geometric mean ≈ 1.0, which is within [0.9, 1.1], so mask should be 1.0
     # Shape is [batch, 1] for sequence-level mask
     expected = torch.tensor([[1.0]], device=device)
-    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(sequence_mask, expected, rtol=1e-3, atol=1e-4)
     # No sequence was masked
-    assert metrics["rejection_seq_masked_frac"] == 0.0
-    assert metrics["rejection_seq_over_high_frac"] == 0.0
-    assert metrics["rejection_seq_under_low_frac"] == 0.0
+    assert metrics["geo_sequence_mask_masked_ratio"] == 0.0
+    assert metrics["geo_sequence_mask_over_high_ratio"] == 0.0
+    assert metrics["geo_sequence_mask_under_low_ratio"] == 0.0
 
 
-def test_compute_rejection_mask_geometric_rejects():
-    """Tests geometric rejection mask correctly rejects sequences outside bounds."""
+def test_compute_sequence_mask_geometric_rejects():
+    """Tests geometric sequence mask correctly rejects sequences outside bounds."""
     device = "cpu"
 
     # Token log ratios: [0.5, 0.5, 0.5] -> sum = 1.5, geometric mean = exp(1.5/3) = exp(0.5) ≈ 1.6487
@@ -797,26 +797,26 @@ def test_compute_rejection_mask_geometric_rejects():
 
     config = DictConfig(
         {
-            "rejection_mask_type": "geometric",
-            "geo_rejection_mask_ratio_cap_high": 1.1,
-            "geo_rejection_mask_ratio_cap_low": 0.9,
+            "sequence_mask_metric": "geometric",
+            "geo_mask_high": 1.1,
+            "geo_mask_low": 0.9,
         }
     )
 
-    rejection_mask, metrics = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "geometric", config)
+    sequence_mask, metrics = compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "geometric", config)
 
     # Geometric mean ≈ 1.6487, which is outside [0.9, 1.1], so mask should be 0.0
     # Shape is [batch, 1] for sequence-level mask
     expected = torch.tensor([[0.0]], device=device)
-    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(sequence_mask, expected, rtol=1e-3, atol=1e-4)
     # One sequence masked, over high cap
-    assert metrics["rejection_seq_masked_frac"] == 1.0
-    assert metrics["rejection_seq_over_high_frac"] == 1.0
-    assert metrics["rejection_seq_under_low_frac"] == 0.0
+    assert metrics["geo_sequence_mask_masked_ratio"] == 1.0
+    assert metrics["geo_sequence_mask_over_high_ratio"] == 1.0
+    assert metrics["geo_sequence_mask_under_low_ratio"] == 0.0
 
 
-def test_compute_rejection_mask_sequence():
-    """Tests sequence rejection mask computation."""
+def test_compute_sequence_mask_sequence():
+    """Tests sequence sequence mask computation."""
     device = "cpu"
 
     # Token log ratios: [0.2, 0.1, 0.0] -> sum = 0.3, seq ratio = exp(0.3) ≈ 1.35
@@ -826,26 +826,26 @@ def test_compute_rejection_mask_sequence():
 
     config = DictConfig(
         {
-            "rejection_mask_type": "sequence",
-            "sequence_rejection_mask_ratio_cap_high": 2.0,
-            "sequence_rejection_mask_ratio_cap_low": 0.5,
+            "sequence_mask_metric": "product",
+            "product_mask_high": 2.0,
+            "product_mask_low": 0.5,
         }
     )
 
-    rejection_mask, metrics = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+    sequence_mask, metrics = compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "product", config)
 
     # Sequence ratio ≈ 1.35, which is within [0.5, 2.0]
     # Shape is [batch, 1] for sequence-level mask
     expected = torch.tensor([[1.0]], device=device)
-    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(sequence_mask, expected, rtol=1e-3, atol=1e-4)
     # No sequence was masked
-    assert metrics["rejection_seq_masked_frac"] == 0.0
-    assert metrics["rejection_seq_over_high_frac"] == 0.0
-    assert metrics["rejection_seq_under_low_frac"] == 0.0
+    assert metrics["product_sequence_mask_masked_ratio"] == 0.0
+    assert metrics["product_sequence_mask_over_high_ratio"] == 0.0
+    assert metrics["product_sequence_mask_under_low_ratio"] == 0.0
 
 
-def test_compute_rejection_mask_sequence_rejects_by_seq_ratio():
-    """Tests sequence rejection mask rejects when sequence ratio is out of bounds."""
+def test_compute_sequence_mask_sequence_rejects_by_seq_ratio():
+    """Tests product sequence mask rejects when sequence ratio is out of bounds."""
     device = "cpu"
 
     # Token log ratios: [1.0, 1.0, 1.0] -> sum = 3.0, seq ratio = exp(3.0) ≈ 20.09
@@ -855,25 +855,25 @@ def test_compute_rejection_mask_sequence_rejects_by_seq_ratio():
 
     config = DictConfig(
         {
-            "rejection_mask_type": "sequence",
-            "sequence_rejection_mask_ratio_cap_high": 2.0,
-            "sequence_rejection_mask_ratio_cap_low": 0.5,
+            "sequence_mask_metric": "product",
+            "product_mask_high": 2.0,
+            "product_mask_low": 0.5,
         }
     )
 
-    rejection_mask, metrics = compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
+    sequence_mask, metrics = compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "product", config)
 
     # Sequence ratio ≈ 20.09, which is outside [0.5, 2.0], so mask should be 0.0
     # Shape is [batch, 1] for sequence-level mask
     expected = torch.tensor([[0.0]], device=device)
-    torch.testing.assert_close(rejection_mask, expected, rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(sequence_mask, expected, rtol=1e-3, atol=1e-4)
     # One sequence masked, over high cap
-    assert metrics["rejection_seq_masked_frac"] == 1.0
-    assert metrics["rejection_seq_over_high_frac"] == 1.0
-    assert metrics["rejection_seq_under_low_frac"] == 0.0
+    assert metrics["product_sequence_mask_masked_ratio"] == 1.0
+    assert metrics["product_sequence_mask_over_high_ratio"] == 1.0
+    assert metrics["product_sequence_mask_under_low_ratio"] == 0.0
 
 
-def test_compute_outlier_token_mask_rejects_by_token_bounds():
+def test_compute_outlier_token_mask_masks_by_token_bounds():
     """Tests outlier token mask rejects when a token ratio is out of bounds."""
     device = "cpu"
 
@@ -886,7 +886,7 @@ def test_compute_outlier_token_mask_rejects_by_token_bounds():
     config = DictConfig(
         {
             "outlier_token_is_threshold_low": 1e-4,
-            "outlier_token_is_threshold_high": 100.0,  # This should cause rejection
+            "outlier_token_is_threshold_high": 100.0,  # This should cause masking
         }
     )
 
@@ -897,9 +897,9 @@ def test_compute_outlier_token_mask_rejects_by_token_bounds():
     expected = torch.tensor([[0.0]], device=device)
     torch.testing.assert_close(outlier_mask, expected, rtol=1e-3, atol=1e-4)
     # One sequence masked, has token over high threshold
-    assert metrics["outlier_seq_masked_frac"] == 1.0
-    assert metrics["outlier_seq_over_high_frac"] == 1.0
-    assert metrics["outlier_seq_under_low_frac"] == 0.0
+    assert metrics["outlier_seq_masked_ratio"] == 1.0
+    assert metrics["outlier_seq_over_high_ratio"] == 1.0
+    assert metrics["outlier_seq_under_low_ratio"] == 0.0
 
 
 def test_compute_outlier_token_mask_accepts_in_bounds():
@@ -926,9 +926,9 @@ def test_compute_outlier_token_mask_accepts_in_bounds():
     expected = torch.tensor([[1.0]], device=device)
     torch.testing.assert_close(outlier_mask, expected, rtol=1e-3, atol=1e-4)
     # No sequence was masked
-    assert metrics["outlier_seq_masked_frac"] == 0.0
-    assert metrics["outlier_seq_over_high_frac"] == 0.0
-    assert metrics["outlier_seq_under_low_frac"] == 0.0
+    assert metrics["outlier_seq_masked_ratio"] == 0.0
+    assert metrics["outlier_seq_over_high_ratio"] == 0.0
+    assert metrics["outlier_seq_under_low_ratio"] == 0.0
 
 
 def test_compute_outlier_token_mask_respects_loss_mask():
@@ -954,11 +954,11 @@ def test_compute_outlier_token_mask_respects_loss_mask():
     expected = torch.tensor([[1.0]], device=device)
     torch.testing.assert_close(outlier_mask, expected, rtol=1e-3, atol=1e-4)
     # No sequence was masked (the out-of-bounds token was in a masked position)
-    assert metrics["outlier_seq_masked_frac"] == 0.0
+    assert metrics["outlier_seq_masked_ratio"] == 0.0
 
 
-def test_apply_rollout_correction_null_configs():
-    """Tests that apply_rollout_correction returns loss unchanged when both configs are null."""
+def test_apply_off_policy_correction_null_configs():
+    """Tests that apply_off_policy_correction returns loss unchanged when both configs are null."""
     device = "cpu"
 
     loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
@@ -968,12 +968,12 @@ def test_apply_rollout_correction_null_configs():
 
     config = DictConfig(
         {
-            "tis_ratio_type": "null",
-            "rejection_mask_type": "null",
+            "tis_ratio_type": None,
+            "sequence_mask_metric": None,
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config
     )
 
@@ -982,8 +982,8 @@ def test_apply_rollout_correction_null_configs():
     assert metrics == {}
 
 
-def test_apply_rollout_correction_tis_only():
-    """Tests apply_rollout_correction with only TIS enabled."""
+def test_apply_off_policy_correction_tis_only():
+    """Tests apply_off_policy_correction with only TIS enabled."""
     device = "cpu"
 
     loss = torch.tensor([[1.0, 1.0, 1.0]], device=device)
@@ -995,14 +995,14 @@ def test_apply_rollout_correction_tis_only():
     config = DictConfig(
         {
             "tis_ratio_type": "token",
-            "token_tis_ratio_cap_high": 2.0,
-            "rejection_mask_type": "null",
+            "token_tis_ratio_clip_high": 2.0,
+            "sequence_mask_metric": None,
             "outlier_token_is_threshold_low": 1e-4,
             "outlier_token_is_threshold_high": 100.0,
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config
     )
 
@@ -1011,11 +1011,11 @@ def test_apply_rollout_correction_tis_only():
     torch.testing.assert_close(corrected_loss, expected, rtol=1e-3, atol=1e-4)
     # Check metrics are populated
     assert "is_ratio_mean" in metrics
-    assert "tis_token_capped_frac" in metrics
+    assert "tis_token_clip_high_ratio" in metrics
 
 
-def test_apply_rollout_correction_rejection_only():
-    """Tests apply_rollout_correction with only rejection mask enabled."""
+def test_apply_off_policy_correction_sequence_mask_only():
+    """Tests apply_off_policy_correction with only geometric sequence mask enabled."""
     device = "cpu"
 
     loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
@@ -1026,16 +1026,16 @@ def test_apply_rollout_correction_rejection_only():
 
     config = DictConfig(
         {
-            "tis_ratio_type": "null",
-            "rejection_mask_type": "geometric",
-            "geo_rejection_mask_ratio_cap_high": 1.1,
-            "geo_rejection_mask_ratio_cap_low": 0.9,
+            "tis_ratio_type": None,
+            "sequence_mask_metric": "geometric",
+            "geo_mask_high": 1.1,
+            "geo_mask_low": 0.9,
             "outlier_token_is_threshold_low": 1e-4,
             "outlier_token_is_threshold_high": 100.0,
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config
     )
 
@@ -1043,11 +1043,11 @@ def test_apply_rollout_correction_rejection_only():
     torch.testing.assert_close(corrected_loss, loss, rtol=1e-3, atol=1e-4)
     # Check metrics are populated
     assert "is_ratio_mean" in metrics
-    assert "rejection_seq_masked_frac" in metrics
+    assert "geo_sequence_mask_masked_ratio" in metrics
 
 
-def test_apply_rollout_correction_both_enabled():
-    """Tests apply_rollout_correction with both TIS and rejection mask enabled."""
+def test_apply_off_policy_correction_both_enabled():
+    """Tests apply_off_policy_correction with both TIS and geometric sequence mask enabled."""
     device = "cpu"
 
     loss = torch.tensor([[1.0, 1.0, 1.0]], device=device)
@@ -1060,16 +1060,16 @@ def test_apply_rollout_correction_both_enabled():
     config = DictConfig(
         {
             "tis_ratio_type": "token",
-            "token_tis_ratio_cap_high": 2.0,
-            "rejection_mask_type": "geometric",
-            "geo_rejection_mask_ratio_cap_high": 1.2,
-            "geo_rejection_mask_ratio_cap_low": 0.8,
+            "token_tis_ratio_clip_high": 2.0,
+            "sequence_mask_metric": "geometric",
+            "geo_mask_high": 1.2,
+            "geo_mask_low": 0.8,
             "outlier_token_is_threshold_low": 1e-4,
             "outlier_token_is_threshold_high": 100.0,
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config
     )
 
@@ -1077,13 +1077,13 @@ def test_apply_rollout_correction_both_enabled():
     # Expected: loss * 1.105 * 1.0 = loss * 1.105
     expected = loss * torch.exp(torch.tensor(0.1))
     torch.testing.assert_close(corrected_loss, expected, rtol=1e-3, atol=1e-4)
-    # Check metrics from both TIS and rejection are populated
-    assert "tis_token_capped_frac" in metrics
-    assert "rejection_seq_masked_frac" in metrics
+    # Check metrics from both TIS and sequence mask are populated
+    assert "tis_token_clip_high_ratio" in metrics
+    assert "geo_sequence_mask_masked_ratio" in metrics
 
 
-def test_apply_rollout_correction_rejection_zeros_loss():
-    """Tests that rejection mask can zero out the loss entirely."""
+def test_apply_off_policy_correction_sequence_mask_zeros_loss():
+    """Tests that sequence mask can zero out the loss entirely."""
     device = "cpu"
 
     loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
@@ -1094,27 +1094,27 @@ def test_apply_rollout_correction_rejection_zeros_loss():
 
     config = DictConfig(
         {
-            "tis_ratio_type": "null",
-            "rejection_mask_type": "geometric",
-            "geo_rejection_mask_ratio_cap_high": 1.1,
-            "geo_rejection_mask_ratio_cap_low": 0.9,
+            "tis_ratio_type": None,
+            "sequence_mask_metric": "geometric",
+            "geo_mask_high": 1.1,
+            "geo_mask_low": 0.9,
             "outlier_token_is_threshold_low": 1e-4,
             "outlier_token_is_threshold_high": 100.0,
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config
     )
 
     # Geometric mean ≈ 2.718, outside [0.9, 1.1], so loss should be zeroed
     expected = torch.tensor([[0.0, 0.0, 0.0]], device=device)
     torch.testing.assert_close(corrected_loss * loss_mask, expected, rtol=1e-3, atol=1e-4)
-    # Check that the rejection metrics show rejection happened
-    assert metrics["rejection_seq_masked_frac"] == 1.0
+    # Check that the sequence mask metrics show sequence mask happened
+    assert metrics["geo_sequence_mask_masked_ratio"] == 1.0
 
 
-def test_ppo_policy_loss_with_rollout_correction():
+def test_ppo_policy_loss_with_off_policy_correction():
     """Integration test for PPO policy loss with rollout correction enabled."""
     device = "cpu"
 
@@ -1131,10 +1131,10 @@ def test_ppo_policy_loss_with_rollout_correction():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": {
+            "off_policy_correction": {
                 "tis_ratio_type": "token",
-                "token_tis_ratio_cap_high": 2.0,
-                "rejection_mask_type": "null",
+                "token_tis_ratio_clip_high": 2.0,
+                "sequence_mask_metric": None,
                 "outlier_token_is_threshold_low": 1e-4,
                 "outlier_token_is_threshold_high": 100.0,
             },
@@ -1161,9 +1161,9 @@ def test_ppo_policy_loss_with_rollout_correction():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "rollout_correction": {
-                "tis_ratio_type": "null",
-                "rejection_mask_type": "null",
+            "off_policy_correction": {
+                "tis_ratio_type": None,
+                "sequence_mask_metric": None,
             },
         }
     )
@@ -1198,15 +1198,15 @@ def test_compute_tis_ratio_invalid_type():
         compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "invalid", config)
 
 
-def test_compute_rejection_mask_invalid_type():
-    """Tests that compute_rejection_mask raises error for invalid rejection_mask_type."""
+def test_compute_sequence_mask_invalid_type():
+    """Tests that compute_sequence_mask raises error for invalid sequence_mask_metric."""
     device = "cpu"
 
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
     rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig({"rejection_mask_type": "invalid"})
+    config = DictConfig({"sequence_mask_metric": "invalid"})
 
-    with pytest.raises(ValueError, match="Unknown rejection_mask_type"):
-        compute_rejection_mask(old_log_probs, rollout_logprobs, loss_mask, "invalid", config)
+    with pytest.raises(ValueError, match="Unknown sequence_mask_metric"):
+        compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "invalid", config)

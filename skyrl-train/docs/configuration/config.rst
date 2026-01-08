@@ -491,14 +491,7 @@ Algorithm Configuration
 
 Rollout Correction Configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-- ``algorithm.rollout_correction``: Rollout correction configuration.
-  - ``algorithm.rollout_correction.tis_ratio_type``: Type of importance ratio to use for rollout correction. Options include: ``token``, ``sequence``, or ``null``.
-  - ``algorithm.rollout_correction.token_tis_ratio_cap_high``: Cap for the importance ratio for ``token`` tis_ratio_type.
-  - ``algorithm.rollout_correction.sequence_tis_ratio_cap_high``: Cap for the importance ratio for ``sequence`` tis_ratio_type.
-  - ``algorithm.rollout_correction.rejection_mask_type``: Type of rejection mask to use. Options include: ``sequence``, ``geometric``, or ``null``.
-  - ``algorithm.rollout_correction.geo_rejection_mask_ratio_cap_high``: Cap for the rejection mask ratio for ``geometric`` rejection_mask_type.
-  - ``algorithm.rollout_correction.geo_rejection_mask_ratio_cap_low``: Cap for the rejection mask ratio for ``geometric`` rejection_mask_type.
-  - ``algorithm.rollout_correction.sequence_rejection_mask_ratio_cap_high``: Cap for the rejection mask ratio for ``sequence`` rejection_mask_type.
+- ``algorithm.off_policy_correction``: Off policy correction configuration.
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -19,7 +19,7 @@
 from collections import defaultdict
 from enum import StrEnum
 from functools import wraps
-from typing import Callable, List, Literal, Optional, Tuple, Union, TypedDict
+from typing import Callable, List, Literal, Optional, Tuple, Union, TypedDict, NotRequired
 
 import numpy as np
 import ray
@@ -196,8 +196,8 @@ def ppo_critic_loss(
     return 0.5 * loss, clipfrac
 
 
-class LossMetrics(TypedDict):
-    clip_ratio: float
+class LossMetrics(TypedDict, total=False):
+    clip_ratio: NotRequired[float]
 
 
 # Shared registry actor class for both policy loss and advantage estimator registries
@@ -561,7 +561,7 @@ def compute_tis_ratio(
     rollout_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
     tis_ratio_type: str,
-    rollout_corr: DictConfig,
+    off_policy_correction: DictConfig,
 ) -> torch.Tensor:
     """
     Compute truncated importance sampling (TIS) ratio for rollout correction.
@@ -571,7 +571,7 @@ def compute_tis_ratio(
         rollout_logprobs: Log probabilities from the rollout policy.
         loss_mask: Mask indicating valid tokens.
         tis_ratio_type: Type of TIS ratio ("token" or "sequence").
-        rollout_corr: Rollout correction config containing cap values.
+        off_policy_correction: Off-policy correction config containing cap values.
 
     Returns:
         TIS ratio tensor to multiply with the loss.
@@ -585,21 +585,21 @@ def compute_tis_ratio(
 
     metrics = {}
     if tis_ratio_type == "token":
-        token_tis_ratio_cap = rollout_corr.token_tis_ratio_cap_high
+        token_tis_ratio_cap = off_policy_correction.token_tis_ratio_clip_high
         # Compute proportion of tokens capped
         tokens_capped = (token_tis_ratio > token_tis_ratio_cap) & (loss_mask > 0)
         total_tokens = (loss_mask > 0).sum()
-        metrics["tis_token_capped_ratio"] = (tokens_capped.sum() / total_tokens.clamp(min=1)).detach().item()
+        metrics["tis_token_clip_high_ratio"] = (tokens_capped.sum() / total_tokens.clamp(min=1)).detach().item()
         return torch.clamp(token_tis_ratio, max=token_tis_ratio_cap), metrics
     elif tis_ratio_type == "sequence":
         # Compute sequence-level importance ratio as product of token ratios (sum of log ratios)
         seq_tis_log_ratio = (token_tis_log_ratio * loss_mask).sum(dim=-1, keepdim=True)
         seq_tis_ratio = _safe_exp_delta(seq_tis_log_ratio, clip=20.0, out_dtype=old_log_probs.dtype)
-        seq_tis_ratio_cap = rollout_corr.sequence_tis_ratio_cap_high
+        seq_tis_ratio_cap = off_policy_correction.sequence_tis_ratio_clip_high
         # Compute proportion of sequences capped
         num_sequences = seq_tis_ratio.shape[0]
         seqs_capped = (seq_tis_ratio > seq_tis_ratio_cap).sum()
-        metrics["tis_seq_capped_ratio"] = (seqs_capped / num_sequences).detach().item()
+        metrics["tis_seq_clip_high_ratio"] = (seqs_capped / num_sequences).detach().item()
         return torch.clamp(seq_tis_ratio, max=seq_tis_ratio_cap), metrics
     else:
         raise ValueError(f"Unknown tis_ratio_type: {tis_ratio_type}")
@@ -609,20 +609,20 @@ def compute_outlier_token_mask(
     old_log_probs: torch.Tensor,
     rollout_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
-    rollout_corr: DictConfig,
+    off_policy_correction: DictConfig,
 ) -> torch.Tensor:
     """
-    Compute outlier token mask that rejects sequences with any token having
+    Compute outlier token mask that masks out sequences with any token having
     importance ratio outside acceptable bounds.
 
-    This is applied independently of TIS ratio type or rejection mask type,
-    whenever rollout correction is enabled.
+    This is applied independently of TIS ratio type or sequence mask type,
+    whenever off policy correction is enabled.
 
     Args:
         old_log_probs: Log probabilities from the old policy (before update).
         rollout_logprobs: Log probabilities from the rollout policy.
         loss_mask: Mask indicating valid tokens.
-        rollout_corr: Rollout correction config containing threshold values.
+        off_policy_correction: Off-policy correction config containing threshold values.
 
     Returns:
         Tuple of (outlier_mask, metrics):
@@ -635,8 +635,8 @@ def compute_outlier_token_mask(
     token_tis_ratio = _safe_exp_delta(token_tis_log_ratio, clip=20.0, out_dtype=old_log_probs.dtype)
 
     # Check per-token bounds
-    token_mask_low = rollout_corr.outlier_token_is_threshold_low
-    token_mask_high = rollout_corr.outlier_token_is_threshold_high
+    token_mask_low = off_policy_correction.outlier_token_is_threshold_low
+    token_mask_high = off_policy_correction.outlier_token_is_threshold_high
     token_over_high = (token_tis_ratio > token_mask_high) & (loss_mask > 0)
     token_under_low = (token_tis_ratio < token_mask_low) & (loss_mask > 0)
     token_in_bounds = ~token_over_high & ~token_under_low
@@ -658,15 +658,15 @@ def compute_outlier_token_mask(
     return all_tokens_valid.float(), metrics
 
 
-def compute_rejection_mask(
+def compute_sequence_mask(
     old_log_probs: torch.Tensor,
     rollout_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
-    rejection_mask_type: str,
-    rollout_corr: DictConfig,
+    sequence_mask_metric: str,
+    off_policy_correction: DictConfig,
 ) -> Tuple[torch.Tensor, dict]:
     """
-    Compute rejection mask for rollout correction.
+    Compute sequence mask for off policy correction.
 
     This masks out sequences with importance ratios that fall outside acceptable bounds,
     helping to filter out off-policy samples that may destabilize training.
@@ -675,66 +675,66 @@ def compute_rejection_mask(
         old_log_probs: Log probabilities from the old policy (before update).
         rollout_logprobs: Log probabilities from the rollout policy.
         loss_mask: Mask indicating valid tokens.
-        rejection_mask_type: Type of rejection mask ("geometric" or "sequence").
-        rollout_corr: Rollout correction config containing cap values.
+        sequence_mask_metric: Metric to use for sequence masking ("geometric" or "product").
+        off_policy_correction: Off-policy correction config containing cap values.
 
     Returns:
-        Tuple of (rejection_mask, metrics):
-        - rejection_mask: Tensor (float) to multiply with the loss
+        Tuple of (sequence_mask, metrics):
+        - sequence_mask: Tensor (float) to multiply with the loss
         - metrics: Dict with masking statistics
     """
     # Compute token-level importance ratio
     token_tis_log_ratio = old_log_probs - rollout_logprobs
     metrics = {}
 
-    if rejection_mask_type == "geometric":
+    if sequence_mask_metric == "geometric":
         # Compute geometric mean of importance ratios per sequence
         num_tokens = loss_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
         seq_tis_log_ratio = (token_tis_log_ratio * loss_mask).sum(dim=-1, keepdim=True)
         geo_mean_ratio = _safe_exp_delta(seq_tis_log_ratio / num_tokens, clip=20.0, out_dtype=old_log_probs.dtype)
-        geo_cap_high = rollout_corr.geo_rejection_mask_ratio_cap_high
-        geo_cap_low = rollout_corr.geo_rejection_mask_ratio_cap_low
+        geo_cap_high = off_policy_correction.geo_mask_high
+        geo_cap_low = off_policy_correction.geo_mask_low
         seq_over_high = geo_mean_ratio > geo_cap_high
         seq_under_low = geo_mean_ratio < geo_cap_low
-        geo_rejection_mask = ~seq_over_high & ~seq_under_low
+        geo_sequence_mask = ~seq_over_high & ~seq_under_low
 
         num_sequences = float(geo_mean_ratio.shape[0])
-        metrics["rejection_seq_masked_ratio"] = ((~geo_rejection_mask).sum() / num_sequences).detach().item()
-        metrics["rejection_seq_over_high_ratio"] = (seq_over_high.sum() / num_sequences).detach().item()
-        metrics["rejection_seq_under_low_ratio"] = (seq_under_low.sum() / num_sequences).detach().item()
+        metrics["geo_sequence_mask_masked_ratio"] = ((~geo_sequence_mask).sum() / num_sequences).detach().item()
+        metrics["geo_sequence_mask_over_high_ratio"] = (seq_over_high.sum() / num_sequences).detach().item()
+        metrics["geo_sequence_mask_under_low_ratio"] = (seq_under_low.sum() / num_sequences).detach().item()
 
-        return geo_rejection_mask.float(), metrics
-    elif rejection_mask_type == "sequence":
+        return geo_sequence_mask.float(), metrics
+    elif sequence_mask_metric == "product":
         # Mask out sequences with product of importance ratios outside the cap
         seq_tis_log_ratio = (token_tis_log_ratio * loss_mask).sum(dim=-1, keepdim=True)
         seq_tis_ratio = _safe_exp_delta(seq_tis_log_ratio, clip=20.0, out_dtype=old_log_probs.dtype)
-        seq_cap_high = rollout_corr.sequence_rejection_mask_ratio_cap_high
-        seq_cap_low = rollout_corr.sequence_rejection_mask_ratio_cap_low
+        seq_cap_high = off_policy_correction.product_mask_high
+        seq_cap_low = off_policy_correction.product_mask_low
         seq_over_high = seq_tis_ratio > seq_cap_high
         seq_under_low = seq_tis_ratio < seq_cap_low
         seq_in_bounds = ~seq_over_high & ~seq_under_low
 
         num_sequences = float(seq_tis_ratio.shape[0])
-        metrics["rejection_seq_masked_ratio"] = ((~seq_in_bounds).sum() / num_sequences).detach().item()
-        metrics["rejection_seq_over_high_ratio"] = (seq_over_high.sum() / num_sequences).detach().item()
-        metrics["rejection_seq_under_low_ratio"] = (seq_under_low.sum() / num_sequences).detach().item()
+        metrics["product_sequence_mask_masked_ratio"] = ((~seq_in_bounds).sum() / num_sequences).detach().item()
+        metrics["product_sequence_mask_over_high_ratio"] = (seq_over_high.sum() / num_sequences).detach().item()
+        metrics["product_sequence_mask_under_low_ratio"] = (seq_under_low.sum() / num_sequences).detach().item()
 
         return seq_in_bounds.float(), metrics
     else:
-        raise ValueError(f"Unknown rejection_mask_type: {rejection_mask_type}")
+        raise ValueError(f"Unknown sequence_mask_metric: {sequence_mask_metric}")
 
 
-def apply_rollout_correction(
+def apply_off_policy_correction(
     loss: torch.Tensor,
     old_log_probs: torch.Tensor,
     rollout_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
-    rollout_corr: DictConfig,
+    off_policy_correction: DictConfig,
 ) -> torch.Tensor:
     """
-    Apply rollout correction to the loss using TIS ratio, rejection mask, and outlier token mask.
+    Apply off policy correction to the loss using TIS ratio, sequence mask, and outlier token mask.
 
-    This is a convenience function that combines compute_tis_ratio, compute_rejection_mask,
+    This is a convenience function that combines compute_tis_ratio, compute_sequence_mask,
     and compute_outlier_token_mask.
 
     Args:
@@ -742,7 +742,7 @@ def apply_rollout_correction(
         old_log_probs: Log probabilities from the old policy (before update).
         rollout_logprobs: Log probabilities from the rollout policy.
         loss_mask: Mask indicating valid tokens.
-        rollout_corr: Rollout correction config.
+        off_policy_correction: Off-policy correction config.
 
     Returns:
         Corrected loss tensor.
@@ -751,16 +751,16 @@ def apply_rollout_correction(
     - https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
     - https://fengyao.notion.site/off-policy-rl
     """
-    tis_ratio_type = rollout_corr.tis_ratio_type
-    rejection_mask_type = rollout_corr.rejection_mask_type
+    tis_ratio_type = off_policy_correction.tis_ratio_type
+    sequence_mask_metric = off_policy_correction.sequence_mask_metric
 
     # Check if TIS ratio correction is enabled
-    apply_tis = tis_ratio_type is not None and tis_ratio_type != "null"
-    # Check if rejection mask is enabled
-    apply_rejection = rejection_mask_type is not None and rejection_mask_type != "null"
+    apply_tis = tis_ratio_type is not None
+    # Check if sequence mask is enabled
+    apply_sequence_mask = sequence_mask_metric is not None
 
     # Early return if no correction needed
-    if not apply_tis and not apply_rejection:
+    if not apply_tis and not apply_sequence_mask:
         return loss, {}, loss_mask
 
     is_ratio = _safe_exp_delta(old_log_probs - rollout_logprobs, clip=20.0, out_dtype=old_log_probs.dtype)
@@ -770,27 +770,29 @@ def apply_rollout_correction(
     metrics["is_ratio_max"] = (is_ratio * loss_mask).max().detach().item()
     metrics["is_ratio_min"] = (is_ratio * loss_mask).min().detach().item()
 
-    # Apply outlier token mask whenever rollout correction is enabled
+    # Apply outlier token mask whenever off policy correction is enabled
     # This rejects sequences with any token having importance ratio outside acceptable bounds
-    outlier_mask, outlier_metrics = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+    outlier_mask, outlier_metrics = compute_outlier_token_mask(
+        old_log_probs, rollout_logprobs, loss_mask, off_policy_correction
+    )
     loss_mask = loss_mask * outlier_mask
     metrics.update(outlier_metrics)
 
     # Apply TIS ratio if enabled
     if apply_tis:
         tis_ratio, tis_metrics = compute_tis_ratio(
-            old_log_probs, rollout_logprobs, loss_mask, tis_ratio_type, rollout_corr
+            old_log_probs, rollout_logprobs, loss_mask, tis_ratio_type, off_policy_correction
         )
         loss = loss * tis_ratio
         metrics.update(tis_metrics)
 
-    # Apply rejection mask if enabled
-    if apply_rejection:
-        rejection_mask, rejection_metrics = compute_rejection_mask(
-            old_log_probs, rollout_logprobs, loss_mask, rejection_mask_type, rollout_corr
+    # Apply sequence mask if enabled
+    if apply_sequence_mask:
+        sequence_mask, sequence_mask_metrics = compute_sequence_mask(
+            old_log_probs, rollout_logprobs, loss_mask, sequence_mask_metric, off_policy_correction
         )
-        loss_mask = loss_mask * rejection_mask
-        metrics.update(rejection_metrics)
+        loss_mask = loss_mask * sequence_mask
+        metrics.update(sequence_mask_metrics)
 
     return loss, metrics, loss_mask
 
@@ -827,12 +829,12 @@ def ppo_policy_loss(
     loss_metrics = LossMetrics(clip_ratio=clip_ratio)
 
     # apply rollout correction
-    rollout_corr = config.rollout_correction
-    if rollout_corr is not None and rollout_logprobs is not None:
-        loss, rollout_correction_metrics, loss_mask = apply_rollout_correction(
-            loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+    off_policy_correction = config.off_policy_correction
+    if rollout_logprobs is not None:
+        loss, off_policy_correction_metrics, loss_mask = apply_off_policy_correction(
+            loss, old_log_probs, rollout_logprobs, loss_mask, off_policy_correction
         )
-        loss_metrics.update(rollout_correction_metrics)
+        loss_metrics.update(off_policy_correction_metrics)
 
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
     return loss, loss_metrics
@@ -898,13 +900,13 @@ def sapo_policy_loss(
     loss = -gates * advantages
 
     # apply rollout correction
-    rollout_corr = config.rollout_correction
+    off_policy_correction = config.off_policy_correction
     loss_metrics = LossMetrics(clip_ratio=0.0)
-    if rollout_corr is not None and rollout_logprobs is not None:
-        loss, rollout_correction_metrics, loss_mask = apply_rollout_correction(
-            loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+    if rollout_logprobs is not None:
+        loss, off_policy_correction_metrics, loss_mask = apply_off_policy_correction(
+            loss, old_log_probs, rollout_logprobs, loss_mask, off_policy_correction
         )
-        loss_metrics.update(rollout_correction_metrics)
+        loss_metrics.update(off_policy_correction_metrics)
     # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
 
@@ -963,19 +965,21 @@ def gspo_policy_loss(
     surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
     loss = -torch.min(surr1, surr2)
 
-    # apply rollout correction
-    rollout_corr = config.rollout_correction
-    if rollout_corr is not None and rollout_logprobs is not None:
-        loss, loss_metrics, loss_mask = apply_rollout_correction(
-            loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
-        )
-
     # Compute clipping ratio for monitoring
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
 
+    # apply rollout correction
+    loss_metrics = LossMetrics(clip_ratio=clip_ratio)
+    off_policy_correction = config.off_policy_correction
+    if rollout_logprobs is not None:
+        loss, off_policy_correction_metrics, loss_mask = apply_off_policy_correction(
+            loss, old_log_probs, rollout_logprobs, loss_mask, off_policy_correction
+        )
+        loss_metrics.update(off_policy_correction_metrics)
+
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
 
-    return loss, LossMetrics(clip_ratio=clip_ratio)
+    return loss, loss_metrics
 
 
 @register_policy_loss(PolicyLossType.CISPO)
@@ -1004,14 +1008,16 @@ def compute_policy_loss_cispo(
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
 
     # apply rollout correction
-    rollout_corr = config.rollout_correction
-    if rollout_corr is not None and rollout_logprobs is not None:
-        loss, loss_metrics, loss_mask = apply_rollout_correction(
-            loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+    off_policy_correction = config.off_policy_correction
+    loss_metrics = LossMetrics(clip_ratio=clip_ratio)
+    if rollout_logprobs is not None:
+        loss, off_policy_correction_metrics, loss_mask = apply_off_policy_correction(
+            loss, old_log_probs, rollout_logprobs, loss_mask, off_policy_correction
         )
+        loss_metrics.update(off_policy_correction_metrics)
 
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
-    return loss, LossMetrics(clip_ratio=clip_ratio)
+    return loss, loss_metrics
 
 
 @register_policy_loss(PolicyLossType.CLIP_COV)
@@ -1073,11 +1079,13 @@ def compute_policy_loss_clip_cov(
     pg_losses = torch.maximum(pg_losses1, pg_losses2) * corr
 
     # apply rollout correction
-    rollout_corr = config.rollout_correction
-    if rollout_corr is not None and rollout_logprobs is not None:
-        pg_losses, loss_metrics, loss_mask = apply_rollout_correction(
-            pg_losses, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+    off_policy_correction = config.off_policy_correction
+    loss_metrics = LossMetrics(clip_ratio=clip_frac.item())
+    if rollout_logprobs is not None:
+        pg_losses, off_policy_correction_metrics, loss_mask = apply_off_policy_correction(
+            pg_losses, old_log_probs, rollout_logprobs, loss_mask, off_policy_correction
         )
+        loss_metrics.update(off_policy_correction_metrics)
 
     pg_loss = reduce_loss(
         loss=pg_losses,
@@ -1086,7 +1094,7 @@ def compute_policy_loss_clip_cov(
         max_seq_len=config.max_seq_len,
     )
 
-    return pg_loss, LossMetrics(clip_frac=clip_frac.item())
+    return pg_loss, loss_metrics
 
 
 @register_policy_loss(PolicyLossType.KL_COV)
@@ -1139,11 +1147,13 @@ def compute_policy_loss_kl_cov(
                 ]
 
     # apply rollout correction
-    rollout_corr = config.rollout_correction
-    if rollout_corr is not None and rollout_logprobs is not None:
-        pg_losses, loss_metrics, loss_mask = apply_rollout_correction(
-            pg_losses, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+    off_policy_correction = config.off_policy_correction
+    loss_metrics = LossMetrics(clip_ratio=0.0)
+    if rollout_logprobs is not None:
+        pg_losses, off_policy_correction_metrics, loss_mask = apply_off_policy_correction(
+            pg_losses, old_log_probs, rollout_logprobs, loss_mask, off_policy_correction
         )
+        loss_metrics.update(off_policy_correction_metrics)
 
     pg_loss = reduce_loss(
         loss=pg_losses,
@@ -1153,7 +1163,7 @@ def compute_policy_loss_kl_cov(
     )
 
     # NOTE (sumanthrh): Since the pg clip ratio is not applicable for KL-COV so we just use 0.0
-    return pg_loss, 0.0
+    return pg_loss, loss_metrics
 
 
 def reduce_loss(

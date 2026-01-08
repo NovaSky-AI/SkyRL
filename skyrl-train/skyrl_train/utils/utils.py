@@ -284,20 +284,20 @@ def validate_cfg(cfg: DictConfig):
     # Legacy TIS validation (deprecated)
     if cfg.trainer.algorithm.use_tis:
         logger.warning(
-            f"`trainer.algorithm.use_tis` is deprecated. Setting `trainer.algorithm.rollout_correction` to `token` instead."
-            f"with `token_tis_ratio_cap_high`={cfg.trainer.algorithm.tis_imp_ratio_cap}"
+            f"`trainer.algorithm.use_tis` is deprecated. Setting `trainer.algorithm.off_policy_correction` to `token` instead."
+            f"with `token_tis_ratio_clip_high`={cfg.trainer.algorithm.tis_imp_ratio_cap}"
         )
-        cfg.trainer.algorithm.rollout_correction.tis_ratio_type = "token"
-        cfg.trainer.algorithm.rollout_correction.token_tis_ratio_cap_high = cfg.trainer.algorithm.tis_imp_ratio_cap
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "token"
+        cfg.trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high = cfg.trainer.algorithm.tis_imp_ratio_cap
 
-    # rollout_correction config validation
-    rollout_corr = cfg.trainer.algorithm.rollout_correction
-    tis_ratio_type = rollout_corr.tis_ratio_type
-    rejection_mask_type = rollout_corr.rejection_mask_type
+    # off_policy_correction config validation
+    off_policy_correction = cfg.trainer.algorithm.off_policy_correction
+    tis_ratio_type = off_policy_correction.tis_ratio_type
+    sequence_mask_metric = off_policy_correction.sequence_mask_metric
 
-    uses_rollout_correction = tis_ratio_type is not None or rejection_mask_type is not None
+    uses_off_policy_correction = tis_ratio_type is not None or sequence_mask_metric is not None
 
-    if uses_rollout_correction:
+    if uses_off_policy_correction:
         # Validate tis_ratio_type
         if tis_ratio_type:
             assert tis_ratio_type in [
@@ -305,24 +305,24 @@ def validate_cfg(cfg: DictConfig):
                 "sequence",
             ], f"`tis_ratio_type` must be 'None', 'token', or 'sequence', got {tis_ratio_type}"
 
-        # Validate rejection_mask_type
-        if rejection_mask_type:
-            assert rejection_mask_type in [
+        # Validate sequence_mask_metric
+        if sequence_mask_metric:
+            assert sequence_mask_metric in [
                 "sequence",
                 "geometric",
-            ], f"`rejection_mask_type` must be 'sequence', or 'geometric', got {rejection_mask_type}"
+            ], f"`sequence_mask_metric` must be 'sequence', or 'geometric', got {sequence_mask_metric}"
 
         # Ensure logprobs are enabled for rollout correction
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but rollout_correction is enabled."
+                "`generator.sampling_params.logprobs` is `None` but off_policy_correction is enabled."
                 " Setting `logprobs` to `True`."
             )
             cfg.generator.sampling_params.logprobs = 0
 
         if cfg.generator.backend == "sglang":
             raise NotImplementedError(
-                "`trainer.algorithm.rollout_correction` doesn't support Sglang backend, please use vLLM"
+                "`trainer.algorithm.off_policy_correction` doesn't support Sglang backend, please use vLLM"
             )
 
     if cfg.trainer.policy.model.lora.rank > 0:

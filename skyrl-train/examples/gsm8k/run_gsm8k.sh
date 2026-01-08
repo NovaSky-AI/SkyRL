@@ -10,7 +10,7 @@ set -x
 
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
 
-: "${DATA_DIR:="/mnt/cluster_storage/data/gsm8k"}"
+: "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${NUM_GPUS:=4}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
 

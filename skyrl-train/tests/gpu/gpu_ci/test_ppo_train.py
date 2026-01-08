@@ -49,11 +49,11 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
             cfg.trainer.algorithm.use_kl_loss = True
             cfg.trainer.algorithm.kl_loss_coef = 0.001
 
-        cfg.trainer.algorithm.rollout_correction.tis_ratio_type = "sequence"
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "sequence"
 
-        cfg.trainer.algorithm.rollout_correction.rejection_mask_type = "geometric"
-        cfg.trainer.algorithm.rollout_correction.geo_rejection_mask_ratio_cap_high = 1.02
-        cfg.trainer.algorithm.rollout_correction.geo_rejection_mask_ratio_cap_low = 0.98
+        cfg.trainer.algorithm.off_policy_correction.sequence_mask_metric = "geometric"
+        cfg.trainer.algorithm.off_policy_correction.geo_mask_high = 1.02
+        cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
 
         actor_group = init_worker_with_type(
             "policy",

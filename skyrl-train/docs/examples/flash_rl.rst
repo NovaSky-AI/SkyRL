@@ -65,8 +65,8 @@ We highlight some important training parameters configured for FlashRL from our 
 
     uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.int8 -m examples.flash_rl.main_dapo_flashrl \
         ...
-        trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_TYPE \
-        trainer.algorithm.rollout_correction.token_tis_ratio_cap_high=$TIS_IMP_RATIO_CAP \
+        trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
+        trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
         generator.sampling_params.logprobs=0 \
         ...
 

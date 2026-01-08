@@ -580,14 +580,14 @@ class RayPPOTrainer:
             logprobs,
         )
 
-        # sanity check for rollout_correction
-        rollout_corr = self.cfg.trainer.algorithm.rollout_correction
-        tis_ratio_type = rollout_corr.tis_ratio_type
-        rejection_mask_type = rollout_corr.rejection_mask_type
-        if tis_ratio_type is not None or rejection_mask_type is not None:
+        # sanity check for off_policy_correction
+        off_policy_correction = self.cfg.trainer.algorithm.off_policy_correction
+        tis_ratio_type = off_policy_correction.tis_ratio_type
+        sequence_mask_metric = off_policy_correction.sequence_mask_metric
+        if tis_ratio_type is not None or sequence_mask_metric is not None:
             assert (
                 rollout_logprobs_tensor is not None
-            ), "expected non-null rollout logprobs tensor when rollout_correction is enabled"
+            ), "expected non-null rollout logprobs tensor when off_policy_correction is enabled"
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
 
         training_input = TrainingInputBatch(
