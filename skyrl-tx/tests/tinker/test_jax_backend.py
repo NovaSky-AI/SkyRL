@@ -173,8 +173,8 @@ def test_adapter_gradient_calculation():
 
     adapter1_id = "adapter1"
     adapter2_id = "adapter2"
-    backend.create_model(adapter1_id, LoraConfig(rank=32, alpha=32))
-    backend.create_model(adapter2_id, LoraConfig(rank=32, alpha=32))
+    backend.create_model(adapter1_id, LoraConfig(rank=32, alpha=32, seed=0))
+    backend.create_model(adapter2_id, LoraConfig(rank=32, alpha=32, seed=0))
 
     # Adapter1 samples (fixed across both rounds)
     a1_input = make_fwd_bwd_input([[1, 2, 3, 4], [5, 6, 7, 8]])
@@ -230,8 +230,8 @@ def test_micro_batch_grad_accumulation():
     # Build backend with micro-batching enabled (batch size 4)
     config_micro = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, train_micro_batch_size=4)
     backend_micro = JaxBackend(BASE_MODEL, config_micro)
-    backend_micro.create_model(adapter1_id, LoraConfig(rank=32, alpha=32))
-    backend_micro.create_model(adapter2_id, LoraConfig(rank=32, alpha=32))
+    backend_micro.create_model(adapter1_id, LoraConfig(rank=32, alpha=32, seed=0))
+    backend_micro.create_model(adapter2_id, LoraConfig(rank=32, alpha=32, seed=0))
 
     # Fused batch with 6 total examples: 2 for adapter1, 4 for adapter2.
     a1_input = make_fwd_bwd_input([[1, 2, 3, 4], [5, 6, 7, 8]])  # 2 samples
@@ -265,8 +265,8 @@ def test_micro_batch_grad_accumulation():
     # Build a second backend without micro-batching
     config_full = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, train_micro_batch_size=0)
     backend_full = JaxBackend(BASE_MODEL, config_full)
-    backend_full.create_model(adapter1_id, LoraConfig(rank=32, alpha=32))
-    backend_full.create_model(adapter2_id, LoraConfig(rank=32, alpha=32))
+    backend_full.create_model(adapter1_id, LoraConfig(rank=32, alpha=32, seed=0))
+    backend_full.create_model(adapter2_id, LoraConfig(rank=32, alpha=32, seed=0))
 
     # Run 2: micro-batching disabled
     backend_full.forward_backward(prepare_model_pass_batch(reqs))
@@ -297,7 +297,7 @@ def test_process_optim_step_hyperparams_behavior():
     low_adapter = "adapter_low"
     default_adapter = "adapter_default"
     for model_id in (low_adapter, default_adapter):
-        backend.create_model(model_id, LoraConfig(rank=32, alpha=32))
+        backend.create_model(model_id, LoraConfig(rank=32, alpha=32, seed=0))
 
     tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
 
