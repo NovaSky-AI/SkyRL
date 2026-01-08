@@ -589,7 +589,7 @@ def compute_tis_ratio(
         # Compute proportion of tokens capped
         tokens_capped = (token_tis_ratio > token_tis_ratio_cap) & (loss_mask > 0)
         total_tokens = (loss_mask > 0).sum()
-        metrics["tis_token_capped_frac"] = (tokens_capped.sum() / total_tokens.clamp(min=1)).detach().item()
+        metrics["tis_token_capped_ratio"] = (tokens_capped.sum() / total_tokens.clamp(min=1)).detach().item()
         return torch.clamp(token_tis_ratio, max=token_tis_ratio_cap), metrics
     elif tis_ratio_type == "sequence":
         # Compute sequence-level importance ratio as product of token ratios (sum of log ratios)
@@ -599,7 +599,7 @@ def compute_tis_ratio(
         # Compute proportion of sequences capped
         num_sequences = seq_tis_ratio.shape[0]
         seqs_capped = (seq_tis_ratio > seq_tis_ratio_cap).sum()
-        metrics["tis_seq_capped_frac"] = (seqs_capped / num_sequences).detach().item()
+        metrics["tis_seq_capped_ratio"] = (seqs_capped / num_sequences).detach().item()
         return torch.clamp(seq_tis_ratio, max=seq_tis_ratio_cap), metrics
     else:
         raise ValueError(f"Unknown tis_ratio_type: {tis_ratio_type}")
@@ -651,9 +651,9 @@ def compute_outlier_token_mask(
     # Sequence has any token under low threshold
     seq_has_under_low = token_under_low.any(dim=-1)
 
-    metrics["outlier_seq_masked_frac"] = ((~all_tokens_valid.squeeze(-1)).sum() / num_sequences).detach().item()
-    metrics["outlier_seq_over_high_frac"] = (seq_has_over_high.sum() / num_sequences).detach().item()
-    metrics["outlier_seq_under_low_frac"] = (seq_has_under_low.sum() / num_sequences).detach().item()
+    metrics["outlier_seq_masked_ratio"] = ((~all_tokens_valid.squeeze(-1)).sum() / num_sequences).detach().item()
+    metrics["outlier_seq_over_high_ratio"] = (seq_has_over_high.sum() / num_sequences).detach().item()
+    metrics["outlier_seq_under_low_ratio"] = (seq_has_under_low.sum() / num_sequences).detach().item()
 
     return all_tokens_valid.float(), metrics
 
@@ -699,9 +699,9 @@ def compute_rejection_mask(
         geo_rejection_mask = ~seq_over_high & ~seq_under_low
 
         num_sequences = float(geo_mean_ratio.shape[0])
-        metrics["rejection_seq_masked_frac"] = ((~geo_rejection_mask).sum() / num_sequences).detach().item()
-        metrics["rejection_seq_over_high_frac"] = (seq_over_high.sum() / num_sequences).detach().item()
-        metrics["rejection_seq_under_low_frac"] = (seq_under_low.sum() / num_sequences).detach().item()
+        metrics["rejection_seq_masked_ratio"] = ((~geo_rejection_mask).sum() / num_sequences).detach().item()
+        metrics["rejection_seq_over_high_ratio"] = (seq_over_high.sum() / num_sequences).detach().item()
+        metrics["rejection_seq_under_low_ratio"] = (seq_under_low.sum() / num_sequences).detach().item()
 
         return geo_rejection_mask.float(), metrics
     elif rejection_mask_type == "sequence":
@@ -715,9 +715,9 @@ def compute_rejection_mask(
         seq_in_bounds = ~seq_over_high & ~seq_under_low
 
         num_sequences = float(seq_tis_ratio.shape[0])
-        metrics["rejection_seq_masked_frac"] = ((~seq_in_bounds).sum() / num_sequences).detach().item()
-        metrics["rejection_seq_over_high_frac"] = (seq_over_high.sum() / num_sequences).detach().item()
-        metrics["rejection_seq_under_low_frac"] = (seq_under_low.sum() / num_sequences).detach().item()
+        metrics["rejection_seq_masked_ratio"] = ((~seq_in_bounds).sum() / num_sequences).detach().item()
+        metrics["rejection_seq_over_high_ratio"] = (seq_over_high.sum() / num_sequences).detach().item()
+        metrics["rejection_seq_under_low_ratio"] = (seq_under_low.sum() / num_sequences).detach().item()
 
         return seq_in_bounds.float(), metrics
     else:

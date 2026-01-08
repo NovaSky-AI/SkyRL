@@ -126,7 +126,9 @@ trainer:
     tis_imp_ratio_cap: -1.0
     use_tis: false
 
-    # reference: https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
+    # references
+    # - https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
+    # - https://fengyao.notion.site/off-policy-rl
     rollout_correction:
       # type of importance sampling ratio to use for ppo loss correction
       # here importance sampling ratio refers to exp(logprobs_{policy_old} - logprobs_{rollout_policy})
