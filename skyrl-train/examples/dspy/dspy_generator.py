@@ -82,7 +82,7 @@ class DSPyGenerator(GeneratorInterface):
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()
-            logger.info(f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}")
+            logger.info(f"DSPyGenerator initialized with custom chat template read from: {custom_chat_template_path}")
         else:
             self.custom_chat_template_content = None
 
@@ -242,7 +242,7 @@ class DSPyGenerator(GeneratorInterface):
         response_messages = chat_history[2:]
         assistant_logprobs = getattr(results.reward, "output_logprobs", None) if results.reward else None
         response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-            response_messages, self.tokenizer, assistant_logprobs
+            response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
         )
 
         # Determine stop reason

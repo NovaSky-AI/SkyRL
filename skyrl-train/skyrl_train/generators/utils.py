@@ -393,7 +393,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
     return conversation_token_ids
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None):
+def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -413,7 +413,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     assert len(messages), "messages list cannot be empty"
 
     # Needed to correctly mask it zero for assistant messages.
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer, custom_chat_template=custom_chat_template)
 
     # 1. Initalize the things to accumulate
     response_ids = []
@@ -424,7 +424,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer)
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer, custom_chat_template=custom_chat_template)
         response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.

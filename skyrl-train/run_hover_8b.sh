@@ -11,7 +11,8 @@ NUM_NODES=1
 NUM_GPUS=1
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-1.5B-Instruct"
+
+MODEL_NAME="Qwen/Qwen3-8B"
 
 
 FLASH_ATTN=true
@@ -22,6 +23,8 @@ train_data="$HOME/data/lcb/deepcoder_train_short.json"
 
 CKPTS_DIR="$HOME/ckpts_hover"
 EXPORTS_DIR="$HOME/hf_ckpts_hover"
+
+CHAT_TEMPLATE_PATH="$HOME/SkyRL/skyrl-train/examples/dspy/qwen3_thinking_acc.jinja2"
 # train_data="['${DATA_DIR}/deepcoder_train_short.json']"
 # val_data="['${DATA_DIR}/test_livecodebench_short.json']"
 
@@ -30,12 +33,17 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data=$train_data \
   data.val_data=$train_data \
-  +dspy.max_num_examples=600 \
   +dspy.program="Hover_query_gen" \
   +dspy.benchmark_name="hover" \
   +dspy.local_reward_fn="hover_query_reward_fn" \
   +dspy.final_reward_fn="hover_final_reward_fn" \
+  +generator.engine_init_kwargs.custom_chat_template_chat_completion_path=$CHAT_TEMPLATE_PATH \
   trainer.policy.model.path=$MODEL_NAME \
+  trainer.policy.model.lora.rank=0 \
+  trainer.policy.model.lora.alpha=16 \
+  trainer.policy.model.lora.dropout=0 \
+  trainer.policy.model.lora.lora_sync_path="$HOME/skyrl_lora_sync" \
+  trainer.policy.model.lora.target_modules="all-linear" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \

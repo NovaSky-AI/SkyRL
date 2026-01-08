@@ -31,6 +31,7 @@ class DSPyExp(BasePPOExp):
         Returns:
             TerminalBenchTaskDataset: The training dataset.
         """
+
         prompts_dataset = DSPyDataset(
             benchmark_name=self.cfg.dspy.benchmark_name,
             max_num_examples=self.cfg.dspy.max_num_examples,

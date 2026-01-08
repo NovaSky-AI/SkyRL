@@ -51,11 +51,12 @@ Given a claim, some key facts, and new search results, identify any new learning
 
 
 class Hover(dspy.Module):
-    def __init__(self, num_docs=4, num_hops=2):
+    def __init__(self, num_docs=4, num_hops=4):
         self.num_docs, self.num_hops = num_docs, num_hops
         self.generate_query_sig = dspy.Signature("claim, key_facts -> followup_search_query", instr1)
         self.generate_query = dspy.ChainOfThought(self.generate_query_sig)
-        self.append_notes = dspy.ChainOfThought(dspy.Signature("claim, key_facts, new_search_results -> new_key_facts", instr2))
+        self.append_notes_sig = dspy.Signature("claim, key_facts, new_search_results -> new_key_facts", instr2)
+        self.append_notes = dspy.ChainOfThought(self.append_notes_sig)
         self.bm25_retriever = BM25Searcher()
         self.adapter = XMLAdapter()
 
@@ -88,12 +89,12 @@ class Hover_query_gen(Hover):
         retrieved_docs = []
 
         for hop_idx in range(self.num_hops):
-            if hop_idx:
-                query = await self.generate_query.acall(claim=claim, key_facts=key_facts)
-                self.append_trace(example, query)
-                query = query.followup_search_query
-            else:
-                query = claim
+            # if hop_idx:
+            query = await self.generate_query.acall(claim=claim, key_facts=key_facts)
+            self.append_trace(query, claim=claim, key_facts=key_facts)
+            query = query.followup_search_query
+            # else:
+            #     query = claim
             
             
             search_results = self.bm25_retriever.search(query, k=self.num_docs)
@@ -107,11 +108,86 @@ class Hover_query_gen(Hover):
 
         return dspy.Prediction(key_facts=key_facts, retrieved_docs=retrieved_docs)
 
-    def append_trace(self, example, pred):
+    def append_trace(self, pred, **kwargs):
         original_sig = GenerateThreeQueries
         # Get formatted finetune data which contains both input and output messages
         finetune_data = self.adapter.format_finetune_data(
                                 signature=self.generate_query_sig,
+                                inputs=kwargs,
+                                outputs=pred,
+                                demos=[] # TODO: Add support for demos
+                            )
+        
+        all_messages = finetune_data.get('messages', [])
+        
+        # Extract user and assistant messages
+        chat_history = [None, None, None]
+
+        for msg in all_messages:
+            if msg.get("role") == "system":
+                chat_history[0] = {
+                    "role": "system",
+                    "content": msg['content']
+                }
+            if msg.get("role") == "user":
+                chat_history[1] = {
+                    "role": "user",
+                    "content": msg['content']
+                }
+            elif msg.get("role") == "assistant":
+                chat_history[2] = {
+                    "role": "assistant",
+                    "content": msg['content']
+                }
+
+        self.query_gen_traces.extend(chat_history)
+        self.queries.append(pred)
+    
+    def collect_trace(self, example, pred):
+        # Remove all system prompts in self.query_gen_traces starting from the second element
+        cleaned_traces = []
+        for i, msg in enumerate(self.query_gen_traces):
+            if i == 0 or (msg is not None and msg.get("role") != "system"):
+                cleaned_traces.append(msg)
+        return cleaned_traces, self.queries
+
+
+class Hover_append_notes(Hover):
+    def __init__(self):
+        super().__init__()
+        self.append_notes_traces = []
+        self.summaries = []
+
+    async def forward(self, example) -> list[str]:
+        claim = example.get("claim")
+        key_facts = []
+        retrieved_docs = []
+
+        for hop_idx in range(self.num_hops):
+            if hop_idx:
+                query = await self.generate_query.acall(claim=claim, key_facts=key_facts)
+                query = query.followup_search_query
+            else:
+                query = claim
+            
+            
+            search_results = self.bm25_retriever.search(query, k=self.num_docs)
+            retrieved_docs.extend(search_results)
+
+            if hop_idx == self.num_hops - 1:
+                break
+                
+            prediction = await self.append_notes.acall(claim=claim, key_facts=key_facts, new_search_results=search_results)
+            self.append_trace(example, prediction)
+            key_facts.append(prediction.new_key_facts)
+
+        return dspy.Prediction(key_facts=key_facts, retrieved_docs=retrieved_docs)
+
+    def append_trace(self, example, pred):
+        original_sig = GenerateThreeQueries
+        # Get formatted finetune data which contains both input and output messages
+        finetune_data = self.adapter.format_finetune_data(
+                                signature=self.append_notes_sig,
                                 inputs=example,
                                 outputs=pred,
                                 demos=[] # TODO: Add support for demos
@@ -138,14 +214,14 @@ class Hover_query_gen(Hover):
                     "role": "assistant",
                     "content": msg['content']
                 }
-        self.query_gen_traces.extend(chat_history)
-        self.queries.append(pred)
+        self.append_notes_traces.extend(chat_history)
+        self.summaries.append(pred)
     
     def collect_trace(self, example, pred):
         # Remove all system prompts in self.query_gen_traces starting from the second element
         cleaned_traces = []
-        for i, msg in enumerate(self.query_gen_traces):
+        for i, msg in enumerate(self.append_notes_traces):
             if i == 0 or (msg is not None and msg.get("role") != "system"):
                 cleaned_traces.append(msg)
         
-        return cleaned_traces, self.queries
+        return cleaned_traces, self.summaries
