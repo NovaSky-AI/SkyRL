@@ -93,7 +93,7 @@ def test_max_adapters_after_delete():
     assert create_model(backend, "model_new") == 1
 
 
-def test_clear_adapter_config():
+def test_clear_lora_adapter():
     """Test that clear_lora_adapter zeros out adapter state."""
     backend = create_backend()
     model_id = "test_model"

@@ -272,7 +272,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig, rngs: nnx.Rngs):
+def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
     """Initialize a LoRA adapter for training.
 
     Initializes the adapter: lora_A with he_uniform, lora_B with zeros,
@@ -282,9 +282,9 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
     Args:
         model: The model containing LoRA layers
         adapter_index: Index of the adapter to initialize
-        lora_config: LoraConfig object containing rank, alpha, and training flags
-        rngs: RNG stream for initialization
+        lora_config: LoraConfig object containing rank, alpha, seed, and training flags
     """
+    rngs = nnx.Rngs(lora_config.seed)
     state = nnx.state(model)
 
     def init_adapter(path, value):
