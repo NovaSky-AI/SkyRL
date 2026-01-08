@@ -32,12 +32,7 @@ class LoRAMixin:
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ) -> None:
-        """Initialize LoRA parameter tensors.
-
-        Note: lora_A and lora_B are initialized to zeros here. The actual weight
-        initialization (he_uniform for lora_A, zeros for lora_B) happens in
-        init_lora_adapter(), which must be called before training.
-        """
+        """Initialize LoRA parameter tensors."""
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
 
@@ -49,6 +44,9 @@ class LoRAMixin:
         else:
             self.lora_scaling = nnx.Variable(jnp.full((max_lora_adapters,), 1.0, dtype=dtype))
             self.lora_ranks = nnx.Variable(jnp.full((max_lora_adapters,), max_lora_rank, dtype=jnp.int32))
+            # lora_A and lora_B are initialized to zeros here. The actual weight
+            # initialization (he_uniform for lora_A, zeros for lora_B) happens in
+            # init_lora_adapter(), which must be called before training.
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
