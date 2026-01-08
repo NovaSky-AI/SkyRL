@@ -170,11 +170,11 @@ class JaxBackendImpl(AbstractBackend):
         self.mesh = jax.make_mesh(
             (config.fully_sharded_data_parallel_size, config.tensor_parallel_size), ("fsdp", "tp")
         )
-        # RNG for LoRA adapter initialization (separate from model's RNG)
-        self.lora_rngs = nnx.Rngs(0)
+        # RNG for model construction and LoRA adapter initialization
+        self.rngs = nnx.Rngs(0)
 
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
-            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
+            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=self.rngs)
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
             # Split model into LoRA and non-LoRA parameters
@@ -182,7 +182,7 @@ class JaxBackendImpl(AbstractBackend):
 
             # Initialize adapter 0 with dummy config (required for base model sampling path)
             init_lora_adapter(
-                self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0), rngs=self.lora_rngs
+                self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0), rngs=self.rngs
             )
 
             # Initialize global accumulated gradients
@@ -446,7 +446,7 @@ class JaxBackendImpl(AbstractBackend):
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Configure adapter
-        init_lora_adapter(self.model, adapter_index, lora_config, rngs=self.lora_rngs)
+        init_lora_adapter(self.model, adapter_index, lora_config, rngs=self.rngs)
         logger.info(f"Created model {model_id} with adapter_index={adapter_index}, config={lora_config}")
 
     def delete_model(self, model_id: str) -> None:
