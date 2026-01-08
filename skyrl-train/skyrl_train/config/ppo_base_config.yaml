@@ -130,7 +130,7 @@ trainer:
     rollout_correction:
       # type of importance ratio to use for ppo loss correction
       # here importance ratio refers to logprobs_{policy_old} - logprobs_{rollout_policy}
-      tis_ratio_type: "null" # "null", "token", "sequence"
+      tis_ratio_type: null # null, "token", "sequence"
 
       # cap for the importance ratio
       # 1.5-5.0 is recommended for "token" tis_ratio_type
@@ -140,7 +140,7 @@ trainer:
 
       # "sequence" mask masks out sequences with product of importance ratios outside the cap
       # "geometric" mask masks out sequences with geometric mean of importance ratios outside the cap
-      rejection_mask_type: "null" # "null", "sequence", "geometric"
+      rejection_mask_type: null # null, "sequence", "geometric"
 
       # cap for the rejection mask ratio
       # values around 0.99-1.01 are recommended for "geometric" rejection_mask_type - MoE models may need larger allowed ranges due to higher mismatch

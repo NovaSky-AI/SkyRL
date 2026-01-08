@@ -583,13 +583,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
                     for i, metrics in enumerate(metrics_list):
-                        status = {
-                            "final_loss": metrics["final_loss"],
-                            "policy_loss": metrics["policy_loss"],
-                            "policy_lr": self.optimizer.param_groups[0]["lr"],
-                            "ppo_clip_ratio": metrics["ppo_clip_ratio"],
-                            "policy_entropy": metrics["policy_entropy"],
-                        }
+                        status = {}
+                        for k, v in metrics.items():
+                            status[k] = v
+
+                        status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
                         if self.cfg.trainer.algorithm.use_kl_loss:
                             status["policy_kl"] = metrics["policy_kl"]
 
@@ -600,7 +598,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # attach response_length
                         status["response_length"] = micro_buffer[i]["num_actions"]
 
-                        status = self.strategy.all_reduce(status)
+                        min_metrics = {k: v for k, v in status.items() if k.endswith("_min")}
+                        max_metrics = {k: v for k, v in status.items() if k.endswith("_max")}
+                        mean_metrics = {
+                            k: v for k, v in status.items() if k not in min_metrics and k not in max_metrics
+                        }
+
+                        status_mean = self.strategy.all_reduce(mean_metrics, op="mean")
+                        status_min = self.strategy.all_reduce(min_metrics, op="min")
+                        status_max = self.strategy.all_reduce(max_metrics, op="max")
+                        status_mean.update(status_min)
+                        status_mean.update(status_max)
+                        status = status_mean
+
                         status_list.append(status)
                         for k, v in status.items():
                             all_metrics[k].append(v)
