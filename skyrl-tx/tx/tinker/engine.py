@@ -178,13 +178,6 @@ class TinkerEngine:
 
         return results, valid_requests
 
-    def _prepare_sample_batch(
-        self,
-        requests: dict[str, tuple[str, types.SampleInput]],
-    ) -> types.PreparedSampleBatch:
-        """Prepare batch data for sample operations."""
-        return prepare_sample_batch(requests, self.config.checkpoints_base)
-
     def __init__(
         self,
         config: EngineConfig,
@@ -447,7 +440,7 @@ class TinkerEngine:
 
     def process_sample(self, requests: dict[str, tuple[str, types.SampleInput]]) -> dict:
         """Generate samples for a batch of requests."""
-        prepared = self._prepare_sample_batch(requests)
+        prepared = prepare_sample_batch(requests, self.config.checkpoints_base)
         return self.backend.sample(prepared)
 
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
