@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
@@ -17,6 +18,115 @@ from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
+
+
+def prepare_sample_batch(
+    requests: dict[str, tuple[str, types.SampleInput]],
+    checkpoints_base: AnyPath | None = None,
+) -> types.PreparedSampleBatch:
+    """Prepare batch data for sample operations.
+
+    Extracts prompts and sampling params from requests into lists
+    that the backend will convert to arrays.
+
+    Args:
+        requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
+        checkpoints_base: Base path for checkpoints (optional, needed for LoRA sampling)
+
+    Returns:
+        PreparedSampleBatch with all data extracted from requests
+    """
+    all_prompts = []
+    all_sampling_params = []
+    all_model_ids = []
+    all_checkpoint_ids = []
+    all_checkpoint_paths = []
+    request_batch_slices = []
+
+    needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
+
+    for request_id, (model_id, request_data) in requests.items():
+        request_start = len(all_prompts)
+
+        # Expand requests for num_samples
+        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+        checkpoint_path = ""
+        if model_id and request_data.checkpoint_id and checkpoints_base:
+            checkpoint_path = str(
+                checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
+            )
+        for _ in range(request_data.num_samples):
+            all_prompts.append(prompt_tokens)
+            all_sampling_params.append(request_data.sampling_params)
+            all_model_ids.append(model_id)
+            all_checkpoint_ids.append(request_data.checkpoint_id)
+            all_checkpoint_paths.append(checkpoint_path)
+
+        request_batch_slices.append(
+            (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
+        )
+
+    return types.PreparedSampleBatch(
+        all_prompts=all_prompts,
+        all_sampling_params=all_sampling_params,
+        all_model_ids=all_model_ids,
+        all_checkpoint_ids=all_checkpoint_ids,
+        all_checkpoint_paths=all_checkpoint_paths,
+        needs_prompt_logprobs=needs_prompt_logprobs,
+        request_batch_slices=request_batch_slices,
+    )
+
+
+def prepare_model_pass_batch(
+    requests: dict[str, tuple[str, types.ForwardBackwardInput]],
+) -> types.PreparedModelPassBatch:
+    """Prepare batch data for forward/forward_backward operations.
+
+    Extracts tokens, targets, and metadata from requests into lists
+    that the backend will convert to arrays.
+
+    Args:
+        requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
+
+    Returns:
+        PreparedModelPassBatch with all data extracted from requests
+    """
+    all_input_ids = []
+    all_targets = []
+    all_token_weights = []
+    all_model_ids = []
+    all_sampling_logprobs = []
+    all_advantages = []
+    all_loss_fn_types = []
+    request_batch_slices = []
+
+    for request_id, (model_id, request_data) in requests.items():
+        loss_fn_type = LOSS_TYPES[request_data.loss_fn]
+
+        request_start = len(all_input_ids)
+        for item in request_data.data:
+            tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
+            all_input_ids.append(tokens)
+            loss_fn_inputs = item.loss_fn_inputs
+            all_targets.append(loss_fn_inputs.target_tokens.data)
+            all_token_weights.append(loss_fn_inputs.weights.data)
+            all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
+            all_advantages.append(loss_fn_inputs.advantages.data)
+            all_model_ids.append(model_id)
+            all_loss_fn_types.append(loss_fn_type)
+
+        request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
+
+    return types.PreparedModelPassBatch(
+        all_input_ids=all_input_ids,
+        all_targets=all_targets,
+        all_token_weights=all_token_weights,
+        all_sampling_logprobs=all_sampling_logprobs,
+        all_advantages=all_advantages,
+        all_model_ids=all_model_ids,
+        all_loss_fn_types=all_loss_fn_types,
+        request_batch_slices=request_batch_slices,
+    )
 
 
 BACKENDS = {
@@ -67,113 +177,6 @@ class TinkerEngine:
                 valid_requests[request_id] = (model_id, request_data)
 
         return results, valid_requests
-
-    def _prepare_model_pass_batch(
-        self,
-        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
-    ) -> types.PreparedModelPassBatch:
-        """Prepare batch data for forward/forward_backward operations.
-
-        Extracts tokens, targets, and metadata from requests into lists
-        that the backend will convert to arrays.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
-
-        Returns:
-            PreparedModelPassBatch with all data extracted from requests
-        """
-        all_input_ids = []
-        all_targets = []
-        all_token_weights = []
-        all_model_ids = []
-        all_sampling_logprobs = []
-        all_advantages = []
-        all_loss_fn_types = []
-        request_batch_slices = []
-
-        for request_id, (model_id, request_data) in requests.items():
-            loss_fn_type = LOSS_TYPES[request_data.loss_fn]
-
-            request_start = len(all_input_ids)
-            for item in request_data.data:
-                tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
-                all_input_ids.append(tokens)
-                loss_fn_inputs = item.loss_fn_inputs
-                all_targets.append(loss_fn_inputs.target_tokens.data)
-                all_token_weights.append(loss_fn_inputs.weights.data)
-                all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
-                all_advantages.append(loss_fn_inputs.advantages.data)
-                all_model_ids.append(model_id)
-                all_loss_fn_types.append(loss_fn_type)
-
-            request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
-
-        return types.PreparedModelPassBatch(
-            all_input_ids=all_input_ids,
-            all_targets=all_targets,
-            all_token_weights=all_token_weights,
-            all_sampling_logprobs=all_sampling_logprobs,
-            all_advantages=all_advantages,
-            all_model_ids=all_model_ids,
-            all_loss_fn_types=all_loss_fn_types,
-            request_batch_slices=request_batch_slices,
-        )
-
-    def _prepare_sample_batch(
-        self,
-        requests: dict[str, tuple[str, types.SampleInput]],
-    ) -> types.PreparedSampleBatch:
-        """Prepare batch data for sample operations.
-
-        Extracts prompts and sampling params from requests into lists
-        that the backend will convert to arrays.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
-
-        Returns:
-            PreparedSampleBatch with all data extracted from requests
-        """
-        all_prompts = []
-        all_sampling_params = []
-        all_model_ids = []
-        all_checkpoint_ids = []
-        all_checkpoint_paths = []
-        request_batch_slices = []
-
-        needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
-
-        for request_id, (model_id, request_data) in requests.items():
-            request_start = len(all_prompts)
-
-            # Expand requests for num_samples
-            prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
-            checkpoint_path = ""
-            if model_id and request_data.checkpoint_id:
-                checkpoint_path = str(
-                    self.config.checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
-                )
-            for _ in range(request_data.num_samples):
-                all_prompts.append(prompt_tokens)
-                all_sampling_params.append(request_data.sampling_params)
-                all_model_ids.append(model_id)
-                all_checkpoint_ids.append(request_data.checkpoint_id)
-                all_checkpoint_paths.append(checkpoint_path)
-
-            request_batch_slices.append(
-                (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
-            )
-
-        return types.PreparedSampleBatch(
-            all_prompts=all_prompts,
-            all_sampling_params=all_sampling_params,
-            all_model_ids=all_model_ids,
-            all_checkpoint_ids=all_checkpoint_ids,
-            all_checkpoint_paths=all_checkpoint_paths,
-            needs_prompt_logprobs=needs_prompt_logprobs,
-            request_batch_slices=request_batch_slices,
-        )
 
     def __init__(
         self,
@@ -427,17 +430,17 @@ class TinkerEngine:
 
     def process_forward_backward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
         """Run forward and backward pass on a batch of requests."""
-        prepared = self._prepare_model_pass_batch(requests)
+        prepared = prepare_model_pass_batch(requests)
         return self.backend.forward_backward(prepared)
 
     def process_forward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
         """Run forward-only pass on a batch of requests."""
-        prepared = self._prepare_model_pass_batch(requests)
+        prepared = prepare_model_pass_batch(requests)
         return self.backend.forward(prepared)
 
     def process_sample(self, requests: dict[str, tuple[str, types.SampleInput]]) -> dict:
         """Generate samples for a batch of requests."""
-        prepared = self._prepare_sample_batch(requests)
+        prepared = prepare_sample_batch(requests, self.config.checkpoints_base)
         return self.backend.sample(prepared)
 
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
