@@ -14,7 +14,7 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 import numpy as np
 from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
-from skyrl_train.workers.worker_utils import BatchIterator
+from skyrl_train.workers.worker_utils import SampleBasedBatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
 from skyrl_train.config.utils import get_default_config
 from tests.cpu.util import example_dummy_config
@@ -559,7 +559,7 @@ def test_ppo_train_batch_calculations():
     policy_worker.record_memory = False
 
     # Calculate expected values based on new accumulation logic
-    dataloader = BatchIterator(
+    dataloader = SampleBasedBatchIterator(
         dummy_databatch, sample_batch_size=cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
     )
     total_micro_batches = len(dataloader)  # Should be 6
