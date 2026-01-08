@@ -1,6 +1,55 @@
 from flax import nnx
 import jax
+from jax import lax
 from jax import numpy as jnp
+
+
+def ragged_dot(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    precision=None,
+    preferred_element_type=None,
+    group_offset: jax.Array | None = None,
+) -> jax.Array:
+    """Ragged dot product with group_offset support on GPUs.
+
+    When group_offset is specified, rhs contains groups [offset, offset + g_local).
+    Tokens outside this range are routed to boundary groups and masked to zero.
+    """
+    if group_offset is None or group_offset[0] == 0:
+        return lax.ragged_dot(
+            lhs, rhs, group_sizes,
+            precision=precision,
+            preferred_element_type=preferred_element_type,
+        )
+
+    offset = group_offset[0]
+    m = lhs.shape[0]
+    g_local = rhs.shape[0]
+
+    # Compute token boundaries for local groups
+    cumsum = jnp.cumsum(group_sizes)
+    shard_start = cumsum[offset - 1]
+    shard_end = cumsum[offset + g_local - 1]
+
+    # Valid mask for tokens in local groups
+    token_idx = jnp.arange(m)
+    valid_mask = (token_idx >= shard_start) & (token_idx < shard_end)
+
+    # Adjust group sizes: absorb extra tokens at boundaries
+    local_group_sizes = lax.dynamic_slice_in_dim(group_sizes, offset, g_local, axis=0)
+    adjusted_group_sizes = local_group_sizes.at[0].add(shard_start)
+    adjusted_group_sizes = adjusted_group_sizes.at[-1].add(m - shard_end)
+
+    # Call ragged_dot - extra tokens use boundary groups but get masked out
+    result = lax.ragged_dot(
+        lhs, rhs, adjusted_group_sizes,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+    )
+
+    return jnp.where(valid_mask[:, None], result, 0)
 
 
 def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx.Rngs):
