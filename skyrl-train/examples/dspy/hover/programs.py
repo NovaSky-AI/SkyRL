@@ -5,41 +5,7 @@ from dspy.adapters import XMLAdapter
 from dspy.dsp.utils import deduplicate
 from .utils import BM25Searcher
 from dspy.adapters.xml_adapter import XMLAdapter
-
-class GenerateThreeQueries(dspy.Signature):
-    """
-    Given a claim and some key facts, generate up to 3 followup
-    search queries to find the next most essential clue towards
-    verifying or refuting the claim. If you think fewer queries
-    are sufficient, generate None for the search query outputs
-    you don't need. The goal ultimately is to find all documents
-    implicated by the claim.
-    """
-
-    claim = dspy.InputField()
-    key_facts = dspy.InputField()
-
-    search_query1 = dspy.OutputField()
-    search_query2 = dspy.OutputField()
-    search_query3 = dspy.OutputField()
-
-
-class AppendNotes(dspy.Signature):
-    """
-    Given a claim, some key facts, and new search results,
-    identify any new learnings from the new search results,
-    which will extend the key facts known so far about whether
-    the claim is true or false. The goal is to ultimately collect
-    all facts that would help us find all documents implicated
-    by the claim.
-    """
-
-    claim = dspy.InputField()
-    key_facts = dspy.InputField()
-    new_search_results = dspy.InputField()
-
-    new_key_facts = dspy.OutputField()
-
+import time
 
 instr1 = """
 Given a claim and some key facts, generate a follow-up search query to find the next most essential clue towards verifying or refuting the claim. The goal ultimately is to find all documents implicated by the claim.
@@ -53,10 +19,8 @@ Given a claim, some key facts, and new search results, identify any new learning
 class Hover(dspy.Module):
     def __init__(self, num_docs=4, num_hops=4):
         self.num_docs, self.num_hops = num_docs, num_hops
-        self.generate_query_sig = dspy.Signature("claim, key_facts -> followup_search_query", instr1)
-        self.generate_query = dspy.ChainOfThought(self.generate_query_sig)
-        self.append_notes_sig = dspy.Signature("claim, key_facts, new_search_results -> new_key_facts", instr2)
-        self.append_notes = dspy.ChainOfThought(self.append_notes_sig)
+        self.generate_query = dspy.ChainOfThought(dspy.Signature("claim, key_facts -> followup_search_query", instr1))
+        self.append_notes = dspy.ChainOfThought(dspy.Signature("claim, key_facts, new_search_results -> new_key_facts", instr2))
         self.bm25_retriever = BM25Searcher()
         self.adapter = XMLAdapter()
 
@@ -109,10 +73,9 @@ class Hover_query_gen(Hover):
         return dspy.Prediction(key_facts=key_facts, retrieved_docs=retrieved_docs)
 
     def append_trace(self, pred, **kwargs):
-        original_sig = GenerateThreeQueries
         # Get formatted finetune data which contains both input and output messages
         finetune_data = self.adapter.format_finetune_data(
-                                signature=self.generate_query_sig,
+                                signature=self.generate_query.predictors()[0].signature,
                                 inputs=kwargs,
                                 outputs=pred,
                                 demos=[] # TODO: Add support for demos
@@ -160,10 +123,9 @@ class Hover_append_notes(Hover):
         return dspy.Prediction(key_facts=key_facts, retrieved_docs=retrieved_docs)
 
     def append_trace(self, example, pred):
-        original_sig = GenerateThreeQueries
         # Get formatted finetune data which contains both input and output messages
         finetune_data = self.adapter.format_finetune_data(
-                                signature=self.append_notes_sig,
+                                signature=self.append_notes_sig.predictors()[0].signature,
                                 inputs=example,
                                 outputs=pred,
                                 demos=[] # TODO: Add support for demos

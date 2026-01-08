@@ -96,7 +96,7 @@ class DSPyGenerator(GeneratorInterface):
                 )
             )
 
-        batch_size = 20
+        batch_size = 40
         semaphore = asyncio.Semaphore(batch_size)
 
         async def run_with_limit(coro):
