@@ -12,7 +12,7 @@ NUM_GPUS=1
 LOGGER="wandb"
 
 
-MODEL_NAME="Qwen/Qwen3-8B"
+MODEL_NAME="Qwen/Qwen2.5-7B-Instruct"
 
 
 FLASH_ATTN=true
@@ -28,16 +28,18 @@ CHAT_TEMPLATE_PATH="$HOME/SkyRL/skyrl-train/examples/dspy/qwen3_thinking_acc.jin
 # train_data="['${DATA_DIR}/deepcoder_train_short.json']"
 # val_data="['${DATA_DIR}/test_livecodebench_short.json']"
 
+# +generator.engine_init_kwargs.custom_chat_template_chat_completion_path=$CHAT_TEMPLATE_PATH \
+
 # NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
 uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_dspy \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data=$train_data \
   data.val_data=$train_data \
+  +dspy.max_num_examples=600 \
   +dspy.program="Hover_query_gen" \
   +dspy.benchmark_name="hover" \
   +dspy.local_reward_fn="hover_query_reward_fn" \
   +dspy.final_reward_fn="hover_final_reward_fn" \
-  +generator.engine_init_kwargs.custom_chat_template_chat_completion_path=$CHAT_TEMPLATE_PATH \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.policy.model.lora.rank=0 \
   trainer.policy.model.lora.alpha=16 \
@@ -57,8 +59,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.http_endpoint_host="127.0.0.1" \
   generator.http_endpoint_port=8000 \
   trainer.epochs=20 \
-  trainer.policy_mini_batch_size=64 \
-  trainer.train_batch_size=64 \
+  trainer.policy_mini_batch_size=2 \
+  trainer.train_batch_size=2 \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.max_prompt_length=29000 \
@@ -67,8 +69,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
-  trainer.hf_save_interval=10 \
-  trainer.ckpt_interval=10 \
+  trainer.hf_save_interval=1 \
+  trainer.ckpt_interval=1 \
   trainer.flash_attn=$FLASH_ATTN \
   generator.backend=vllm \
   generator.run_engines_locally=true \
