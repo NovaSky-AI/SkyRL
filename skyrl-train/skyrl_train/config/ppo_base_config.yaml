@@ -121,7 +121,8 @@ trainer:
     # dual clip parameters
     clip_ratio_c: 3.0
 
-    # mark for deprecation
+    # To be deprecated in favor of rollout_correction.tis_ratio_type = "token"
+    # and "token_tis_ratio_cap_high"
     tis_imp_ratio_cap: -1.0
     use_tis: false
 

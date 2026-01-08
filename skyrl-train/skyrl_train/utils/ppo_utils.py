@@ -824,16 +824,6 @@ def ppo_policy_loss(
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
 
-    # Legacy TIS support (deprecated)
-    if config.use_tis:
-        from loguru import logger as logger_
-
-        logger_.debug(f"Using TIS with dtype: {rollout_logprobs.dtype}")
-        # Apply truncated importance sampling -> https://fengyao.notion.site/off-policy-rl
-        tis_imp_ratio = _safe_exp_delta(old_log_probs - rollout_logprobs, clip=20.0, out_dtype=log_probs.dtype)
-        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
-        loss = loss * tis_imp_ratio
-
     loss_metrics = LossMetrics(clip_ratio=clip_ratio)
 
     # apply rollout correction

@@ -284,64 +284,51 @@ def validate_cfg(cfg: DictConfig):
     # Legacy TIS validation (deprecated)
     if cfg.trainer.algorithm.use_tis:
         logger.warning(
-            "`trainer.algorithm.use_tis` is deprecated. Please use `trainer.algorithm.rollout_correction` instead."
+            f"`trainer.algorithm.use_tis` is deprecated. Setting `trainer.algorithm.rollout_correction` to `token` instead."
+            f"with `token_tis_ratio_cap_high`={cfg.trainer.algorithm.tis_imp_ratio_cap}"
         )
-        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
-            raise ValueError(
-                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` "
-                f"should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap }"
-            )
-        if cfg.generator.sampling_params.logprobs is None:
-            logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but `trainer.algorithm.use_tis` is `True`."
-                " Setting `logprobs` to `True`."
-            )
-            # just set to 0 for better user exp
-            cfg.generator.sampling_params.logprobs = 0
+        cfg.trainer.algorithm.rollout_correction.tis_ratio_type = "token"
+        cfg.trainer.algorithm.rollout_correction.token_tis_ratio_cap_high = cfg.trainer.algorithm.tis_imp_ratio_cap
 
-        if cfg.generator.backend == "sglang":
-            raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
+    # rollout_correction config validation
+    rollout_corr = cfg.trainer.algorithm.rollout_correction
+    tis_ratio_type = rollout_corr.tis_ratio_type
+    rejection_mask_type = rollout_corr.rejection_mask_type
 
-    # New rollout_correction validation
-    rollout_corr = cfg.trainer.algorithm.get("rollout_correction", None)
-    if rollout_corr is not None:
-        tis_ratio_type = rollout_corr.tis_ratio_type
-        rejection_mask_type = rollout_corr.rejection_mask_type
+    uses_rollout_correction = tis_ratio_type is not None or rejection_mask_type is not None
 
-        uses_rollout_correction = tis_ratio_type is not None or rejection_mask_type is not None
-
-        if uses_rollout_correction:
-            # Validate tis_ratio_type
+    if uses_rollout_correction:
+        # Validate tis_ratio_type
+        if tis_ratio_type:
             assert tis_ratio_type in [
-                None,
                 "token",
                 "sequence",
             ], f"`tis_ratio_type` must be 'None', 'token', or 'sequence', got {tis_ratio_type}"
 
-            # Validate rejection_mask_type
+        # Validate rejection_mask_type
+        if rejection_mask_type:
             assert rejection_mask_type in [
-                None,
                 "sequence",
                 "geometric",
             ], f"`rejection_mask_type` must be 'sequence', or 'geometric', got {rejection_mask_type}"
 
-            # Ensure logprobs are enabled for rollout correction
-            if cfg.generator.sampling_params.logprobs is None:
-                logger.warning(
-                    "`generator.sampling_params.logprobs` is `None` but rollout_correction is enabled."
-                    " Setting `logprobs` to `True`."
-                )
-                cfg.generator.sampling_params.logprobs = 0
+        # Ensure logprobs are enabled for rollout correction
+        if cfg.generator.sampling_params.logprobs is None:
+            logger.warning(
+                "`generator.sampling_params.logprobs` is `None` but rollout_correction is enabled."
+                " Setting `logprobs` to `True`."
+            )
+            cfg.generator.sampling_params.logprobs = 0
 
-            if cfg.generator.backend == "sglang":
-                raise NotImplementedError(
-                    "`trainer.algorithm.rollout_correction` doesn't support Sglang backend, please use vLLM"
-                )
+        if cfg.generator.backend == "sglang":
+            raise NotImplementedError(
+                "`trainer.algorithm.rollout_correction` doesn't support Sglang backend, please use vLLM"
+            )
 
-            assert cfg.trainer.algorithm.policy_loss_type in [
-                "regular",
-                "dual_clip",
-            ], "rollout_correction is only implemented for regular and dual_clip policy loss types"
+        assert cfg.trainer.algorithm.policy_loss_type in [
+            "regular",
+            "dual_clip",
+        ], "rollout_correction is only implemented for regular and dual_clip policy loss types"
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
