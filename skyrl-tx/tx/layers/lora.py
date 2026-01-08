@@ -32,6 +32,7 @@ class LoRAMixin:
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ) -> None:
+        """Initialize LoRA parameter tensors."""
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
 
@@ -43,10 +44,13 @@ class LoRAMixin:
         else:
             self.lora_scaling = nnx.Variable(jnp.full((max_lora_adapters,), 1.0, dtype=dtype))
             self.lora_ranks = nnx.Variable(jnp.full((max_lora_adapters,), max_lora_rank, dtype=jnp.int32))
+            # lora_A and lora_B are initialized to zeros here. The actual weight
+            # initialization (he_uniform for lora_A, zeros for lora_B) happens in
+            # init_lora_adapter(), which must be called before training.
             self.lora_A = Param(
                 *shape_A,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.he_uniform(), sharding_A),
+                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), sharding_A),
                 rngs=rngs,
             )
             self.lora_B = Param(
@@ -266,22 +270,22 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def update_adapter_config(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
-    """Update lora_ranks and lora_scaling for a specific adapter across all LoRA layers.
+def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
+    """Initialize a LoRA adapter for training.
 
-    Note: This method needs to be called BEFORE any training happens, you should not update
-    the config for the same adapter index multiple times throughout training (e.g. it will
-    invalidate your current training progress and also violate the assumption that lora_B
-    is zero).
+    Initializes the adapter: lora_A with he_uniform, lora_B with zeros,
+    and sets the appropriate rank and scaling. This must be called BEFORE
+    training begins on an adapter slot.
 
     Args:
         model: The model containing LoRA layers
-        adapter_index: Index of the adapter to update
-        lora_config: LoraConfig object containing rank, alpha, and training flags
+        adapter_index: Index of the adapter to initialize
+        lora_config: LoraConfig object containing rank, alpha, seed, and training flags
     """
+    rngs = nnx.Rngs(lora_config.seed)
     state = nnx.state(model)
 
-    def update_lora_config(path, value):
+    def init_adapter(path, value):
         effective_rank = lora_config.rank
         normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
 
@@ -294,24 +298,32 @@ def update_adapter_config(model: ModelForCausalLM, adapter_index: int, lora_conf
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
-        if path[-2].key == "lora_ranks":
+        key_name = path[-2].key
+        if key_name == "lora_ranks":
             return value.at[adapter_index].set(effective_rank)
-        if path[-2].key == "lora_scaling":
+        if key_name == "lora_scaling":
             # Set scaling to 0.0 if rank is 0
             return value.at[adapter_index].set(lora_config.alpha / effective_rank if effective_rank > 0 else 0.0)
-        if path[-2].key == "lora_A":
-            # Zero out columns beyond the rank for this adapter; lora_B is already zero
-            return value.at[adapter_index, ..., effective_rank:].set(0.0)
+        if key_name == "lora_A":
+            # Reinitialize with he_uniform, then zero columns beyond rank
+            shape = value[adapter_index].shape
+            new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
+            new_A = new_A.at[..., effective_rank:].set(0.0)
+            return value.at[adapter_index].set(new_A)
+        if key_name == "lora_B":
+            # Explicitly zero lora_B
+            return value.at[adapter_index].set(0.0)
         return value
 
-    updated_state = jax.tree.map_with_path(update_lora_config, state)
+    updated_state = jax.tree.map_with_path(init_adapter, state)
     nnx.update(model, updated_state)
 
 
-def clear_adapter_config(model: ModelForCausalLM, adapter_index: int):
+def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     """Clear/reset a LoRA adapter, freeing it for reuse.
 
     Sets rank=0, scaling=0, and zeros out lora_A and lora_B for the adapter.
+    Before reusing this adapter for training again, `init_lora_adapter` must be called.
     """
     state = nnx.state(model)
 

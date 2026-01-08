@@ -19,15 +19,15 @@ MAX_LORA_ADAPTERS = 4
 LORA_RANK = 8
 
 
-def create_backend():
+def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS):
     """Create a JaxBackend."""
-    config = JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32)
+    config = JaxBackendConfig(max_lora_adapters=max_lora_adapters, max_lora_rank=32)
     return JaxBackend(BASE_MODEL, config)
 
 
 def create_model(backend: JaxBackend, model_id: str) -> int:
     """Create a model and return its adapter index."""
-    lora_config = LoraConfig(rank=LORA_RANK, alpha=16)
+    lora_config = LoraConfig(rank=LORA_RANK, alpha=16, seed=0)
     backend.create_model(model_id, lora_config)
     return backend.models[model_id].adapter_index
 
@@ -100,8 +100,8 @@ def test_max_adapters_after_delete():
     assert create_model(backend, "model_new") == 1
 
 
-def test_clear_adapter_config():
-    """Test that clear_adapter_config zeros out adapter state."""
+def test_clear_lora_adapter():
+    """Test that clear_lora_adapter zeros out adapter state."""
     backend = create_backend()
     model_id = "test_model"
     adapter_idx = create_model(backend, model_id)
@@ -111,7 +111,7 @@ def test_clear_adapter_config():
     lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
     assert lora_layer.lora_ranks[adapter_idx] > 0
 
-    # Delete the model (calls clear_adapter_config internally)
+    # Delete the model (calls clear_lora_adapter internally)
     backend.delete_model(model_id)
 
     # Verify adapter state is zeroed
@@ -521,3 +521,38 @@ def test_sample_prompt_logprobs_with_microbatching():
         assert (
             len(result.prompt_logprobs) == expected_length
         ), f"Request {request_id}: expected {expected_length} prompt_logprobs, got {len(result.prompt_logprobs)}"
+
+
+def test_adapter_reuse_initializes_lora_adapter():
+    """Test that reusing an adapter slot initializes the lora adapter properly."""
+    # Use max_lora_adapters=2 so only slot 1 is available
+    # (slot 0 is reserved for base model)
+    backend = create_backend(max_lora_adapters=2)
+    model = backend.model
+    lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+
+    # Create first model
+    model_id_1 = "model_1"
+    adapter_idx = create_model(backend, model_id_1)
+
+    # Verify lora_A is non-zero after creation
+    assert not (
+        lora_layer.lora_A[adapter_idx, ..., :LORA_RANK] == 0.0
+    ).all(), "lora_A should be initialized with he_uniform (non-zero)"
+
+    # Delete the model (clears both lora_A and lora_B to zeros)
+    backend.delete_model(model_id_1)
+    assert (lora_layer.lora_A[adapter_idx] == 0.0).all(), "lora_A should be zeroed after clear_lora_adapter"
+
+    # Create a new model that reuses the same adapter slot
+    model_id_2 = "model_2"
+    new_adapter_idx = create_model(backend, model_id_2)
+    assert new_adapter_idx == adapter_idx, "Should reuse the same adapter slot"
+
+    # Verify lora_A is initialized (non-zero)
+    assert not (
+        lora_layer.lora_A[adapter_idx, ..., :LORA_RANK] == 0.0
+    ).all(), "lora_A should be initialized with he_uniform after adapter reuse"
+
+    # Verify lora_B is zeros
+    assert (lora_layer.lora_B[adapter_idx] == 0.0).all(), "lora_B should be zeros"

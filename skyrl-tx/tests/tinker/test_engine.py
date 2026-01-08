@@ -24,7 +24,7 @@ def test_process_unload_model():
 
     model_id = "test_model"
     _ = engine.process_single_request(
-        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16}}
+        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16, "seed": 0}}
     )
     assert engine.backend.has_model(model_id)
 
@@ -50,7 +50,7 @@ def test_cleanup_stale_sessions():
 
     # Create model in backend
     _ = engine.process_single_request(
-        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16}}
+        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16, "seed": 0}}
     )
     assert engine.backend.has_model(model_id)
 
@@ -69,7 +69,7 @@ def test_cleanup_stale_sessions():
             ModelDB(
                 model_id=model_id,
                 base_model=BASE_MODEL,
-                lora_config=types.LoraConfig(rank=8, alpha=16).model_dump(),
+                lora_config=types.LoraConfig(rank=8, alpha=16, seed=0).model_dump(),
                 status="ready",
                 request_id=1,
                 session_id=session_id,
