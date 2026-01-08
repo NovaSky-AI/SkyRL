@@ -301,10 +301,6 @@ def validate_cfg(cfg: DictConfig):
 
         if cfg.generator.backend == "sglang":
             raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-        assert cfg.trainer.algorithm.policy_loss_type in [
-            "regular",
-            "dual_clip",
-        ], "TIS is only implemented for regular and dual_clip policy loss types"
 
     # New rollout_correction validation
     rollout_corr = cfg.trainer.algorithm.get("rollout_correction", None)

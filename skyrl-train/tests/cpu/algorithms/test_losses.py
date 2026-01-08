@@ -17,6 +17,12 @@ from skyrl_train.utils.ppo_utils import (
     apply_rollout_correction,
 )
 
+NULL_ROLLOUT_CORR = {
+    "tis_ratio_type": "null",
+    "rejection_mask_type": "null",
+    "outlier_token_is_threshold_low": 1e-4,
+    "outlier_token_is_threshold_high": 100.0,
+}
 
 # Adapted a good test from NeMO-RL
 def test_policy_loss_dual_clip():
@@ -41,6 +47,7 @@ def test_policy_loss_dual_clip():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -94,6 +101,7 @@ def test_policy_loss_cispo():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -172,6 +180,7 @@ def test_policy_loss_reduction_modes():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -184,6 +193,7 @@ def test_policy_loss_reduction_modes():
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -257,6 +267,7 @@ def test_policy_loss_reduction_edge_cases():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -269,6 +280,7 @@ def test_policy_loss_reduction_edge_cases():
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -355,6 +367,7 @@ def test_gspo_importance_sampling_levels():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
     ppo_loss_fn = PolicyLossRegistry.get("regular")
@@ -370,6 +383,7 @@ def test_gspo_importance_sampling_levels():
             "loss_reduction": "sequence_mean",  # GSPO recommended reduction
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
     gspo_loss_fn = PolicyLossRegistry.get("gspo")
@@ -476,6 +490,7 @@ def test_clip_cov_policy_loss():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "clip_cov": {"clip_ratio": 0.5, "clip_cov_lb": -5.0, "clip_cov_ub": 5.0},  # Large ratio for testing
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -498,6 +513,7 @@ def test_clip_cov_policy_loss():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -538,6 +554,7 @@ def test_kl_cov_policy_loss():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "kl_cov": {"kl_cov_frac": 0.5, "ppo_kl_coef": 1.0},  # Apply KL to 50% of tokens
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -560,6 +577,7 @@ def test_kl_cov_policy_loss():
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
             "use_tis": False,
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -592,6 +610,7 @@ def test_sapo_policy_loss_basic():
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
             "sapo": {"tau_pos": 1.0, "tau_neg": 2.0},
+            "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
 
@@ -945,6 +964,8 @@ def test_apply_rollout_correction_tis_only():
             "tis_ratio_type": "token",
             "token_tis_ratio_cap_high": 2.0,
             "rejection_mask_type": "null",
+            "outlier_token_is_threshold_low": 1e-4,
+            "outlier_token_is_threshold_high": 100.0,
         }
     )
 
@@ -971,6 +992,8 @@ def test_apply_rollout_correction_rejection_only():
             "rejection_mask_type": "geometric",
             "geo_rejection_mask_ratio_cap_high": 1.1,
             "geo_rejection_mask_ratio_cap_low": 0.9,
+            "outlier_token_is_threshold_low": 1e-4,
+            "outlier_token_is_threshold_high": 100.0,
         }
     )
 
@@ -998,6 +1021,8 @@ def test_apply_rollout_correction_both_enabled():
             "rejection_mask_type": "geometric",
             "geo_rejection_mask_ratio_cap_high": 1.2,
             "geo_rejection_mask_ratio_cap_low": 0.8,
+            "outlier_token_is_threshold_low": 1e-4,
+            "outlier_token_is_threshold_high": 100.0,
         }
     )
 
@@ -1025,6 +1050,8 @@ def test_apply_rollout_correction_rejection_zeros_loss():
             "rejection_mask_type": "geometric",
             "geo_rejection_mask_ratio_cap_high": 1.1,
             "geo_rejection_mask_ratio_cap_low": 0.9,
+            "outlier_token_is_threshold_low": 1e-4,
+            "outlier_token_is_threshold_high": 100.0,
         }
     )
 
@@ -1057,6 +1084,8 @@ def test_ppo_policy_loss_with_rollout_correction():
                 "tis_ratio_type": "token",
                 "token_tis_ratio_cap_high": 2.0,
                 "rejection_mask_type": "null",
+                "outlier_token_is_threshold_low": 1e-4,
+                "outlier_token_is_threshold_high": 100.0,
             },
         }
     )

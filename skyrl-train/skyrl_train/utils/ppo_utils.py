@@ -652,8 +652,6 @@ def compute_rejection_mask(
 
     Returns:
         Rejection mask tensor (float) to multiply with the loss.
-
-    Reference: https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
     """
     # Compute token-level importance ratio
     token_tis_log_ratio = old_log_probs - rollout_logprobs
@@ -701,6 +699,10 @@ def apply_rollout_correction(
 
     Returns:
         Corrected loss tensor.
+
+    References:
+    - https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
+    - https://fengyao.notion.site/off-policy-rl
     """
     tis_ratio_type = rollout_corr.tis_ratio_type
     rejection_mask_type = rollout_corr.rejection_mask_type
@@ -773,10 +775,9 @@ def ppo_policy_loss(
         tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
         loss = loss * tis_imp_ratio
 
-    # New rollout correction support
-    rollout_corr = config.get("rollout_correction", None)
-    if rollout_corr is not None and rollout_logprobs is not None:
-        loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+    # apply rollout correction
+    rollout_corr = config.rollout_correction
+    loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
 
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
     return loss, clip_ratio
@@ -841,6 +842,10 @@ def sapo_policy_loss(
     # compute policy gradient loss
     loss = -gates * advantages
 
+    # apply rollout correction
+    rollout_corr = config.rollout_correction
+    loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+
     # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
 
@@ -902,6 +907,11 @@ def gspo_policy_loss(
     surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
     loss = -torch.min(surr1, surr2)
 
+    # apply rollout correction
+    rollout_corr = config.rollout_correction
+    if rollout_corr is not None and rollout_logprobs is not None:
+        loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+
     # Compute clipping ratio for monitoring
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
 
@@ -934,6 +944,10 @@ def compute_policy_loss_cispo(
 
     is_clipped = (ratio < 1 - config.cispo.cispo_eps_clip_low) | (ratio > 1 + config.cispo.cispo_eps_clip_high)
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
+
+    # apply rollout correction
+    rollout_corr = config.rollout_correction
+    loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
 
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
     return loss, clip_ratio
@@ -996,6 +1010,11 @@ def compute_policy_loss_clip_cov(
 
     # Apply correction mask to losses
     pg_losses = torch.maximum(pg_losses1, pg_losses2) * corr
+
+    # apply rollout correction
+    rollout_corr = config.rollout_correction
+    pg_losses = apply_rollout_correction(pg_losses, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+
     pg_loss = reduce_loss(
         loss=pg_losses,
         loss_mask=loss_mask,
@@ -1054,6 +1073,10 @@ def compute_policy_loss_kl_cov(
                     large_cov_idxs // advantages.shape[1],
                     large_cov_idxs % advantages.shape[1],
                 ]
+
+    # apply rollout correction
+    rollout_corr = config.rollout_correction
+    pg_losses = apply_rollout_correction(pg_losses, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
 
     pg_loss = reduce_loss(
         loss=pg_losses,

@@ -67,7 +67,6 @@ We highlight some important training parameters configured for FlashRL from our 
         ...
         trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_TYPE \
         trainer.algorithm.rollout_correction.token_tis_ratio_cap_high=$TIS_IMP_RATIO_CAP \
-        trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
         generator.sampling_params.logprobs=0 \
         ...
 
