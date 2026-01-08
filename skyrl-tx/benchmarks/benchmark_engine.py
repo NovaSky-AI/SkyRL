@@ -47,7 +47,7 @@ def build_engine(config: EngineConfig, num_adapters: int) -> TinkerEngine:
         engine.process_single_request(
             types.RequestType.CREATE_MODEL,
             model_id,
-            {"lora_config": {"rank": config.backend_config["max_lora_rank"], "alpha": 32}},
+            {"lora_config": {"rank": config.backend_config["max_lora_rank"], "alpha": 32, "seed": i}},
         )
         # Mark as loaded so sampling uses in-memory weights
         engine.backend.models[model_id].loaded_checkpoint_id = model_id
