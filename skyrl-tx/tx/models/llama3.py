@@ -265,7 +265,6 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.rngs = rngs
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
         if not self.config.tie_word_embeddings:

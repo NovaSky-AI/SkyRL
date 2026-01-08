@@ -24,8 +24,9 @@ def test_lora_training():
         load_safetensors(checkpoint_path, config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
-        init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16))
-        init_lora_adapter(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8))
+        lora_rngs = nnx.Rngs(0)
+        init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16), rngs=lora_rngs)
+        init_lora_adapter(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8), rngs=lora_rngs)
 
         # Create optimizer that only targets LoRA A and B parameters
         optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)

@@ -272,7 +272,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
+def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig, rngs: nnx.Rngs):
     """Initialize a LoRA adapter for training.
 
     Initializes the adapter: lora_A with he_uniform, lora_B with zeros,
@@ -283,6 +283,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         model: The model containing LoRA layers
         adapter_index: Index of the adapter to initialize
         lora_config: LoraConfig object containing rank, alpha, and training flags
+        rngs: RNG stream for initialization
     """
     state = nnx.state(model)
 
@@ -308,7 +309,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if key_name == "lora_A":
             # Reinitialize with he_uniform, then zero columns beyond rank
             shape = value[adapter_index].shape
-            new_A = nnx.initializers.he_uniform()(model.rngs.params(), shape, value.dtype)
+            new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
             new_A = new_A.at[..., effective_rank:].set(0.0)
             return value.at[adapter_index].set(new_A)
         if key_name == "lora_B":

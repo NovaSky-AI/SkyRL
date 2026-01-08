@@ -34,7 +34,9 @@ def create_test_model(base_model_name: str, rank: int, alpha: int, adapter_index
     mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        init_lora_adapter(model, adapter_index=adapter_index, lora_config=LoraConfig(rank=rank, alpha=alpha))
+        init_lora_adapter(
+            model, adapter_index=adapter_index, lora_config=LoraConfig(rank=rank, alpha=alpha), rngs=nnx.Rngs(0)
+        )
 
     return config, base_config, model
 
