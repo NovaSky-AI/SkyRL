@@ -52,7 +52,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
 
     rank, alpha, adapter_index = 8, 16, 2
     config, base_config, model = create_test_model(base_model_name, rank, alpha, adapter_index)
-    adapter_config = LoraConfig(rank=rank, alpha=alpha)
+    adapter_config = LoraConfig(rank=rank, alpha=alpha, seed=0)
 
     # Set LoRA weights to random values for testing (to catch transpose bugs)
     q_proj = model.model.layers[0].self_attn.q_proj

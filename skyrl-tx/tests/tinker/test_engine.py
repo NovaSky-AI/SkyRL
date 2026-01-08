@@ -75,10 +75,10 @@ def test_adapter_gradient_calculation():
 
     # Create two LoRA adapters
     engine.process_single_request(
-        types.RequestType.CREATE_MODEL, adapter1_id, {"lora_config": {"rank": 32, "alpha": 32}}
+        types.RequestType.CREATE_MODEL, adapter1_id, {"lora_config": {"rank": 32, "alpha": 32, "seed": 0}}
     )
     engine.process_single_request(
-        types.RequestType.CREATE_MODEL, adapter2_id, {"lora_config": {"rank": 32, "alpha": 32}}
+        types.RequestType.CREATE_MODEL, adapter2_id, {"lora_config": {"rank": 32, "alpha": 32, "seed": 0}}
     )
 
     # Adapter1 samples (fixed across both rounds)
@@ -141,10 +141,10 @@ def test_micro_batch_grad_accumulation():
     adapter2_id = "adapter2"
 
     engine.process_single_request(
-        types.RequestType.CREATE_MODEL, adapter1_id, {"lora_config": {"rank": 32, "alpha": 32}}
+        types.RequestType.CREATE_MODEL, adapter1_id, {"lora_config": {"rank": 32, "alpha": 32, "seed": 0}}
     )
     engine.process_single_request(
-        types.RequestType.CREATE_MODEL, adapter2_id, {"lora_config": {"rank": 32, "alpha": 32}}
+        types.RequestType.CREATE_MODEL, adapter2_id, {"lora_config": {"rank": 32, "alpha": 32, "seed": 0}}
     )
 
     # Fused batch with 6 total examples: 2 for adapter1, 4 for adapter2.
@@ -185,10 +185,10 @@ def test_micro_batch_grad_accumulation():
     engine = TinkerEngine(config)
 
     engine.process_single_request(
-        types.RequestType.CREATE_MODEL, adapter1_id, {"lora_config": {"rank": 32, "alpha": 32}}
+        types.RequestType.CREATE_MODEL, adapter1_id, {"lora_config": {"rank": 32, "alpha": 32, "seed": 0}}
     )
     engine.process_single_request(
-        types.RequestType.CREATE_MODEL, adapter2_id, {"lora_config": {"rank": 32, "alpha": 32}}
+        types.RequestType.CREATE_MODEL, adapter2_id, {"lora_config": {"rank": 32, "alpha": 32, "seed": 0}}
     )
 
     # Run 2: micro-batching disabled
@@ -229,7 +229,7 @@ def test_process_optim_step_hyperparams_behavior():
         engine.process_single_request(
             types.RequestType.CREATE_MODEL,
             model_id,
-            {"lora_config": {"rank": 32, "alpha": 32}},
+            {"lora_config": {"rank": 32, "alpha": 32, "seed": 0}},
         )
 
     tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
@@ -526,7 +526,7 @@ def test_process_unload_model():
 
     model_id = "test_model"
     _ = engine.process_single_request(
-        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16}}
+        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16, "seed": 0}}
     )
     assert engine.backend.has_model(model_id)
 
@@ -552,7 +552,7 @@ def test_cleanup_stale_sessions():
 
     # Create model in backend
     _ = engine.process_single_request(
-        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16}}
+        types.RequestType.CREATE_MODEL, model_id, {"lora_config": {"rank": 8, "alpha": 16, "seed": 0}}
     )
     assert engine.backend.has_model(model_id)
 
@@ -571,7 +571,7 @@ def test_cleanup_stale_sessions():
             ModelDB(
                 model_id=model_id,
                 base_model=BASE_MODEL,
-                lora_config=types.LoraConfig(rank=8, alpha=16).model_dump(),
+                lora_config=types.LoraConfig(rank=8, alpha=16, seed=0).model_dump(),
                 status="ready",
                 request_id=1,
                 session_id=session_id,
