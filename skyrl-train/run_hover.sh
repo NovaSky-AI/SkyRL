@@ -51,8 +51,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.epochs=20 \
   trainer.policy_mini_batch_size=64 \
   trainer.train_batch_size=64 \
-  trainer.micro_forward_batch_size_per_gpu=1 \
-  trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.micro_forward_batch_size_per_gpu=2 \
+  trainer.micro_train_batch_size_per_gpu=2 \
   trainer.max_prompt_length=29000 \
   generator.max_input_length=29000 \
   generator.sampling_params.max_generate_length=3000 \

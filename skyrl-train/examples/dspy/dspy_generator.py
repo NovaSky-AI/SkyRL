@@ -96,7 +96,7 @@ class DSPyGenerator(GeneratorInterface):
                 )
             )
 
-        batch_size = 10
+        batch_size = 20
         semaphore = asyncio.Semaphore(batch_size)
 
         async def run_with_limit(coro):
@@ -203,7 +203,7 @@ class DSPyGenerator(GeneratorInterface):
                 reward = results.reward.output
                 chat_history = results.traces
                 
-                if len(chat_history) == 3 and chat_history[2].get("content"):
+                if len(chat_history) >= 3:
                     successful = True
                     metadata = results.reward.metadata
                     logger.info(f"{prefix} successful: Results: {metadata}")

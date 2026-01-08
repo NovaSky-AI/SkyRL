@@ -119,37 +119,13 @@ class Hover_query_gen(Hover):
                             )
         
         all_messages = finetune_data.get('messages', [])
-        
-        # Extract user and assistant messages
-        chat_history = [None, None, None]
 
-        for msg in all_messages:
-            if msg.get("role") == "system":
-                chat_history[0] = {
-                    "role": "system",
-                    "content": msg['content']
-                }
-            if msg.get("role") == "user":
-                chat_history[1] = {
-                    "role": "user",
-                    "content": msg['content']
-                }
-            elif msg.get("role") == "assistant":
-                chat_history[2] = {
-                    "role": "assistant",
-                    "content": msg['content']
-                }
 
-        self.query_gen_traces.extend(chat_history)
+        self.query_gen_traces.extend(all_messages)
         self.queries.append(pred)
     
     def collect_trace(self, example, pred):
-        # Remove all system prompts in self.query_gen_traces starting from the second element
-        cleaned_traces = []
-        for i, msg in enumerate(self.query_gen_traces):
-            if i == 0 or (msg is not None and msg.get("role") != "system"):
-                cleaned_traces.append(msg)
-        return cleaned_traces, self.queries
+        return self.query_gen_traces, self.queries
 
 
 class Hover_append_notes(Hover):
@@ -195,26 +171,7 @@ class Hover_append_notes(Hover):
         
         all_messages = finetune_data.get('messages', [])
         
-        # Extract user and assistant messages
-        chat_history = [None, None, None]
-
-        for msg in all_messages:
-            if msg.get("role") == "system":
-                chat_history[0] = {
-                    "role": "system",
-                    "content": msg['content']
-                }
-            if msg.get("role") == "user":
-                chat_history[1] = {
-                    "role": "user",
-                    "content": msg['content']
-                }
-            elif msg.get("role") == "assistant":
-                chat_history[2] = {
-                    "role": "assistant",
-                    "content": msg['content']
-                }
-        self.append_notes_traces.extend(chat_history)
+        self.append_notes_traces.extend(all_messages)
         self.summaries.append(pred)
     
     def collect_trace(self, example, pred):
