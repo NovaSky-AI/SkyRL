@@ -104,7 +104,7 @@ def test_clear_adapter_config():
     lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
     assert lora_layer.lora_ranks[adapter_idx] > 0
 
-    # Delete the model (calls clear_adapter internally)
+    # Delete the model (calls clear_lora_adapter internally)
     backend.delete_model(model_id)
 
     # Verify adapter state is zeroed
