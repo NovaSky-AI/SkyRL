@@ -708,6 +708,9 @@ class PolicyWorkerBase(Worker):
             "policy_entropy": entropy.item(),
             "response_length": num_actions,
         }
+        for k, v in loss_metrics.items():
+            if k != "clip_ratio":  # we separately name the clip ratio metric
+                status["loss_metrics/" + k] = v
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
@@ -741,7 +744,16 @@ class PolicyWorkerBase(Worker):
             # for DP
             # TODO (sumanthrh): this assumes all workers are data parallel.
             # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
-            status = self.strategy.all_reduce(status)
+            min_metrics = {k: v for k, v in status.items() if k.endswith("_min")}
+            max_metrics = {k: v for k, v in status.items() if k.endswith("_max")}
+            mean_metrics = {k: v for k, v in status.items() if k not in min_metrics and k not in max_metrics}
+
+            status_mean = self.strategy.all_reduce(mean_metrics, op="mean")
+            status_min = self.strategy.all_reduce(min_metrics, op="min")
+            status_max = self.strategy.all_reduce(max_metrics, op="max")
+            status_mean.update(status_min)
+            status_mean.update(status_max)
+            status = status_mean
 
             # weighted mean for kl
             # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
@@ -817,7 +829,6 @@ class PolicyWorkerBase(Worker):
         torch.distributed.barrier()
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
-
         status_mean = reduce_metrics(all_metrics)
         status_mean["policy_update_steps"] = num_minibatches * self.cfg.trainer.update_epochs_per_batch
 

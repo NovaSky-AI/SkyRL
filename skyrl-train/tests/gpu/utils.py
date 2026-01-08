@@ -77,6 +77,7 @@ def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> Traini
             "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
             "loss_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
             "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+            "rollout_logprobs": 0.2 * torch.ones((batch_size, num_actions), device="cpu"),
         }
     )
     data.metadata = {"response_length": num_actions}

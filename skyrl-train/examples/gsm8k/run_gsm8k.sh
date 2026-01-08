@@ -10,17 +10,28 @@ set -x
 
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
 
-: "${DATA_DIR:="$HOME/data/gsm8k"}"
+: "${DATA_DIR:="/mnt/cluster_storage/data/gsm8k"}"
 : "${NUM_GPUS:=4}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
 
 : "${INFERENCE_BACKEND:=vllm}"
 # : "${INFERENCE_BACKEND:=sglang}"
 
+
+# rollout correction parameters
+TIS_RATIO_TYPE="sequence"
+REJECTION_MASK_TYPE="geometric"
+GEO_REJECTION_MASK_RATIO_CAP_HIGH=1.01
+GEO_REJECTION_MASK_RATIO_CAP_LOW=0.99
+
 uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_RATIO_TYPE \
+  trainer.algorithm.rollout_correction.rejection_mask_type=$REJECTION_MASK_TYPE \
+  trainer.algorithm.rollout_correction.geo_rejection_mask_ratio_cap_high=$GEO_REJECTION_MASK_RATIO_CAP_HIGH \
+  trainer.algorithm.rollout_correction.geo_rejection_mask_ratio_cap_low=$GEO_REJECTION_MASK_RATIO_CAP_LOW \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \

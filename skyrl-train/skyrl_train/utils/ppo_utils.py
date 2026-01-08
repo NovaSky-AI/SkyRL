@@ -761,7 +761,7 @@ def apply_rollout_correction(
 
     # Early return if no correction needed
     if not apply_tis and not apply_rejection:
-        return loss, {}
+        return loss, {}, loss_mask
 
     is_ratio = _safe_exp_delta(old_log_probs - rollout_logprobs, clip=20.0, out_dtype=old_log_probs.dtype)
     metrics = {}
@@ -773,12 +773,14 @@ def apply_rollout_correction(
     # Apply outlier token mask whenever rollout correction is enabled
     # This rejects sequences with any token having importance ratio outside acceptable bounds
     outlier_mask, outlier_metrics = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
-    loss = loss * outlier_mask
+    loss_mask = loss_mask * outlier_mask
     metrics.update(outlier_metrics)
 
     # Apply TIS ratio if enabled
     if apply_tis:
-        tis_ratio, tis_metrics = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, tis_ratio_type, rollout_corr)
+        tis_ratio, tis_metrics = compute_tis_ratio(
+            old_log_probs, rollout_logprobs, loss_mask, tis_ratio_type, rollout_corr
+        )
         loss = loss * tis_ratio
         metrics.update(tis_metrics)
 
@@ -787,10 +789,10 @@ def apply_rollout_correction(
         rejection_mask, rejection_metrics = compute_rejection_mask(
             old_log_probs, rollout_logprobs, loss_mask, rejection_mask_type, rollout_corr
         )
-        loss = loss * rejection_mask
+        loss_mask = loss_mask * rejection_mask
         metrics.update(rejection_metrics)
 
-    return loss, metrics
+    return loss, metrics, loss_mask
 
 
 @register_policy_loss(PolicyLossType.REGULAR)
@@ -837,7 +839,9 @@ def ppo_policy_loss(
     # apply rollout correction
     rollout_corr = config.rollout_correction
     if rollout_corr is not None and rollout_logprobs is not None:
-        loss, rollout_correction_metrics = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+        loss, rollout_correction_metrics, loss_mask = apply_rollout_correction(
+            loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+        )
         loss_metrics.update(rollout_correction_metrics)
 
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
@@ -907,7 +911,9 @@ def sapo_policy_loss(
     rollout_corr = config.rollout_correction
     loss_metrics = LossMetrics(clip_ratio=0.0)
     if rollout_corr is not None and rollout_logprobs is not None:
-        loss, rollout_correction_metrics = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+        loss, rollout_correction_metrics, loss_mask = apply_rollout_correction(
+            loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+        )
         loss_metrics.update(rollout_correction_metrics)
     # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
@@ -970,7 +976,9 @@ def gspo_policy_loss(
     # apply rollout correction
     rollout_corr = config.rollout_correction
     if rollout_corr is not None and rollout_logprobs is not None:
-        loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+        loss, loss_metrics, loss_mask = apply_rollout_correction(
+            loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+        )
 
     # Compute clipping ratio for monitoring
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
@@ -1008,7 +1016,9 @@ def compute_policy_loss_cispo(
     # apply rollout correction
     rollout_corr = config.rollout_correction
     if rollout_corr is not None and rollout_logprobs is not None:
-        loss = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+        loss, loss_metrics, loss_mask = apply_rollout_correction(
+            loss, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+        )
 
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
     return loss, LossMetrics(clip_ratio=clip_ratio)
@@ -1075,7 +1085,9 @@ def compute_policy_loss_clip_cov(
     # apply rollout correction
     rollout_corr = config.rollout_correction
     if rollout_corr is not None and rollout_logprobs is not None:
-        pg_losses = apply_rollout_correction(pg_losses, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+        pg_losses, loss_metrics, loss_mask = apply_rollout_correction(
+            pg_losses, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+        )
 
     pg_loss = reduce_loss(
         loss=pg_losses,
@@ -1139,7 +1151,9 @@ def compute_policy_loss_kl_cov(
     # apply rollout correction
     rollout_corr = config.rollout_correction
     if rollout_corr is not None and rollout_logprobs is not None:
-        pg_losses = apply_rollout_correction(pg_losses, old_log_probs, rollout_logprobs, loss_mask, rollout_corr)
+        pg_losses, loss_metrics, loss_mask = apply_rollout_correction(
+            pg_losses, old_log_probs, rollout_logprobs, loss_mask, rollout_corr
+        )
 
     pg_loss = reduce_loss(
         loss=pg_losses,

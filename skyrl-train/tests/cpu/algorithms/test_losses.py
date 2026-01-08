@@ -680,7 +680,7 @@ def test_compute_tis_ratio_token_level():
     torch.testing.assert_close(tis_ratio, expected, rtol=1e-3, atol=1e-4)
     # One token out of 3 was capped
     assert "tis_token_capped_frac" in metrics
-    assert abs(metrics["tis_token_capped_frac"] - 1/3) < 0.01
+    assert abs(metrics["tis_token_capped_frac"] - 1 / 3) < 0.01
 
 
 def test_compute_tis_ratio_sequence_level():
@@ -983,7 +983,9 @@ def test_apply_rollout_correction_null_configs():
         }
     )
 
-    corrected_loss, metrics = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    )
 
     # Should return the same tensor (early return) and empty metrics
     assert corrected_loss is loss
@@ -1010,7 +1012,9 @@ def test_apply_rollout_correction_tis_only():
         }
     )
 
-    corrected_loss, metrics = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    )
 
     # Expected: loss * 1.6487 (no capping needed)
     expected = loss * torch.exp(torch.tensor(0.5))
@@ -1041,7 +1045,9 @@ def test_apply_rollout_correction_rejection_only():
         }
     )
 
-    corrected_loss, metrics = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    )
 
     # Geometric mean = 1.0, within bounds, so loss unchanged
     torch.testing.assert_close(corrected_loss, loss, rtol=1e-3, atol=1e-4)
@@ -1073,7 +1079,9 @@ def test_apply_rollout_correction_both_enabled():
         }
     )
 
-    corrected_loss, metrics = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    )
 
     # TIS ratio ≈ 1.105, geometric mean ≈ 1.105 (within bounds, mask=1)
     # Expected: loss * 1.105 * 1.0 = loss * 1.105
@@ -1105,11 +1113,13 @@ def test_apply_rollout_correction_rejection_zeros_loss():
         }
     )
 
-    corrected_loss, metrics = apply_rollout_correction(loss, old_log_probs, rollout_logprobs, loss_mask, config)
+    corrected_loss, metrics, loss_mask = apply_rollout_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    )
 
     # Geometric mean ≈ 2.718, outside [0.9, 1.1], so loss should be zeroed
     expected = torch.tensor([[0.0, 0.0, 0.0]], device=device)
-    torch.testing.assert_close(corrected_loss, expected, rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(corrected_loss * loss_mask, expected, rtol=1e-3, atol=1e-4)
     # Check that the rejection metrics show rejection happened
     assert metrics["rejection_seq_masked_frac"] == 1.0
 

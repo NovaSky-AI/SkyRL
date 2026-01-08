@@ -7,7 +7,7 @@ set -x
 # bash examples/megatron/run_megatron_dapo_qwen3_30b_a3b_lora.sh
 
 MODEL_NAME="Qwen/Qwen3-30B-A3B-Base"
-DATA_DIR="$HOME/data/dapo"
+DATA_DIR="/mnt/cluster_storage/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_NODES=2
@@ -55,8 +55,13 @@ LORA_RANK=32
 LORA_ALPHA=64
 
 # TIS parameters
-TIS_IMP_RATIO_CAP=2.0
-TIS_TYPE=token
+TIS_IMP_RATIO_CAP=3.0
+
+# rollout correction parameters
+TIS_RATIO_TYPE="sequence"
+REJECTION_MASK_TYPE="geometric"
+GEO_REJECTION_MASK_RATIO_CAP_HIGH=1.05
+GEO_REJECTION_MASK_RATIO_CAP_LOW=0.95
 
 uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -88,8 +93,11 @@ uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
   trainer.policy.model.lora.rank=$LORA_RANK \
   trainer.policy.model.lora.alpha=$LORA_ALPHA \
-  trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_TYPE \
-  trainer.algorithm.rollout_correction.token_tis_ratio_cap_high=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.rollout_correction.tis_ratio_type=$TIS_RATIO_TYPE \
+  trainer.algorithm.rollout_correction.sequence_tis_ratio_cap_high=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.rollout_correction.rejection_mask_type=$REJECTION_MASK_TYPE \
+  trainer.algorithm.rollout_correction.geo_rejection_mask_ratio_cap_high=$GEO_REJECTION_MASK_RATIO_CAP_HIGH \
+  trainer.algorithm.rollout_correction.geo_rejection_mask_ratio_cap_low=$GEO_REJECTION_MASK_RATIO_CAP_LOW \
   trainer.epochs=20 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
@@ -119,10 +127,10 @@ uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   generator.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
-  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
+  trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}_seq_is_${TIS_RATIO_TYPE}_${TIS_IMP_RATIO_CAP}_rej_${REJECTION_MASK_TYPE}_${GEO_REJECTION_MASK_RATIO_CAP_HIGH}_${GEO_REJECTION_MASK_RATIO_CAP_LOW}" \
+  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}_seq_is_${TIS_RATIO_TYPE}_${TIS_IMP_RATIO_CAP}_rej_${REJECTION_MASK_TYPE}_${GEO_REJECTION_MASK_RATIO_CAP_HIGH}_${GEO_REJECTION_MASK_RATIO_CAP_LOW}" \
   trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}_seq_is_${TIS_RATIO_TYPE}_${TIS_IMP_RATIO_CAP}_rej_${REJECTION_MASK_TYPE}_${GEO_REJECTION_MASK_RATIO_CAP_HIGH}_${GEO_REJECTION_MASK_RATIO_CAP_LOW}" \
   $@

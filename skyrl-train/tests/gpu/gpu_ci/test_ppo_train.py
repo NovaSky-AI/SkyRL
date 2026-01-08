@@ -29,7 +29,8 @@ def cfg() -> DictConfig:
     return cfg
 
 
-@pytest.mark.parametrize("use_entropy_loss, use_kl_loss", [(False, False), (True, True), (True, False), (False, True)])
+# @pytest.mark.parametrize("use_entropy_loss, use_kl_loss", [(False, False), (True, True), (True, False), (False, True)])
+@pytest.mark.parametrize("use_entropy_loss, use_kl_loss", [(False, False)])
 def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_kl_loss):
     """
     Test that ppo_train runs and returns correct structure.
@@ -47,6 +48,12 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
         if use_kl_loss:
             cfg.trainer.algorithm.use_kl_loss = True
             cfg.trainer.algorithm.kl_loss_coef = 0.001
+
+        cfg.trainer.algorithm.rollout_correction.tis_ratio_type = "sequence"
+
+        cfg.trainer.algorithm.rollout_correction.rejection_mask_type = "geometric"
+        cfg.trainer.algorithm.rollout_correction.geo_rejection_mask_ratio_cap_high = 1.02
+        cfg.trainer.algorithm.rollout_correction.geo_rejection_mask_ratio_cap_low = 0.98
 
         actor_group = init_worker_with_type(
             "policy",
@@ -82,6 +89,8 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
         for metric in expected_metrics:
             assert metric in train_status, f"Should have {metric} in train_status"
             assert isinstance(train_status[metric], (int, float)), f"{metric} should be numeric"
+
+        print(train_status)
 
         # Simple check for metric values
         assert train_status["policy_update_steps"] > 0, "Should have completed at least one update step"

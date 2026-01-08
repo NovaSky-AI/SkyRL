@@ -12,7 +12,12 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     for k, v in metrics.items():
         assert len(v) > 0, f"No metrics for key {k}"
         assert all(isinstance(x, (int, float)) for x in v), f"Metrics for key {k} are not all numbers"
-        reduced_metrics[k] = sum(v) / len(v)
+        if k.endswith("_max"):
+            reduced_metrics[k] = max(v)
+        elif k.endswith("_min"):
+            reduced_metrics[k] = min(v)
+        else:
+            reduced_metrics[k] = sum(v) / len(v)
     return reduced_metrics
 
 

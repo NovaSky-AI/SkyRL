@@ -305,25 +305,25 @@ def validate_cfg(cfg: DictConfig):
     # New rollout_correction validation
     rollout_corr = cfg.trainer.algorithm.get("rollout_correction", None)
     if rollout_corr is not None:
-        tis_ratio_type = rollout_corr.get("tis_ratio_type", "null")
-        rejection_mask_type = rollout_corr.get("rejection_mask_type", "null")
+        tis_ratio_type = rollout_corr.tis_ratio_type
+        rejection_mask_type = rollout_corr.rejection_mask_type
 
-        uses_rollout_correction = tis_ratio_type != "null" or rejection_mask_type != "null"
+        uses_rollout_correction = tis_ratio_type is not None or rejection_mask_type is not None
 
         if uses_rollout_correction:
             # Validate tis_ratio_type
             assert tis_ratio_type in [
-                "null",
+                None,
                 "token",
                 "sequence",
-            ], f"`tis_ratio_type` must be 'null', 'token', or 'sequence', got {tis_ratio_type}"
+            ], f"`tis_ratio_type` must be 'None', 'token', or 'sequence', got {tis_ratio_type}"
 
             # Validate rejection_mask_type
             assert rejection_mask_type in [
-                "null",
+                None,
                 "sequence",
                 "geometric",
-            ], f"`rejection_mask_type` must be 'null', 'sequence', or 'geometric', got {rejection_mask_type}"
+            ], f"`rejection_mask_type` must be 'sequence', or 'geometric', got {rejection_mask_type}"
 
             # Ensure logprobs are enabled for rollout correction
             if cfg.generator.sampling_params.logprobs is None:
