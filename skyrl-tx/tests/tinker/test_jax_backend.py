@@ -20,7 +20,7 @@ def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS):
 
 def create_model(backend: JaxBackend, model_id: str) -> int:
     """Create a model and return its adapter index."""
-    lora_config = LoraConfig(rank=LORA_RANK, alpha=16)
+    lora_config = LoraConfig(rank=LORA_RANK, alpha=16, seed=0)
     backend.create_model(model_id, lora_config)
     return backend.models[model_id].adapter_index
 
