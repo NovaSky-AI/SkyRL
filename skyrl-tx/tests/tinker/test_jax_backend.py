@@ -94,7 +94,7 @@ def test_max_adapters_after_delete():
 
 
 def test_clear_adapter_config():
-    """Test that clear_adapter zeros out adapter state."""
+    """Test that clear_lora_adapter zeros out adapter state."""
     backend = create_backend()
     model_id = "test_model"
     adapter_idx = create_model(backend, model_id)
