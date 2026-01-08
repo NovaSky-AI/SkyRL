@@ -704,13 +704,11 @@ class PolicyWorkerBase(Worker):
         status = {
             "final_loss": loss.item(),
             "policy_loss": policy_loss.item(),
-            "ppo_clip_ratio": loss_metrics["clip_ratio"],
             "policy_entropy": entropy.item(),
             "response_length": num_actions,
         }
         for k, v in loss_metrics.items():
-            if k != "clip_ratio":  # we separately name the clip ratio metric
-                status["loss_metrics/" + k] = v
+            status["loss_metrics/" + k] = v
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 

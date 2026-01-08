@@ -31,7 +31,7 @@ set -x
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
-RUN_NAME=gsm8k-async-qwen2.5_1.5B-useTIS_${USE_TIS}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
+RUN_NAME=gsm8k-async-qwen2.5_1.5B-TIS_TYPE_${TIS_TYPE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
 
 uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_async \
   data.train_data="['$DATA_DIR/train.parquet']" \

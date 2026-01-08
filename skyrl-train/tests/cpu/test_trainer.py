@@ -550,7 +550,12 @@ def test_ppo_train_batch_calculations():
 
     def mock_policy_forward_backward(experience, microbatch_weight):
         policy_forward_backward_calls.append({"microbatch_weight": microbatch_weight})
-        return {"policy_loss": 0.5, "ppo_clip_ratio": 0.1, "policy_entropy": 2.0, "response_length": response_length}
+        return {
+            "policy_loss": 0.5,
+            "loss_metrics/clip_ratio": 0.1,
+            "policy_entropy": 2.0,
+            "response_length": response_length,
+        }
 
     policy_worker.forward_backward = mock_policy_forward_backward
     policy_worker.optim_step = MagicMock(return_value=None)

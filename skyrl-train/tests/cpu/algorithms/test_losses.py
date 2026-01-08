@@ -47,7 +47,6 @@ def test_policy_loss_dual_clip():
             "policy_loss_type": "dual_clip",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -101,7 +100,6 @@ def test_policy_loss_cispo():
             "policy_loss_type": "cispo",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -180,7 +178,6 @@ def test_policy_loss_reduction_modes():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -193,7 +190,6 @@ def test_policy_loss_reduction_modes():
             "policy_loss_type": "regular",
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -267,7 +263,6 @@ def test_policy_loss_reduction_edge_cases():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -280,7 +275,6 @@ def test_policy_loss_reduction_edge_cases():
             "policy_loss_type": "regular",
             "loss_reduction": "sequence_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -367,7 +361,6 @@ def test_gspo_importance_sampling_levels():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -383,7 +376,6 @@ def test_gspo_importance_sampling_levels():
             "policy_loss_type": "gspo",
             "loss_reduction": "sequence_mean",  # GSPO recommended reduction
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -514,7 +506,6 @@ def test_clip_cov_policy_loss():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -578,7 +569,6 @@ def test_kl_cov_policy_loss():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": NULL_ROLLOUT_CORR,
         }
     )
@@ -1141,7 +1131,6 @@ def test_ppo_policy_loss_with_rollout_correction():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": {
                 "tis_ratio_type": "token",
                 "token_tis_ratio_cap_high": 2.0,
@@ -1172,7 +1161,6 @@ def test_ppo_policy_loss_with_rollout_correction():
             "policy_loss_type": "regular",
             "loss_reduction": "token_mean",
             "max_seq_len": 4,
-            "use_tis": False,
             "rollout_correction": {
                 "tis_ratio_type": "null",
                 "rejection_mask_type": "null",

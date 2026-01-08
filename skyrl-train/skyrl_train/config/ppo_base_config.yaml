@@ -128,30 +128,33 @@ trainer:
 
     # reference: https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
     rollout_correction:
-      # type of importance ratio to use for ppo loss correction
-      # here importance ratio refers to logprobs_{policy_old} - logprobs_{rollout_policy}
+      # type of importance sampling ratio to use for ppo loss correction
+      # here importance sampling ratio refers to exp(logprobs_{policy_old} - logprobs_{rollout_policy})
       tis_ratio_type: null # null, "token", "sequence"
 
-      # cap for the importance ratio
-      # 1.5-5.0 is recommended for "token" tis_ratio_type
+      # used if tis_ratio_type = "token", 1.5-5.0 is recommended for "token" tis_ratio_type
       token_tis_ratio_cap_high: 2.0
-      # 2.0-10.0 is recommended for "sequence" tis_ratio_type
+      # used if tis_ratio_type = "sequence", 2.0-10.0 is recommended for "sequence" tis_ratio_type
       sequence_tis_ratio_cap_high: 5.0
 
+      # method of masking out sequences with cumulative importance sampling ratios outside the cap
       # "sequence" mask masks out sequences with product of importance ratios outside the cap
       # "geometric" mask masks out sequences with geometric mean of importance ratios outside the cap
       rejection_mask_type: null # null, "sequence", "geometric"
 
-      # cap for the rejection mask ratio
+      # used if rejection_mask_type = "geometric"
       # values around 0.99-1.01 are recommended for "geometric" rejection_mask_type - MoE models may need larger allowed ranges due to higher mismatch
-      geo_rejection_mask_ratio_cap_high: 1.001
-      geo_rejection_mask_ratio_cap_low: 0.999
+      geo_rejection_mask_ratio_cap_high: 1.01
+      geo_rejection_mask_ratio_cap_low: 0.99
 
-      # sequence level rejection mask ratio cap
+      # used if rejection_mask_type = "sequence"
+      # values around 0.5-2.0 are recommended for "sequence" rejection_mask_type
       sequence_rejection_mask_ratio_cap_high: 2.0
       sequence_rejection_mask_ratio_cap_low: 0.5
 
-      # masks out sequences with any token having importance ration far outside an acceptable range
+      # separate from rejection_mask and tis_ratio_type 
+      # if either is enabled, masks out sequences with any token having importance ratio
+      # far outside an acceptable range (low and high thresholds)
       outlier_token_is_threshold_low: 1e-4
       outlier_token_is_threshold_high: 100
 

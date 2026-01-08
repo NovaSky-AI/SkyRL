@@ -325,11 +325,6 @@ def validate_cfg(cfg: DictConfig):
                 "`trainer.algorithm.rollout_correction` doesn't support Sglang backend, please use vLLM"
             )
 
-        assert cfg.trainer.algorithm.policy_loss_type in [
-            "regular",
-            "dual_clip",
-        ], "rollout_correction is only implemented for regular and dual_clip policy loss types"
-
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2

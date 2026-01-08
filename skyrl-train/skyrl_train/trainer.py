@@ -579,12 +579,6 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
         )
-        # sanity check for tis (legacy)
-        if self.cfg.trainer.algorithm.use_tis:
-            assert (
-                rollout_logprobs_tensor is not None
-            ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
-            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
 
         # sanity check for rollout_correction
         rollout_corr = self.cfg.trainer.algorithm.rollout_correction

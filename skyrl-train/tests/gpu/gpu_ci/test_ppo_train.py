@@ -81,7 +81,7 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
             "policy_loss",
             "policy_update_steps",
             "policy_lr",
-            "ppo_clip_ratio",
+            "loss_metrics/clip_ratio",
             "policy_entropy",
             "final_loss",
         ]

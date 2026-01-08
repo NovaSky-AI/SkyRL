@@ -256,12 +256,10 @@ class MegatronModelWrapper:
                 "final_loss": loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
-                "ppo_clip_ratio": loss_metrics["clip_ratio"],
                 "policy_kl": kl_loss.detach().item(),
             }
             for k, v in loss_metrics.items():
-                if k != "clip_ratio":
-                    metrics["loss_metrics/" + k] = v
+                metrics["loss_metrics/" + k] = v
             return loss, metrics
 
         def forward_step(batch_iter, model):
