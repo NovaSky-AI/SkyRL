@@ -663,7 +663,7 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
-            policy_loss, clip_ratio = self.policy_loss_fn(
+            policy_loss, loss_metrics = self.policy_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -704,7 +704,7 @@ class PolicyWorkerBase(Worker):
         status = {
             "final_loss": loss.item(),
             "policy_loss": policy_loss.item(),
-            "ppo_clip_ratio": clip_ratio,
+            "ppo_clip_ratio": loss_metrics["clip_ratio"],
             "policy_entropy": entropy.item(),
             "response_length": num_actions,
         }

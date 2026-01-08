@@ -219,7 +219,7 @@ class MegatronModelWrapper:
             action_log_probs = token_logprobs[:, -num_actions:]
 
             # policy loss should be calculated based on the selected token logprobs
-            policy_loss, clip_ratio = self.policy_loss_fn(
+            policy_loss, loss_metrics = self.policy_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -256,7 +256,7 @@ class MegatronModelWrapper:
                 "final_loss": loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
-                "ppo_clip_ratio": clip_ratio,
+                "ppo_clip_ratio": loss_metrics["clip_ratio"],
                 "policy_kl": kl_loss.detach().item(),
             }
             return loss, metrics

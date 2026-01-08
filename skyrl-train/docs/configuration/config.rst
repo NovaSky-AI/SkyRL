@@ -502,7 +502,7 @@ It can be helpful to understand the final loss formulation to see how the differ
       advantages: torch.Tensor,
       config: DictConfig, # trainer.algorithm config
       loss_mask: Optional[torch.Tensor] = None,
-  ) -> torch.Tensor:
+  ) -> Tuple[torch.Tensor, LossMetrics]:
 
       ratio = (log_probs - old_log_probs).exp()
       surr1 = ratio * advantages
@@ -515,7 +515,7 @@ It can be helpful to understand the final loss formulation to see how the differ
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
       loss = reduce_loss(loss, loss_mask, config.loss_reduction)
-      return loss, clip_ratio
+      return loss, LossMetrics(clip_ratio=clip_ratio)
 
 
 Generator Configuration
