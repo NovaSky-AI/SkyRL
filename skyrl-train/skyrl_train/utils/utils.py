@@ -281,7 +281,7 @@ def validate_cfg(cfg: DictConfig):
         algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
-    # Legacy TIS validation (deprecated)
+    # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:
         logger.warning(
             f"`trainer.algorithm.use_tis` is deprecated. Setting `trainer.algorithm.off_policy_correction` to `token` instead."

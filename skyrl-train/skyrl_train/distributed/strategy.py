@@ -93,10 +93,8 @@ class DistributedStrategy(ABC):
                 data /= self.world_size
                 dist.all_reduce(data, op=dist.ReduceOp.SUM)
             elif op == "max":
-                data = torch.max(data)
                 dist.all_reduce(data, op=dist.ReduceOp.MAX)
             elif op == "min":
-                data = torch.min(data)
                 dist.all_reduce(data, op=dist.ReduceOp.MIN)
             elif op == "sum":
                 dist.all_reduce(data, op=dist.ReduceOp.SUM)

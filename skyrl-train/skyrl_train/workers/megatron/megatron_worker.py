@@ -30,7 +30,7 @@ from skyrl_train.distributed.megatron.megatron_utils import print_model_size, br
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -598,18 +598,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # attach response_length
                         status["response_length"] = micro_buffer[i]["num_actions"]
 
-                        min_metrics = {k: v for k, v in status.items() if k.endswith("_min")}
-                        max_metrics = {k: v for k, v in status.items() if k.endswith("_max")}
-                        mean_metrics = {
-                            k: v for k, v in status.items() if k not in min_metrics and k not in max_metrics
-                        }
-
-                        status_mean = self.strategy.all_reduce(mean_metrics, op="mean")
-                        status_min = self.strategy.all_reduce(min_metrics, op="min")
-                        status_max = self.strategy.all_reduce(max_metrics, op="max")
-                        status_mean.update(status_min)
-                        status_mean.update(status_max)
-                        status = status_mean
+                        status_mean = all_reduce_metrics(status, self.strategy)
 
                         status_list.append(status)
                         for k, v in status.items():

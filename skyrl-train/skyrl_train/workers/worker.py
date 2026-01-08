@@ -32,7 +32,7 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -742,16 +742,7 @@ class PolicyWorkerBase(Worker):
             # for DP
             # TODO (sumanthrh): this assumes all workers are data parallel.
             # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
-            min_metrics = {k: v for k, v in status.items() if k.endswith("_min")}
-            max_metrics = {k: v for k, v in status.items() if k.endswith("_max")}
-            mean_metrics = {k: v for k, v in status.items() if k not in min_metrics and k not in max_metrics}
-
-            status_mean = self.strategy.all_reduce(mean_metrics, op="mean")
-            status_min = self.strategy.all_reduce(min_metrics, op="min")
-            status_max = self.strategy.all_reduce(max_metrics, op="max")
-            status_mean.update(status_min)
-            status_mean.update(status_max)
-            status = status_mean
+            status = all_reduce_metrics(status, self.strategy)
 
             # weighted mean for kl
             # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
