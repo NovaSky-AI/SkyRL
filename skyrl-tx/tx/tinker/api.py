@@ -144,7 +144,9 @@ async def create_checkpoint(
 
 class LoRAConfig(BaseModel):
     rank: int
-    seed: int | None = Field(default=None, description="Seed for LoRA weight initialization. If None, a random seed is used.")
+    seed: int | None = Field(
+        default=None, description="Seed for LoRA weight initialization. If None, a random seed is used."
+    )
 
 
 class CreateModelRequest(BaseModel):
