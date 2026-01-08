@@ -144,6 +144,9 @@ async def create_checkpoint(
 
 class LoRAConfig(BaseModel):
     rank: int
+    seed: int | None = Field(
+        default=None, description="Seed for LoRA weight initialization. If None, a random seed is used."
+    )
 
 
 class CreateModelRequest(BaseModel):
@@ -551,7 +554,9 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     model_id = f"model_{uuid4().hex[:8]}"
 
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
-    lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0)
+    # Generate a random seed if not provided
+    seed = request.lora_config.seed if request.lora_config.seed is not None else random.randint(0, 2**31 - 1)
+    lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0, seed=seed)
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.CREATE_MODEL,

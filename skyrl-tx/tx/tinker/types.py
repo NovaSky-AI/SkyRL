@@ -66,6 +66,7 @@ class AdamParams(BaseModel):
 class LoraConfig(BaseModel):
     rank: int
     alpha: float
+    seed: int
     train_attn: bool = True
     train_mlp: bool = True
     train_unembed: bool = False
