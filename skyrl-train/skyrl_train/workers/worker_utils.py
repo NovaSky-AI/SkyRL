@@ -21,6 +21,7 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
             reduced_metrics[k] = sum(v) / len(v)
     return reduced_metrics
 
+
 def all_reduce_metrics(metrics: Dict[str, List[float]], strategy: DistributedStrategy) -> Dict[str, float]:
     """All reduce metrics across all processes."""
     min_metrics = {k: v for k, v in metrics.items() if k.endswith("_min")}
@@ -32,6 +33,7 @@ def all_reduce_metrics(metrics: Dict[str, List[float]], strategy: DistributedStr
     status_mean.update(status_min)
     status_mean.update(status_max)
     return status_mean
+
 
 class BatchIterator:
     """A simple iterator to yield micro batches of data from the training batch."""
