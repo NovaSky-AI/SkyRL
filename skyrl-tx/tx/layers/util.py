@@ -41,8 +41,7 @@ def ragged_dot(
 
     # Adjust group sizes: absorb extra tokens at boundaries
     local_group_sizes = lax.dynamic_slice_in_dim(group_sizes, offset, g_local, axis=0)
-    adjusted_group_sizes = local_group_sizes.at[0].add(shard_start)
-    adjusted_group_sizes = adjusted_group_sizes.at[-1].add(m - shard_end)
+    adjusted_group_sizes = local_group_sizes.at[0].add(shard_start).at[-1].add(m - shard_end)
 
     # Call ragged_dot - extra tokens use boundary groups but get masked out
     result = lax.ragged_dot(
