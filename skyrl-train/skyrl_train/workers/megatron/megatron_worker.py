@@ -535,8 +535,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 disable=not self.strategy.is_rank_0(),
             )
 
+            # TODO: Convert this into 2 loops for minibatches and microbatches.
             micro_buffer = []
-            for local_step, experience in enumerate(pbar):
+            for local_step, microbatch in enumerate(pbar):
+                experience = BatchIterator.batch_to_experience(microbatch)
                 experience.to_device(torch.cuda.current_device())
                 sequences = experience.sequences
                 attention_mask = experience.attention_mask

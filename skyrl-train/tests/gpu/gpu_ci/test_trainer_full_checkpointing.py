@@ -5,8 +5,8 @@ This test validates that the RayPPOTrainer can save and restore ALL training sta
 ensuring that training can resume exactly where it left off.
 
 Run with:
-For FSDP and DeepSpeed, run:
-uv run --isolated --extra dev --extra deepspeed --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
+For FSDP and FSDP2, run:
+uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
 
 For Megatron, run:
 uv run --isolated --extra dev --extra mcore pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
@@ -133,7 +133,6 @@ def create_minimal_trainer(cfg: DictConfig):
 @pytest.mark.parametrize(
     ("strategy, fsdp2_cpu_offload"),
     [
-        ("deepspeed", False),
         ("fsdp", False),
         ("fsdp2", False),
         ("fsdp2", True),

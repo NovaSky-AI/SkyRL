@@ -153,3 +153,12 @@ class AbstractBackend(ABC):
             True if the model is registered, False otherwise
         """
         pass
+
+    @abstractmethod
+    def delete_model(self, model_id: str) -> None:
+        """Delete a model and free all associated resources.
+
+        Args:
+            model_id: The model identifier
+        """
+        pass

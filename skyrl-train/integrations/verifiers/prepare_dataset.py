@@ -12,7 +12,7 @@ def extract_env_name(env_id: str) -> str:
     return base.split("@")[0]
 
 
-def build_row(sample: Dict[str, Any], data_source: str, env_name: str) -> Dict[str, Any]:
+def build_row(sample: Dict[str, Any], idx: int, data_source: str, env_name: str) -> Dict[str, Any]:
     if "prompt" not in sample:
         raise ValueError("Example must contain a 'prompt' field")
     prompt = sample["prompt"]  # Already formatted by the environment as chat messages
@@ -24,6 +24,7 @@ def build_row(sample: Dict[str, Any], data_source: str, env_name: str) -> Dict[s
     full_sample = {
         "data_source": data_source,
         "prompt": prompt,
+        "example_id": sample.get("example_id", idx),
         "verifiers": {
             "answer": answer,
             "task": task,
@@ -39,7 +40,9 @@ def build_row(sample: Dict[str, Any], data_source: str, env_name: str) -> Dict[s
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate Parquet dataset from a verifiers environment.")
-    parser.add_argument("--env_id", default="wordle", help="Environment identifier to load (e.g., 'wordle').")
+    parser.add_argument(
+        "--env_id", default="primeintellect/wordle", help="Environment identifier to load (e.g., 'wordle')."
+    )
     parser.add_argument(
         "--output_dir", default=None, help="Output directory for Parquet files. Defaults to ~/data/{env_id} in-code."
     )
@@ -70,7 +73,7 @@ if __name__ == "__main__":
         train_ds = None
         print(f"WARNING: Environment {args.env_id} does not have a training dataset. Loading the eval dataset only.")
     if train_ds:
-        train_ds = train_ds.map(map_fn, num_proc=16)
+        train_ds = train_ds.map(map_fn, with_indices=True, num_proc=16)
         # Drop top-level 'info' column, which often defaults to empty dict and cannot be serialized to parquet.
         if "info" in train_ds.column_names:
             train_ds = train_ds.remove_columns("info")
@@ -79,7 +82,7 @@ if __name__ == "__main__":
 
     # Load eval dataset
     eval_ds = vf_env.get_eval_dataset(args.num_eval)
-    eval_ds = eval_ds.map(map_fn, num_proc=16)
+    eval_ds = eval_ds.map(map_fn, with_indices=True, num_proc=16)
     # Drop top-level 'info' column, which often defaults to empty dict and cannot be serialized to parquet.
     if "info" in eval_ds.column_names:
         eval_ds = eval_ds.remove_columns("info")

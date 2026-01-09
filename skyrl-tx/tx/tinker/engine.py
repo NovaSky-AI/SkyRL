@@ -3,20 +3,130 @@
 import argparse
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus
+from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, ModelDB, SessionDB
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
+
+
+def prepare_sample_batch(
+    requests: dict[str, tuple[str, types.SampleInput]],
+    checkpoints_base: AnyPath | None = None,
+) -> types.PreparedSampleBatch:
+    """Prepare batch data for sample operations.
+
+    Extracts prompts and sampling params from requests into lists
+    that the backend will convert to arrays.
+
+    Args:
+        requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
+        checkpoints_base: Base path for checkpoints (optional, needed for LoRA sampling)
+
+    Returns:
+        PreparedSampleBatch with all data extracted from requests
+    """
+    all_prompts = []
+    all_sampling_params = []
+    all_model_ids = []
+    all_checkpoint_ids = []
+    all_checkpoint_paths = []
+    request_batch_slices = []
+
+    needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
+
+    for request_id, (model_id, request_data) in requests.items():
+        request_start = len(all_prompts)
+
+        # Expand requests for num_samples
+        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+        checkpoint_path = ""
+        if model_id and request_data.checkpoint_id and checkpoints_base:
+            checkpoint_path = str(
+                checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
+            )
+        for _ in range(request_data.num_samples):
+            all_prompts.append(prompt_tokens)
+            all_sampling_params.append(request_data.sampling_params)
+            all_model_ids.append(model_id)
+            all_checkpoint_ids.append(request_data.checkpoint_id)
+            all_checkpoint_paths.append(checkpoint_path)
+
+        request_batch_slices.append(
+            (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
+        )
+
+    return types.PreparedSampleBatch(
+        all_prompts=all_prompts,
+        all_sampling_params=all_sampling_params,
+        all_model_ids=all_model_ids,
+        all_checkpoint_ids=all_checkpoint_ids,
+        all_checkpoint_paths=all_checkpoint_paths,
+        needs_prompt_logprobs=needs_prompt_logprobs,
+        request_batch_slices=request_batch_slices,
+    )
+
+
+def prepare_model_pass_batch(
+    requests: dict[str, tuple[str, types.ForwardBackwardInput]],
+) -> types.PreparedModelPassBatch:
+    """Prepare batch data for forward/forward_backward operations.
+
+    Extracts tokens, targets, and metadata from requests into lists
+    that the backend will convert to arrays.
+
+    Args:
+        requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
+
+    Returns:
+        PreparedModelPassBatch with all data extracted from requests
+    """
+    all_input_ids = []
+    all_targets = []
+    all_token_weights = []
+    all_model_ids = []
+    all_sampling_logprobs = []
+    all_advantages = []
+    all_loss_fn_types = []
+    request_batch_slices = []
+
+    for request_id, (model_id, request_data) in requests.items():
+        loss_fn_type = LOSS_TYPES[request_data.loss_fn]
+
+        request_start = len(all_input_ids)
+        for item in request_data.data:
+            tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
+            all_input_ids.append(tokens)
+            loss_fn_inputs = item.loss_fn_inputs
+            all_targets.append(loss_fn_inputs.target_tokens.data)
+            all_token_weights.append(loss_fn_inputs.weights.data)
+            all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
+            all_advantages.append(loss_fn_inputs.advantages.data)
+            all_model_ids.append(model_id)
+            all_loss_fn_types.append(loss_fn_type)
+
+        request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
+
+    return types.PreparedModelPassBatch(
+        all_input_ids=all_input_ids,
+        all_targets=all_targets,
+        all_token_weights=all_token_weights,
+        all_sampling_logprobs=all_sampling_logprobs,
+        all_advantages=all_advantages,
+        all_model_ids=all_model_ids,
+        all_loss_fn_types=all_loss_fn_types,
+        request_batch_slices=request_batch_slices,
+    )
 
 
 BACKENDS = {
@@ -68,113 +178,6 @@ class TinkerEngine:
 
         return results, valid_requests
 
-    def _prepare_model_pass_batch(
-        self,
-        requests: dict[str, tuple[str, types.ForwardBackwardInput]],
-    ) -> types.PreparedModelPassBatch:
-        """Prepare batch data for forward/forward_backward operations.
-
-        Extracts tokens, targets, and metadata from requests into lists
-        that the backend will convert to arrays.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
-
-        Returns:
-            PreparedModelPassBatch with all data extracted from requests
-        """
-        all_input_ids = []
-        all_targets = []
-        all_token_weights = []
-        all_model_ids = []
-        all_sampling_logprobs = []
-        all_advantages = []
-        all_loss_fn_types = []
-        request_batch_slices = []
-
-        for request_id, (model_id, request_data) in requests.items():
-            loss_fn_type = LOSS_TYPES[request_data.loss_fn]
-
-            request_start = len(all_input_ids)
-            for item in request_data.data:
-                tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
-                all_input_ids.append(tokens)
-                loss_fn_inputs = item.loss_fn_inputs
-                all_targets.append(loss_fn_inputs.target_tokens.data)
-                all_token_weights.append(loss_fn_inputs.weights.data)
-                all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
-                all_advantages.append(loss_fn_inputs.advantages.data)
-                all_model_ids.append(model_id)
-                all_loss_fn_types.append(loss_fn_type)
-
-            request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
-
-        return types.PreparedModelPassBatch(
-            all_input_ids=all_input_ids,
-            all_targets=all_targets,
-            all_token_weights=all_token_weights,
-            all_sampling_logprobs=all_sampling_logprobs,
-            all_advantages=all_advantages,
-            all_model_ids=all_model_ids,
-            all_loss_fn_types=all_loss_fn_types,
-            request_batch_slices=request_batch_slices,
-        )
-
-    def _prepare_sample_batch(
-        self,
-        requests: dict[str, tuple[str, types.SampleInput]],
-    ) -> types.PreparedSampleBatch:
-        """Prepare batch data for sample operations.
-
-        Extracts prompts and sampling params from requests into lists
-        that the backend will convert to arrays.
-
-        Args:
-            requests: Dict mapping request_id to (model_id, request_data) tuples (pre-validated)
-
-        Returns:
-            PreparedSampleBatch with all data extracted from requests
-        """
-        all_prompts = []
-        all_sampling_params = []
-        all_model_ids = []
-        all_checkpoint_ids = []
-        all_checkpoint_paths = []
-        request_batch_slices = []
-
-        needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
-
-        for request_id, (model_id, request_data) in requests.items():
-            request_start = len(all_prompts)
-
-            # Expand requests for num_samples
-            prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
-            checkpoint_path = ""
-            if model_id and request_data.checkpoint_id:
-                checkpoint_path = str(
-                    self.config.checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
-                )
-            for _ in range(request_data.num_samples):
-                all_prompts.append(prompt_tokens)
-                all_sampling_params.append(request_data.sampling_params)
-                all_model_ids.append(model_id)
-                all_checkpoint_ids.append(request_data.checkpoint_id)
-                all_checkpoint_paths.append(checkpoint_path)
-
-            request_batch_slices.append(
-                (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
-            )
-
-        return types.PreparedSampleBatch(
-            all_prompts=all_prompts,
-            all_sampling_params=all_sampling_params,
-            all_model_ids=all_model_ids,
-            all_checkpoint_ids=all_checkpoint_ids,
-            all_checkpoint_paths=all_checkpoint_paths,
-            needs_prompt_logprobs=needs_prompt_logprobs,
-            request_batch_slices=request_batch_slices,
-        )
-
     def __init__(
         self,
         config: EngineConfig,
@@ -190,6 +193,9 @@ class TinkerEngine:
         backend_class, backend_config_class = BACKENDS[config.backend]
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
+
+        # Track last cleanup time for periodic stale session cleanup
+        self._last_cleanup_time: float = time.time()
 
         logger.info(f"Initialized TinkerEngine with backend={type(self.backend).__name__}")
 
@@ -344,6 +350,77 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
+    def process_unload_model(self, model_id: str, request_data: types.UnloadModelInput) -> types.UnloadModelOutput:
+        """Unload a model and free all resources."""
+        if not self.backend.has_model(model_id):
+            logger.warning(f"Ignoring unload request for model {model_id} that is not loaded.")
+        else:
+            self.backend.delete_model(model_id)
+
+            # Update model status in DB
+            with Session(self.db_engine) as session:
+                _ = session.exec(update(ModelDB).where(ModelDB.model_id == model_id).values(status="unloaded"))
+                session.commit()
+
+            logger.info(f"Unloaded model {model_id}")
+
+        return types.UnloadModelOutput(model_id=model_id, status="unloaded")
+
+    def cleanup_stale_sessions(self) -> int:
+        """Cleanup sessions with no recent heartbeat and unload their models.
+
+        Returns:
+            Number of models unloaded
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.config.session_timeout_sec)
+        unloaded_count = 0
+
+        with Session(self.db_engine) as session:
+            # Find stale sessions (active sessions with heartbeat older than cutoff)
+            stale_sessions = session.exec(
+                select(SessionDB).where(
+                    SessionDB.status == "active",
+                    SessionDB.last_heartbeat_at < cutoff,
+                )
+            ).all()
+
+            if not stale_sessions:
+                return 0
+
+            stale_session_ids = {s.session_id for s in stale_sessions}
+
+            # Find all models for all stale sessions in one query
+            models_to_process = session.exec(
+                select(ModelDB).where(
+                    ModelDB.session_id.in_(stale_session_ids),
+                    ModelDB.status != "unloaded",
+                )
+            ).all()
+
+            sessions_with_failed_unloads = set()
+            for model in models_to_process:
+                if self.backend.has_model(model.model_id):
+                    try:
+                        self.backend.delete_model(model.model_id)
+                        model.status = "unloaded"
+                        unloaded_count += 1
+                        logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
+                        sessions_with_failed_unloads.add(model.session_id)
+                else:
+                    # Model not in backend but status not unloaded - fix DB state
+                    model.status = "unloaded"
+
+            for sess in stale_sessions:
+                if sess.session_id not in sessions_with_failed_unloads:
+                    sess.status = "expired"
+                    logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
+
+            session.commit()
+
+        return unloaded_count
+
     def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
         if not self.backend.has_model(model_id):
@@ -353,17 +430,17 @@ class TinkerEngine:
 
     def process_forward_backward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
         """Run forward and backward pass on a batch of requests."""
-        prepared = self._prepare_model_pass_batch(requests)
+        prepared = prepare_model_pass_batch(requests)
         return self.backend.forward_backward(prepared)
 
     def process_forward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
         """Run forward-only pass on a batch of requests."""
-        prepared = self._prepare_model_pass_batch(requests)
+        prepared = prepare_model_pass_batch(requests)
         return self.backend.forward(prepared)
 
     def process_sample(self, requests: dict[str, tuple[str, types.SampleInput]]) -> dict:
         """Generate samples for a batch of requests."""
-        prepared = self._prepare_sample_batch(requests)
+        prepared = prepare_sample_batch(requests, self.config.checkpoints_base)
         return self.backend.sample(prepared)
 
     def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
@@ -461,6 +538,8 @@ class TinkerEngine:
                 return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
             case types.RequestType.LOAD_WEIGHTS:
                 return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
+            case types.RequestType.UNLOAD_MODEL:
+                return self.process_unload_model(model_id, types.UnloadModelInput.model_validate(request_data))
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
@@ -533,6 +612,12 @@ class TinkerEngine:
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
+
+            # Periodically cleanup stale sessions (disabled if either config is negative)
+            cleanup_enabled = self.config.session_cleanup_interval_sec >= 0 and self.config.session_timeout_sec >= 0
+            if cleanup_enabled and time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
+                _ = self.cleanup_stale_sessions()
+                self._last_cleanup_time = time.time()
 
             # Poll every 100ms
             time.sleep(0.1)

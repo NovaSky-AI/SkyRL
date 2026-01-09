@@ -108,8 +108,8 @@ async def _run_verifiers_end_to_end(
         for _ in range(num_prompts)
     ]
     env_extras = [
-        {"verifiers": {"environment": "wordle", "answer": "", "info": {}, "task": "default"}}
-        for _ in range(num_prompts)
+        {"verifiers": {"environment": "wordle", "answer": "", "info": {}, "task": "default", "example_id": i}}
+        for i in range(num_prompts)
     ]
 
     base_sampling = DictConfig(

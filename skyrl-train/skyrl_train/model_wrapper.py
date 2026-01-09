@@ -4,8 +4,6 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
 from typing import Any, Dict, Optional, Tuple, Union
-from copy import deepcopy
-
 import torch
 import torch.nn as nn
 from loguru import logger
@@ -13,7 +11,6 @@ from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
 import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
-from transformers.integrations.deepspeed import HfDeepSpeedConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
@@ -38,7 +35,6 @@ class HFModelWrapper(nn.Module):
         lora_init_method (str, optional): Initialization method for LoRA layers. Defaults to "kaiming".
         target_modules (list, optional): List of target modules for applying LoRA. Defaults to None.
         exclude_modules (list, optional): List of modules to exclude from applying LoRA. Defaults to None.
-        ds_config (dict, optional): Configuration for DeepSpeed, enabling model partitioning across multiple GPUs. Defaults to None.
         device_map (dict, optional): Device mapping for loading the model onto specific devices. Defaults to None.
         packing_samples (bool, optional): Whether to pack samples during training. Defaults to False.
         temperature (float, optional): Temperature for action selection. Defaults to 1.0.
@@ -58,7 +54,6 @@ class HFModelWrapper(nn.Module):
         lora_init_method="kaiming",
         target_modules=None,
         exclude_modules=None,
-        ds_config=None,
         device_map=None,
         temperature=1.0,
         use_liger_kernel=False,
@@ -82,20 +77,6 @@ class HFModelWrapper(nn.Module):
             ), "Flash attention 2 should be used for `use_sample_packing`"
 
         if isinstance(pretrain_or_model, str):
-            # Note: dschf is defined in function scope to avoid global effects
-            # https://huggingface.co/docs/transformers/deepspeed#non-trainer-deepspeed-integration
-            if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
-                if bf16 and ds_config["torch_autocast"]["enabled"]:
-                    # The model’s dtype on initialization follows the config passed to `HfDeepSpeedConfig`,
-                    # regardless of the `torch_dtype` specified in `from_pretrained`.
-                    # To align with this behavior, we temporarily set `bf16` to True in a copied config.
-                    # Note: this does NOT affect the config passed to `deepspeed.initialize()`.
-                    ds_config = deepcopy(ds_config)
-                    ds_config["bf16"] = {"enabled": True}
-                dschf = HfDeepSpeedConfig(ds_config)
-            else:
-                dschf = None  # noqa: F841
-
             if load_in_4bit:
                 assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
                 nf4_config = BitsAndBytesConfig(
@@ -535,7 +516,6 @@ def get_llm_for_sequence_regression(
     exclude_modules=None,
     lora_dropout=0,
     use_flash_attention_2=False,
-    ds_config: dict = None,
     init_value_head: bool = False,
     value_head_prefix="value_head",
     device_map=None,
@@ -551,8 +531,6 @@ def get_llm_for_sequence_regression(
         model_type (str): Type of sequence classification model. Only `critic` is supported.
         bf16 (bool, optional): Whether enable bfloat16. Defaults to True.
         use_flash_attention_2 (bool, optional): Whether use Flash Attention 2.0. Defaults to False.
-        ds_config (dict, optional): Deepspeed config, used to automatically splitting the model onto
-            multiple gpus during from_pretrained when ZeRO-3 enabled. Defaults to None.
 
     Returns:
         nn.Module: pretrained transformer model.
@@ -571,13 +549,6 @@ def get_llm_for_sequence_regression(
         sequence_parallel_size=sequence_parallel_size,
         use_sample_packing=use_sample_packing,
     )
-
-    # Note: dschf is defined in function scope to avoid global effects
-    # https://huggingface.co/docs/transformers/main_classes/deepspeed#nontrainer-deepspeed-integration
-    if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
-        dschf = HfDeepSpeedConfig(ds_config)
-    else:
-        dschf = None
 
     if load_in_4bit:
         assert bf16, "we only support bnb_4bit_compute_dtype = bf16"
@@ -632,19 +603,10 @@ def get_llm_for_sequence_regression(
     # https://github.com/huggingface/transformers/issues/26877
     model.config.use_cache = False
 
-    # NOTE: For reward model training only, intialize value_head manually
-    # because deepspeed.zero.Init() will not intialize them.
+    # NOTE: For reward model training only, intialize value_head manually.
     # TODO: Find a better way to clarify reward model training.
     if init_value_head:
         value_head = getattr(model, value_head_prefix)
-        if dschf is not None:
-            logger.info("initialize value_head for ZeRO-3 reward model training.")
-            import deepspeed
-
-            with deepspeed.zero.GatheredParameters([value_head.weight], modifier_rank=0):
-                if torch.distributed.get_rank() == 0:
-                    value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
-        else:
-            value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
+        value_head.weight.data.normal_(mean=0.0, std=1 / (config.hidden_size + 1))
 
     return model
