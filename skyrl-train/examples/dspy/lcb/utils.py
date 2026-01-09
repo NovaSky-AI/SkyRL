@@ -714,8 +714,9 @@ def check_test_raw(
 
 # Load gold predictions if available, otherwise use empty dicts
 # Try to find the files relative to the module location or current directory
-_gold_preds_train_path = os.path.join(os.path.dirname(__file__), "gold_preds_train.pkl")
-_gold_preds_test_path = os.path.join(os.path.dirname(__file__), "gold_preds_test.pkl")
+data_folder = os.path.expanduser("~/data/lcb")
+_gold_preds_train_path = os.path.join(data_folder, "gold_preds_train.pkl")
+_gold_preds_test_path = os.path.join(data_folder, "gold_preds_test.pkl")
 
 gold_preds = {}
 gold_preds_test = {}
