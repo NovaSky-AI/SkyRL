@@ -12,7 +12,7 @@ def ragged_dot(
     preferred_element_type=None,
     group_offset: jax.Array | None = None,
 ) -> jax.Array:
-    """Ragged dot product with group_offset support on GPUs.
+    """Ragged dot product with group_offset support.
 
     When group_offset is specified, rhs contains groups [offset, offset + g_local).
     Tokens outside this range are routed to boundary groups and masked to zero.
