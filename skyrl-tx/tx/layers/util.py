@@ -178,7 +178,7 @@ def expert_parallel_dispatch_combine(
         return jax.lax.psum(local_out, axis_name="ep")
 
     sharded_fn = jax.shard_map(
-        _shard_body, mesh=mesh, in_specs=in_specs, out_specs=P(),
+        _shard_body, mesh=mesh, in_specs=in_specs, out_specs=P("fsdp"),
     )
     return sharded_fn(
         hidden_states, selected_experts, routing_weights, adapter_indices,
