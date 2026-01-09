@@ -17,7 +17,7 @@ def ragged_dot(
     When group_offset is specified, rhs contains groups [offset, offset + g_local).
     Tokens outside this range are routed to boundary groups and masked to zero.
     """
-    if group_offset is None or group_offset[0] == 0:
+    if group_offset is None:
         return lax.ragged_dot(
             lhs, rhs, group_sizes,
             precision=precision,
@@ -29,9 +29,9 @@ def ragged_dot(
     g_local = rhs.shape[0]
 
     # Compute token boundaries for local groups
-    cumsum = jnp.cumsum(group_sizes)
-    shard_start = cumsum[offset - 1]
-    shard_end = cumsum[offset + g_local - 1]
+    cumsum = jnp.cumulative_sum(group_sizes, include_initial=True)
+    shard_start = cumsum[offset]
+    shard_end = cumsum[offset + g_local]
 
     # Valid mask for tokens in local groups
     token_idx = jnp.arange(m)
