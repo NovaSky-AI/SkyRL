@@ -19,7 +19,9 @@ def ragged_dot(
     """
     if group_offset is None:
         return lax.ragged_dot(
-            lhs, rhs, group_sizes,
+            lhs,
+            rhs,
+            group_sizes,
             precision=precision,
             preferred_element_type=preferred_element_type,
         )
@@ -44,7 +46,9 @@ def ragged_dot(
 
     # Call ragged_dot - extra tokens use boundary groups but get masked out
     result = lax.ragged_dot(
-        lhs, rhs, adjusted_group_sizes,
+        lhs,
+        rhs,
+        adjusted_group_sizes,
         precision=precision,
         preferred_element_type=preferred_element_type,
     )
