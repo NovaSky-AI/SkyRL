@@ -3,7 +3,7 @@ import jax
 from jax import numpy as jnp
 
 from tx.utils.models import filter_lora
-from tx.layers.util import Param, prepare_routing
+from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
 
@@ -244,7 +244,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
                 else p
             )
 
-        base_out = jax.lax.ragged_dot(x, _slice(self.weight.value, 0), group_sizes, group_offset=group_offset)
+        base_out = ragged_dot(x, _slice(self.weight.value, 0), group_sizes, group_offset=group_offset)
 
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
