@@ -103,7 +103,7 @@ def has_test_type(tests, type):  ## helper to select specific type of problems
 
 
 def get_split(split="test"):
-    pkl_path = f"live_code_bench_dataset_{split}.pkl"
+    pkl_path = os.path.expanduser("~/data/lcb/live_code_bench_dataset_test.pkl")
     if os.path.exists(pkl_path):
         with open(pkl_path, "rb") as f:
             return pickle.load(f)
@@ -169,7 +169,7 @@ def get_split(split="test"):
     #     for row in filtered_lcb_codegen_list
     # ]
 
-    with open(f"live_code_bench_dataset_{split}.pkl", "wb") as f:
+    with open(pkl_path, "wb") as f:
         print("Saving dataset...")
         pickle.dump(live_code_bench_dataset, f)
 
@@ -177,9 +177,9 @@ def get_split(split="test"):
 
 
 def lcb_data():
-    # return None, get_split("test")
+    get_split("test")
+    pkl_path = os.path.expanduser("~/data/lcb/live_code_bench_dataset_test.pkl")
 
-    pkl_path = "/home/ray/data/lcb/live_code_bench_dataset_test.pkl"
     with open(pkl_path, "rb") as f:
         examples = pickle.load(f)
     train_set, test_set = examples[:400], examples[400:]

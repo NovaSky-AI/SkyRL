@@ -253,25 +253,7 @@ class CodeGeneratorWithRanker_prog(CodeGeneratorWithRanker):
         
         # Extract user and assistant messages
 
-        chat_history = [None, None, None]
-
-        for msg in all_messages:
-            if msg.get("role") == "system":
-                chat_history[0] = {
-                    "role": "system",
-                    "content": msg['content']
-                }
-            if msg.get("role") == "user":
-                chat_history[1] = {
-                    "role": "user",
-                    "content": msg['content']
-                }
-            elif msg.get("role") == "assistant":
-                chat_history[2] = {
-                    "role": "assistant",
-                    "content": msg['content']
-                }
-        return chat_history, None
+        return all_messages, None
 
 
 class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
@@ -361,11 +343,11 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
 
     def collect_trace(self, kwargs, pred):
         is_stdin = kwargs.get("is_stdin")
-        original_sig = GenerateTests_std_inputs if is_stdin else GenerateTests_func_inputs
+        generator = self.test_generator_stdin if is_stdin else self.test_generator
 
         # Get formatted finetune data which contains both input and output messages
         finetune_data = self.adapter.format_finetune_data(
-                                signature=original_sig,
+                                signature=generator.predictors()[0].signature,
                                 inputs=kwargs,
                                 outputs=self.raw_tests,
                                 demos=[] # TODO: Add support for demos
@@ -375,25 +357,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
         
         # Extract user and assistant messages
 
-        chat_history = [None, None, None]
-
-        for msg in all_messages:
-            if msg.get("role") == "system":
-                chat_history[0] = {
-                    "role": "system",
-                    "content": msg['content']
-                }
-            if msg.get("role") == "user":
-                chat_history[1] = {
-                    "role": "user",
-                    "content": msg['content']
-                }
-            elif msg.get("role") == "assistant":
-                chat_history[2] = {
-                    "role": "assistant",
-                    "content": msg['content']
-                }
-        return chat_history, self.raw_tests
+        return all_messages, self.raw_tests
 
     
     
