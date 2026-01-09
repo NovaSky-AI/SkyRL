@@ -202,16 +202,13 @@ class Qwen3Experts(nnx.Module):
         routing_weights, selected_experts = jax.lax.top_k(router_logits, k=self.config.num_experts_per_tok)
         routing_weights = nnx.softmax(routing_weights, axis=-1)
 
-        def _expert_op(x, groups, adapt_idx, **kwargs):
-            gate = self.gate_proj(x, groups, adapt_idx, **kwargs)
-            up = self.up_proj(x, groups, adapt_idx, **kwargs)
-            return self.down_proj(nnx.silu(gate) * up, groups, adapt_idx, **kwargs)
-
         return expert_parallel_dispatch_combine(
             hidden_states,
             selected_experts,
             routing_weights,
-            _expert_op,
+            self.gate_proj,
+            self.up_proj,
+            self.down_proj,
             self.config.num_experts,
             self.config.num_experts_per_tok,
             self.config.hidden_size,

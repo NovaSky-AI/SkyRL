@@ -233,26 +233,19 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         group_sizes: jax.Array,
         adapter_indices_sorted: jax.Array | None = None,
         *,
-        expert_start: int | None = None,
-        num_experts_chunk: int | None = None,
         group_offset: jax.Array | None = None,
     ) -> jax.Array:
-        def _slice(p, axis=0):
-            return (
-                jax.lax.dynamic_slice_in_dim(p, expert_start, num_experts_chunk, axis)
-                if expert_start is not None
-                else p
-            )
+        # Inside shard_map, weights are already local shards
+        weight = self.weight.value
+        num_local_experts = weight.shape[0]
 
-        base_out = ragged_dot(x, _slice(self.weight.value, 0), group_sizes, group_offset=group_offset)
+        base_out = ragged_dot(x, weight, group_sizes, group_offset=group_offset)
 
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
 
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
             raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
-
-        num_experts = num_experts_chunk or self.num_experts
 
         # Reconstruct expert indices from group_sizes (global indices)
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])
@@ -261,12 +254,12 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         flattened_indices = expert_indices * self.max_lora_adapters + adapter_indices_sorted
         num_flattened_groups = self.num_experts * self.max_lora_adapters
 
-        # Reshape LoRA weights in expert-first order, then slice local experts
-        lora_A = _slice(self.lora_A.value.transpose((1, 0, 2, 3)), 0).reshape(
-            self.max_lora_adapters * num_experts, self.in_features, self.max_lora_rank
+        # Reshape LoRA weights in expert-first order (already local shards)
+        lora_A = self.lora_A.value.transpose((1, 0, 2, 3)).reshape(
+            self.max_lora_adapters * num_local_experts, self.in_features, self.max_lora_rank
         )
-        lora_B = _slice(self.lora_B.value.transpose((1, 0, 2, 3)), 0).reshape(
-            self.max_lora_adapters * num_experts, self.max_lora_rank, self.out_features
+        lora_B = self.lora_B.value.transpose((1, 0, 2, 3)).reshape(
+            self.max_lora_adapters * num_local_experts, self.max_lora_rank, self.out_features
         )
 
         # Sort tokens by combined index

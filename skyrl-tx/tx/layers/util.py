@@ -85,29 +85,20 @@ def prepare_routing(
     return sorted_tokens, group_sizes, unsort_indices, sorted_adapter_indices
 
 
-def _replicated_spec_like(x: jax.Array) -> PartitionSpec:
-    """Return a PartitionSpec that mirrors an array's sharding but omits 'ep'."""
-    spec = getattr(getattr(x, "sharding", None), "spec", (None,) * x.ndim)
-    return PartitionSpec(
-        *[
-            tuple(a for a in s if a != "ep") or None if isinstance(s, tuple) else (None if s == "ep" else s)
-            for s in spec
-        ]
-    )
-
-
 def _local_expert_computation(
     hidden_states: jax.Array,
     selected_experts: jax.Array,
     routing_weights: jax.Array,
-    expert_fn,
+    gate_proj,
+    up_proj,
+    down_proj,
     num_experts: int,
     num_experts_per_tok: int,
     hidden_size: int,
     adapter_indices: jax.Array | None = None,
-    expert_kwargs: dict | None = None,
+    group_offset: jax.Array | None = None,
 ) -> jax.Array:
-    """Run expert computation locally without expert-parallel sharding."""
+    """Run expert computation locally."""
     hidden_states_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
     adapter_indices_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
     hidden_states_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
@@ -117,7 +108,10 @@ def _local_expert_computation(
         adapter_indices=adapter_indices_expanded,
     )
 
-    expert_out = expert_fn(hidden_states_sorted, group_sizes, adapter_indices_sorted, **(expert_kwargs or {}))
+    gate = gate_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted, group_offset=group_offset)
+    up = up_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted, group_offset=group_offset)
+    expert_out = down_proj(nnx.silu(gate) * up, group_sizes, adapter_indices_sorted, group_offset=group_offset)
+
     reshaped_out = expert_out[unsort_indices].reshape(-1, num_experts_per_tok, hidden_size)
     return jnp.sum(reshaped_out * routing_weights[..., None], axis=1)
 
@@ -126,7 +120,9 @@ def expert_parallel_dispatch_combine(
     hidden_states: jax.Array,
     selected_experts: jax.Array,
     routing_weights: jax.Array,
-    expert_fn,
+    gate_proj,
+    up_proj,
+    down_proj,
     num_experts: int,
     num_experts_per_tok: int,
     hidden_size: int,
@@ -138,32 +134,53 @@ def expert_parallel_dispatch_combine(
 
     if ep_size == 1:
         return _local_expert_computation(
-            hidden_states, selected_experts, routing_weights, expert_fn,
+            hidden_states, selected_experts, routing_weights,
+            gate_proj, up_proj, down_proj,
             num_experts, num_experts_per_tok, hidden_size, adapter_indices,
         )
 
     assert num_experts % ep_size == 0
     experts_per_rank = num_experts // ep_size
 
-    def _shard_body(shard_h, shard_s, shard_r, shard_a):
+    # Split modules into graphdef and state
+    gate_graphdef, gate_state = nnx.split(gate_proj)
+    up_graphdef, up_state = nnx.split(up_proj)
+    down_graphdef, down_state = nnx.split(down_proj)
+
+    # Get partition specs from states
+    gate_state_specs = nnx.get_partition_spec(gate_state)
+    up_state_specs = nnx.get_partition_spec(up_state)
+    down_state_specs = nnx.get_partition_spec(down_state)
+
+    P = PartitionSpec
+    in_specs = (
+        P(), P(), P(), P(),  # hidden_states, selected_experts, routing_weights, adapter_indices
+        gate_state_specs,
+        up_state_specs,
+        down_state_specs,
+    )
+
+    def _shard_body(shard_h, shard_s, shard_r, shard_a, gate_st, up_st, down_st):
         axis_idx = jax.lax.axis_index("ep")
-        shard_start = axis_idx * experts_per_rank
-        group_offset = jnp.array([shard_start], dtype=jnp.int32)
+        group_offset = jnp.array([axis_idx * experts_per_rank], dtype=jnp.int32)
+
+        # Reconstruct modules from state
+        gate = nnx.merge(gate_graphdef, gate_st)
+        up = nnx.merge(up_graphdef, up_st)
+        down = nnx.merge(down_graphdef, down_st)
 
         local_out = _local_expert_computation(
-            shard_h, shard_s, shard_r, expert_fn,
+            shard_h, shard_s, shard_r,
+            gate, up, down,
             num_experts, num_experts_per_tok, hidden_size, shard_a,
-            expert_kwargs={
-                "expert_start": jax.lax.stop_gradient(shard_start),
-                "num_experts_chunk": experts_per_rank,
-                "group_offset": group_offset,
-            },
+            group_offset=group_offset,
         )
         return jax.lax.psum(local_out, axis_name="ep")
 
-    in_specs = jax.tree.map(_replicated_spec_like, (hidden_states, selected_experts, routing_weights, adapter_indices))
     sharded_fn = jax.shard_map(
-        _shard_body, mesh=mesh, in_specs=in_specs,
-        out_specs=_replicated_spec_like(hidden_states), axis_names={"ep"},
+        _shard_body, mesh=mesh, in_specs=in_specs, out_specs=P(),
     )
-    return sharded_fn(hidden_states, selected_experts, routing_weights, adapter_indices)
+    return sharded_fn(
+        hidden_states, selected_experts, routing_weights, adapter_indices,
+        gate_state, up_state, down_state,
+    )
