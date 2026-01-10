@@ -87,76 +87,32 @@ def prepare_routing(
     return sorted_tokens, group_sizes, unsort_indices, sorted_adapter_indices
 
 
-def shard_experts(
-    hidden_states: jax.Array,
-    selected_experts: jax.Array,
-    routing_weights: jax.Array,
-    experts: nnx.Module,
-    forward,
-    adapter_indices: jax.Array | None = None,
-) -> jax.Array:
-    """Dispatch tokens to experts and combine outputs using expert parallelism.
+def ep_specs(state):
+    """Extract only 'ep' dims from PartitionSpecs, replacing others with None."""
+    return jax.tree.map(
+        lambda s: PartitionSpec(*(p if p == "ep" else None for p in s)) if isinstance(s, PartitionSpec) else s,
+        nnx.get_partition_spec(state),
+        is_leaf=lambda x: isinstance(x, PartitionSpec),
+    )
+
+
+def shard_map_ep(module: nnx.Module, func, mesh, *args):
+    """Apply shard_map over the 'ep' axis for a stateful nnx.Module.
 
     Args:
-        hidden_states: Input tensor of shape (batch, seq_len, hidden_size)
-        selected_experts: Expert indices of shape (batch, seq_len, num_experts_per_tok)
-        routing_weights: Routing weights of shape (batch, seq_len, num_experts_per_tok)
-        experts: Module with config (num_experts, num_experts_per_tok, hidden_size)
-        forward: Callable (experts, hidden_states, group_sizes, adapter_indices, group_offset) -> output
-        adapter_indices: Optional adapter indices for LoRA
+        module: The NNX module (will be split into graph/state).
+        func: Function to run inside shard_map. Signature: (module, *args).
+        mesh: The device mesh.
+        *args: Arguments to pass to func (replicated across shards).
     """
-    num_experts = experts.config.num_experts
-    num_experts_per_tok = experts.config.num_experts_per_tok
-    hidden_size = experts.config.hidden_size
+    graphdef, state = nnx.split(module)
+    state_specs = ep_specs(state)
+    in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
-    mesh = get_abstract_mesh()
-    ep_size = mesh.shape.get("ep", 1) if mesh is not None else 1
+    def _body(state, *fn_args):
+        module_shard = nnx.merge(graphdef, state)
+        return func(module_shard, *fn_args)
 
-    assert num_experts % ep_size == 0
-    experts_per_rank = num_experts // ep_size
-
-    # Split module into graphdef and state
-    graphdef, state = nnx.split(experts)
-
-    # Get partition specs from state, keeping only 'ep' for shard_map (tp/fsdp handled by JAX)
-    def ep_only(spec):
-        return PartitionSpec(*(p if p == 'ep' else None for p in spec)) if isinstance(spec, PartitionSpec) else spec
-
-    state_specs = jax.tree.map(ep_only, nnx.get_partition_spec(state), is_leaf=lambda x: isinstance(x, PartitionSpec))
-
-    P = PartitionSpec
-    in_specs = (
-        P(), P(), P(), P(),  # hidden_states, selected_experts, routing_weights, adapter_indices
-        state_specs,
-    )
-
-    def _shard_body(hidden_states, selected_experts, routing_weights, adapter_indices, experts_state):
-        axis_idx = jax.lax.axis_index("ep")
-        group_offset = jnp.array([axis_idx * experts_per_rank], dtype=jnp.int32)
-
-        # Reconstruct module from state
-        experts = nnx.merge(graphdef, experts_state)
-
-        # Prepare routing
-        hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
-        adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
-        hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
-            hidden_expanded, selected_experts.reshape(-1), num_experts, adapter_indices=adapter_expanded
-        )
-
-        # Expert computation (model-specific)
-        out = forward(experts, hidden_sorted, group_sizes, adapter_sorted, group_offset)
-
-        # Unsort and combine
-        out = out[unsort_indices].reshape(-1, num_experts_per_tok, hidden_size)
-        local_out = jnp.sum(out * routing_weights[..., None], axis=1)
-        return jax.lax.psum(local_out, axis_name="ep")
-
-    sharded_fn = jax.shard_map(
-        _shard_body, mesh=mesh, in_specs=in_specs, out_specs=P(),
-        axis_names={'ep'},  # Only ep is manual; tp/fsdp handled automatically by JAX
-    )
-    return sharded_fn(
-        hidden_states, selected_experts, routing_weights, adapter_indices,
-        state,
-    )
+    return jax.shard_map(
+        _body, mesh=mesh, in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"}
+    )(state, *args)

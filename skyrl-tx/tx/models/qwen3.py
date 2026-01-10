@@ -4,7 +4,7 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
-from tx.layers.util import shard_experts
+from tx.layers.util import prepare_routing, shard_map_ep
 from tx.layers.rotary_embedding import apply_rope
 from tx.models.configs import Qwen3Config
 from tx.layers.layernorm import RMSNorm
@@ -198,22 +198,39 @@ class Qwen3Experts(nnx.Module):
     def __call__(
         self, hidden_states: jax.Array, router_logits: jax.Array, adapter_indices: jax.Array | None = None
     ) -> jax.Array:
-        # Get top-k experts for each token and compute routing weights
         routing_weights, selected_experts = jax.lax.top_k(router_logits, k=self.config.num_experts_per_tok)
         routing_weights = nnx.softmax(routing_weights, axis=-1)
 
-        def forward(experts, hidden_states, group_sizes, adapter_indices, group_offset):
-            gate = experts.gate_proj(hidden_states, group_sizes, adapter_indices, group_offset=group_offset)
-            up = experts.up_proj(hidden_states, group_sizes, adapter_indices, group_offset=group_offset)
-            return experts.down_proj(nnx.silu(gate) * up, group_sizes, adapter_indices, group_offset=group_offset)
+        num_experts = self.config.num_experts
+        num_experts_per_tok = self.config.num_experts_per_tok
+        hidden_size = self.config.hidden_size
 
-        return shard_experts(
-            hidden_states,
-            selected_experts,
-            routing_weights,
-            self,
-            forward,
-            adapter_indices=adapter_indices,
+        def forward(experts, hidden_states, selected_experts, routing_weights, adapter_indices):
+            # Calculate local offset for this shard
+            ep_rank = jax.lax.axis_index("ep")
+            experts_per_rank = num_experts // jax.lax.psum(1, axis_name="ep")
+            group_offset = jnp.array([ep_rank * experts_per_rank], dtype=jnp.int32)
+
+            # Prepare routing (inputs are replicated, so every rank generates the same sorted lists)
+            hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
+            adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
+            hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
+                hidden_expanded, selected_experts.ravel(), num_experts, adapter_indices=adapter_expanded
+            )
+
+            # Expert computation
+            gate = experts.gate_proj(hidden_sorted, group_sizes, adapter_sorted, group_offset=group_offset)
+            up = experts.up_proj(hidden_sorted, group_sizes, adapter_sorted, group_offset=group_offset)
+            down = experts.down_proj(nnx.silu(gate) * up, group_sizes, adapter_sorted, group_offset=group_offset)
+
+            # Unsort and combine
+            out = down[unsort_indices].reshape(-1, num_experts_per_tok, hidden_size)
+            local_out = jnp.sum(out * routing_weights[..., None], axis=1)
+            return jax.lax.psum(local_out, axis_name="ep")
+
+        return shard_map_ep(
+            self, forward, get_abstract_mesh(),
+            hidden_states, selected_experts, routing_weights, adapter_indices,
         )
 
 
