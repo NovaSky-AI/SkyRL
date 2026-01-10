@@ -87,14 +87,24 @@ def prepare_routing(
     return sorted_tokens, group_sizes, unsort_indices, sorted_adapter_indices
 
 
-def expert_parallel_dispatch_combine(
+def shard_experts(
     hidden_states: jax.Array,
     selected_experts: jax.Array,
     routing_weights: jax.Array,
     experts: nnx.Module,
+    forward,
     adapter_indices: jax.Array | None = None,
 ) -> jax.Array:
-    """Dispatch tokens to experts and combine outputs using group_offset."""
+    """Dispatch tokens to experts and combine outputs using expert parallelism.
+
+    Args:
+        hidden_states: Input tensor of shape (batch, seq_len, hidden_size)
+        selected_experts: Expert indices of shape (batch, seq_len, num_experts_per_tok)
+        routing_weights: Routing weights of shape (batch, seq_len, num_experts_per_tok)
+        experts: Module with config (num_experts, num_experts_per_tok, hidden_size)
+        forward: Callable (experts, hidden_states, group_sizes, adapter_indices, group_offset) -> output
+        adapter_indices: Optional adapter indices for LoRA
+    """
     num_experts = experts.config.num_experts
     num_experts_per_tok = experts.config.num_experts_per_tok
     hidden_size = experts.config.hidden_size
@@ -120,7 +130,7 @@ def expert_parallel_dispatch_combine(
         state_specs,
     )
 
-    def _shard_body(shard_h, shard_s, shard_r, shard_a, experts_state):
+    def _shard_body(hidden_states, selected_experts, routing_weights, adapter_indices, experts_state):
         axis_idx = jax.lax.axis_index("ep")
         group_offset = jnp.array([axis_idx * experts_per_rank], dtype=jnp.int32)
 
@@ -128,20 +138,18 @@ def expert_parallel_dispatch_combine(
         experts = nnx.merge(graphdef, experts_state)
 
         # Prepare routing
-        h_expanded = jnp.repeat(shard_h, num_experts_per_tok, axis=0)
-        a_expanded = jnp.repeat(shard_a, num_experts_per_tok) if shard_a is not None else None
-        h_sorted, group_sizes, unsort_idx, a_sorted = prepare_routing(
-            h_expanded, shard_s.reshape(-1), num_experts, adapter_indices=a_expanded
+        hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
+        adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
+        hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
+            hidden_expanded, selected_experts.reshape(-1), num_experts, adapter_indices=adapter_expanded
         )
 
-        # Expert computation
-        g = experts.gate_proj(h_sorted, group_sizes, a_sorted, group_offset=group_offset)
-        u = experts.up_proj(h_sorted, group_sizes, a_sorted, group_offset=group_offset)
-        out = experts.down_proj(nnx.silu(g) * u, group_sizes, a_sorted, group_offset=group_offset)
+        # Expert computation (model-specific)
+        out = forward(experts, hidden_sorted, group_sizes, adapter_sorted, group_offset)
 
         # Unsort and combine
-        out = out[unsort_idx].reshape(-1, num_experts_per_tok, hidden_size)
-        local_out = jnp.sum(out * shard_r[..., None], axis=1)
+        out = out[unsort_indices].reshape(-1, num_experts_per_tok, hidden_size)
+        local_out = jnp.sum(out * routing_weights[..., None], axis=1)
         return jax.lax.psum(local_out, axis_name="ep")
 
     sharded_fn = jax.shard_map(

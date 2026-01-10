@@ -4,7 +4,7 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
-from tx.layers.util import expert_parallel_dispatch_combine
+from tx.layers.util import shard_experts
 from tx.layers.rotary_embedding import apply_rope
 from tx.models.configs import Qwen3Config
 from tx.layers.layernorm import RMSNorm
@@ -202,11 +202,17 @@ class Qwen3Experts(nnx.Module):
         routing_weights, selected_experts = jax.lax.top_k(router_logits, k=self.config.num_experts_per_tok)
         routing_weights = nnx.softmax(routing_weights, axis=-1)
 
-        return expert_parallel_dispatch_combine(
+        def forward(experts, hidden_states, group_sizes, adapter_indices, group_offset):
+            gate = experts.gate_proj(hidden_states, group_sizes, adapter_indices, group_offset=group_offset)
+            up = experts.up_proj(hidden_states, group_sizes, adapter_indices, group_offset=group_offset)
+            return experts.down_proj(nnx.silu(gate) * up, group_sizes, adapter_indices, group_offset=group_offset)
+
+        return shard_experts(
             hidden_states,
             selected_experts,
             routing_weights,
             self,
+            forward,
             adapter_indices=adapter_indices,
         )
 
