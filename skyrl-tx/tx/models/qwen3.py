@@ -208,7 +208,7 @@ class Qwen3Experts(nnx.Module):
         def forward(experts, hidden_states, selected_experts, routing_weights, adapter_indices):
             # Calculate local offset for this shard
             ep_rank = jax.lax.axis_index("ep")
-            experts_per_rank = num_experts // jax.lax.psum(1, axis_name="ep")
+            experts_per_rank = num_experts // jax.lax.axis_size("ep")
             group_offset = jnp.array([ep_rank * experts_per_rank], dtype=jnp.int32)
 
             # Prepare routing (inputs are replicated, so every rank generates the same sorted lists)
