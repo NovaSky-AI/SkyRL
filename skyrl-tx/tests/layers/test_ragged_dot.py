@@ -1,3 +1,4 @@
+import jax
 import pytest
 import jax.numpy as jnp
 from tx.layers.util import ragged_dot
@@ -22,7 +23,7 @@ def test_ragged_dot_with_group_offset(group_sizes, group_offset, g_local, expect
     lhs = jnp.arange(m * d, dtype=jnp.float32).reshape(m, d)
     rhs = jnp.stack([(i + 1) * jnp.eye(d) for i in range(g_local)])  # 1*I, 2*I, ...
 
-    result = ragged_dot(lhs, rhs, group_sizes, group_offset=jnp.array([group_offset]))
+    result = jax.jit(ragged_dot)(lhs, rhs, group_sizes, group_offset=jnp.array([group_offset]))
 
     # expected_scale: 0 for masked tokens, else local_group_idx + 1
     scale = jnp.array(expected_scale, dtype=jnp.float32)[:, None]
