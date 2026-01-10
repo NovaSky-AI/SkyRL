@@ -26,6 +26,7 @@ def ragged_dot(
             preferred_element_type=preferred_element_type,
         )
 
+    assert group_offset.shape == (1,), "group_offset must have shape (1,)"
     offset = group_offset[0]
     m = lhs.shape[0]
     g_local = rhs.shape[0]
