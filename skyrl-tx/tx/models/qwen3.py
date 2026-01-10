@@ -229,8 +229,7 @@ class Qwen3Experts(nnx.Module):
             return jax.lax.psum(local_out, axis_name="ep")
 
         return shard_map_ep(
-            self, forward, get_abstract_mesh(),
-            hidden_states, selected_experts, routing_weights, adapter_indices,
+            self, forward, get_abstract_mesh(), hidden_states, selected_experts, routing_weights, adapter_indices
         )
 
 
