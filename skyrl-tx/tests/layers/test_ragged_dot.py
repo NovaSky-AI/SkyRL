@@ -1,70 +1,35 @@
+import pytest
 import jax.numpy as jnp
 from tx.layers.util import ragged_dot
 
 
-def test_ragged_dot_with_group_offset():
-    """Test ragged_dot with group_offset using a simple hand-verifiable example.
+@pytest.mark.parametrize(
+    "group_sizes,group_offset,g_local,expected_scale",
+    [
+        ([2, 2, 2], 1, 2, [0, 0, 1, 1, 2, 2]),  # middle shard (original test)
+        ([2, 2, 2], 0, 2, [1, 1, 2, 2, 0, 0]),  # first shard
+        ([2, 2, 2], 2, 1, [0, 0, 0, 0, 1, 1]),  # last shard
+        ([6], 0, 1, [1, 1, 1, 1, 1, 1]),        # single group
+        ([2, 0, 0, 4], 1, 2, [0, 0, 0, 0, 0, 0]),  # empty groups in shard
+        ([1, 3, 2], 1, 2, [0, 1, 1, 1, 2, 2]),  # uneven sizes
+    ],
+)
+def test_ragged_dot_with_group_offset(group_sizes, group_offset, g_local, expected_scale):
+    """Test ragged_dot with group_offset for various edge cases."""
+    group_sizes = jnp.array(group_sizes)
+    m, d = 6, 2
 
-    Setup:
-    - 6 tokens, 2 features each
-    - 3 global groups with sizes [2, 2, 2]
-    - Local rhs contains only groups 1 and 2 (g_local=2)
-    - group_offset=1 means we start at global group 1
+    lhs = jnp.arange(m * d, dtype=jnp.float32).reshape(m, d)
+    rhs = jnp.stack([(i + 1) * jnp.eye(d) for i in range(g_local)])  # 1*I, 2*I, ...
 
-    Expected behavior:
-    - Tokens 0-1 (global group 0): masked to 0 (not in our shard)
-    - Tokens 2-3 (global group 1): use rhs[0] (local group 0)
-    - Tokens 4-5 (global group 2): use rhs[1] (local group 1)
-    """
-    # lhs: 6 tokens, 2 features - use simple values
-    # Token values: [[1,0], [0,1], [1,1], [2,0], [0,2], [1,2]]
-    lhs = jnp.array(
-        [
-            [1.0, 0.0],  # token 0 (group 0) - should be masked
-            [0.0, 1.0],  # token 1 (group 0) - should be masked
-            [1.0, 1.0],  # token 2 (group 1) - use rhs[0]
-            [2.0, 0.0],  # token 3 (group 1) - use rhs[0]
-            [0.0, 2.0],  # token 4 (group 2) - use rhs[1]
-            [1.0, 2.0],  # token 5 (group 2) - use rhs[1]
-        ]
-    )
+    result = ragged_dot(lhs, rhs, group_sizes, group_offset=jnp.array([group_offset]))
 
-    # rhs: 2 local groups, 2x2 weight matrices
-    # rhs[0] (for global group 1): identity matrix
-    # rhs[1] (for global group 2): [[1,0], [0,2]] (scales second output by 2)
-    rhs = jnp.array(
-        [
-            [[1.0, 0.0], [0.0, 1.0]],  # rhs[0]: identity
-            [[1.0, 0.0], [0.0, 2.0]],  # rhs[1]: scale y by 2
-        ]
-    )
-
-    group_sizes = jnp.array([2, 2, 2])
-    group_offset = jnp.array([1])
-
-    result = ragged_dot(lhs, rhs, group_sizes, group_offset=group_offset)
-
-    # Expected results:
-    # Token 0: masked -> [0, 0]
-    # Token 1: masked -> [0, 0]
-    # Token 2: [1,1] @ identity = [1, 1]
-    # Token 3: [2,0] @ identity = [2, 0]
-    # Token 4: [0,2] @ [[1,0],[0,2]] = [0, 4]
-    # Token 5: [1,2] @ [[1,0],[0,2]] = [1, 4]
-    expected = jnp.array(
-        [
-            [0.0, 0.0],
-            [0.0, 0.0],
-            [1.0, 1.0],
-            [2.0, 0.0],
-            [0.0, 4.0],
-            [1.0, 4.0],
-        ]
-    )
+    # expected_scale: 0 for masked tokens, else local_group_idx + 1
+    scale = jnp.array(expected_scale, dtype=jnp.float32)[:, None]
+    expected = lhs * scale
 
     assert jnp.allclose(result, expected), f"Got:\n{result}\nExpected:\n{expected}"
 
 
 if __name__ == "__main__":
-    test_ragged_dot_with_group_offset()
-    print("All tests passed!")
+    pytest.main([__file__, "-v"])
