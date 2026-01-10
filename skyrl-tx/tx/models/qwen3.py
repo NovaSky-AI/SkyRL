@@ -206,12 +206,7 @@ class Qwen3Experts(nnx.Module):
             hidden_states,
             selected_experts,
             routing_weights,
-            self.gate_proj,
-            self.up_proj,
-            self.down_proj,
-            self.config.num_experts,
-            self.config.num_experts_per_tok,
-            self.config.hidden_size,
+            self,
             adapter_indices=adapter_indices,
         )
 

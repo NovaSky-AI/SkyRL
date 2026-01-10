@@ -91,50 +91,41 @@ def expert_parallel_dispatch_combine(
     hidden_states: jax.Array,
     selected_experts: jax.Array,
     routing_weights: jax.Array,
-    gate_proj,
-    up_proj,
-    down_proj,
-    num_experts: int,
-    num_experts_per_tok: int,
-    hidden_size: int,
+    experts: nnx.Module,
     adapter_indices: jax.Array | None = None,
 ) -> jax.Array:
     """Dispatch tokens to experts and combine outputs using group_offset."""
+    num_experts = experts.config.num_experts
+    num_experts_per_tok = experts.config.num_experts_per_tok
+    hidden_size = experts.config.hidden_size
+
     mesh = get_abstract_mesh()
     ep_size = mesh.shape.get("ep", 1) if mesh is not None else 1
 
     assert num_experts % ep_size == 0
     experts_per_rank = num_experts // ep_size
 
-    # Split modules into graphdef and state
-    gate_graphdef, gate_state = nnx.split(gate_proj)
-    up_graphdef, up_state = nnx.split(up_proj)
-    down_graphdef, down_state = nnx.split(down_proj)
+    # Split module into graphdef and state
+    graphdef, state = nnx.split(experts)
 
-    # Get partition specs from states, keeping only 'ep' for shard_map (tp/fsdp handled by JAX)
+    # Get partition specs from state, keeping only 'ep' for shard_map (tp/fsdp handled by JAX)
     def ep_only(spec):
         return PartitionSpec(*(p if p == 'ep' else None for p in spec)) if isinstance(spec, PartitionSpec) else spec
 
-    gate_state_specs = jax.tree.map(ep_only, nnx.get_partition_spec(gate_state), is_leaf=lambda x: isinstance(x, PartitionSpec))
-    up_state_specs = jax.tree.map(ep_only, nnx.get_partition_spec(up_state), is_leaf=lambda x: isinstance(x, PartitionSpec))
-    down_state_specs = jax.tree.map(ep_only, nnx.get_partition_spec(down_state), is_leaf=lambda x: isinstance(x, PartitionSpec))
+    state_specs = jax.tree.map(ep_only, nnx.get_partition_spec(state), is_leaf=lambda x: isinstance(x, PartitionSpec))
 
     P = PartitionSpec
     in_specs = (
         P(), P(), P(), P(),  # hidden_states, selected_experts, routing_weights, adapter_indices
-        gate_state_specs,
-        up_state_specs,
-        down_state_specs,
+        state_specs,
     )
 
-    def _shard_body(shard_h, shard_s, shard_r, shard_a, gate_st, up_st, down_st):
+    def _shard_body(shard_h, shard_s, shard_r, shard_a, experts_state):
         axis_idx = jax.lax.axis_index("ep")
         group_offset = jnp.array([axis_idx * experts_per_rank], dtype=jnp.int32)
 
-        # Reconstruct modules from state
-        gate = nnx.merge(gate_graphdef, gate_st)
-        up = nnx.merge(up_graphdef, up_st)
-        down = nnx.merge(down_graphdef, down_st)
+        # Reconstruct module from state
+        experts = nnx.merge(graphdef, experts_state)
 
         # Prepare routing
         h_expanded = jnp.repeat(shard_h, num_experts_per_tok, axis=0)
@@ -144,9 +135,9 @@ def expert_parallel_dispatch_combine(
         )
 
         # Expert computation
-        g = gate(h_sorted, group_sizes, a_sorted, group_offset=group_offset)
-        u = up(h_sorted, group_sizes, a_sorted, group_offset=group_offset)
-        out = down(nnx.silu(g) * u, group_sizes, a_sorted, group_offset=group_offset)
+        g = experts.gate_proj(h_sorted, group_sizes, a_sorted, group_offset=group_offset)
+        u = experts.up_proj(h_sorted, group_sizes, a_sorted, group_offset=group_offset)
+        out = experts.down_proj(nnx.silu(g) * u, group_sizes, a_sorted, group_offset=group_offset)
 
         # Unsort and combine
         out = out[unsort_idx].reshape(-1, num_experts_per_tok, hidden_size)
@@ -159,5 +150,5 @@ def expert_parallel_dispatch_combine(
     )
     return sharded_fn(
         hidden_states, selected_experts, routing_weights, adapter_indices,
-        gate_state, up_state, down_state,
+        state,
     )
