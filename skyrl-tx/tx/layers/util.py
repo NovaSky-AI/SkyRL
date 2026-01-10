@@ -30,6 +30,8 @@ def ragged_dot(
     m = lhs.shape[0]
     g_local = rhs.shape[0]
 
+    assert g_local > 0, "rhs must have at least one group"
+
     # Compute token boundaries for local groups
     cumsum = jnp.cumulative_sum(group_sizes, include_initial=True)
     shard_start = cumsum[offset]
