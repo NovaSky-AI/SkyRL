@@ -228,9 +228,7 @@ class Qwen3Experts(nnx.Module):
             local_out = jnp.sum(out * routing_weights[..., None], axis=1)
             return jax.lax.psum(local_out, axis_name="ep")
 
-        return shard_map_ep(
-            self, forward, get_abstract_mesh(), hidden_states, selected_experts, routing_weights, adapter_indices
-        )
+        return shard_map_ep(self, forward, hidden_states, selected_experts, routing_weights, adapter_indices)
 
 
 class Qwen3MoeSparseMoeBlock(nnx.Module):

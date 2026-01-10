@@ -87,13 +87,12 @@ def prepare_routing(
     return sorted_tokens, group_sizes, unsort_indices, sorted_adapter_indices
 
 
-def shard_map_ep(module: nnx.Module, func, mesh, *args):
+def shard_map_ep(module: nnx.Module, func, *args):
     """Apply shard_map over the 'ep' axis for a stateful nnx.Module.
 
     Args:
         module: The NNX module (will be split into graph/state).
         func: Function to run inside shard_map. Signature: (module, *args).
-        mesh: The device mesh.
         *args: Arguments to pass to func (replicated across shards).
     """
     graphdef, state = nnx.split(module)
@@ -105,7 +104,7 @@ def shard_map_ep(module: nnx.Module, func, mesh, *args):
     )
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
-    @jax.shard_map(mesh=mesh, in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"})
+    @jax.shard_map(mesh=get_abstract_mesh(), in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"})
     def _body(state, *fn_args):
         module_shard = nnx.merge(graphdef, state)
         return func(module_shard, *fn_args)
