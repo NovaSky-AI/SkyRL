@@ -109,10 +109,13 @@ def expert_parallel_dispatch_combine(
     up_graphdef, up_state = nnx.split(up_proj)
     down_graphdef, down_state = nnx.split(down_proj)
 
-    # Get partition specs from states
-    gate_state_specs = nnx.get_partition_spec(gate_state)
-    up_state_specs = nnx.get_partition_spec(up_state)
-    down_state_specs = nnx.get_partition_spec(down_state)
+    # Get partition specs from states, keeping only 'ep' for shard_map (tp/fsdp handled by JAX)
+    def ep_only(spec):
+        return PartitionSpec(*(p if p == 'ep' else None for p in spec)) if isinstance(spec, PartitionSpec) else spec
+
+    gate_state_specs = jax.tree.map(ep_only, nnx.get_partition_spec(gate_state), is_leaf=lambda x: isinstance(x, PartitionSpec))
+    up_state_specs = jax.tree.map(ep_only, nnx.get_partition_spec(up_state), is_leaf=lambda x: isinstance(x, PartitionSpec))
+    down_state_specs = jax.tree.map(ep_only, nnx.get_partition_spec(down_state), is_leaf=lambda x: isinstance(x, PartitionSpec))
 
     P = PartitionSpec
     in_specs = (
@@ -149,7 +152,8 @@ def expert_parallel_dispatch_combine(
         return jax.lax.psum(local_out, axis_name="ep")
 
     sharded_fn = jax.shard_map(
-        _shard_body, mesh=mesh, in_specs=in_specs, out_specs=P("fsdp", "tp"),
+        _shard_body, mesh=mesh, in_specs=in_specs, out_specs=P(),
+        axis_names={'ep'},  # Only ep is manual; tp/fsdp handled automatically by JAX
     )
     return sharded_fn(
         hidden_states, selected_experts, routing_weights, adapter_indices,
