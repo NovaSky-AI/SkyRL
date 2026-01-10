@@ -105,10 +105,9 @@ def shard_map_ep(module: nnx.Module, func, mesh, *args):
     )
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
+    @jax.shard_map(mesh=mesh, in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"})
     def _body(state, *fn_args):
         module_shard = nnx.merge(graphdef, state)
         return func(module_shard, *fn_args)
 
-    return jax.shard_map(_body, mesh=mesh, in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"})(
-        state, *args
-    )
+    return _body(state, *args)
