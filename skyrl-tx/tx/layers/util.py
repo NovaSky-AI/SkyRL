@@ -87,15 +87,6 @@ def prepare_routing(
     return sorted_tokens, group_sizes, unsort_indices, sorted_adapter_indices
 
 
-def ep_specs(state):
-    """Extract only 'ep' dims from PartitionSpecs, replacing others with None."""
-    return jax.tree.map(
-        lambda s: PartitionSpec(*(p if p == "ep" else None for p in s)) if isinstance(s, PartitionSpec) else s,
-        nnx.get_partition_spec(state),
-        is_leaf=lambda x: isinstance(x, PartitionSpec),
-    )
-
-
 def shard_map_ep(module: nnx.Module, func, mesh, *args):
     """Apply shard_map over the 'ep' axis for a stateful nnx.Module.
 
@@ -106,7 +97,12 @@ def shard_map_ep(module: nnx.Module, func, mesh, *args):
         *args: Arguments to pass to func (replicated across shards).
     """
     graphdef, state = nnx.split(module)
-    state_specs = ep_specs(state)
+    # Extract only 'ep' dims from PartitionSpecs, replacing others with None
+    state_specs = jax.tree.map(
+        lambda s: PartitionSpec(*(p if p == "ep" else None for p in s)) if isinstance(s, PartitionSpec) else s,
+        nnx.get_partition_spec(state),
+        is_leaf=lambda x: isinstance(x, PartitionSpec),
+    )
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
     def _body(state, *fn_args):
