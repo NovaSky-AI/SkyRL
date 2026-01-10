@@ -26,11 +26,13 @@ def ragged_dot(
             preferred_element_type=preferred_element_type,
         )
 
+    assert group_offset.shape == (1,), "group_offset must have shape (1,)"
     offset = group_offset[0]
     m = lhs.shape[0]
     g_local = rhs.shape[0]
 
     assert g_local > 0, "rhs must have at least one group"
+    assert 0 <= offset and offset + g_local <= group_sizes.shape[0], f"Invalid group range for offset={offset}, g_local={g_local}, g={group_sizes.shape[0]}"
 
     # Compute token boundaries for local groups
     cumsum = jnp.cumulative_sum(group_sizes, include_initial=True)
