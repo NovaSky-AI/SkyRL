@@ -6,10 +6,10 @@ from tx.layers.util import ragged_dot
 @pytest.mark.parametrize(
     "group_sizes,group_offset,g_local,expected_scale",
     [
-        ([2, 2, 2], 1, 2, [0, 0, 1, 1, 2, 2]),  # middle shard (original test)
+        ([2, 2, 2], 1, 2, [0, 0, 1, 1, 2, 2]),  # middle shard
         ([2, 2, 2], 0, 2, [1, 1, 2, 2, 0, 0]),  # first shard
         ([2, 2, 2], 2, 1, [0, 0, 0, 0, 1, 1]),  # last shard
-        ([6], 0, 1, [1, 1, 1, 1, 1, 1]),        # single group
+        ([6], 0, 1, [1, 1, 1, 1, 1, 1]),  # single group
         ([2, 0, 0, 4], 1, 2, [0, 0, 0, 0, 0, 0]),  # empty groups in shard
         ([1, 3, 2], 1, 2, [0, 1, 1, 1, 2, 2]),  # uneven sizes
     ],
