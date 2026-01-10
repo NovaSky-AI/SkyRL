@@ -205,18 +205,18 @@ class Qwen3Experts(nnx.Module):
         num_experts_per_tok = self.config.num_experts_per_tok
         hidden_size = self.config.hidden_size
 
-        def forward(experts, hidden_states, selected_experts, routing_weights, adapter_indices):
+        # Prepare routing (inputs are replicated, so every rank generates the same sorted lists)
+        hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
+        adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
+        hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
+            hidden_expanded, selected_experts.ravel(), num_experts, adapter_indices=adapter_expanded
+        )
+
+        def forward(experts, hidden_sorted, group_sizes, unsort_indices, adapter_sorted, routing_weights):
             # Calculate local offset for this shard
             ep_rank = jax.lax.axis_index("ep")
             experts_per_rank = num_experts // jax.lax.axis_size("ep")
             group_offset = jnp.array([ep_rank * experts_per_rank], dtype=jnp.int32)
-
-            # Prepare routing (inputs are replicated, so every rank generates the same sorted lists)
-            hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
-            adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
-            hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
-                hidden_expanded, selected_experts.ravel(), num_experts, adapter_indices=adapter_expanded
-            )
 
             # Expert computation
             gate = experts.gate_proj(hidden_sorted, group_sizes, adapter_sorted, group_offset=group_offset)
@@ -228,7 +228,7 @@ class Qwen3Experts(nnx.Module):
             local_out = jnp.sum(out * routing_weights[..., None], axis=1)
             return jax.lax.psum(local_out, axis_name="ep")
 
-        return shard_map_ep(self, forward, hidden_states, selected_experts, routing_weights, adapter_indices)
+        return shard_map_ep(self, forward, hidden_sorted, group_sizes, unsort_indices, adapter_sorted, routing_weights)
 
 
 class Qwen3MoeSparseMoeBlock(nnx.Module):
