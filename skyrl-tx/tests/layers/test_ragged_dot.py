@@ -30,7 +30,3 @@ def test_ragged_dot_with_group_offset(group_sizes, group_offset, g_local, expect
     expected = lhs * scale
 
     assert jnp.allclose(result, expected), f"Got:\n{result}\nExpected:\n{expected}"
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
