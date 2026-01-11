@@ -1,0 +1,17 @@
+The following lines contain 10 text messages, one per line. Each text message can be classified as spam or ham (i.e., not spam).
+
+You will be asked to answer questions about the aggregate label statistics across all 10 examples in this dataset. Do not try to guess, estimate, or approximate the result. Calculate the exact answer given these datapoints.
+
+Date: Dec 28, 2022 || User: 76063 || Instance: Todays Vodafone numbers ending with 4882 are selected to a receive a £350 award. If your number matches call 09064019014 to receive your £350 award.
+Date: Jul 28, 2024 || User: 33845 || Instance: URGENT This is our 2nd attempt to contact U. Your £900 prize from YESTERDAY is still awaiting collection. To claim CALL NOW 09061702893
+Date: Feb 05, 2025 || User: 76063 || Instance: 74355 XMAS iscoming & ur awarded either £500 CD gift vouchers & free entry 2 r £100 weekly draw txt MUSIC to 87066 TnC
+Date: Jun 04, 2025 || User: 76063 || Instance: We left already we at orchard now.
+Date: May 16, 2025 || User: 24151 || Instance: Guessin you ain't gonna be here before 9?
+Date: Apr 06, 2024 || User: 76063 || Instance: GSOH? Good with SPAM the ladies?U could b a male gigolo? 2 join the uk's fastest growing mens club reply ONCALL. mjzgroup. 08714342399.2stop reply STOP. msg@£1.50rcvd
+Date: Feb 07, 2024 || User: 76063 || Instance: No need for the drug anymore.
+Date: Jul 24, 2024 || User: 76063 || Instance: Your bill at 3 is £33.65 so thats not bad!
+Date: Jul 02, 2024 || User: 76063 || Instance: Final Chance! Claim ur £150 worth of discount vouchers today! Text YES to 85023 now! SavaMob, member offers mobile! T Cs SavaMob POBOX84, M263UZ. £3.00 Subs 16
+Date: Oct 14, 2022 || User: 76063 || Instance: You are awarded a SiPix Digital Camera! call 09061221061 from landline. Delivery within 28days. T Cs Box177. M221BP. 2yr warranty. 150ppm. 16 . p p£3.99
+Recall: the preceding lines contain 10 text messages, one per line. Each text message can be classified as spam or ham (i.e., not spam).
+
+You will be asked to answer questions about the aggregate label statistics across all 10 examples in this dataset. Do not try to guess, estimate, or approximate the result. Calculate the exact answer given these datapoints.
