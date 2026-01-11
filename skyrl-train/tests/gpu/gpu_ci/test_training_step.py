@@ -73,7 +73,7 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
         for result in results:
             assert isinstance(result, dict), "Result should be a dictionary of training stats"
             assert "policy_loss" in result
-            assert "ppo_clip_ratio" in result
+            assert "loss_metrics/clip_ratio" in result
             assert "policy_entropy" in result
             for k, v in result.items():
                 assert isinstance(v, (int, float)), f"{k} should be an int or float"

@@ -17,6 +17,7 @@ from skyrl_train.utils.ppo_utils import (
     AdvantageEstimatorRegistry,
     register_advantage_estimator,
     PolicyLossRegistry,
+    LossMetrics,
     register_policy_loss,
     compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
@@ -376,7 +377,7 @@ def test_policy_loss_registry_specific():
 
     @register_policy_loss("test_policy_decorator")
     def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
-        return torch.tensor(1.5), 0.3
+        return torch.tensor(1.5), LossMetrics(clip_ratio=0.3)
 
     # Test decorator worked
     assert "test_policy_decorator" in PolicyLossRegistry.list_available()
@@ -385,14 +386,14 @@ def test_policy_loss_registry_specific():
 
     # Test function execution
     config = DictConfig({"policy_loss_type": "test_policy_decorator"})
-    loss, clip_ratio = retrieved(
+    loss, loss_metrics = retrieved(
         log_probs=torch.tensor([[0.1]]),
         old_log_probs=torch.tensor([[0.2]]),
         advantages=torch.tensor([[1.0]]),
         config=config,
     )
     assert loss.item() == 1.5
-    assert clip_ratio == 0.3
+    assert loss_metrics["clip_ratio"] == 0.3
 
     # Test error message includes "Policy loss"
     with pytest.raises(ValueError, match="Unknown policy loss"):
@@ -413,10 +414,10 @@ def test_registry_cross_ray_process():
 
         # Create test functions
         def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(2.0), 0.5
+            return torch.tensor(2.0), LossMetrics(clip_ratio=0.5)
 
         def test_policy_loss_2(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(3.0), 0.6
+            return torch.tensor(3.0), LossMetrics(clip_ratio=0.6)
 
         def test_advantage_estimator(**kwargs):
             rewards = kwargs["token_level_rewards"]
@@ -432,7 +433,7 @@ def test_registry_cross_ray_process():
             policy_loss = PolicyLossRegistry.get("cross_process_test")
             adv_estimator = AdvantageEstimatorRegistry.get("cross_process_adv_test")
 
-            loss, clip_ratio = policy_loss(
+            loss, loss_metrics = policy_loss(
                 log_probs=torch.tensor([[0.1]]),
                 old_log_probs=torch.tensor([[0.2]]),
                 advantages=torch.tensor([[1.0]]),
@@ -444,25 +445,25 @@ def test_registry_cross_ray_process():
                 response_mask=torch.tensor([[1.0, 1.0]]),
                 index=np.array(["0", "0"]),
             )
-            return loss, clip_ratio, adv, ret
+            return loss, loss_metrics, adv, ret
 
         # Run Ray task
-        loss, clip_ratio, adv, ret = ray.get(test_ray_registry_access.remote())
+        loss, loss_metrics, adv, ret = ray.get(test_ray_registry_access.remote())
         assert loss.item() == 2.0
-        assert clip_ratio == 0.5
+        assert loss_metrics["clip_ratio"] == 0.5
         assert adv.shape == torch.Size([1, 2])
         assert ret.shape == torch.Size([1, 2])
 
         # test that registration works after ray init as well
         PolicyLossRegistry.register("cross_process_test_2", test_policy_loss_2)
-        loss_2, clip_ratio_2 = PolicyLossRegistry.get("cross_process_test_2")(
+        loss_2, loss_metrics_2 = PolicyLossRegistry.get("cross_process_test_2")(
             log_probs=torch.tensor([[0.1]]),
             old_log_probs=torch.tensor([[0.2]]),
             advantages=torch.tensor([[1.0]]),
             config=DictConfig({"policy_loss_type": "cross_process_test_2"}),
         )
         assert loss_2.item() == 3.0
-        assert clip_ratio_2 == 0.6
+        assert loss_metrics_2["clip_ratio"] == 0.6
     finally:
         PolicyLossRegistry.reset()
         AdvantageEstimatorRegistry.reset()

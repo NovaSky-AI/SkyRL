@@ -32,7 +32,7 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -663,7 +663,7 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
-            policy_loss, clip_ratio = self.policy_loss_fn(
+            policy_loss, loss_metrics = self.policy_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -704,10 +704,11 @@ class PolicyWorkerBase(Worker):
         status = {
             "final_loss": loss.item(),
             "policy_loss": policy_loss.item(),
-            "ppo_clip_ratio": clip_ratio,
             "policy_entropy": entropy.item(),
             "response_length": num_actions,
         }
+        for k, v in loss_metrics.items():
+            status["loss_metrics/" + k] = v
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
@@ -741,7 +742,7 @@ class PolicyWorkerBase(Worker):
             # for DP
             # TODO (sumanthrh): this assumes all workers are data parallel.
             # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
-            status = self.strategy.all_reduce(status)
+            status = all_reduce_metrics(status, self.strategy)
 
             # weighted mean for kl
             # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
@@ -817,7 +818,6 @@ class PolicyWorkerBase(Worker):
         torch.distributed.barrier()
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
-
         status_mean = reduce_metrics(all_metrics)
         status_mean["policy_update_steps"] = num_minibatches * self.cfg.trainer.update_epochs_per_batch
 

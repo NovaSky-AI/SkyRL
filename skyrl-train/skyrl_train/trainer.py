@@ -579,12 +579,17 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
         )
-        # sanity check for tis
-        if self.cfg.trainer.algorithm.use_tis:
+
+        # sanity check for off_policy_correction
+        off_policy_correction = self.cfg.trainer.algorithm.off_policy_correction
+        tis_ratio_type = off_policy_correction.tis_ratio_type
+        sequence_mask_metric = off_policy_correction.sequence_mask_metric
+        if tis_ratio_type is not None or sequence_mask_metric is not None:
             assert (
                 rollout_logprobs_tensor is not None
-            ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
+            ), "expected non-null rollout logprobs tensor when off_policy_correction is enabled"
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)

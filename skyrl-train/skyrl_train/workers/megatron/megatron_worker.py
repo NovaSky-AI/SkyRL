@@ -30,7 +30,7 @@ from skyrl_train.distributed.megatron.megatron_utils import print_model_size, br
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype
 from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -583,13 +583,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     # within a DP group, metrics are already the same across all workers - we then just all reduce across
                     # the whole world size to get the metrics for the global micro batch
                     for i, metrics in enumerate(metrics_list):
-                        status = {
-                            "final_loss": metrics["final_loss"],
-                            "policy_loss": metrics["policy_loss"],
-                            "policy_lr": self.optimizer.param_groups[0]["lr"],
-                            "ppo_clip_ratio": metrics["ppo_clip_ratio"],
-                            "policy_entropy": metrics["policy_entropy"],
-                        }
+                        status = {}
+                        for k, v in metrics.items():
+                            status[k] = v
+
+                        status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
                         if self.cfg.trainer.algorithm.use_kl_loss:
                             status["policy_kl"] = metrics["policy_kl"]
 
@@ -600,7 +598,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # attach response_length
                         status["response_length"] = micro_buffer[i]["num_actions"]
 
-                        status = self.strategy.all_reduce(status)
+                        status_mean = all_reduce_metrics(status, self.strategy)
+
                         status_list.append(status)
                         for k, v in status.items():
                             all_metrics[k].append(v)
