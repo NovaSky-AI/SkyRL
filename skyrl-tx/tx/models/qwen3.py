@@ -205,6 +205,9 @@ class Qwen3Experts(nnx.Module):
         num_experts_per_tok = self.config.num_experts_per_tok
         hidden_size = self.config.hidden_size
 
+        ep = get_abstract_mesh().shape.get("ep", 1)
+        assert num_experts % ep == 0, f"num_experts={num_experts} must be divisible by ep={ep}"
+
         # Prepare routing (inputs are replicated, so every rank generates the same sorted lists)
         hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
         adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
