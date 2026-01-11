@@ -239,11 +239,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         *,
         group_offset: jax.Array | None = None,
     ) -> jax.Array:
-        # Inside shard_map, weights are already local shards
-        weight = self.weight.value
-        num_local_experts = weight.shape[0]
-
-        base_out = ragged_dot(x, weight, group_sizes, group_offset=group_offset)
+        base_out = ragged_dot(x, self.weight.value, group_sizes, group_offset=group_offset)
 
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
@@ -257,8 +253,9 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         # Expert-first flattening so local expert groups are contiguous
         flattened_indices = expert_indices * self.max_lora_adapters + adapter_indices_sorted
         num_flattened_groups = self.num_experts * self.max_lora_adapters
+        num_local_experts = self.lora_A.value.shape[1]
 
-        # Reshape LoRA weights in expert-first order (already local shards)
+        # Reshape LoRA weights in expert-first order
         lora_A = self.lora_A.value.transpose((1, 0, 2, 3)).reshape(
             self.max_lora_adapters * num_local_experts, self.in_features, self.max_lora_rank
         )
