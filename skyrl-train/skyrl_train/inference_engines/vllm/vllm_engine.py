@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.v1.metrics.loggers import LoggingStatLogger
 from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
@@ -362,6 +363,22 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await asyncio.to_thread(engine.collective_rpc, "destroy_weights_update_group")
 
+class V1LoggingStatLoggerFixed(LoggingStatLogger):
+    """
+    A fixed version of LoggingStatLogger that actually logs during the record method.
+    The log method is otherwise not called in the VLLM codebase.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.log_interval = 5
+
+    def record(self, *args: Any, **kwargs: Any) -> None:
+        super().record(*args, **kwargs)
+        now = time.monotonic()
+        if now - self.last_log_time > self.log_interval:
+            self.log()
+            self.last_log_time = now
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
@@ -371,13 +388,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
 
     def _create_engine(self, *args, **kwargs):
-        openai_kwargs = pop_openai_kwargs(kwargs)
         # TODO (erictang000): potentially enable log requests for a debugging mode
-        if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-            engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
-        else:
-            engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
-        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+        custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
+        stat_loggers = [V1LoggingStatLoggerFixed]
+        engine_args = vllm.AsyncEngineArgs(**kwargs)
+        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
@@ -387,6 +402,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
         models = OpenAIServingModels(engine, model_config, base_model_paths)
+
+        # TODO(Charlie): adding custom chat template for chat completion. Hacky!
+        if custom_chat_template_path:
+            with open(custom_chat_template_path, "r") as f:
+                custom_chat_template_content = f.read()
+            logger.info(f"Initializing OpenAIServingChat with custom_chat_template read from: {custom_chat_template_path}")
+        else:
+            custom_chat_template_content = None
+
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
         self.openai_serving_chat = OpenAIServingChat(
@@ -395,9 +419,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             models=models,
             response_role="assistant",
             request_logger=None,
-            chat_template=None,
+            chat_template=custom_chat_template_content,
             chat_template_content_format="auto",
-            **openai_kwargs,
         )
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,

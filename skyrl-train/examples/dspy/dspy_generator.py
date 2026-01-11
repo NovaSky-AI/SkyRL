@@ -53,6 +53,9 @@ class DSPyGenerator(GeneratorInterface):
         self.dspy_cfg = dspy_cfg
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
+        self.concurrency = dspy_cfg.concurrency
+        self.alpha = dspy_cfg.alpha
+        # TODO: add this alpha when calculating the final final reward
 
         # Create DSPy LM for the program
         # Disable DSPy cache/logs
@@ -96,8 +99,7 @@ class DSPyGenerator(GeneratorInterface):
                 )
             )
 
-        batch_size = 40
-        semaphore = asyncio.Semaphore(batch_size)
+        semaphore = asyncio.Semaphore(self.concurrency)
 
         async def run_with_limit(coro):
             async with semaphore:

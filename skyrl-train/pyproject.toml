@@ -122,6 +122,7 @@ dspy = [
     "PyStemmer",
     "bm25s",
     "litellm==1.74.9",
+    "sentence_transformers"
 ]
 docs = [
     "sphinx>=7.0.0",

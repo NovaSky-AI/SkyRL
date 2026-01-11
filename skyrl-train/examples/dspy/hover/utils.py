@@ -46,26 +46,58 @@ class BM25Searcher:
         ]
 
 
-async def hover_query_reward_fn(example, pred):
+from sentence_transformers import SentenceTransformer, util
+import numpy as np
+print("loading sentence transformer model...")
+sentence_model = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
+print("loading sentence transformer done")
+
+async def hover_query_reward_fn(example: list[str], preds, st_model=sentence_model, avg_weight=0.7, min_weight=0.3):
     return 0
+    queries = [p.followup_search_query for p in preds]
+    if len(queries) <= 1:
+        # One query is trivially non-repetitive
+        return 1.0
+
+    # Embed and normalize
+    emb = st_model.encode(queries, normalize_embeddings=True)  # [N, D]
+
+    # Compute centroid
+    centroid = emb.mean(axis=0)
+    centroid /= (np.linalg.norm(centroid) + 1e-12)
+
+    # Cosine similarity of each query to centroid
+    sims = emb @ centroid  # [N], in [-1, 1], usually [0, 1]
+
+    avg_sim = float(sims.mean())
+    min_sim = float(sims.min())
+
+    # "How similar are these queries overall?"
+    similarity_score = (
+        avg_weight * avg_sim +
+        min_weight * min_sim
+    )
+    similarity_score = float(np.clip(similarity_score, 0.0, 1.0))
+
+    # INVERT → distinctiveness
+    distinctiveness_score = 1.0 - similarity_score
+    import pdb; pdb.set_trace()
+    return distinctiveness_score
+
+async def hover_query_reward_fn_2(example, preds):
+    return
+
+# async def assert_no_duplicate_notes(example, trace):
+    
+#     unique_notes = set(pred.new_notes)
+#     if not len(unique_notes) == len(pred.new_notes):
+#         return "Ensure there's no duplicate notes", 0
+#     return None, 1
+
+# async def hover_query_reward_fn(example, pred):
+#     return 0
 
 async def hover_final_reward_fn(example, pred, trace=None):
     gold_titles = example.titles
     retrieved_titles = [doc.split(" | ")[0] for doc in pred.retrieved_docs]
     return sum(x in retrieved_titles for x in set(gold_titles)) / len(gold_titles)
-
-# async def hover_final_reward_fn(example, pred):
-#     gold_titles = set(
-#         map(
-#             dspy.evaluate.normalize_text,
-#             [doc["key"] for doc in example["supporting_facts"]],
-#         )
-#     )
-#     found_titles = set(
-#         map(
-#             dspy.evaluate.normalize_text,
-#             pred.titles
-#         )
-#     )
-#     return gold_titles.issubset(found_titles)
-    
