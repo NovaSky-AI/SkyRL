@@ -1,0 +1,180 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import "leaflet/dist/leaflet.css";
+
+@layer base {
+  :root {
+    /* Typography */
+    --font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+    /* Base Colors & Typography Variables from User Snippet */
+    --font-size-32: 32px;
+    --font-size-24: 24px;
+    --font-size-20: 20px;
+    --font-size-16: 16px;
+    --font-size-14: 14px;
+    --font-size-12: 12px;
+    --line-height-40: 40px;
+    --line-height-32: 32px;
+    --line-height-24: 24px;
+    --line-height-20: 20px;
+    --line-height-16: 16px;
+
+    /* Color Palette */
+    --blue-700: #0880cc;
+    --blue-600: #0a8ae6;
+    --blue-500: #0b99ff;
+    --blue-400: #28a5ff;
+    --red-500: #f45757;
+    --red-400: #ff7373;
+    --steel-700: #4d7699;
+    --steel-650: #5a83ac;
+    --steel-600: #54687f;
+    --steel-550: #6890bb;
+    --steel-500: #759bca;
+    --steel-400: #82a7d6;
+    --neutral-900: #1a1a1a;
+    --neutral-600: #666;
+    --neutral-200: #f4f5f7;
+    --neutral-100: #f6f6f6;
+    --neutral-50: #f6f7f9;
+    --neutral-000: #fff;
+
+    /* Sizing & Spacing */
+    --size-44: 44px;
+    --size-32: 32px;
+    --size-26: 26px;
+    --spacing-18: 18px;
+    --spacing-14: 14px;
+    --spacing-10: 10px;
+    --radius-10: 10px;
+    --radius-6: 6px;
+    --radius-4: 4px;
+
+    /* Alpha Colors */
+    --alpha-2: #00000005;
+    --alpha-6: #0000000f;
+    --alpha-10: #0000001a;
+    --alpha-12: #0000001f;
+    --alpha-16: #00000029;
+
+    /* Button Gradients & Shadows */
+    --btn-default-bg: linear-gradient(180deg, var(--neutral-000) 5.17%, var(--neutral-100) 23.1%, var(--neutral-200) 76.9%, var(--neutral-50) 94.83%);
+    --btn-primary-bg: linear-gradient(180deg, oklch(.67 .19 263), oklch(.59 .26 263) 62%, oklch(.64 .22 263));
+    --btn-primary-border: oklch(.53 .25 265.05);
+    --btn-primary-shadow: inset 0 1px 0 oklch(1 0 0 / .2), inset 0 -1px 0 oklch(0 0 0 / .2), 0 1px 2px oklch(0 0 0 / .2);
+    --btn-secondary-bg: linear-gradient(180deg, var(--steel-400) 5.17%, var(--steel-500) 23.1%, var(--steel-500) 76.9%, var(--steel-400) 94.83%);
+    --btn-danger-bg: linear-gradient(180deg, var(--red-400) 5.17%, var(--red-500) 23.1%, var(--red-500) 76.9%, var(--red-400) 94.83%);
+
+    --shadow-btn-inset: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    --overlay-hover: rgba(0, 0, 0, 0.04);
+    --overlay-active: rgba(0, 0, 0, 0.08);
+
+    /* Text Colors */
+    --text-body: var(--neutral-900);
+    --text-muted: var(--neutral-600);
+    --border-default: var(--alpha-10);
+
+    /* Shadcn/Radix OKLCH Theme Variables */
+    --radius: .625rem;
+    --background: 100% 0 0;
+    --foreground: 14.5% 0 0;
+    --card: 100% 0 0;
+    --card-foreground: 14.5% 0 0;
+    --popover: 100% 0 0;
+    --popover-foreground: 14.5% 0 0;
+    --primary: 20.5% 0 0;
+    --primary-foreground: 98.5% 0 0;
+    --secondary: 97% 0 0;
+    --secondary-foreground: 20.5% 0 0;
+    --muted: 97% 0 0;
+    --muted-foreground: 55.6% 0 0;
+    --accent: 97% 0 0;
+    --accent-foreground: 20.5% 0 0;
+    --destructive: 57.7% .245 27.325;
+    --border: 92.2% 0 0;
+    --input: 92.2% 0 0;
+    --ring: 70.8% 0 0;
+
+    /* Charts */
+    --chart-1: 64.6% .222 41.116;
+    --chart-2: 60% .118 184.704;
+    --chart-3: 39.8% .07 227.392;
+    --chart-4: 82.8% .189 84.429;
+    --chart-5: 76.9% .188 70.08;
+
+    /* Sidebar */
+    --sidebar: 98.5% 0 0;
+    --sidebar-foreground: 14.5% 0 0;
+    --sidebar-primary: 20.5% 0 0;
+    --sidebar-primary-foreground: 98.5% 0 0;
+    --sidebar-accent: 97% 0 0;
+    --sidebar-accent-foreground: 20.5% 0 0;
+    --sidebar-border: 92.2% 0 0;
+    --sidebar-ring: 70.8% 0 0;
+
+    /* Additional Control Variables */
+    --control-md: 32px;
+    --control-sm: 28px;
+    --control-xs: 24px;
+    --px-control-md: 12px;
+    --text-control-md: 14px;
+    --radius-control: 6px;
+    --px-control-sm: 12px;
+
+    /* Badge colors (Restored) */
+    --badge-blue-bg: #dbeafe;
+    --badge-blue-text: #1e40af;
+    --badge-green-bg: #dcfce7;
+    --badge-green-text: #166534;
+    --badge-gray-bg: #f3f4f6;
+    --badge-gray-text: #374151;
+    --badge-purple-bg: #f3e8ff;
+    --badge-purple-text: #6b21a8;
+  }
+
+  .dark {
+    /* Dark mode overrides if needed, assuming system preference or class */
+    --background: 14.5% 0 0;
+    --foreground: 98.5% 0 0;
+    --card: 14.5% 0 0;
+    --card-foreground: 98.5% 0 0;
+    --popover: 14.5% 0 0;
+    --popover-foreground: 98.5% 0 0;
+    --primary: 98.5% 0 0;
+    --primary-foreground: 20.5% 0 0;
+    --secondary: 20.5% 0 0;
+    --secondary-foreground: 98.5% 0 0;
+    --muted: 20.5% 0 0;
+    --muted-foreground: 55.6% 0 0;
+    --accent: 20.5% 0 0;
+    --accent-foreground: 98.5% 0 0;
+    --destructive: 57.7% .245 27.325;
+    --border: 20.5% 0 0;
+    --input: 20.5% 0 0;
+    --ring: 70.8% 0 0;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Utilities for token visualization */
+@layer utilities {
+  .rounded-control { border-radius: var(--radius-control); }
+  .h-control-sm { height: var(--control-sm); }
+  .px-control-sm { padding-left: var(--px-control-sm); padding-right: var(--px-control-sm); }
+  .text-control-md { font-size: var(--text-control-md); }
+  .shadow-btn-inset { box-shadow: var(--shadow-btn-inset); }
+  .bg-btn-primary { background: var(--btn-primary-bg); }
+  .bg-btn-default { background: var(--btn-default-bg); }
+}
