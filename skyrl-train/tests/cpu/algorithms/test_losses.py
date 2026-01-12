@@ -14,7 +14,7 @@ from skyrl_train.utils.ppo_utils import (
     compute_tis_ratio,
     compute_sequence_mask,
     compute_outlier_token_mask,
-    apply_off_policy_correction,
+    compute_off_policy_correction,
 )
 
 NULL_OFF_POLICY_CORR = {
@@ -957,11 +957,10 @@ def test_compute_outlier_token_mask_respects_loss_mask():
     assert metrics["outlier_seq_masked_ratio"] == 0.0
 
 
-def test_apply_off_policy_correction_null_configs():
-    """Tests that apply_off_policy_correction returns loss unchanged when both configs are null."""
+def test_compute_off_policy_correction_null_configs():
+    """Tests that compute_off_policy_correction returns None tis_ratio when both configs are null."""
     device = "cpu"
 
-    loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
     rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
@@ -973,20 +972,19 @@ def test_apply_off_policy_correction_null_configs():
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
-        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
+        old_log_probs, rollout_logprobs, loss_mask, config
     )
 
-    # Should return the same tensor (early return) and empty metrics
-    assert corrected_loss is loss
+    # Should return None tis_ratio (early return) and empty metrics
+    assert tis_ratio is None
     assert metrics == {}
 
 
-def test_apply_off_policy_correction_tis_only():
-    """Tests apply_off_policy_correction with only TIS enabled."""
+def test_compute_off_policy_correction_tis_only():
+    """Tests compute_off_policy_correction with only TIS enabled."""
     device = "cpu"
 
-    loss = torch.tensor([[1.0, 1.0, 1.0]], device=device)
     # Token log ratios: [0.5, 0.5, 0.5] -> token ratios = [1.6487, 1.6487, 1.6487]
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
     rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
@@ -1002,23 +1000,22 @@ def test_apply_off_policy_correction_tis_only():
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
-        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
+        old_log_probs, rollout_logprobs, loss_mask, config
     )
 
-    # Expected: loss * 1.6487 (no capping needed)
-    expected = loss * torch.exp(torch.tensor(0.5))
-    torch.testing.assert_close(corrected_loss, expected, rtol=1e-3, atol=1e-4)
+    # Expected tis_ratio: 1.6487 (no capping needed)
+    expected_tis_ratio = torch.exp(torch.tensor(0.5))
+    torch.testing.assert_close(tis_ratio, torch.full_like(old_log_probs, expected_tis_ratio.item()), rtol=1e-3, atol=1e-4)
     # Check metrics are populated
     assert "is_ratio_mean" in metrics
     assert "tis_token_clip_high_ratio" in metrics
 
 
-def test_apply_off_policy_correction_sequence_mask_only():
-    """Tests apply_off_policy_correction with only geometric sequence mask enabled."""
+def test_compute_off_policy_correction_sequence_mask_only():
+    """Tests compute_off_policy_correction with only geometric sequence mask enabled."""
     device = "cpu"
 
-    loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
     # Token log ratios: [0.0, 0.0, 0.0] -> geometric mean = 1.0
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
     rollout_logprobs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
@@ -1035,22 +1032,23 @@ def test_apply_off_policy_correction_sequence_mask_only():
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
-        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
+        old_log_probs, rollout_logprobs, loss_mask, config
     )
 
-    # Geometric mean = 1.0, within bounds, so loss unchanged
-    torch.testing.assert_close(corrected_loss, loss, rtol=1e-3, atol=1e-4)
+    # Geometric mean = 1.0, within bounds, so loss_mask unchanged
+    # tis_ratio is None since tis_ratio_type is None
+    assert tis_ratio is None
+    torch.testing.assert_close(new_loss_mask, loss_mask, rtol=1e-3, atol=1e-4)
     # Check metrics are populated
     assert "is_ratio_mean" in metrics
     assert "geo_sequence_mask_masked_ratio" in metrics
 
 
-def test_apply_off_policy_correction_both_enabled():
-    """Tests apply_off_policy_correction with both TIS and geometric sequence mask enabled."""
+def test_compute_off_policy_correction_both_enabled():
+    """Tests compute_off_policy_correction with both TIS and geometric sequence mask enabled."""
     device = "cpu"
 
-    loss = torch.tensor([[1.0, 1.0, 1.0]], device=device)
     # Token log ratios: [0.1, 0.1, 0.1] -> token ratios ≈ [1.105, 1.105, 1.105]
     # Geometric mean ≈ 1.105
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
@@ -1069,24 +1067,22 @@ def test_apply_off_policy_correction_both_enabled():
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
-        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
+        old_log_probs, rollout_logprobs, loss_mask, config
     )
 
     # TIS ratio ≈ 1.105, geometric mean ≈ 1.105 (within bounds, mask=1)
-    # Expected: loss * 1.105 * 1.0 = loss * 1.105
-    expected = loss * torch.exp(torch.tensor(0.1))
-    torch.testing.assert_close(corrected_loss, expected, rtol=1e-3, atol=1e-4)
+    expected_tis_ratio = torch.exp(torch.tensor(0.1))
+    torch.testing.assert_close(tis_ratio, torch.full_like(old_log_probs, expected_tis_ratio.item()), rtol=1e-3, atol=1e-4)
     # Check metrics from both TIS and sequence mask are populated
     assert "tis_token_clip_high_ratio" in metrics
     assert "geo_sequence_mask_masked_ratio" in metrics
 
 
-def test_apply_off_policy_correction_sequence_mask_zeros_loss():
-    """Tests that sequence mask can zero out the loss entirely."""
+def test_compute_off_policy_correction_sequence_mask_zeros_loss():
+    """Tests that sequence mask can zero out the loss_mask entirely."""
     device = "cpu"
 
-    loss = torch.tensor([[1.0, 2.0, 3.0]], device=device)
     # Token log ratios: [1.0, 1.0, 1.0] -> geometric mean = exp(1.0) ≈ 2.718
     old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
     rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
@@ -1103,13 +1099,13 @@ def test_apply_off_policy_correction_sequence_mask_zeros_loss():
         }
     )
 
-    corrected_loss, metrics, loss_mask = apply_off_policy_correction(
-        loss, old_log_probs, rollout_logprobs, loss_mask, config
+    tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
+        old_log_probs, rollout_logprobs, loss_mask, config
     )
 
-    # Geometric mean ≈ 2.718, outside [0.9, 1.1], so loss should be zeroed
-    expected = torch.tensor([[0.0, 0.0, 0.0]], device=device)
-    torch.testing.assert_close(corrected_loss * loss_mask, expected, rtol=1e-3, atol=1e-4)
+    # Geometric mean ≈ 2.718, outside [0.9, 1.1], so loss_mask should be zeroed
+    expected_mask = torch.tensor([[0.0, 0.0, 0.0]], device=device)
+    torch.testing.assert_close(new_loss_mask, expected_mask, rtol=1e-3, atol=1e-4)
     # Check that the sequence mask metrics show sequence mask happened
     assert metrics["geo_sequence_mask_masked_ratio"] == 1.0
 
