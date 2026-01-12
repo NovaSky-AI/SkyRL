@@ -19,6 +19,7 @@ from .lcb.lcb_utils import (
 )
 from .hover.programs import Hover, Hover_query_gen
 from .papillon.programs import PAPILLON, PAPILLON_request_gen
+from .banking77.programs import Banking77_intent_classifier
 
 # Import reward functions from different modules
 from .lcb.utils import (
@@ -33,11 +34,16 @@ from .hover.utils import (
     hover_final_reward_fn,
     hover_query_reward_fn,
 )
+from .banking77.utils import (
+    banking77_final_reward_fn,
+    banking77_local_reward_fn,
+)
 
 # Import data functions from different modules
 from .lcb.data import lcb_data
 from .papillon.data import papillon_data
 from .hover.data import hover_data
+from .banking77.data import banking77_data
 
 # Mapping from program name (string) to program class
 DSPY_PROGRAM_MAP: Dict[str, Type[dspy.Module]] = {
@@ -49,6 +55,7 @@ DSPY_PROGRAM_MAP: Dict[str, Type[dspy.Module]] = {
     "CodeGeneratorWithSelfDebug": CodeGeneratorWithSelfDebug,
     "Hover_query_gen": Hover_query_gen,
     "papillon_request_gen": PAPILLON_request_gen,
+    "Banking77_intent_classifier": Banking77_intent_classifier,
 }
 
 # Mapping from reward function name (string) to reward function
@@ -59,6 +66,8 @@ REWARD_FUNCTION_MAP: Dict[str, Callable[..., Any]] = {
     "papillon_query_leakage": compute_query_leakage,
     "hover_final_reward_fn": hover_final_reward_fn,
     "hover_query_reward_fn": hover_query_reward_fn,
+    "banking77_final_reward_fn": banking77_final_reward_fn,
+    "banking77_local_reward_fn": banking77_local_reward_fn,
 }
 
 # Mapping from benchmark name (string) to data function
@@ -66,6 +75,7 @@ BENCHMARK_DATA_MAP: Dict[str, Callable[[], tuple]] = {
     "lcb": lcb_data,
     "papillon": papillon_data,
     "hover": hover_data,
+    "banking77": banking77_data,
 }
 
 
