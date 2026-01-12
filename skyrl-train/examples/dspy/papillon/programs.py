@@ -49,6 +49,20 @@ class PAPILLON(dspy.Module):
         )
 
 class PAPILLON_request_gen(PAPILLON):
+    def __init__(self):
+        super().__init__()
+        request_lm = dspy.LM(
+            model="openai/Qwen/Qwen2.5-0.5B-Instruct",
+            api_base="http://0.0.0.0:8002/v1",
+            api_key="fake-key",
+            temperature=1.0,
+            model_type="chat",
+            max_tokens=4096,
+            cache=False,
+        )
+        self.craft_redacted_request.set_lm(request_lm)
+        self.respond_to_query.set_lm(request_lm)
+        
     async def forward(self, example):
         user_query = example.get("user_query")
         print("[Program] Generating LLM request")
@@ -72,10 +86,10 @@ class PAPILLON_request_gen(PAPILLON):
         )
     
     def collect_trace(self, kwargs, pred):
-        original_sig = CraftRedactedRequest
         # Get formatted finetune data which contains both input and output messages
+        import pdb; pdb.set_trace()
         finetune_data = self.adapter.format_finetune_data(
-                                signature=original_sig,
+                                signature=self.craft_redacted_request.predictors()[0].signature,
                                 inputs=kwargs,
                                 outputs=self.llm_request,
                                 demos=[] # TODO: Add support for demos
@@ -83,27 +97,7 @@ class PAPILLON_request_gen(PAPILLON):
         
         all_messages = finetune_data.get('messages', [])
         
-        # Extract user and assistant messages
-
-        chat_history = [None, None, None]
-
-        for msg in all_messages:
-            if msg.get("role") == "system":
-                chat_history[0] = {
-                    "role": "system",
-                    "content": msg['content']
-                }
-            if msg.get("role") == "user":
-                chat_history[1] = {
-                    "role": "user",
-                    "content": msg['content']
-                }
-            elif msg.get("role") == "assistant":
-                chat_history[2] = {
-                    "role": "assistant",
-                    "content": msg['content']
-                }
-        return chat_history, self.llm_request
+        return all_messages, self.llm_request
 
     
     
