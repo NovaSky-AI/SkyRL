@@ -5,6 +5,7 @@ from omegaconf import DictConfig
 from skyrl_gym.tools import RLMExecutorToolGroup
 import re
 import json
+import traceback
 
 
 class RLMExecutorEnv(BaseTextEnv):
@@ -123,7 +124,6 @@ class RLMExecutorEnv(BaseTextEnv):
 
             except Exception as e:
                 # If tool execution fails, return error observation and continue
-                import traceback
 
                 error_msg = f"Tool execution error: {str(e)}"
                 print("[RLM ENV] Tool execution failed!")

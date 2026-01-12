@@ -10,6 +10,8 @@ import textwrap
 import threading
 import time
 import uuid
+import shutil
+import sys
 from urllib.parse import urlparse
 from typing import Any, Optional
 from openai import OpenAI
@@ -428,7 +430,6 @@ class RLMExecutorToolGroup(ToolGroup):
 
     def _execute_code(self, code: str) -> dict:
         """Execute Python in the persistent REPL namespace."""
-        import sys
 
         start_time = time.perf_counter()
 
@@ -470,8 +471,6 @@ class RLMExecutorToolGroup(ToolGroup):
 
     def close(self) -> None:
         if getattr(self, "temp_dir", None) and os.path.exists(self.temp_dir):
-            import shutil
-
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         self.temp_dir = None
         self.globals_dict.clear()
