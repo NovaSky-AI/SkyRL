@@ -1006,7 +1006,9 @@ def test_compute_off_policy_correction_tis_only():
 
     # Expected tis_ratio: 1.6487 (no capping needed)
     expected_tis_ratio = torch.exp(torch.tensor(0.5))
-    torch.testing.assert_close(tis_ratio, torch.full_like(old_log_probs, expected_tis_ratio.item()), rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(
+        tis_ratio, torch.full_like(old_log_probs, expected_tis_ratio.item()), rtol=1e-3, atol=1e-4
+    )
     # Check metrics are populated
     assert "is_ratio_mean" in metrics
     assert "tis_token_clip_high_ratio" in metrics
@@ -1073,7 +1075,9 @@ def test_compute_off_policy_correction_both_enabled():
 
     # TIS ratio ≈ 1.105, geometric mean ≈ 1.105 (within bounds, mask=1)
     expected_tis_ratio = torch.exp(torch.tensor(0.1))
-    torch.testing.assert_close(tis_ratio, torch.full_like(old_log_probs, expected_tis_ratio.item()), rtol=1e-3, atol=1e-4)
+    torch.testing.assert_close(
+        tis_ratio, torch.full_like(old_log_probs, expected_tis_ratio.item()), rtol=1e-3, atol=1e-4
+    )
     # Check metrics from both TIS and sequence mask are populated
     assert "tis_token_clip_high_ratio" in metrics
     assert "geo_sequence_mask_masked_ratio" in metrics
