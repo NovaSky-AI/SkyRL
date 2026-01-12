@@ -96,7 +96,7 @@ class RLMExecutorEnv(BaseTextEnv):
                     if looks_like_json:
                         try:
                             tool_payload = json.loads(s)
-                        except Exception:
+                        except json.JSONDecodeError:
                             tool_payload = tool_input
                     else:
                         tool_payload = tool_input
