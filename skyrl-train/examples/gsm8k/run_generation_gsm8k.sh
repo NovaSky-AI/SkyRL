@@ -25,3 +25,4 @@ uv run --isolated --extra $INFERENCE_BACKEND \
   generator.eval_sampling_params.max_generate_length=1024 \
   generator.eval_sampling_params.temperature=0.7 \
   environment.env_class=gsm8k \
+  "$@"
