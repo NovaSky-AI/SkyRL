@@ -41,7 +41,7 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   +dspy.local_reward_fn="hover_query_reward_fn" \
   +dspy.final_reward_fn="hover_final_reward_fn" \
   +dspy.alpha=0.7 \
-  +dspy.concurrency=32 \
+  +dspy.concurrency=48 \
   +generator.engine_init_kwargs.custom_chat_template_chat_completion_path=$CHAT_TEMPLATE_PATH \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.policy.model.lora.rank=0 \
@@ -66,8 +66,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   trainer.epochs=20 \
   trainer.policy_mini_batch_size=64 \
   trainer.train_batch_size=64 \
-  trainer.micro_forward_batch_size_per_gpu=1 \
-  trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=4 \
   trainer.max_prompt_length=29000 \
   generator.max_input_length=29000 \
   generator.sampling_params.max_generate_length=3000 \

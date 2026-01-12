@@ -237,13 +237,30 @@ class CodeGeneratorWithRanker(dspy.Module):
         return dspy.Prediction(code=pred)
     
 class CodeGeneratorWithRanker_prog(CodeGeneratorWithRanker):
+    def __init__(self):
+        super().__init__()
+        test_gen_lm = dspy.LM(
+            model="openai/Qwen/Qwen2.5-Coder-3B-Instruct",
+            api_base="http://0.0.0.0:8002/v1",
+            api_key="fake-key",
+            temperature=1.0,
+            model_type="chat",
+            max_tokens=4096,
+            cache=False,
+        )
+        self.test_generator_stdin.set_lm(test_gen_lm)
+        self.test_generator.set_lm(test_gen_lm)
+
+        # TODO: change the prog lm to something else
+        self.stdin_prog.set_lm(test_gen_lm)
+        self.functional_prog.set_lm(test_gen_lm)
     def collect_trace(self, kwargs, pred):
         is_stdin = kwargs.get("is_stdin")
-        original_sig = GenerateLCBcodestdin if is_stdin else GenerateLCBcodefunctional
+        prog_gen = self.stdin_prog if is_stdin else self.functional_prog
 
         # Get formatted finetune data which contains both input and output messages
         finetune_data = self.adapter.format_finetune_data(
-                                signature=original_sig,
+                                signature=prog_gen.predictors()[0].signature,
                                 inputs=kwargs,
                                 outputs=pred,
                                 demos=[] # TODO: Add support for demos
@@ -257,6 +274,24 @@ class CodeGeneratorWithRanker_prog(CodeGeneratorWithRanker):
 
 
 class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
+    def __init__(self):
+        super().__init__()
+        test_gen_lm = dspy.LM(
+            model="openai/Qwen/Qwen2.5-Coder-3B-Instruct",
+            api_base="http://0.0.0.0:8002/v1",
+            api_key="fake-key",
+            temperature=1.0,
+            model_type="chat",
+            max_tokens=4096,
+            cache=False,
+        )
+        self.test_generator_stdin.set_lm(test_gen_lm)
+        self.test_generator.set_lm(test_gen_lm)
+
+        # TODO: change the prog lm to something else
+        self.stdin_prog.set_lm(test_gen_lm)
+        self.functional_prog.set_lm(test_gen_lm)
+        
     async def forward(self, example):
         prompt = example.get("prompt")  
         task_id = example.get("task_id")
@@ -269,7 +304,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
         for retry in range(3):
             try:
                 start = time.time()
-                self.raw_tests = generator.acall(prompt=prompt)
+                self.raw_tests = await generator.acall(prompt=prompt)
                 end = time.time()
                 print(f"[Program] Time taken to generate tests: {end - start}")
                 break
@@ -286,10 +321,10 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
         print(f"[Program] Generating programs for task_id: {task_id}")
         if len(tests) == 0:
             print(f"No tests found for prompt: {prompt.splitlines()[0]}")
-            return self.prog.acall(prompt=prompt)
+            return await self.prog.acall(prompt=prompt)
 
         preds = [
-            self.prog.acall(
+            await self.prog.acall(
                 prompt=prompt,
                 config=dict(temperature=self.temperature + (TEMPARATURE_STEP * i)),
             )

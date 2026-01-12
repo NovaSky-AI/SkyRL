@@ -65,18 +65,6 @@ class Trial:
         else:
             self.program = config.dspy_program
         
-        # Set LM on the program if provided
-        if config.lm is not None:
-            if hasattr(self.program, "set_lm"):
-                self.program.set_lm(config.lm)
-            else:
-                # If the program doesn't have set_lm, try setting on sub-programs
-                # This handles cases like NaiveCodeGenerator_dspy which has stdin_prog and functional_prog
-                if hasattr(self.program, "stdin_prog"):
-                    self.program.stdin_prog.set_lm(config.lm)
-                if hasattr(self.program, "functional_prog"):
-                    self.program.functional_prog.set_lm(config.lm)
-        
         self.example = config.example
         self.final_reward_fn = config.final_reward_fn
         self.local_reward_fn = config.local_reward_fn

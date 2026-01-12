@@ -53,6 +53,7 @@ sentence_model = SentenceTransformer("all-MiniLM-L6-v2", device='cpu')
 print("loading sentence transformer done")
 
 async def hover_query_reward_fn(example: list[str], preds, st_model=sentence_model, avg_weight=0.7, min_weight=0.3):
+    # todo: check to see if golden solution is being reached
     return 0
     queries = [p.followup_search_query for p in preds]
     if len(queries) <= 1:

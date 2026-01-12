@@ -11,7 +11,9 @@ NUM_NODES=1
 NUM_GPUS=1
 LOGGER="wandb"
 
-MODEL_NAME="Qwen/Qwen2.5-Coder-0.5B-Instruct"
+export CUDA_VISIBLE_DEVICES=3
+
+MODEL_NAME="Qwen/Qwen2.5-Coder-3B-Instruct"
 
 
 FLASH_ATTN=true
@@ -35,6 +37,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   +dspy.benchmark_name="lcb" \
   +dspy.local_reward_fn="lcb_assert_test_gen" \
   +dspy.final_reward_fn="lcb_final_reward_fn" \
+  +dspy.alpha=0.7 \
+  +dspy.concurrency=10 \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
@@ -47,7 +51,7 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TP \
   generator.enable_http_endpoint=true \
   generator.http_endpoint_host="127.0.0.1" \
-  generator.http_endpoint_port=8000 \
+  generator.http_endpoint_port=8002 \
   trainer.epochs=20 \
   trainer.policy_mini_batch_size=32 \
   trainer.train_batch_size=32 \
