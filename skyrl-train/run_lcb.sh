@@ -8,22 +8,22 @@ export WANDB_API_KEY="6a25ce5b41815c557d6fe8aecb8bac2dd6b1bea0"
 
 
 NUM_NODES=1
-NUM_GPUS=1
+NUM_GPUS=2
 LOGGER="wandb"
 
-export CUDA_VISIBLE_DEVICES=3
+# export CUDA_VISIBLE_DEVICES=3
 
 MODEL_NAME="Qwen/Qwen2.5-Coder-1.5B-Instruct"
 
 
 FLASH_ATTN=true
 NUM_INFERENCE_ENGINES=1
-INFERENCE_ENGINE_TP=1
+INFERENCE_ENGINE_TP=2
 
 train_data="$HOME/Liheng/data/lcb/deepcoder_train_short.json"
 
-CKPTS_DIR="$HOME/ckpts"
-EXPORTS_DIR="$HOME/hf_ckpts"
+CKPTS_DIR="$HOME/ckpts_lcb"
+EXPORTS_DIR="$HOME/hf_ckpts_lcb"
 # train_data="['${DATA_DIR}/deepcoder_train_short.json']"
 # val_data="['${DATA_DIR}/test_livecodebench_short.json']"
 
@@ -53,10 +53,10 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.http_endpoint_host="127.0.0.1" \
   generator.http_endpoint_port=8002 \
   trainer.epochs=20 \
-  trainer.policy_mini_batch_size=32 \
-  trainer.train_batch_size=32 \
-  trainer.micro_forward_batch_size_per_gpu=1 \
-  trainer.micro_train_batch_size_per_gpu=1 \
+  trainer.policy_mini_batch_size=64 \
+  trainer.train_batch_size=64 \
+  trainer.micro_forward_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=4 \
   trainer.max_prompt_length=29000 \
   generator.max_input_length=29000 \
   generator.sampling_params.max_generate_length=3000 \
@@ -77,8 +77,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
   trainer.logger="wandb" \
-  trainer.project_name="skyrl" \
-  trainer.run_name="skyrlcode_test" \
+  trainer.project_name="assertion" \
+  trainer.run_name="lcb" \
   trainer.resume_mode=null \
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
