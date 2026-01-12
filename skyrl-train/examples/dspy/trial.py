@@ -44,7 +44,7 @@ class TrialConfig:
     example: Any
     final_reward_fn: Optional[Callable[[Any, Any], float]] = None
     local_reward_fn: Optional[Callable[[Any, Any], float]] = None
-    lm: Optional[Any] = None  # DSPy LM object
+    alpha: float = 0
 # ---------------------------
 # Trial
 # ---------------------------
@@ -68,6 +68,7 @@ class Trial:
         self.example = config.example
         self.final_reward_fn = config.final_reward_fn
         self.local_reward_fn = config.local_reward_fn
+        self.alpha = config.alpha
 
     # -------- public API --------
     async def run(self) -> TrialResults:
@@ -106,15 +107,19 @@ class Trial:
             trace, trace_pred = self.program.collect_trace(self.example, pred)
             
             assert inspect.iscoroutinefunction(self.local_reward_fn), "local_reward_fn must be a coroutine function"
-            try:
-                print(f"[Trial] running local_reward_fn for task_id: {self.example.get('task_id')}")
-                local_reward = await asyncio.wait_for(self.local_reward_fn(self.example, trace_pred), timeout=verification_timeout_seconds) if self.local_reward_fn is not None else 0
-                print(f"[Trial] local_reward_fn finished for task_id: {self.example.get('task_id')}. Got {local_reward}")
-            except asyncio.TimeoutError as e:
-                raise VerifierTimeoutError(f"TimeoutError: local_reward_fn exceeded {verification_timeout_seconds} seconds")
+            
+            if self.alpha == 0:
+                local_reward = 0
+            else:
+                try:
+                    print(f"[Trial] running local_reward_fn for task_id: {self.example.get('task_id')}")
+                    local_reward = await asyncio.wait_for(self.local_reward_fn(self.example, trace_pred), timeout=verification_timeout_seconds) if self.local_reward_fn is not None else 0
+                    print(f"[Trial] local_reward_fn finished for task_id: {self.example.get('task_id')}. Got {local_reward}")
+                except asyncio.TimeoutError as e:
+                    raise VerifierTimeoutError(f"TimeoutError: local_reward_fn exceeded {verification_timeout_seconds} seconds")
             
             # For handling the case where there is only one module in the program.
-            reward = final_reward + local_reward
+            reward = (1 - self.alpha) * final_reward + self.alpha * local_reward
             results.reward = AgentResult(
                 output=reward,
                 metadata={"reward_value": reward}

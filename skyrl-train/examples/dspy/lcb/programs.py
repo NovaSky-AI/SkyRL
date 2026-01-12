@@ -6,6 +6,7 @@ from dspy.adapters.xml_adapter import XMLAdapter
 from collections import Counter
 import json
 import time
+import asyncio
 
 TIMEOUT_CONSTANT = 6
 NUM_TESTS = 5
@@ -277,7 +278,7 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
     def __init__(self):
         super().__init__()
         test_gen_lm = dspy.LM(
-            model="openai/Qwen/Qwen2.5-Coder-3B-Instruct",
+            model="openai/Qwen/Qwen2.5-Coder-1.5B-Instruct",
             api_base="http://0.0.0.0:8002/v1",
             api_key="fake-key",
             temperature=1.0,
@@ -288,9 +289,31 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
         self.test_generator_stdin.set_lm(test_gen_lm)
         self.test_generator.set_lm(test_gen_lm)
 
-        # TODO: change the prog lm to something else
+        prog_gen_lm = dspy.LM(
+            model="openai/Qwen/Qwen2.5-Coder-7B-Instruct",
+            api_base="http://0.0.0.0:8002/v1",
+            api_key="fake-key",
+            temperature=1.0,
+            model_type="chat",
+            max_tokens=4096,
+            cache=False,
+        )
         self.stdin_prog.set_lm(test_gen_lm)
         self.functional_prog.set_lm(test_gen_lm)
+        
+    async def _check_one(self, test_obj, pred, prompt):
+        # test_obj is {"test": ..., "count": ...}
+        ok = await asyncio.to_thread(
+            check_test,
+            [test_obj["test"]],
+            pred,
+            0,
+            prompt,
+            "dummy",
+            runtime_debug=True,
+        )
+        # check_test returns something like (passed_bool, ...)
+        return test_obj["count"] if ok[0] else 0
         
     async def forward(self, example):
         prompt = example.get("prompt")  
@@ -345,19 +368,27 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
 
         print(f"[Program] running tests for task_id: {task_id}")
         start = time.time()
-        preds_pass = [
-            list(
-                map(
-                    lambda test: test["count"]
-                    if check_test(
-                        [test["test"]], pred, 0, prompt, "dummy", runtime_debug=True
-                    )[0]
-                    else 0,
-                    tests,
-                )
-            )
-            for pred in preds
-        ]
+        # preds_pass = [
+        #     list(
+        #         map(
+        #             lambda test: test["count"]
+        #             if check_test(
+        #                 [test["test"]], pred, 0, prompt, "dummy", runtime_debug=True
+        #             )[0]
+        #             else 0,
+        #             tests,
+        #         )
+        #     )
+        #     for pred in preds
+        # ]
+
+        preds_pass = []
+        for pred in preds:
+            tasks = [self._check_one(t, pred, prompt) for t in tests]
+            results = await asyncio.gather(*tasks, return_exceptions=False)
+            preds_pass.append(list(results))
+
+            
         end = time.time()
         print(f"[Program] Time taken to run tests: {end - start}")
         print(f"[Program] tests finished for task_id: {task_id}")

@@ -861,6 +861,8 @@ def assert_dummy(pred, **kwargs):
 # with open("gold_preds_train.pkl", "rb") as f: #TODO: use test during test time
 #     gold_preds = pickle.load(f)
 
+import asyncio
+
 async def local_reward_fn(input, pred, trace=None): 
 
 
@@ -889,12 +891,29 @@ async def local_reward_fn(input, pred, trace=None):
     ]
     
 
-    num_passed = 0
-    for test in tests:
-        results = check_test([test["test"]], gold_pred, 0, prompt, "dummy", runtime_debug=True)
-        passed = results[0]
-        if passed:
-            num_passed += 1
+    # num_passed = 0
+    # for test in tests:
+    #     results = check_test([test["test"]], gold_pred, 0, prompt, "dummy", runtime_debug=True)
+    #     passed = results[0]
+    #     if passed:
+    #         num_passed += 1
+
+    async def run_one(test_obj):
+        # run sync function in a worker thread
+        results = await asyncio.to_thread(
+            check_test,
+            [test_obj["test"]],
+            gold_pred,
+            0,
+            prompt,
+            "dummy",
+            runtime_debug=True,
+        )
+        return bool(results[0])
+
+    passed_list = await asyncio.gather(*(run_one(t) for t in tests), return_exceptions=False)
+    num_passed = sum(passed_list)
+
     return num_passed / len(tests)
 
 async def final_reward_fn(example, pred, trace=None):

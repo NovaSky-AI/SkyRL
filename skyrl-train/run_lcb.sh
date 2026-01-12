@@ -13,7 +13,7 @@ LOGGER="wandb"
 
 export CUDA_VISIBLE_DEVICES=3
 
-MODEL_NAME="Qwen/Qwen2.5-Coder-3B-Instruct"
+MODEL_NAME="Qwen/Qwen2.5-Coder-1.5B-Instruct"
 
 
 FLASH_ATTN=true
@@ -37,8 +37,8 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   +dspy.benchmark_name="lcb" \
   +dspy.local_reward_fn="lcb_assert_test_gen" \
   +dspy.final_reward_fn="lcb_final_reward_fn" \
-  +dspy.alpha=0.7 \
-  +dspy.concurrency=10 \
+  +dspy.alpha=0 \
+  +dspy.concurrency=20 \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \

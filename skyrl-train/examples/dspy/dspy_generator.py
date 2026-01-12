@@ -178,7 +178,7 @@ class DSPyGenerator(GeneratorInterface):
             example=prompt, 
             final_reward_fn=get_reward_function(self.dspy_cfg.final_reward_fn),
             local_reward_fn=get_reward_function(self.dspy_cfg.local_reward_fn),
-            lm=self.dspy_lm
+            alpha=self.alpha
         )
 
         trial = Trial(trial_config)
