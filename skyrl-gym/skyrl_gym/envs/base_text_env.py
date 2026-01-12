@@ -55,7 +55,7 @@ class BaseTextEnv(Env[ConversationType, str]):
             if group.name == tool_group_name:
                 if isinstance(tool_input, dict):
                     return group.execute_tool(tool_name, **tool_input)
-                if isinstance(tool_input, (tuple, list)):
+                elif isinstance(tool_input, (tuple, list)):
                     return group.execute_tool(tool_name, *tool_input)
                 return group.execute_tool(tool_name, tool_input)
 
