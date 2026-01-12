@@ -21,6 +21,22 @@ class RLMExecutorEnv(BaseTextEnv):
         self.rlm_tool = RLMExecutorToolGroup()
         self.init_tool_groups([self.rlm_tool])
 
+        rlm_base_url = None
+        rlm_model = None
+        rlm_api_key = None
+        if env_config is not None:
+            rlm_base_url = env_config.get("rlm_base_url", None)
+            rlm_model = env_config.get("rlm_model", None)
+            rlm_api_key = env_config.get("rlm_api_key", None)
+
+        if (rlm_base_url and rlm_model) or rlm_api_key:
+            self.rlm_tool.rlm_setup(
+                base_url=rlm_base_url or "https://api.openai.com/v1",
+                model=rlm_model or "gpt-4o-mini",
+                openai_api_key=rlm_api_key,
+                init_prompt="",
+            )
+
         self.ground_truth = extras["reward_spec"]["ground_truth"]
         self.current_turn = 0
         self.max_turns = 3

@@ -525,7 +525,7 @@ class RLMExecutorToolGroup(ToolGroup):
     @tool
     def rlm_setup(
         self,
-        base_url: str = "https://api.openai.com/v1",
+        base_url: str | None = None,
         model: str = "gpt-4o-mini",
         init_prompt: str = "",
         openai_api_key: str | None = None,
@@ -545,11 +545,18 @@ class RLMExecutorToolGroup(ToolGroup):
 
         if openai_api_key is None or openai_api_key == "":
             openai_api_key = os.getenv("OPENAI_API_KEY")
-        if openai_api_key is None:
-            raise ValueError("`OPENAI_API_KEY` must be set")
+        if openai_api_key is None or openai_api_key == "":
+            openai_api_key = "EMPTY"
+
+        hostname = parsed.hostname or ""
+        if hostname == "api.openai.com" and openai_api_key == "EMPTY":
+            raise ValueError(
+                "`OPENAI_API_KEY` must be set when using the official OpenAI endpoint (https://api.openai.com)."
+            )
+        self.lm_client = OpenAI(base_url=base_url, api_key=openai_api_key)
         if not init_prompt:
             init_prompt = DEFAULT_INIT_PROMPT
-        self.lm_client = OpenAI(base_url=base_url, api_key=openai_api_key)
+
         self.model = model
         self.init_prompt = init_prompt
         self._reset_repl_namespace()

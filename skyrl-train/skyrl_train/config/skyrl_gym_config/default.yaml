@@ -9,6 +9,11 @@ llm_as_a_judge:
   model: "gpt-4o-mini"
   base_url: null  # or a local endpoint: http://localhost:8000/v1
 
+rlm_ex:
+  rlm_base_url: "http://${generator.http_endpoint_host}:${generator.http_endpoint_port}/v1"
+  rlm_model: ${trainer.policy.model.path}
+  rlm_api_key: ${oc.env:OPENAI_API_KEY,"EMPTY"}
+
 search:
   log_requests: false
   search_url: "http://127.0.0.1:8000/retrieve"
