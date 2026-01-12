@@ -11,7 +11,7 @@ NUM_NODES=1
 NUM_GPUS=2
 LOGGER="wandb"
 
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES=6,7
 
 MODEL_NAME="Qwen/Qwen2.5-Coder-1.5B-Instruct"
 
@@ -22,8 +22,8 @@ INFERENCE_ENGINE_TP=2
 
 train_data="$HOME/Liheng/data/lcb/deepcoder_train_short.json"
 
-CKPTS_DIR="$HOME/assertion/ckpts_lcb"
-EXPORTS_DIR="$HOME/assertion/hf_ckpts_lcb"
+CKPTS_DIR="$HOME/assertion/ckpts_lcb_2"
+EXPORTS_DIR="$HOME/assertion/hf_ckpts_lcb_2"
 # train_data="['${DATA_DIR}/deepcoder_train_short.json']"
 # val_data="['${DATA_DIR}/test_livecodebench_short.json']"
 
@@ -33,11 +33,11 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   data.train_data=$train_data \
   data.val_data=$train_data \
   +dspy.max_num_examples=400 \
-  +dspy.program="CodeGeneratorWithRanker_test" \
+  +dspy.program="CodeGeneratorWithRanker_test_2" \
   +dspy.benchmark_name="lcb" \
   +dspy.local_reward_fn="lcb_assert_test_gen" \
   +dspy.final_reward_fn="lcb_final_reward_fn" \
-  +dspy.alpha=0 \
+  +dspy.alpha=0.5 \
   +dspy.concurrency=48 \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
@@ -51,7 +51,7 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TP \
   generator.enable_http_endpoint=true \
   generator.http_endpoint_host="127.0.0.1" \
-  generator.http_endpoint_port=8002 \
+  generator.http_endpoint_port=8001 \
   trainer.epochs=20 \
   trainer.policy_mini_batch_size=64 \
   trainer.train_batch_size=64 \
@@ -78,7 +78,7 @@ uv run --isolated --extra dspy --extra vllm -m examples.dspy.entrypoints.main_ds
   generator.sampling_params.top_p=0.95 \
   trainer.logger="wandb" \
   trainer.project_name="assertion" \
-  trainer.run_name="lcb_final" \
+  trainer.run_name="lcb_final_and_local" \
   trainer.resume_mode=null \
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \

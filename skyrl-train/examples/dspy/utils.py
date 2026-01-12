@@ -12,6 +12,7 @@ from .lcb.programs import (
     CodeGeneratorWithRanker,
     CodeGeneratorWithRanker_prog,
     CodeGeneratorWithRanker_test,
+    CodeGeneratorWithRanker_test_2
 )
 from .lcb.lcb_utils import (
     CodeGeneratorWithIteratedRanker,
@@ -51,6 +52,7 @@ DSPY_PROGRAM_MAP: Dict[str, Type[dspy.Module]] = {
     "CodeGeneratorWithRanker": CodeGeneratorWithRanker,
     "CodeGeneratorWithRanker_prog": CodeGeneratorWithRanker_prog,
     "CodeGeneratorWithRanker_test": CodeGeneratorWithRanker_test,
+    "CodeGeneratorWithRanker_test_2": CodeGeneratorWithRanker_test_2,
     "CodeGeneratorWithIteratedRanker": CodeGeneratorWithIteratedRanker,
     "CodeGeneratorWithSelfDebug": CodeGeneratorWithSelfDebug,
     "Hover_query_gen": Hover_query_gen,

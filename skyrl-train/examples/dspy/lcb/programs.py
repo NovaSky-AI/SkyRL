@@ -291,15 +291,15 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
 
         prog_gen_lm = dspy.LM(
             model="openai/Qwen/Qwen2.5-Coder-7B-Instruct",
-            api_base="http://0.0.0.0:8002/v1",
+            api_base="http://0.0.0.0:8000/v1",
             api_key="fake-key",
             temperature=1.0,
             model_type="chat",
             max_tokens=4096,
             cache=False,
         )
-        self.stdin_prog.set_lm(test_gen_lm)
-        self.functional_prog.set_lm(test_gen_lm)
+        self.stdin_prog.set_lm(prog_gen_lm)
+        self.functional_prog.set_lm(prog_gen_lm)
         
     async def _check_one(self, test_obj, pred, prompt):
         # test_obj is {"test": ..., "count": ...}
@@ -426,4 +426,30 @@ class CodeGeneratorWithRanker_test(CodeGeneratorWithRanker):
         return all_messages, self.raw_tests
 
     
-    
+
+class CodeGeneratorWithRanker_test_2(CodeGeneratorWithRanker_test):
+    def __init__(self):
+        super().__init__()
+        test_gen_lm = dspy.LM(
+            model="openai/Qwen/Qwen2.5-Coder-1.5B-Instruct",
+            api_base="http://0.0.0.0:8001/v1",
+            api_key="fake-key",
+            temperature=1.0,
+            model_type="chat",
+            max_tokens=4096,
+            cache=False,
+        )
+        self.test_generator_stdin.set_lm(test_gen_lm)
+        self.test_generator.set_lm(test_gen_lm)
+
+        prog_gen_lm = dspy.LM(
+            model="openai/Qwen/Qwen2.5-Coder-7B-Instruct",
+            api_base="http://0.0.0.0:8000/v1",
+            api_key="fake-key",
+            temperature=1.0,
+            model_type="chat",
+            max_tokens=4096,
+            cache=False,
+        )
+        self.stdin_prog.set_lm(prog_gen_lm)
+        self.functional_prog.set_lm(prog_gen_lm)
