@@ -47,7 +47,7 @@ class RLMExecutorEnv(BaseTextEnv):
         """Capture the original query from the initial prompt."""
         if prompt and len(prompt) > 0:
             self.original_query = prompt[0].get("content", "")
-        print(f"[GSM8K ENV] Captured original query: {self.original_query[:100]}...")
+        print(f"[RLM ENV] Captured original query: {self.original_query[:100]}...")
         return super().init(prompt)
 
     def _get_reward(self, action: str) -> float:
