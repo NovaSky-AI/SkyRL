@@ -238,19 +238,42 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 @pytest.mark.parametrize("use_conversation_multi_turn", [True, False])
+@pytest.mark.parametrize("logprobs_setting", [None, 0])
+@pytest.mark.parametrize("mock_llm_output_ids", [[1, 10, 12, 4], [1, 10, 12]])
 async def test_agent_loop_single_turn(
-    mock_make, mock_tokenizer, mock_llm, mock_env, generator_cfg, use_conversation_multi_turn, mock_env_cfg
+    mock_make,
+    mock_tokenizer,
+    mock_llm,
+    mock_env,
+    generator_cfg,
+    use_conversation_multi_turn,
+    logprobs_setting,
+    mock_llm_output_ids,
+    mock_env_cfg,
 ):
     """
     This test mocks when we call SkyRLGymGenerator.agent_loop() despite being a single-turn generation.
     This is when `batched=False`. Here the environment does nothing.
     """
     generator_cfg.use_conversation_multi_turn = use_conversation_multi_turn
+    generator_cfg.sampling_params.logprobs = logprobs_setting
     mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
     mock_tokenizer.eos_token_id = 4  # bypass check for eos token id for this test
 
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    def mock_generate(_):
+        result = {
+            "responses": ["4"],
+            "response_ids": [mock_llm_output_ids.copy()],
+            "stop_reasons": ["stop"],
+        }
+        if logprobs_setting is not None:
+            result["response_logprobs"] = [[-0.1] * len(mock_llm_output_ids)]
+        return result
+
+    mock_llm.generate = AsyncMock(side_effect=mock_generate)
 
     generator = SkyRLGymGenerator(
         generator_cfg=generator_cfg,
@@ -265,13 +288,37 @@ async def test_agent_loop_single_turn(
     extras = {"answer": "4"}
     output = await generator.agent_loop(prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512)
 
-    assert output.response_ids == MOCK_LLM_OUTPUT_IDS
+    if use_conversation_multi_turn:
+        expected_response_ids = mock_llm_output_ids
+        expected_loss_mask = [1] * len(expected_response_ids)
+    else:
+        has_eos_in_mock = mock_llm_output_ids and mock_llm_output_ids[-1] == mock_tokenizer.eos_token_id
+
+        expected_response_ids = mock_llm_output_ids.copy()
+        if has_eos_in_mock:
+            # Had EOS: removed then re-added, so final IDs same as mock
+            expected_response_ids = mock_llm_output_ids
+        else:
+            # No EOS: just add it
+            expected_response_ids = mock_llm_output_ids + [mock_tokenizer.eos_token_id]
+
+        expected_loss_mask = [1] * (len(expected_response_ids))
+
+    if logprobs_setting is not None:
+        assert output.rollout_logprobs is not None
+        assert len(output.rollout_logprobs) == len(output.response_ids)
+        assert all(isinstance(lp, float) for lp in output.rollout_logprobs)
+    else:
+        assert output.rollout_logprobs is None
+
+    assert output.response_ids == expected_response_ids
+    assert output.loss_mask == expected_loss_mask
+
     if isinstance(output.reward, list):
         assert sum(output.reward) == 1.0
     else:
         assert output.reward == 1.0
     assert output.stop_reason == "stop"
-    assert output.loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
 
 
 @pytest.mark.asyncio

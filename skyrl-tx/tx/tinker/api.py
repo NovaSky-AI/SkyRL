@@ -144,6 +144,9 @@ async def create_checkpoint(
 
 class LoRAConfig(BaseModel):
     rank: int
+    seed: int | None = Field(
+        default=None, description="Seed for LoRA weight initialization. If None, a random seed is used."
+    )
 
 
 class CreateModelRequest(BaseModel):
@@ -158,6 +161,16 @@ class CreateModelResponse(BaseModel):
     lora_config: LoRAConfig | None = None
     status: str = "created"
     request_id: str
+
+
+class UnloadModelRequest(BaseModel):
+    model_id: str
+    type: str | None = None
+
+
+class UnloadModelResponse(BaseModel):
+    request_id: str
+    model_id: str
 
 
 class ModelData(BaseModel):
@@ -541,7 +554,9 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     model_id = f"model_{uuid4().hex[:8]}"
 
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
-    lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0)
+    # Generate a random seed if not provided
+    seed = request.lora_config.seed if request.lora_config.seed is not None else random.randint(0, 2**31 - 1)
+    lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0, seed=seed)
     request_id = await create_future(
         session=session,
         request_type=types.RequestType.CREATE_MODEL,
@@ -568,6 +583,30 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
         status="created",
         request_id=str(request_id),
     )
+
+
+@app.post("/api/v1/unload_model", response_model=UnloadModelResponse)
+async def unload_model(request: UnloadModelRequest, session: AsyncSession = Depends(get_session)):
+    """Unload a model and free all associated resources."""
+    # Validate model exists
+    model_db = await session.get(ModelDB, request.model_id)
+    if model_db is None:
+        raise HTTPException(status_code=404, detail="Model not found")
+
+    # Update model status
+    model_db.status = "unloading"
+
+    # Create future request
+    request_id = await create_future(
+        session=session,
+        request_type=types.RequestType.UNLOAD_MODEL,
+        model_id=request.model_id,
+        request_data=types.UnloadModelInput(),
+    )
+
+    await session.commit()
+
+    return UnloadModelResponse(request_id=str(request_id), model_id=request.model_id)
 
 
 class GetInfoRequest(BaseModel):

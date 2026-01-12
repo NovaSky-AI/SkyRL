@@ -568,6 +568,7 @@ Generator Configuration
       top_p: 1.0
       min_p: 0.0
       top_k: -1
+      logprobs: 0
 
     use_conversation_multi_turn: true
 
@@ -578,6 +579,7 @@ Generator Configuration
       top_p: 1.0
       min_p: 0.0
       top_k: -1
+      logprobs: 0
 
     # number of samples per prompt for evaluation
     eval_n_samples_per_prompt: 1
@@ -635,6 +637,7 @@ Generation Parameters
     - ``generator.sampling_params.top_p``: Top-p sampling parameter for the inference engine.
     - ``generator.sampling_params.min_p``: Min-p sampling parameter for the inference engine, as proposed in `this paper <https://arxiv.org/pdf/2407.01082>`_.
     - ``generator.sampling_params.top_k``: Top-k sampling parameter for the inference engine.
+    - ``generator.sampling_params.logprobs``: Number of logprobs to return from the inference engine. Set to ``0`` to return only the chosen token's logprob.
 - ``generator.eval_sampling_params``: Sampling parameters for evaluation.
 - ``generator.eval_n_samples_per_prompt``: Number of samples to generate per prompt for evaluation.
 - ``generator.max_turns``: Maximum number of turns for generation with multi-turn RL.
