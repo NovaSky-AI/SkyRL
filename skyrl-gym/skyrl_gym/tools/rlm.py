@@ -580,7 +580,7 @@ class RLMExecutorToolGroup(ToolGroup):
             if looks_like_json:
                 try:
                     context_payload = json.loads(s)
-                except Exception:
+                except json.JSONDecodeError:
                     # Keep original string (including whitespace) if parsing fails.
                     context_payload = context
 
