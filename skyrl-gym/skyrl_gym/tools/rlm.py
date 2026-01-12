@@ -671,7 +671,7 @@ class RLMExecutorToolGroup(ToolGroup):
             # - ```repl ... ```
 
             code_matches = re.findall(r"<repl>(.*?)</repl>", response_text, re.DOTALL | re.IGNORECASE)
-            code_matches += re.findall(r"```repl\s*\n(.*?)\n```", response_text, re.DOTALL | re.IGNORECASE)
+            code_matches += re.findall(r"```repl\s*(.*?)\s*```", response_text, re.DOTALL | re.IGNORECASE)
 
             print_box(
                 f"MODEL OUTPUT (turn {self.turns}/{self.max_turns})",
