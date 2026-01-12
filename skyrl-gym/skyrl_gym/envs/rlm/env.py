@@ -39,7 +39,7 @@ class RLMExecutorEnv(BaseTextEnv):
 
         self.ground_truth = extras["reward_spec"]["ground_truth"]
         self.current_turn = 0
-        self.max_turns = 3
+        self.max_turns = env_config.get("max_turns", 3) if env_config else 3
         self.original_query = extras.get("prompt", "")
         self._has_called_rlm = False
 
