@@ -7,7 +7,7 @@ import re
 import json
 
 
-class RLMGSM8kEnv(BaseTextEnv):
+class RLMExecutorEnv(BaseTextEnv):
     """
     Environment for Math execution tasks.
     """
