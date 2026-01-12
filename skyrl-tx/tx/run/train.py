@@ -82,28 +82,28 @@ def train(
     loader = get_loader(loader_name)
 
     model_class = get_model_class(base_config)
-    mesh = jax.make_mesh((1, tp_size), ("fsdp", "tp"))
+    mesh = jax.make_mesh((1, 1, tp_size), ("fsdp", "ep", "tp"))
     with jax.set_mesh(mesh):
         model = model_class(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
         optimizer = nnx.Optimizer(model, get_optimizer(optimizer_name, optimizer_args), wrt=nnx.Param)
 
-    if load_checkpoint_path:
-        load_safetensors(load_checkpoint_path, base_config, model)
+        if load_checkpoint_path:
+            load_safetensors(load_checkpoint_path, base_config, model)
 
-    num_steps = train_dataset.num_rows / batch_size
-    for step, (batch, metrics) in enumerate(loader(tokenizer, train_dataset, batch_size)):
-        if max_steps and step >= max_steps:
-            break
+        num_steps = train_dataset.num_rows / batch_size
+        for step, (batch, metrics) in enumerate(loader(tokenizer, train_dataset, batch_size)):
+            if max_steps and step >= max_steps:
+                break
 
-        model.train()
-        loss, gradnorm = train_step(model, optimizer, batch)
-        tracker.log({"epoch": step / num_steps, **metrics, "gradnorm": gradnorm.item(), "loss": loss.item()}, step)
+            model.train()
+            loss, gradnorm = train_step(model, optimizer, batch)
+            tracker.log({"epoch": step / num_steps, **metrics, "gradnorm": gradnorm.item(), "loss": loss.item()}, step)
 
-        if step % save_steps == 0:
-            logger.info(f"Saving checkpoint to {output_dir}")
-            save_safetensors(base_config, model, output_dir / "model.safetensors")
+            if step % save_steps == 0:
+                logger.info(f"Saving checkpoint to {output_dir}")
+                save_safetensors(base_config, model, output_dir / "model.safetensors")
 
-    logger.info(f"Saving final checkpoint to {output_dir}")
-    base_config.save_pretrained(output_dir)
-    tokenizer.save_pretrained(output_dir)
-    save_safetensors(base_config, model, output_dir / "model.safetensors")
+        logger.info(f"Saving final checkpoint to {output_dir}")
+        base_config.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        save_safetensors(base_config, model, output_dir / "model.safetensors")

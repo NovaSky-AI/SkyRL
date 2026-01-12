@@ -2,6 +2,7 @@ from flax import nnx
 import jax
 from jax import lax
 from jax import numpy as jnp
+from jax.sharding import get_abstract_mesh, PartitionSpec
 
 
 def ragged_dot(
@@ -84,3 +85,28 @@ def prepare_routing(
     group_sizes = jnp.bincount(indices, length=num_groups)
     unsort_indices = jnp.argsort(sort_indices)
     return sorted_tokens, group_sizes, unsort_indices, sorted_adapter_indices
+
+
+def shard_map_ep(module: nnx.Module, func, *args):
+    """Apply shard_map over the 'ep' axis for a stateful nnx.Module.
+
+    Args:
+        module: The NNX module (will be split into graph/state).
+        func: Function to run inside shard_map. Signature: (module, *args).
+        *args: Arguments to pass to func (replicated across shards).
+    """
+    graphdef, state = nnx.split(module)
+    # Extract only 'ep' dims from PartitionSpecs, replacing others with None
+    state_specs = jax.tree.map(
+        lambda s: PartitionSpec(*(p if p == "ep" else None for p in s)) if isinstance(s, PartitionSpec) else s,
+        nnx.get_partition_spec(state),
+        is_leaf=lambda x: isinstance(x, PartitionSpec),
+    )
+    in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
+
+    @jax.shard_map(mesh=get_abstract_mesh(), in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"})
+    def _body(state, *fn_args):
+        module_shard = nnx.merge(graphdef, state)
+        return func(module_shard, *fn_args)
+
+    return _body(state, *args)
