@@ -24,8 +24,7 @@ def extract_solution(solution_str, method="strict"):
         if solution is None:
             final_answer = None
         else:
-            final_answer = solution.group(0)
-            final_answer = final_answer.split("#### ")[1].replace(",", "").replace("$", "")
+            final_answer = solution.group(1).replace(",", "").replace("$", "")
     elif method == "flexible":
         answer = re.findall("(\\-?[0-9\\.\\,]+)", solution_str)
         final_answer = None
