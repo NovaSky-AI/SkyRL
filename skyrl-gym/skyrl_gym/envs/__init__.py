@@ -38,6 +38,6 @@ register(
 )
 
 register(
-    id="rlm_gsm8k",
-    entry_point="skyrl_gym.envs.rlm.env:RLMGSM8kEnv",
+    id="rlm_ex",
+    entry_point="skyrl_gym.envs.rlm.env:RLMExecutorEnv",
 )

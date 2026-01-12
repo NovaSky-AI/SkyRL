@@ -1,5 +1,5 @@
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from skyrl_gym.envs.rlm import gsm8k_utils as utils
+from skyrl_gym.envs.rlm import utils
 from typing import Dict, Any
 from omegaconf import DictConfig
 from skyrl_gym.tools import RLMExecutorToolGroup
@@ -110,10 +110,10 @@ class RLMGSM8kEnv(BaseTextEnv):
                 import traceback
 
                 error_msg = f"Tool execution error: {str(e)}"
-                print("[GSM8K ENV] Tool execution failed!")
-                print(f"[GSM8K ENV] Tool: {tool_name}")
-                print(f"[GSM8K ENV] Error: {error_msg}")
-                print(f"[GSM8K ENV] Traceback:\n{traceback.format_exc()}")
+                print("[RLM ENV] Tool execution failed!")
+                print(f"[RLM ENV] Tool: {tool_name}")
+                print(f"[RLM ENV] Error: {error_msg}")
+                print(f"[RLM ENV] Traceback:\n{traceback.format_exc()}")
                 return BaseTextEnvStepOutput(
                     observations=[{"role": "user", "content": error_msg}],
                     reward=0.0,
