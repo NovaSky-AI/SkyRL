@@ -78,7 +78,7 @@ class Llama3Attention(nnx.Module):
         self,
         x: jax.Array,
         *,
-        attention_mask: jax.Array,
+        seq_lengths: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
@@ -102,15 +102,41 @@ class Llama3Attention(nnx.Module):
 
         updated_cache = (k, v)
 
-        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
-        attn_output = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            scale=1.0 / self.head_dim**0.5,
-            mask=attention_mask[:, None, None, :].astype(bool),
-            is_causal=kv_cache is None,
-        )
+        is_prefill = kv_cache is None
+
+        # Use cuDNN flash attention on GPU (O(seq) memory), fall back to mask-based on CPU/TPU
+        if jax.default_backend() == 'gpu':
+            # cuDNN flash attention with seq_lengths
+            # During prefill: query_len == kv_len == seq_lengths
+            # During decode: query_len == 1, kv_len == seq_lengths (cache position)
+            if is_prefill:
+                query_seq_lengths = seq_lengths
+            else:
+                query_seq_lengths = jnp.ones_like(seq_lengths)
+
+            attn_output = jax.nn.dot_product_attention(
+                q,
+                k,
+                v,
+                scale=1.0 / self.head_dim**0.5,
+                is_causal=is_prefill,
+                query_seq_lengths=query_seq_lengths,
+                key_value_seq_lengths=seq_lengths,
+                implementation='cudnn',
+            )
+        else:
+            # Mask-based attention for CPU/TPU
+            # Construct attention mask from seq_lengths: mask[b, t] = t < seq_lengths[b]
+            kv_len = k.shape[1]
+            attention_mask = jnp.arange(kv_len)[None, :] < seq_lengths[:, None]  # [B, T]
+            attn_output = jax.nn.dot_product_attention(
+                q,
+                k,
+                v,
+                scale=1.0 / self.head_dim**0.5,
+                mask=attention_mask[:, None, None, :],
+                is_causal=is_prefill,
+            )
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
         return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
@@ -171,7 +197,7 @@ class Llama3DecoderLayer(nnx.Module):
         self,
         hidden_states: jax.Array,
         *,
-        attention_mask: jax.Array,
+        seq_lengths: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
@@ -180,7 +206,7 @@ class Llama3DecoderLayer(nnx.Module):
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
-            attention_mask=attention_mask,
+            seq_lengths=seq_lengths,
             positions=positions,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
@@ -219,7 +245,7 @@ class Llama3Model(nnx.Module):
         self,
         input_ids: jax.Array,
         *,
-        attention_mask: jax.Array,
+        seq_lengths: jax.Array,
         positions: jax.Array,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
@@ -239,7 +265,7 @@ class Llama3Model(nnx.Module):
 
             hidden_states, (k, v) = layer(
                 hidden_states,
-                attention_mask=attention_mask,
+                seq_lengths=seq_lengths,
                 positions=positions,
                 adapter_indices=adapter_indices,
                 kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
@@ -291,16 +317,19 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         *,
         attention_mask: jax.Array,
         positions: jax.Array | None = None,
+        seq_lengths: jax.Array | None = None,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
+        if seq_lengths is None:
+            seq_lengths = attention_mask.sum(axis=1).astype(jnp.int32)
 
         outputs = self.model(
             input_ids,
-            attention_mask=attention_mask,
+            seq_lengths=seq_lengths,
             positions=positions,
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
