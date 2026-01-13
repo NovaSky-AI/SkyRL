@@ -71,6 +71,7 @@ def _build_config(base_model: str, config: SkyRLTrainBackendConfig, lora_config:
             "n_samples_per_prompt": 1,
             "sampling_params": {"temperature": 1.0},
             "weight_transfer_threshold_cuda_ipc_GB": 1.0,
+            "weight_sync_backend": "nccl",
         },
     })
 
