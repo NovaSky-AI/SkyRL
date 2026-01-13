@@ -7,7 +7,7 @@ set -x
 # bash examples/megatron/run_megatron_dapo_qwen3_30b_a3b_lora.sh
 
 MODEL_NAME="Qwen/Qwen3-30B-A3B-Base"
-DATA_DIR="/mnt/cluster_storage/data/dapo"
+DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_NODES=2
@@ -127,10 +127,10 @@ uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   generator.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}_seq_is_${TIS_RATIO_TYPE}_${TIS_IMP_RATIO_CAP}_rej_${sequence_mask_metric}_${geo_mask_high}_${geo_mask_low}" \
-  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}_seq_is_${TIS_RATIO_TYPE}_${TIS_IMP_RATIO_CAP}_rej_${sequence_mask_metric}_${geo_mask_high}_${geo_mask_low}" \
+  trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
+  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
   trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}_seq_is_${TIS_RATIO_TYPE}_${TIS_IMP_RATIO_CAP}_rej_${sequence_mask_metric}_${geo_mask_high}_${geo_mask_low}" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
   $@

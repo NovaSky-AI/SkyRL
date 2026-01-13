@@ -71,16 +71,7 @@ class DistributedStrategy(ABC):
         """Perform all_reduce across all processes"""
         assert op in ("mean", "max", "sum", "min")
         if isinstance(data, dict):
-            ret = {}
-            for k, v in data.items():
-                options = ["min", "max", "mean"]
-                detected_op = op
-                for option in options:
-                    if option in k:
-                        detected_op = option
-                        break
-                ret[k] = self.all_reduce(v, detected_op)
-            return ret
+            return {k: self.all_reduce(v, op) for k, v in data.items()}
         else:
             is_tensor = True
             if not isinstance(data, torch.Tensor):
