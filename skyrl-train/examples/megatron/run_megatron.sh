@@ -13,15 +13,14 @@ MODEL_NAME="Qwen/Qwen3-0.6B"
 
 INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 
-MEGATRON_TP=1
-MEGATRON_PP=1
+MEGATRON_TP=2
+MEGATRON_PP=2
 MEGATRON_CP=1
 
 # torch profiler config
 ENABLE_TORCH_PROFILER=false
 RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
-
 
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -49,8 +48,8 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=64 \
-  trainer.policy_mini_batch_size=16 \
+  trainer.train_batch_size=128 \
+  trainer.policy_mini_batch_size=64 \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=4 \
   trainer.ckpt_interval=10 \
