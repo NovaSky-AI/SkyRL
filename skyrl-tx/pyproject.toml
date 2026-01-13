@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Unified API for training and inference"
 readme = "README.md"
 # requires-python = ">=3.11"
-requires-python = ">=3.12, <3.13"
+requires-python = ">=3.12"
 dependencies = [
     "datasets>=4.0.0",
     "flax>=0.12.2",
