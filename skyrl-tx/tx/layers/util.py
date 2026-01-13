@@ -2,6 +2,7 @@ from flax import nnx
 import jax
 from jax import lax
 from jax import numpy as jnp
+from tx.layers.kernels.ragged_dot import ragged_dot as ragged_dot_pallas
 
 
 def ragged_dot(
@@ -56,6 +57,20 @@ def ragged_dot(
     )
 
     return jnp.where(valid_mask[:, None], result, 0)
+
+
+def fast_ragged_dot(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    group_offset: jax.Array | None = None,
+) -> jax.Array:
+    """Fast ragged dot product with group_offset support using Pallas kernels.
+    
+    Uses GPU info to configure Pallas kernels. Defaults to using ragged_dot().
+    """
+    
+    # TODO: Benchmark and fill
 
 
 def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx.Rngs):
