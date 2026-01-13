@@ -13,8 +13,8 @@ MODEL_NAME="Qwen/Qwen3-0.6B"
 
 INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 
-MEGATRON_TP=2
-MEGATRON_PP=2
+MEGATRON_TP=1
+MEGATRON_PP=1
 MEGATRON_CP=1
 
 # torch profiler config
@@ -22,10 +22,23 @@ ENABLE_TORCH_PROFILER=false
 RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
 
+TIS_RATIO_TYPE="sequence"
+TIS_RATIO_HIGH=2.0
+SEQUENCE_MASK_METRIC="geometric"
+SEQUENCE_MASK_HIGH=1.02
+SEQUENCE_MASK_LOW=0.98
+
+
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_RATIO_TYPE \
+  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_RATIO_HIGH \
+  trainer.algorithm.off_policy_correction.sequence_tis_ratio_clip_high=$TIS_RATIO_HIGH \
+  trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
+  trainer.algorithm.off_policy_correction.geo_mask_high=$SEQUENCE_MASK_HIGH \
+  trainer.algorithm.off_policy_correction.geo_mask_low=$SEQUENCE_MASK_LOW \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \
@@ -48,8 +61,8 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=128 \
-  trainer.policy_mini_batch_size=64 \
+  trainer.train_batch_size=64 \
+  trainer.policy_mini_batch_size=16 \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=4 \
   trainer.ckpt_interval=10 \

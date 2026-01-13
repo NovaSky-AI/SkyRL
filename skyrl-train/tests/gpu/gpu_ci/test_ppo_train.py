@@ -29,8 +29,7 @@ def cfg() -> DictConfig:
     return cfg
 
 
-# @pytest.mark.parametrize("use_entropy_loss, use_kl_loss", [(False, False), (True, True), (True, False), (False, True)])
-@pytest.mark.parametrize("use_entropy_loss, use_kl_loss", [(False, False)])
+@pytest.mark.parametrize("use_entropy_loss, use_kl_loss", [(False, False), (True, True), (True, False), (False, True)])
 def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_kl_loss):
     """
     Test that ppo_train runs and returns correct structure.
@@ -50,7 +49,6 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
             cfg.trainer.algorithm.kl_loss_coef = 0.001
 
         cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "sequence"
-
         cfg.trainer.algorithm.off_policy_correction.sequence_mask_metric = "geometric"
         cfg.trainer.algorithm.off_policy_correction.geo_mask_high = 1.02
         cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
@@ -82,6 +80,9 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
             "policy_update_steps",
             "policy_lr",
             "loss_metrics/clip_ratio",
+            "loss_metrics/is_ratio_mean",
+            "loss_metrics/outlier_seq_masked_ratio",
+            "loss_metrics/geo_sequence_mask_masked_ratio",
             "policy_entropy",
             "final_loss",
         ]
@@ -89,8 +90,6 @@ def test_ppo_train_basic_execution(ray_init_fixture, cfg, use_entropy_loss, use_
         for metric in expected_metrics:
             assert metric in train_status, f"Should have {metric} in train_status"
             assert isinstance(train_status[metric], (int, float)), f"{metric} should be numeric"
-
-        print(train_status)
 
         # Simple check for metric values
         assert train_status["policy_update_steps"] > 0, "Should have completed at least one update step"

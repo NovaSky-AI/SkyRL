@@ -472,6 +472,11 @@ async def test_megatron_train(
         )
         transformer_config_kwargs["num_layers"] = 2
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+        # test off policy correction config propagates correctly
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "sequence"
+        cfg.trainer.algorithm.off_policy_correction.sequence_mask_metric = "geometric"
+        cfg.trainer.algorithm.off_policy_correction.geo_mask_high = 1.02
+        cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = gpus_per_node
@@ -547,6 +552,14 @@ async def test_megatron_train(
         "policy_kl",
         "final_loss",
     ]
+    if ep > 1:
+        keys_to_compare.extend(
+            [
+                "loss_metrics/is_ratio_mean",
+                "loss_metrics/outlier_seq_masked_ratio",
+                "loss_metrics/geo_sequence_mask_masked_ratio",
+            ]
+        )
     for i, result in enumerate(results_fsdp):
         for k in keys_to_compare:
             if k == "policy_entropy":

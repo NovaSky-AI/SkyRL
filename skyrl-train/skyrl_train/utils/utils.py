@@ -324,7 +324,7 @@ def validate_cfg(cfg: DictConfig):
             raise NotImplementedError(
                 "`trainer.algorithm.off_policy_correction` doesn't support Sglang backend, please use vLLM"
             )
-        if cfg.algorithm.policy_loss_type in ["clip_cov", "kl_cov"]:
+        if cfg.trainer.algorithm.policy_loss_type in ["clip_cov", "kl_cov"]:
             raise NotImplementedError(
                 "`trainer.algorithm.off_policy_correction` doesn't support clip_cov or kl_cov policy loss types"
             )
