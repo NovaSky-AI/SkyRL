@@ -22,23 +22,11 @@ ENABLE_TORCH_PROFILER=false
 RANKS_TO_PROFILE="[0]"
 SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
 
-TIS_RATIO_TYPE="sequence"
-TIS_RATIO_HIGH=2.0
-SEQUENCE_MASK_METRIC="geometric"
-SEQUENCE_MASK_HIGH=1.02
-SEQUENCE_MASK_LOW=0.98
-
 
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_RATIO_TYPE \
-  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_RATIO_HIGH \
-  trainer.algorithm.off_policy_correction.sequence_tis_ratio_clip_high=$TIS_RATIO_HIGH \
-  trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
-  trainer.algorithm.off_policy_correction.geo_mask_high=$SEQUENCE_MASK_HIGH \
-  trainer.algorithm.off_policy_correction.geo_mask_low=$SEQUENCE_MASK_LOW \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \
