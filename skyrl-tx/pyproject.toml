@@ -7,7 +7,8 @@ name = "skyrl-tx"
 dynamic = ["version"]
 description = "Unified API for training and inference"
 readme = "README.md"
-requires-python = ">=3.11"
+# requires-python = ">=3.11"
+requires-python = ">=3.12, <3.13"
 dependencies = [
     "datasets>=4.0.0",
     "flax>=0.12.2",
@@ -79,3 +80,8 @@ version = {attr = "tx.__version__"}
 
 [project.scripts]
 tx = "tx.run.main:app"
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{requirement = "torch", match-runtime = true}]
+transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
+transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
