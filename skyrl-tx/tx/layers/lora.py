@@ -3,7 +3,7 @@ import jax
 from jax import numpy as jnp
 
 from tx.utils.models import filter_lora
-from tx.layers.util import Param, prepare_routing
+from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
 
@@ -236,8 +236,10 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         x: jax.Array,
         group_sizes: jax.Array,
         adapter_indices_sorted: jax.Array | None = None,
+        *,
+        group_offset: jax.Array | None = None,
     ) -> jax.Array:
-        base_out = jax.lax.ragged_dot(x, self.weight.value, group_sizes)
+        base_out = ragged_dot(x, self.weight.value, group_sizes, group_offset=group_offset)
 
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
@@ -245,23 +247,31 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
             raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
-        # Reconstruct expert indices from group_sizes
+        # Reconstruct expert indices from group_sizes (global indices)
         expert_indices = jnp.repeat(jnp.arange(self.num_experts), group_sizes, total_repeat_length=x.shape[0])
 
-        # Flatten (adapter, expert) into a single routing dimension.
-        flattened_indices = adapter_indices_sorted * self.num_experts + expert_indices
-        num_flattened_groups = self.max_lora_adapters * self.num_experts
+        # Expert-first flattening so local expert groups are contiguous
+        flattened_indices = expert_indices * self.max_lora_adapters + adapter_indices_sorted
+        num_flattened_groups = self.num_experts * self.max_lora_adapters
+        num_local_experts = self.lora_A.value.shape[1]
 
-        # Reshape lora_A and lora_B to merge (max_lora_adapters, num_experts) dimensions
-        lora_A_reshaped = self.lora_A.value.reshape(num_flattened_groups, self.in_features, self.max_lora_rank)
-        lora_B_reshaped = self.lora_B.value.reshape(num_flattened_groups, self.max_lora_rank, self.out_features)
+        # Reshape LoRA weights in expert-first order
+        lora_A = self.lora_A.value.transpose((1, 0, 2, 3)).reshape(
+            self.max_lora_adapters * num_local_experts, self.in_features, self.max_lora_rank
+        )
+        lora_B = self.lora_B.value.transpose((1, 0, 2, 3)).reshape(
+            self.max_lora_adapters * num_local_experts, self.max_lora_rank, self.out_features
+        )
 
         # Sort tokens by combined index
         x_sorted, combined_group_sizes, unsort_indices, _ = prepare_routing(x, flattened_indices, num_flattened_groups)
 
+        # Compute group_offset for LoRA (scaled by max_lora_adapters)
+        lora_group_offset = group_offset * self.max_lora_adapters if group_offset is not None else None
+
         # Apply LoRA using ragged_dot: x @ A @ B
-        intermediate = jax.lax.ragged_dot(x_sorted, lora_A_reshaped, combined_group_sizes)
-        lora_output_sorted = jax.lax.ragged_dot(intermediate, lora_B_reshaped, combined_group_sizes)
+        intermediate = ragged_dot(x_sorted, lora_A, combined_group_sizes, group_offset=lora_group_offset)
+        lora_output_sorted = ragged_dot(intermediate, lora_B, combined_group_sizes, group_offset=lora_group_offset)
 
         # Unsort and apply scaling
         lora_output = lora_output_sorted[unsort_indices]
