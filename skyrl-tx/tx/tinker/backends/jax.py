@@ -81,7 +81,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     )
     gradient_checkpointing: bool = Field(
         default=False,
-        description="Whether to use gradient checkpointing (full recomputation strategy)",
+        description="Per-layer activation checkpointing: recompute activations during backward to save memory",
     )
     # Multi-node configuration
     coordinator_address: str | None = Field(
@@ -163,6 +163,7 @@ class JaxBackendImpl(AbstractBackend):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             shard_attention_heads=config.shard_attention_heads,
+            gradient_checkpointing=config.gradient_checkpointing,
         )
 
         model_class = get_model_class(self.model_config)
@@ -240,11 +241,6 @@ class JaxBackendImpl(AbstractBackend):
             model = nnx.merge(graphdef, lora_params, non_lora_params)
             output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
             return output.logits
-
-        if self.config.gradient_checkpointing:
-            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
-            # policy=None corresponds to full activation recomputation
-            _model_forward = jax.checkpoint(_model_forward, policy=None)
 
         def loss_for_lora(
             lora_params: nnx.State,
