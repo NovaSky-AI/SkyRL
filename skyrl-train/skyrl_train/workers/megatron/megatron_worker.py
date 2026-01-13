@@ -598,7 +598,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                         # attach response_length
                         status["response_length"] = micro_buffer[i]["num_actions"]
 
-                        status_mean = all_reduce_metrics(status, self.strategy)
+                        status = all_reduce_metrics(status, self.strategy)
 
                         status_list.append(status)
                         for k, v in status.items():

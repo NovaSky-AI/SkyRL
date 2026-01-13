@@ -815,8 +815,8 @@ def test_compute_sequence_mask_geometric_rejects():
     assert metrics["geo_sequence_mask_under_low_ratio"] == 0.0
 
 
-def test_compute_sequence_mask_sequence():
-    """Tests sequence sequence mask computation."""
+def test_compute_sequence_mask_product():
+    """Tests product sequence mask computation."""
     device = "cpu"
 
     # Token log ratios: [0.2, 0.1, 0.0] -> sum = 0.3, seq ratio = exp(0.3) ≈ 1.35
@@ -844,8 +844,8 @@ def test_compute_sequence_mask_sequence():
     assert metrics["product_sequence_mask_under_low_ratio"] == 0.0
 
 
-def test_compute_sequence_mask_sequence_rejects_by_seq_ratio():
-    """Tests product sequence mask rejects when sequence ratio is out of bounds."""
+def test_compute_sequence_mask_product_rejects_by_seq_ratio():
+    """Tests product sequence mask rejects when product ratio is out of bounds."""
     device = "cpu"
 
     # Token log ratios: [1.0, 1.0, 1.0] -> sum = 3.0, seq ratio = exp(3.0) ≈ 20.09

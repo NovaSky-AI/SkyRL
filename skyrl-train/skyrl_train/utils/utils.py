@@ -308,9 +308,9 @@ def validate_cfg(cfg: DictConfig):
         # Validate sequence_mask_metric
         if sequence_mask_metric:
             assert sequence_mask_metric in [
-                "sequence",
+                "product",
                 "geometric",
-            ], f"`sequence_mask_metric` must be 'sequence', or 'geometric', got {sequence_mask_metric}"
+            ], f"`sequence_mask_metric` must be 'product', or 'geometric', got {sequence_mask_metric}"
 
         # Ensure logprobs are enabled for rollout correction
         if cfg.generator.sampling_params.logprobs is None:

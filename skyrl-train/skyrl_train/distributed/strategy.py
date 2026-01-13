@@ -74,11 +74,12 @@ class DistributedStrategy(ABC):
             ret = {}
             for k, v in data.items():
                 options = ["min", "max", "mean"]
-                for op in options:
-                    if op in k:
-                        op = op
+                detected_op = op
+                for option in options:
+                    if option in k:
+                        detected_op = option
                         break
-                ret[k] = self.all_reduce(v, op)
+                ret[k] = self.all_reduce(v, detected_op)
             return ret
         else:
             is_tensor = True

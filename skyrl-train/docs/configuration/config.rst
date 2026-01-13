@@ -418,7 +418,7 @@ Algorithm Configuration
         geo_mask_low: 0.99
 
         # used if sequence_mask_metric = "product"
-        # values around 0.5-2.0 are recommended for "sequence" sequence_mask_metric
+        # values around 0.5-2.0 are recommended for "product" sequence_mask_metric
         product_mask_high: 2.0
         product_mask_low: 0.5
 
