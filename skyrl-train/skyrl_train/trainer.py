@@ -498,23 +498,29 @@ class RayPPOTrainer:
             else:
                 critic_model = None
 
+        policy_steps_per_train_batch = (
+            cfg.trainer.train_batch_size // cfg.trainer.policy_mini_batch_size * cfg.trainer.update_epochs_per_batch
+        )
+        critic_steps_per_train_batch = 0
+        if cfg.trainer.critic.model.path:
+            critic_steps_per_train_batch = (
+                cfg.trainer.train_batch_size // cfg.trainer.critic_mini_batch_size * cfg.trainer.update_epochs_per_batch
+            )
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
                 refs.extend(ref_model.async_init_model(cfg.trainer.ref.model.path))
-            policy_num_mini_batches_per_train_batch = cfg.trainer.train_batch_size // cfg.trainer.policy_mini_batch_size
             refs.extend(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps * policy_num_mini_batches_per_train_batch,
+                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
                 )
             )
             if cfg.trainer.critic.model.path:
-                critic_num_mini_batches_per_train_batch = cfg.trainer.train_batch_size // cfg.trainer.critic_mini_batch_size
                 refs.extend(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps * critic_num_mini_batches_per_train_batch,
+                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
                     )
                 )
             ray.get(refs)
@@ -523,21 +529,19 @@ class RayPPOTrainer:
             if ref_model is not None:
                 ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
                 ref_model.offload_to_cpu()
-            policy_num_mini_batches_per_train_batch = cfg.trainer.train_batch_size // cfg.trainer.policy_mini_batch_size
             ray.get(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps * policy_num_mini_batches_per_train_batch,
+                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
                 )
             )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
-                critic_num_mini_batches_per_train_batch = cfg.trainer.train_batch_size // cfg.trainer.critic_mini_batch_size
                 ray.get(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps * critic_num_mini_batches_per_train_batch,
+                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
                     )
                 )
                 critic_model.offload_to_cpu()
