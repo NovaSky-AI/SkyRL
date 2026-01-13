@@ -347,38 +347,112 @@ class Qwen3Model(nnx.Module):
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            layer_kv_cache = kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position)
-            if self.config.gradient_checkpointing and is_training:
-                layer = jax.checkpoint(layer)
-
-            hidden_states, (k, v) = layer(
+        # Checkpointing: use fori_loop so XLA compiles ONE loop body and reuses
+        # buffers during recomputation. Without checkpointing, activations are
+        # stored anyway, so fori_loop's buffer reuse doesn't help and its weight
+        # stacking overhead makes it worse.
+        if is_training and self.config.gradient_checkpointing:
+            hidden_states = self._forward_layers_checkpointed(
                 hidden_states,
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
-                kv_cache=layer_kv_cache,
             )
-            updated_keys.append(k)
-            updated_values.append(v)
+            updated_keys, updated_values = [], []
+            new_cache_position = input_ids.shape[1]
+        else:
+            hidden_states, updated_keys, updated_values = self._forward_layers(
+                hidden_states,
+                seq_lengths=seq_lengths,
+                positions=positions,
+                adapter_indices=adapter_indices,
+                kv_cache=kv_cache,
+                output_hidden_states=output_hidden_states,
+                all_hidden_states=all_hidden_states,
+            )
+            new_cache_position = kv_cache.cache_position + 1 if kv_cache else input_ids.shape[1]
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
-
-        # Increment cache_position if cache exists, or use sequence length for new cache
-        new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
 
         return ModelOutput(
             last_hidden_state=hidden_states,
             kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
+
+    def _forward_layers_checkpointed(
+        self,
+        hidden_states: jax.Array,
+        *,
+        seq_lengths: jax.Array,
+        positions: jax.Array,
+        adapter_indices: jax.Array | None,
+    ) -> jax.Array:
+        """Forward pass with gradient checkpointing using fori_loop.
+
+        Uses fori_loop so XLA compiles ONE loop body and reuses buffers during
+        backward recomputation. With a Python loop, XLA unrolls N separate
+        checkpoint regions and can't optimize buffer reuse across them.
+
+        Tradeoff: requires stacking all layer weights once per forward pass.
+        This is acceptable because checkpointing already trades compute for memory.
+
+        TODO(haochen): Load weights directly into stacked format to avoid 2x memory.
+        Currently we have both self.layers (original) and stacked copy during forward.
+        """
+        num_layers = len(self.layers)
+
+        # Stack layer weights for dynamic indexing in fori_loop
+        layer_graphdef, _ = nnx.split(self.layers[0])
+        stacked_weights = jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *[nnx.state(layer) for layer in self.layers])
+
+        def body_fn(i, hs):
+            layer_weights = jax.tree.map(lambda x: x[i], stacked_weights)
+            layer = nnx.merge(layer_graphdef, layer_weights)
+            hs, _ = layer(
+                hs, seq_lengths=seq_lengths, positions=positions, adapter_indices=adapter_indices, kv_cache=None
+            )
+            return hs
+
+        body_fn = jax.checkpoint(body_fn)
+        return jax.lax.fori_loop(0, num_layers, body_fn, hidden_states)
+
+    def _forward_layers(
+        self,
+        hidden_states: jax.Array,
+        *,
+        seq_lengths: jax.Array,
+        positions: jax.Array,
+        adapter_indices: jax.Array | None,
+        kv_cache: KVCache | None,
+        output_hidden_states: bool,
+        all_hidden_states: list[jax.Array],
+    ) -> tuple[jax.Array, list[jax.Array], list[jax.Array]]:
+        """Standard forward pass through decoder layers.
+
+        Used for inference (with KV cache) and training without checkpointing.
+        """
+        updated_keys, updated_values = [], []
+
+        for layer_idx, layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states.append(hidden_states)
+
+            layer_kv = kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position)
+            hidden_states, (k, v) = layer(
+                hidden_states,
+                seq_lengths=seq_lengths,
+                positions=positions,
+                adapter_indices=adapter_indices,
+                kv_cache=layer_kv,
+            )
+            updated_keys.append(k)
+            updated_values.append(v)
+
+        return hidden_states, updated_keys, updated_values
 
 
 class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
