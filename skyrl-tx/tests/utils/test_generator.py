@@ -9,7 +9,7 @@ class DummyModel(GeneratorMixin, nnx.Module):
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
 
-    def __call__(self, input_ids, attention_mask=None, positions=None, kv_cache=None, adapter_indices=None):
+    def __call__(self, input_ids, attention_mask=None, positions=None, kv_cache=None, adapter_indices=None, **kwargs):
         """Simple dummy model for testing generator behavior."""
         batch_size, seq_len = input_ids.shape
         base = jnp.arange(self.vocab_size, dtype=jnp.float32)
