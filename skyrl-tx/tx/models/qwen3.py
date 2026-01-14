@@ -416,7 +416,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-        is_training: bool = False,
+        skip_logits: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -430,11 +430,11 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             kv_cache=kv_cache,
         )
 
-        if is_training:
-            # Training: skip logits, return lm_head for chunked computation
+        if skip_logits:
+            # Skip logits computation for chunked cross-entropy (uses lm_head weight directly)
             logits = None
         else:
-            # Inference: compute logits normally
+            # Compute logits with LoRA applied (required for train_unembed=True)
             hidden_states = outputs.last_hidden_state
             if self.config.tie_word_embeddings:
                 logits = hidden_states @ self.model.embed_tokens.embedding.value.T
