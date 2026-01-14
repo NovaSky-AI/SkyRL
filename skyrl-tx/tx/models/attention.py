@@ -33,8 +33,8 @@ def dot_product_attention(
     """Compute dot-product attention with automatic backend selection.
 
     Uses cuDNN flash attention on GPU for causal attention (training/prefill),
-    reducing memory from O(S^2) to O(S). For left-padded sequences, temporarily
-    shifts to right-padding before applying flash attention.
+    reducing memory from O(S^2) to O(S). Handles both left-padded (inference) and
+    right-padded (training) sequences by shifting to right-padded format for cuDNN.
 
     Falls back to mask-based attention for decode (is_causal=False) or CPU/TPU.
     Decode doesn't benefit from flash attention since attention is already O(S).
@@ -43,7 +43,8 @@ def dot_product_attention(
         q: Query tensor of shape [B, T, num_heads, head_dim]
         k: Key tensor of shape [B, S, num_kv_heads, head_dim]
         v: Value tensor of shape [B, S, num_kv_heads, head_dim]
-        attention_mask: Mask of shape [B, S] where 1 = valid, 0 = masked
+        attention_mask: Mask of shape [B, S] where 1 = valid, 0 = masked.
+            Each batch element must have at least one valid token.
         is_causal: Whether this is causal (training/prefill) or non-causal (decode)
         head_dim: Dimension of each attention head (for scaling)
 
@@ -60,35 +61,19 @@ def dot_product_attention(
         )
 
     # Causal attention on GPU: use cuDNN flash attention
+    # Shift to right-padded format (shift=0 for already right-padded sequences)
     seq_lengths = attention_mask.sum(axis=1).astype(jnp.int32)
+    shift = jnp.argmax(attention_mask, axis=1)  # first valid token position
 
-    # Check if right-padded (all batches have 1 at position 0)
-    # Right-padded: [1,1,1,0,0], Left-padded: [0,0,1,1,1]
-    is_right_padded = attention_mask[:, 0].min() == 1
+    q_shifted = _shift_sequences(q, shift)
+    k_shifted = _shift_sequences(k, shift)
+    v_shifted = _shift_sequences(v, shift)
 
-    def cudnn_right_padded():
-        return jax.nn.dot_product_attention(
-            q, k, v, scale=scale, is_causal=True,
-            query_seq_lengths=seq_lengths,
-            key_value_seq_lengths=seq_lengths,
-            implementation='cudnn',
-        )
+    out = jax.nn.dot_product_attention(
+        q_shifted, k_shifted, v_shifted, scale=scale, is_causal=True,
+        query_seq_lengths=seq_lengths,
+        key_value_seq_lengths=seq_lengths,
+        implementation='cudnn',
+    )
 
-    def cudnn_left_padded():
-        # Shift left-padded to right-padded for cuDNN compatibility
-        shift = attention_mask.shape[1] - seq_lengths
-        q_shifted = _shift_sequences(q, shift)
-        k_shifted = _shift_sequences(k, shift)
-        v_shifted = _shift_sequences(v, shift)
-
-        out = jax.nn.dot_product_attention(
-            q_shifted, k_shifted, v_shifted, scale=scale, is_causal=True,
-            query_seq_lengths=seq_lengths,
-            key_value_seq_lengths=seq_lengths,
-            implementation='cudnn',
-        )
-
-        # Shift output back to left-padded
-        return _shift_sequences(out, -shift)
-
-    return jax.lax.cond(is_right_padded, cudnn_right_padded, cudnn_left_padded)
+    return _shift_sequences(out, -shift)
