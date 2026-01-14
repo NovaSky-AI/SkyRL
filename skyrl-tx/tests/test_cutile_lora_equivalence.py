@@ -9,6 +9,7 @@ Phase 1 Scope: Single-GPU forward pass only (no group_offset, no gradients).
 """
 
 import pytest
+import numpy as np
 
 try:
     import jax
@@ -156,7 +157,7 @@ def compare_outputs(
 
     # Check if within tolerance
     try:
-        jnp.testing.assert_allclose(
+        np.testing.assert_allclose(
             cutile_out,
             ragged_out,
             rtol=rtol,
