@@ -359,7 +359,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.tracker.log(eval_metrics, step=self.global_step)
 
         # main training loop
-        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batch Progress")
+        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
         start_epoch = self.global_step // self.num_steps_per_epoch
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
