@@ -47,8 +47,8 @@ def jax_to_torch(jax_arr: jax.Array) -> torch.Tensor:
 
     # Convert via DLPack (zero-copy when devices match)
     try:
-        dlpack_capsule = jax.dlpack.to_dlpack(jax_arr)
-        torch_tensor = torch.from_dlpack(dlpack_capsule)
+        # Use __dlpack__() method (modern JAX API)
+        torch_tensor = torch.from_dlpack(jax_arr)
         return torch_tensor
     except Exception as e:
         raise RuntimeError(f"DLPack conversion failed: {e}") from e
