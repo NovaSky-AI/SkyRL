@@ -168,7 +168,7 @@ if CUTILE_AVAILABLE:
         start_n = bid_n * TILE_N
 
         # Get expert ID for this tile
-        expert_id = ct.gather(expert_ids_per_tile, ct.full((1,), bid_m, dtype=ct.int32))[0]
+        expert_id = ct.gather(expert_ids_per_tile, ct.full((1,), bid_m, dtype=ct.int32)).item()
 
         # Initialize accumulator
         accumulator = ct.full((TILE_M, TILE_N), 0.0, dtype=ct.float32)
