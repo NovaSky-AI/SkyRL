@@ -497,6 +497,14 @@ class RayPPOTrainer:
             else:
                 critic_model = None
 
+        policy_steps_per_train_batch = (
+            cfg.trainer.train_batch_size // cfg.trainer.policy_mini_batch_size * cfg.trainer.update_epochs_per_batch
+        )
+        critic_steps_per_train_batch = 0
+        if cfg.trainer.critic.model.path:
+            critic_steps_per_train_batch = (
+                cfg.trainer.train_batch_size // cfg.trainer.critic_mini_batch_size * cfg.trainer.update_epochs_per_batch
+            )
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
@@ -504,14 +512,14 @@ class RayPPOTrainer:
             refs.extend(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps,
+                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
                 )
             )
             if cfg.trainer.critic.model.path:
                 refs.extend(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps,
+                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
                     )
                 )
             ray.get(refs)
@@ -523,7 +531,7 @@ class RayPPOTrainer:
             ray.get(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps,
+                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
                 )
             )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
@@ -532,7 +540,7 @@ class RayPPOTrainer:
                 ray.get(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps,
+                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
                     )
                 )
                 critic_model.offload_to_cpu()
