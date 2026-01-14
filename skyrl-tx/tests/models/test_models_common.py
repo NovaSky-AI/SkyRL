@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from tx.models.configs import Llama3Config, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
@@ -34,11 +34,7 @@ def test_last_token_logits_only(model_name, config_cls, model_cls, mesh_axes):
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
 
-        base_config = (
-            AutoConfig.from_pretrained(model_name)
-            if config_cls == Llama3Config
-            else PretrainedConfig.from_pretrained(model_name)
-        )
+        base_config = AutoConfig.from_pretrained(model_name)
         config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
         mesh = jax.make_mesh((1, 1), mesh_axes)
         with jax.set_mesh(mesh):
