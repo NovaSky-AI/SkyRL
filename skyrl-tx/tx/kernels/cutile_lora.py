@@ -113,7 +113,8 @@ def cutile_ragged_dot(
     if not CUTILE_AVAILABLE:
         raise RuntimeError(
             "Cutile not available. Install with:\n"
-            "  pip install git+https://github.com/NVIDIA/cutile-python.git\n"
+            "  pip install cuda-tile\n"
+            "Note: CUDA Toolkit 13.1+ is required (install separately)\n"
             "Or set TX_USE_CUTILE_LORA=0 to use ragged_dot"
         )
 

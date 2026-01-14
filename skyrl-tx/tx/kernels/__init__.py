@@ -1,7 +1,7 @@
 """
 Cutile-based kernel implementations for SkyRL-tx.
 
-This package provides optimized CUDA kernels using NVIDIA's cutile-python
+This package provides optimized CUDA kernels using NVIDIA's cuTile (cuda-tile on PyPI)
 for LoRA expert parallelism computation.
 """
 

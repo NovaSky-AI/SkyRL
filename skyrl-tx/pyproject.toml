@@ -29,7 +29,7 @@ dependencies = [
 gpu = [
     "jax[cuda12]>=0.7.2",
     "torch>=2.0.0",
-    "cutile-python @ git+https://github.com/NVIDIA/cutile-python.git",
+    "cuda-tile",  # cuTile Python from PyPI (requires CUDA Toolkit 13.1+)
 ]
 
 tpu = [

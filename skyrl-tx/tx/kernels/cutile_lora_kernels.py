@@ -1,7 +1,7 @@
 """
 Cutile CUDA kernel implementations for LoRA expert parallelism.
 
-This module contains the actual CUDA kernels using NVIDIA's cutile-python.
+This module contains the actual CUDA kernels using NVIDIA's cuTile (cuda-tile on PyPI).
 """
 
 from typing import Tuple
