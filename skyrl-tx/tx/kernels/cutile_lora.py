@@ -41,9 +41,9 @@ def jax_to_torch(jax_arr: jax.Array) -> torch.Tensor:
         ValueError: If array is not on GPU
     """
     # Ensure on GPU
-    device_str = str(jax_arr.device()).lower()
+    device_str = str(jax_arr.device).lower()
     if "gpu" not in device_str and "cuda" not in device_str:
-        raise ValueError(f"Expected GPU array, got device: {jax_arr.device()}")
+        raise ValueError(f"Expected GPU array, got device: {jax_arr.device}")
 
     # Convert via DLPack (zero-copy when devices match)
     try:
