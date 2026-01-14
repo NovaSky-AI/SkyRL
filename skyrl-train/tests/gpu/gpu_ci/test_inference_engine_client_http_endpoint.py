@@ -22,9 +22,11 @@ import requests
 import aiohttp
 from omegaconf import DictConfig
 from pydantic import BaseModel
+import litellm
 from litellm import completion as litellm_completion
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
+
 from skyrl_train.inference_engines.base import ConversationType
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.entrypoints.main_base import config_dir
@@ -42,8 +44,40 @@ from transformers import AutoTokenizer
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 TP_SIZE = 1
-SERVER_PORT = 8123
+SERVER_PORT_START = 8123
 SERVER_HOST = "127.0.0.1"
+
+
+# Disable aiohttp transport in litellm to avoid unclosed connector warnings.
+# This makes litellm use httpx's default transport instead of aiohttp.
+# This is safe for tests since we don't need the performance benefits of aiohttp.
+litellm.disable_aiohttp_transport = True
+
+
+def find_available_port(host: str, start_port: int, max_attempts: int = 100) -> int:
+    """Find an available port starting from start_port.
+
+    Args:
+        host: The host address to check.
+        start_port: The port number to start checking from.
+        max_attempts: Maximum number of ports to try.
+
+    Returns:
+        An available port number.
+
+    Raises:
+        RuntimeError: If no available port is found within max_attempts.
+    """
+    import socket
+
+    for port in range(start_port, start_port + max_attempts):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind((host, port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError(f"Could not find available port in range {start_port}-{start_port + max_attempts}")
 
 
 def _get_test_sampling_params(backend: str, cfg: DictConfig, endpoint: str) -> Dict[str, Any]:
@@ -205,13 +239,16 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
+        # Find an available port
+        server_port = find_available_port(SERVER_HOST, SERVER_PORT_START)
+
         def run_server():
-            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+            serve(client, host=SERVER_HOST, port=server_port, log_level="warning")
 
         server_thread = threading.Thread(target=run_server, daemon=True)
         server_thread.start()
-        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+        wait_for_server_ready(host=SERVER_HOST, port=server_port, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{server_port}/v1"
 
         # 2. Build prompts
         num_samples = 20
@@ -238,7 +275,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
                 _check_completions_outputs(text_prompts, outputs, "request_posting", "vllm")
     finally:
-        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread.is_alive():
             server_thread.join(timeout=5)
 
@@ -277,13 +314,16 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
+        # Find an available port
+        server_port = find_available_port(SERVER_HOST, SERVER_PORT_START)
+
         def run_server():
-            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+            serve(client, host=SERVER_HOST, port=server_port, log_level="warning")
 
         server_thread = threading.Thread(target=run_server, daemon=True)
         server_thread.start()
-        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+        wait_for_server_ready(host=SERVER_HOST, port=server_port, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{server_port}/v1"
 
         # Weight sync
         policy = init_worker_with_type(
@@ -411,7 +451,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                     _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, test_type, "vllm")
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread.is_alive():
             server_thread.join(timeout=5)
 
@@ -550,16 +590,19 @@ def test_structured_generation(ray_init_fixture):
             sleep_level=1,  # since we do not explicitly sync weights
         )
 
+        # Find an available port
+        server_port = find_available_port(SERVER_HOST, SERVER_PORT_START)
+
         # Start server in background thread using serve function directly
         def run_server():
-            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+            serve(client, host=SERVER_HOST, port=server_port, log_level="warning")
 
         server_thread = threading.Thread(target=run_server, daemon=True)
         server_thread.start()
 
         # Wait for server to be ready using the helper method
-        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
-        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}/v1"
+        wait_for_server_ready(host=SERVER_HOST, port=server_port, max_wait_seconds=30)
+        base_url = f"http://{SERVER_HOST}:{server_port}/v1"
 
         class TestSchema(BaseModel):
             name: str
@@ -592,7 +635,7 @@ def test_structured_generation(ray_init_fixture):
         text = output.choices[0].message.content
         assert json.loads(text) is not None, f"Output is not valid JSON: {text}"
     finally:
-        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
 
 
 # TODO(Charlie): sglang has slightly different error response format. We need to handle it.
@@ -624,17 +667,20 @@ def test_http_endpoint_error_handling(ray_init_fixture):
             wait_for_server_ready,
         )
 
+        # Find an available port
+        server_port = find_available_port(SERVER_HOST, SERVER_PORT_START)
+
         # Start server in background thread
         def run_server():
-            serve(client, host=SERVER_HOST, port=SERVER_PORT, log_level="warning")
+            serve(client, host=SERVER_HOST, port=server_port, log_level="warning")
 
         server_thread = threading.Thread(target=run_server, daemon=True)
         server_thread.start()
 
         # Wait for server to be ready
-        wait_for_server_ready(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=30)
+        wait_for_server_ready(host=SERVER_HOST, port=server_port, max_wait_seconds=30)
 
-        base_url = f"http://{SERVER_HOST}:{SERVER_PORT}"
+        base_url = f"http://{SERVER_HOST}:{server_port}"
 
         # Test 1: Invalid request - streaming not supported, raised by SkyRL
         response = requests.post(
@@ -735,6 +781,6 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         assert r.status_code == HTTPStatus.BAD_REQUEST
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
+        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread.is_alive():
             server_thread.join(timeout=5)
