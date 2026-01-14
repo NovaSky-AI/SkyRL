@@ -312,10 +312,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
         self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
-        self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
+        self.total_training_batches = self.num_steps_per_epoch * self.cfg.trainer.epochs
         logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
-        logger.info(f"Total training steps: {self.total_training_steps}")
+        logger.info(f"Total training steps: {self.total_training_batches}")
 
     async def train(self):
         """
@@ -359,7 +359,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.tracker.log(eval_metrics, step=self.global_step)
 
         # main training loop
-        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
+        pbar = tqdm(total=self.total_training_batches, initial=self.global_step, desc="Training Batch Progress")
         start_epoch = self.global_step // self.num_steps_per_epoch
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
@@ -429,7 +429,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # NOTE(Charlie): eval does not overlap with training, but can overlap with generation. Is it fine?
                 if self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
-                    or self.global_step == self.total_training_steps
+                    or self.global_step == self.total_training_batches
                 ):
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()

@@ -84,7 +84,7 @@ class RayPPOTrainer:
         self.inference_engine_client = inference_engine_client
         self.generator = generator
         self.train_dataloader = None
-        self.total_training_steps = None
+        self.total_training_batches = None
         self._build_train_dataloader_and_compute_training_steps()
 
         self.eval_dataloader = (
@@ -118,7 +118,7 @@ class RayPPOTrainer:
         Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
-        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+        self.total_training_batches = len(self.train_dataloader) * self.cfg.trainer.epochs
 
     @torch.no_grad()
     async def eval(self) -> Dict[str, float]:
@@ -187,7 +187,7 @@ class RayPPOTrainer:
             self.reward_kl_controller = get_kl_controller(self.cfg.trainer.algorithm)
 
         # main training loop
-        pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Batches Processed")
+        pbar = tqdm(total=self.total_training_batches, initial=self.global_step, desc="Training Batches Processed")
         start_epoch = self.global_step // len(self.train_dataloader)
         self.global_step += 1  # start training at global_step 1
         for epoch in range(start_epoch, self.cfg.trainer.epochs):
@@ -312,7 +312,7 @@ class RayPPOTrainer:
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                 if self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
-                    or self.global_step == self.total_training_steps
+                    or self.global_step == self.total_training_batches
                 ):
                     with Timer("eval", self.all_timings):
                         eval_metrics = asyncio.run(self.eval())
@@ -513,14 +513,14 @@ class RayPPOTrainer:
             refs.extend(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
+                    num_training_steps=self.total_training_batches * policy_steps_per_train_batch,
                 )
             )
             if cfg.trainer.critic.model.path:
                 refs.extend(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
+                        num_training_steps=self.total_training_batches * critic_steps_per_train_batch,
                     )
                 )
             ray.get(refs)
@@ -532,7 +532,7 @@ class RayPPOTrainer:
             ray.get(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
+                    num_training_steps=self.total_training_batches * policy_steps_per_train_batch,
                 )
             )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
@@ -541,7 +541,7 @@ class RayPPOTrainer:
                 ray.get(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
+                        num_training_steps=self.total_training_batches * critic_steps_per_train_batch,
                     )
                 )
                 critic_model.offload_to_cpu()
