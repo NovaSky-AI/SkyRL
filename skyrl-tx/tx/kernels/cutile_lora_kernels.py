@@ -180,11 +180,9 @@ if CUTILE_AVAILABLE:
             # Load input tile [TILE_M, TILE_K]
             m_indices = start_m + ct.arange(TILE_M, dtype=ct.int32)
             k_indices = start_k + ct.arange(TILE_K, dtype=ct.int32)
-            input_tile = ct.load(
+            input_tile = ct.gather(
                 hidden_states,
                 (m_indices[:, None], k_indices[None, :]),
-                shape=(TILE_M, TILE_K),
-                padding_mode=ct.PaddingMode.ZERO,
             )
 
             # Load weight tile [TILE_K, TILE_N] for this expert
