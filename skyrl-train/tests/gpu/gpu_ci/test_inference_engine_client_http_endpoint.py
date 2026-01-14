@@ -27,10 +27,6 @@ from litellm import completion as litellm_completion
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
 
-# Disable aiohttp transport in litellm to avoid unclosed connector warnings.
-# This makes litellm use httpx's default transport instead of aiohttp.
-# This is safe for tests since we don't need the performance benefits of aiohttp.
-litellm.disable_aiohttp_transport = True
 from skyrl_train.inference_engines.base import ConversationType
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.entrypoints.main_base import config_dir
@@ -52,21 +48,28 @@ SERVER_PORT_START = 8123
 SERVER_HOST = "127.0.0.1"
 
 
+# Disable aiohttp transport in litellm to avoid unclosed connector warnings.
+# This makes litellm use httpx's default transport instead of aiohttp.
+# This is safe for tests since we don't need the performance benefits of aiohttp.
+litellm.disable_aiohttp_transport = True
+
+
 def find_available_port(host: str, start_port: int, max_attempts: int = 100) -> int:
     """Find an available port starting from start_port.
-    
+
     Args:
         host: The host address to check.
         start_port: The port number to start checking from.
         max_attempts: Maximum number of ports to try.
-        
+
     Returns:
         An available port number.
-        
+
     Raises:
         RuntimeError: If no available port is found within max_attempts.
     """
     import socket
+
     for port in range(start_port, start_port + max_attempts):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
