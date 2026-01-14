@@ -64,7 +64,7 @@ def test_last_token_logits_only(model_name, config_cls, model_cls, mesh_axes):
         result_with = model.generate(input_ids, attention_mask, sampling_params=sampling_params, prompt_logprobs=True)
         result_without = model.generate(input_ids, attention_mask, sampling_params=sampling_params, prompt_logprobs=False)
 
-        assert result_with.generated_ids == result_without.generated_ids, "Generated tokens should match"
-        assert result_with.stop_reasons == result_without.stop_reasons, "Stop reasons should match"
         for i in range(batch_size):
+            assert result_with.generated_ids[i] == result_without.generated_ids[i], f"Generated tokens should match for seq {i}"
+            assert result_with.stop_reasons[i] == result_without.stop_reasons[i], f"Stop reasons should match for seq {i}"
             assert np.allclose(result_with.logprobs[i], result_without.logprobs[i]), f"Logprobs should match for seq {i}"
