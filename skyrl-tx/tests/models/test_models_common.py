@@ -49,9 +49,11 @@ def test_last_token_logits_only(model_name, config_cls, model_cls, mesh_axes):
         outputs_last = model(
             batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), last_token_logits_only=True
         )
-        assert outputs_last.logits.shape == (batch_size, 1, config.vocab_size), (
-            f"Expected shape ({batch_size}, 1, {config.vocab_size}), got {outputs_last.logits.shape}"
-        )
+        assert outputs_last.logits.shape == (
+            batch_size,
+            1,
+            config.vocab_size,
+        ), f"Expected shape ({batch_size}, 1, {config.vocab_size}), got {outputs_last.logits.shape}"
 
         # Last token logits should match
         assert np.allclose(outputs_full.logits[:, -1:, :], outputs_last.logits, rtol=1e-5, atol=1e-5)
@@ -62,9 +64,17 @@ def test_last_token_logits_only(model_name, config_cls, model_cls, mesh_axes):
         sampling_params = [SamplingParams(max_tokens=8, temperature=0.0, seed=42)] * batch_size
 
         result_with = model.generate(input_ids, attention_mask, sampling_params=sampling_params, prompt_logprobs=True)
-        result_without = model.generate(input_ids, attention_mask, sampling_params=sampling_params, prompt_logprobs=False)
+        result_without = model.generate(
+            input_ids, attention_mask, sampling_params=sampling_params, prompt_logprobs=False
+        )
 
         for i in range(batch_size):
-            assert result_with.generated_ids[i] == result_without.generated_ids[i], f"Generated tokens should match for seq {i}"
-            assert result_with.stop_reasons[i] == result_without.stop_reasons[i], f"Stop reasons should match for seq {i}"
-            assert np.allclose(result_with.logprobs[i], result_without.logprobs[i]), f"Logprobs should match for seq {i}"
+            assert (
+                result_with.generated_ids[i] == result_without.generated_ids[i]
+            ), f"Generated tokens should match for seq {i}"
+            assert (
+                result_with.stop_reasons[i] == result_without.stop_reasons[i]
+            ), f"Stop reasons should match for seq {i}"
+            assert np.allclose(
+                result_with.logprobs[i], result_without.logprobs[i]
+            ), f"Logprobs should match for seq {i}"

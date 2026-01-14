@@ -152,7 +152,13 @@ class GeneratorMixin:
 
         # Prefill: process full prompt
         # Use last_token_logits_only=True when we don't need prompt_logprobs to save memory
-        outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices, last_token_logits_only=not prompt_logprobs)
+        outputs = model(
+            input_ids,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            last_token_logits_only=not prompt_logprobs,
+        )
 
         # Compute prompt logprobs if requested
         prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
