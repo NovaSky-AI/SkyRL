@@ -403,8 +403,8 @@ class TestCutileRaggedDotEquivalence:
 
         # Check device placement
         assert (
-            cutile_out.device() == ragged_out.device() == device
-        ), f"Device mismatch: input={device}, ragged={ragged_out.device()}, cutile={cutile_out.device()}"
+            cutile_out.device == ragged_out.device == device
+        ), f"Device mismatch: input={device}, ragged={ragged_out.device}, cutile={cutile_out.device}"
 
         compare_outputs(cutile_out, ragged_out, rtol=1e-3, atol=1e-5)
 
