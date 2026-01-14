@@ -101,26 +101,22 @@ def swizzle_2d(
     N: int,
     TILE_M: int,
     TILE_N: int,
-    GROUP_SIZE_M: int = None,
+    GROUP_SIZE_M: int,
 ) -> Tuple[int, int]:
     """Compute 2D block swizzling for better cache locality.
+
+    This function must be called from within a cutile kernel context.
 
     Args:
         M: Total rows
         N: Total columns
         TILE_M: Tile size in M dimension
         TILE_N: Tile size in N dimension
-        GROUP_SIZE_M: Number of M blocks to group together (default from config)
+        GROUP_SIZE_M: Number of M blocks to group together
 
     Returns:
         Tuple of (bid_m, bid_n) - block indices in M and N dimensions
     """
-    if not CUTILE_AVAILABLE:
-        return (0, 0)
-
-    if GROUP_SIZE_M is None:
-        GROUP_SIZE_M = default_config.group_size_m
-
     bid = ct.bid()
     grid_m = ct.cdiv(M, TILE_M)
     grid_n = ct.cdiv(N, TILE_N)
