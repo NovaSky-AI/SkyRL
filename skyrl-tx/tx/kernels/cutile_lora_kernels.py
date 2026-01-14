@@ -161,7 +161,7 @@ if CUTILE_AVAILABLE:
         d = hidden_states.shape[1]
         out_features = weights.shape[2]
 
-        bid_m, bid_n = swizzle_2d(m_total, out_features, TILE_M, TILE_N)
+        bid_m, bid_n = swizzle_2d(m_total, out_features, TILE_M, TILE_N, GROUP_SIZE_M=8)
 
         # Compute global indices for this tile
         start_m = bid_m * TILE_M
