@@ -294,6 +294,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        last_token_logits_only: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -307,6 +308,9 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             kv_cache=kv_cache,
         )
         hidden_states = outputs.last_hidden_state
+        # Only compute logits for last token if requested (saves memory during prefill)
+        if last_token_logits_only:
+            hidden_states = hidden_states[:, -1:, :]
         if self.config.tie_word_embeddings:
             logits = hidden_states @ self.model.embed_tokens.embedding.value.T
         else:
