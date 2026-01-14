@@ -117,7 +117,7 @@ def swizzle_2d(
     Returns:
         Tuple of (bid_m, bid_n) - block indices in M and N dimensions
     """
-    bid = ct.bid()
+    bid = ct.bid(axis=0)
     grid_m = ct.cdiv(M, TILE_M)
     grid_n = ct.cdiv(N, TILE_N)
 
