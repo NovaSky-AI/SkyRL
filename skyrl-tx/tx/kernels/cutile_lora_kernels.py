@@ -178,8 +178,8 @@ if CUTILE_AVAILABLE:
             start_k = k_tile * TILE_K
 
             # Load input tile [TILE_M, TILE_K]
-            m_indices = start_m + ct.arange(TILE_M)
-            k_indices = start_k + ct.arange(TILE_K)
+            m_indices = start_m + ct.arange(TILE_M, dtype=ct.int32)
+            k_indices = start_k + ct.arange(TILE_K, dtype=ct.int32)
             input_tile = ct.load(
                 hidden_states,
                 (m_indices[:, None], k_indices[None, :]),
@@ -188,7 +188,7 @@ if CUTILE_AVAILABLE:
             )
 
             # Load weight tile [TILE_K, TILE_N] for this expert
-            n_indices = start_n + ct.arange(TILE_N)
+            n_indices = start_n + ct.arange(TILE_N, dtype=ct.int32)
             expert_indices = ct.full((TILE_K, TILE_N), expert_id, dtype=ct.int32)
             k_indices_2d = k_indices[:, None].broadcast_to((TILE_K, TILE_N))
             n_indices_2d = n_indices[None, :].broadcast_to((TILE_K, TILE_N))
@@ -206,8 +206,8 @@ if CUTILE_AVAILABLE:
         accumulator = ct.astype(accumulator, output.dtype)
 
         # Store output tile
-        output_m_indices = start_m + ct.arange(TILE_M)
-        output_n_indices = start_n + ct.arange(TILE_N)
+        output_m_indices = start_m + ct.arange(TILE_M, dtype=ct.int32)
+        output_n_indices = start_n + ct.arange(TILE_N, dtype=ct.int32)
         ct.scatter(
             output,
             (output_m_indices[:, None], output_n_indices[None, :]),
