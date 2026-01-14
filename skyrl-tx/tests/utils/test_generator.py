@@ -17,6 +17,9 @@ class DummyModel(GeneratorMixin, nnx.Module):
         if kv_cache is None:
             # Prefill: deterministic logits
             logits = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
+            # Only return last token logits if requested (saves memory during prefill)
+            if last_token_logits_only:
+                logits = logits[:, -1:, :]
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             kv_cache = KVCache(keys=keys, values=values, cache_position=seq_len)
