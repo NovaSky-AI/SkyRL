@@ -186,15 +186,14 @@ if CUTILE_AVAILABLE:
             )
 
             # Load weight tile [TILE_K, TILE_N] for this expert
+            # weights shape: [num_experts, d, out_features]
+            # We want weights[expert_id, k_indices, n_indices]
             n_indices = start_n + ct.arange(TILE_N, dtype=ct.int32)
-            expert_indices = ct.full((TILE_K, TILE_N), expert_id, dtype=ct.int32)
-            k_indices_2d = k_indices[:, None].broadcast_to((TILE_K, TILE_N))
-            n_indices_2d = n_indices[None, :].broadcast_to((TILE_K, TILE_N))
 
+            # Use broadcasting: k_indices[:, None] x n_indices[None, :] creates 2D grid
             weight_tile = ct.gather(
                 weights,
-                (expert_indices, k_indices_2d, n_indices_2d),
-                shape=(TILE_K, TILE_N),
+                (expert_id, k_indices[:, None], n_indices[None, :]),
             )
 
             # Matrix multiply-accumulate
