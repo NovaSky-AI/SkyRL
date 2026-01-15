@@ -246,6 +246,13 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
                 "Please set `generator.async_engine=true` in your config."
             )
+        # Pop enable_ray_prometheus_stats - only supported for async engine
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+        if enable_ray_prometheus_stats:
+            logger.warning(
+                "enable_ray_prometheus_stats is only supported with AsyncVLLMInferenceEngine. "
+                "Set `generator.async_engine=true` to enable Ray Prometheus stats logging."
+            )
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -350,12 +357,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+
         # TODO (erictang000): potentially enable log requests for a debugging mode
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
             engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
         else:
             engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
-        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+
+        # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
+        stat_loggers = None
+        if enable_ray_prometheus_stats:
+            stat_loggers = self._create_ray_prometheus_stat_loggers()
+
+        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
@@ -387,6 +402,30 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             request_logger=None,
         )
         return engine
+
+    def _create_ray_prometheus_stat_loggers(self):
+        """Create Ray Prometheus stat loggers for vLLM metrics.
+
+        Returns stat_loggers in the format expected by vLLM's from_engine_args().
+        For vLLM v1 (0.9.0+), this returns a list of StatLoggerFactory callables.
+        For older versions, this returns a dict of stat logger instances.
+
+        See: https://docs.vllm.ai/en/latest/api/vllm/v1/metrics/ray_wrappers/
+        """
+        try:
+            # Try vLLM v1 API first (0.9.0+)
+            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+            logger.info("Enabling RayPrometheusStatLogger for vLLM inference engine metrics")
+            # For v1, stat_loggers is a list of factory callables
+            return [RayPrometheusStatLogger]
+        except ImportError:
+            logger.warning(
+                "RayPrometheusStatLogger not available in this vLLM version. "
+                "For Ray-integrated metrics, upgrade to vLLM >= 0.9.0. "
+                "Stat logging will be disabled."
+            )
+            return None
 
     async def _load_lora_from_disk(self, lora_path: str):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""

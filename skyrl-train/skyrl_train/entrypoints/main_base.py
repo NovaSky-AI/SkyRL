@@ -59,6 +59,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
         "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+        "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled

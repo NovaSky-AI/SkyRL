@@ -235,6 +235,9 @@ generator:
   # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
   fully_sharded_loras: false
+  # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only)
+  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger
+  enable_ray_prometheus_stats: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
