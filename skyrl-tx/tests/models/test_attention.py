@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from tx.models.attention import _shift_sequences, dot_product_attention
 
@@ -23,14 +24,6 @@ class TestShiftSequences:
         expected = jnp.array([[[1, 1], [2, 2], [3, 3], [0, 0], [0, 0]]])
         assert jnp.allclose(result, expected)
 
-    def test_roundtrip(self):
-        """shift by N then -N returns original."""
-        x = jnp.array([[[0, 0], [0, 0], [1, 1], [2, 2], [3, 3]]])
-        shift = jnp.array([2])
-        shifted = _shift_sequences(x, shift)
-        restored = _shift_sequences(shifted, -shift)
-        assert jnp.allclose(restored, x)
-
     def test_per_batch_shift(self):
         """Different shift amounts per batch element."""
         x = jnp.array(
@@ -49,11 +42,33 @@ class TestShiftSequences:
         )
         assert jnp.allclose(result, expected)
 
-    def test_4d_tensor(self):
-        """Works with 4D tensors [B, S, H, D]."""
-        x = jax.random.normal(jax.random.key(0), (2, 8, 4, 16))
-        shift = jnp.array([0, 3])
+    @pytest.mark.parametrize(
+        'shape,pad_lengths',
+        [
+            ((1, 5, 2), [2]),  # 3D: [B, S, D]
+            ((2, 8, 4), [0, 3]),  # 3D: batch with different padding
+            ((2, 8, 4, 16), [0, 3]),  # 4D: [B, S, H, D]
+            ((4, 16, 8, 64), [0, 4, 8, 12]),  # 4D: larger batch
+        ],
+    )
+    def test_roundtrip(self, shape, pad_lengths):
+        """Shift by N then -N returns original, with realistic padding."""
+        x = jax.random.normal(jax.random.key(0), shape)
+
+        # Set padding positions to 0 (simulate left-padded sequences)
+        for b, pad_len in enumerate(pad_lengths):
+            if pad_len > 0:
+                x = x.at[b, :pad_len].set(0)
+
+        shift = jnp.array(pad_lengths)
         shifted = _shift_sequences(x, shift)
+
+        # Verify padding moved to the end
+        for b, pad_len in enumerate(pad_lengths):
+            if pad_len > 0:
+                assert jnp.allclose(shifted[b, -pad_len:], 0)
+
+        # Verify roundtrip
         restored = _shift_sequences(shifted, -shift)
         assert jnp.allclose(restored, x)
 
