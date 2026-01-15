@@ -90,6 +90,7 @@ def set_up_http_server(client: InferenceEngineClient) -> Tuple[threading.Thread,
     def _find_available_port(host: str) -> int:
         """Find an available port by binding to port 0."""
         import socket
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind((host, 0))
             return s.getsockname()[1]
