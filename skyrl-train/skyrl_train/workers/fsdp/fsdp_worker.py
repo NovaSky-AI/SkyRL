@@ -116,7 +116,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         # Update per-gpu mini batch size based on device mesh
         self._normalize_mini_batch_size()
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(model_path,
+                                                    torch_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else None,
+                                                   trust_remote_code=True)
         init_context = get_init_weight_context_manager(
             use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
         )
