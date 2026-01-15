@@ -417,8 +417,6 @@ def handle_replace_sampling(
 
             if generator_output["rollout_logprobs"]:
                 generator_output["rollout_logprobs"][bad_idx] = generator_output["rollout_logprobs"][replacement_idx]
-            if generator_output.get("sampling_masks"):
-                generator_output["sampling_masks"][bad_idx] = generator_output["sampling_masks"][replacement_idx]
 
         # Update UIDs accordingly
         replaced_uids = uids.copy()
@@ -557,9 +555,6 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
         "rollout_logprobs": (
             [output["rollout_logprobs"][i] for i in kept_indices] if output["rollout_logprobs"] else None
         ),
-        "sampling_masks": (
-            [output["sampling_masks"][i] for i in kept_indices] if output.get("sampling_masks") else None
-        ),
     }
 
     if output.get("stop_reasons"):
@@ -618,7 +613,6 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             "loss_masks",
             "rewards",
             "rollout_logprobs",
-            "sampling_masks",
         ]:
             assert len(generator_output[key]) == len(generator_output["response_ids"]), (
                 f"Generator output {key} length must be equal to response_ids length, "
@@ -644,11 +638,6 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             assert len(response_ids) == len(generator_output["rollout_logprobs"][i]), (
                 f"Response ids and rollout logprobs must have the same length, "
                 f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
-            )
-        if generator_output.get("sampling_masks"):
-            assert len(response_ids) == len(generator_output["sampling_masks"][i]), (
-                f"Response ids and sampling masks must have the same length, "
-                f"for sample {i} got {len(response_ids)} and {len(generator_output['sampling_masks'][i])}"
             )
 
     # loss masks should be non-zero for at least one element for trainer

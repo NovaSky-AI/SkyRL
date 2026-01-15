@@ -197,14 +197,11 @@ def apply_sampling_mask(
     batch_size, seqlen, vocab_size = logits.shape
     device = logits.device
 
+    # TODO(devpatel) if we sort the tokens, then indices might be wrong
     valid_token_mask = torch.zeros((batch_size, seqlen, vocab_size), dtype=torch.bool, device=device)
-
-    for b in range(batch_size):
-        for s in range(seqlen):
-            valid_indices = sampling_mask[b, s]
-            valid_indices = valid_indices[valid_indices >= 0]
-            if len(valid_indices) > 0:
-                valid_token_mask[b, s, valid_indices] = True
+    valid = sampling_mask >= 0
+    idx = sampling_mask.clamp(min=0)
+    valid_token_mask.scatter_(dim=2, index=idx, src=valid)
 
     masked_logits = logits.clone()
     masked_logits[~valid_token_mask] = float("-inf")

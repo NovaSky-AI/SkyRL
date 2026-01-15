@@ -1,5 +1,5 @@
 """
-Test for `skyrl-train/skyrl_train/inference_engines/inference_engine_client.py` functinoalities
+Test for `skyrl-train/skyrl_train/inference_engines/inference_engine_client.py` functionalities
 that can be mocked. Also tests for `skyrl-train/skyrl_train/inference_engines/utils.py`.
 
 Run with:

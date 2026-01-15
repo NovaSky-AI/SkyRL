@@ -69,14 +69,16 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
 
     loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
     rewards = [torch.tensor([0, 1, 0]), torch.tensor([1, 0, 0, 0, 0])]
+    sampling_masks = [[[1, 2, 3], [4, 5, 6]], [[1, 2, 3], [4, 5, 6], [7, 8, 9]]]
 
-    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs = (
+    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, ret_sampling_masks = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer,
             prompts,
             outputs,
             rewards,
             loss_masks,
+            sampling_masks,
         )
     )
 
