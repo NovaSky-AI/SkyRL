@@ -2,6 +2,9 @@ __pycache__/
 /wandb/
 /skyrl-train/wandb/
 **/*.egg-info/
+.vscode/
+.venv/
+.DS_Store
 # hydra logs
 /outputs/
 /skyrl-train/outputs/
