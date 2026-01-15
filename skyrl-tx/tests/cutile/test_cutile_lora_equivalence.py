@@ -409,29 +409,66 @@ class TestCutileRaggedDotEquivalence:
         compare_outputs(cutile_out, ragged_out, rtol=1e-3, atol=1e-5)
 
     def test_benchmark_performance(self, capsys):
-        """Benchmark cutile vs ragged_dot performance."""
-        m, d, out_features, num_experts = 1024, 512, 512, 16
+        """Benchmark cutile vs ragged_dot performance across multiple realistic configurations."""
+        # Realistic configurations based on common LLM architectures
+        # Format: (m, d, out_features, num_experts, description)
+        configs = [
+            (1024, 512, 512, 16, "Small (original)"),
+            (2048, 1024, 1024, 16, "Medium (Qwen-0.6B scale)"),
+            (4096, 1536, 1536, 32, "Large (Qwen2.5-1.5B scale)"),
+            (4096, 2048, 2048, 32, "Large+ (2B scale)"),
+            (8192, 4096, 4096, 64, "XLarge (Llama 3 8B scale)"),
+        ]
 
-        lhs, rhs, group_sizes = generate_ragged_test_case(
-            m, d, out_features, num_experts, seed=505, distribution="imbalanced"
-        )
+        results = []
 
         # Temporarily disable output capturing to show benchmark results
         with capsys.disabled():
-            print(f"\n{'='*60}")
-            print(f"Benchmark: {m} tokens, {d} hidden, {num_experts} experts")
-            print(f"{'='*60}")
-            ragged_time, cutile_time, speedup = benchmark_both(lhs, rhs, group_sizes, num_runs=100, warmup=10)
+            print(f"\n{'='*80}")
+            print(f"{'CUTILE vs RAGGED_DOT BENCHMARK SUITE':^80}")
+            print(f"{'='*80}")
 
-            # Print summary
-            status = "✓ FASTER" if speedup > 1.0 else "⚠ SLOWER" if speedup < 1.0 else "≈ EQUAL"
-            print(f"\n{status} than ragged_dot ({speedup:.2f}x)")
-            print(f"{'='*60}\n")
+            for m, d, out_features, num_experts, desc in configs:
+                lhs, rhs, group_sizes = generate_ragged_test_case(
+                    m, d, out_features, num_experts, seed=505, distribution="imbalanced"
+                )
 
-        # For Phase 1, just ensure cutile doesn't crash and produces correct output
-        # Performance optimization comes later
-        assert cutile_time > 0, "Cutile execution failed"
-        assert ragged_time > 0, "Ragged_dot execution failed"
+                print(f"\n{desc}")
+                print(f"  Config: {m} tokens × {d} hidden → {out_features} out, {num_experts} experts")
+                print(f"  {'-'*76}")
+
+                ragged_time, cutile_time, speedup = benchmark_both(lhs, rhs, group_sizes, num_runs=50, warmup=5)
+
+                # Store results
+                results.append(
+                    {
+                        "config": desc,
+                        "m": m,
+                        "d": d,
+                        "num_experts": num_experts,
+                        "ragged_time": ragged_time,
+                        "cutile_time": cutile_time,
+                        "speedup": speedup,
+                    }
+                )
+
+                # Basic sanity check
+                assert cutile_time > 0, f"Cutile execution failed for {desc}"
+                assert ragged_time > 0, f"Ragged_dot execution failed for {desc}"
+
+            # Print summary table
+            print(f"\n{'='*80}")
+            print(f"{'SUMMARY':^80}")
+            print(f"{'='*80}")
+            print(f"{'Config':<20} {'Tokens':>8} {'Hidden':>8} {'Experts':>8} {'Speedup':>10}")
+            print(f"{'-'*80}")
+            for r in results:
+                status = "✓" if r["speedup"] > 1.0 else "⚠"
+                print(
+                    f"{r['config']:<20} {r['m']:>8} {r['d']:>8} {r['num_experts']:>8} "
+                    f"{status} {r['speedup']:>7.2f}x"
+                )
+            print(f"{'='*80}\n")
 
 
 # ============================================================================
