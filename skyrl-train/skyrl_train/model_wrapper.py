@@ -13,7 +13,7 @@ import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
-from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
+from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits, apply_sampling_mask
 from flash_attn.bert_padding import pad_input, unpad_input
 from packaging.version import Version
 
@@ -267,6 +267,7 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
+        sampling_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
         position_ids = attention_mask.long().cumsum(-1) - 1
@@ -312,6 +313,9 @@ class HFModelWrapper(nn.Module):
 
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
+
+        if sampling_mask:
+            logits_BSV = apply_sampling_mask(logits_BSV, sampling_mask)
 
         # NOTE: this is slightly inaccurate with sample packing because last token from nth seq -> first token of n+1th seq loss is added.
         log_probs = logprobs_from_logits(
