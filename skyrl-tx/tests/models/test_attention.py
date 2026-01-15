@@ -78,29 +78,29 @@ class TestDotProductAttentionCPU:
 
     def test_basic_attention(self):
         """Basic attention computation on CPU."""
-        B, T, S, H, D = 2, 4, 4, 2, 8
-        q = jax.random.normal(jax.random.key(0), (B, T, H, D))
-        k = jax.random.normal(jax.random.key(1), (B, S, H, D))
-        v = jax.random.normal(jax.random.key(2), (B, S, H, D))
-        mask = jnp.ones((B, S))
+        batch, seq_len, num_heads, head_dim = 2, 4, 2, 8
+        q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim))
+        k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_heads, head_dim))
+        v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_heads, head_dim))
+        mask = jnp.ones((batch, seq_len))
 
-        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=D)
-        assert result.shape == (B, T, H, D)
+        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
+        assert result.shape == (batch, seq_len, num_heads, head_dim)
 
     def test_masked_positions_ignored(self):
         """Masked positions (0s) don't affect output for valid positions."""
-        B, T, H, D = 1, 3, 1, 4
-        q = jax.random.normal(jax.random.key(0), (B, T, H, D))
-        k = jax.random.normal(jax.random.key(1), (B, T, H, D))
-        v = jax.random.normal(jax.random.key(2), (B, T, H, D))
+        batch, seq_len, num_heads, head_dim = 1, 3, 1, 4
+        q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim))
+        k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_heads, head_dim))
+        v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_heads, head_dim))
 
         # Full mask
         mask_full = jnp.array([[1, 1, 1]])
-        out_full = dot_product_attention(q, k, v, mask_full, is_causal=False, head_dim=D)
+        out_full = dot_product_attention(q, k, v, mask_full, is_causal=False, head_dim=head_dim)
 
         # Mask with padding at end (right-padded) - only first 2 valid
         mask_right = jnp.array([[1, 1, 0]])
-        out_right = dot_product_attention(q, k, v, mask_right, is_causal=False, head_dim=D)
+        out_right = dot_product_attention(q, k, v, mask_right, is_causal=False, head_dim=head_dim)
 
         # First two positions should only attend to first two K/V
         # Output at masked positions doesn't matter
@@ -109,24 +109,23 @@ class TestDotProductAttentionCPU:
 
     def test_decode_single_query(self):
         """Decode mode with single query token."""
-        B, S, H, D = 2, 10, 4, 16
-        q = jax.random.normal(jax.random.key(0), (B, 1, H, D))  # single query
-        k = jax.random.normal(jax.random.key(1), (B, S, H, D))
-        v = jax.random.normal(jax.random.key(2), (B, S, H, D))
-        mask = jnp.ones((B, S))
+        batch, seq_len, num_heads, head_dim = 2, 10, 4, 16
+        q = jax.random.normal(jax.random.key(0), (batch, 1, num_heads, head_dim))  # single query
+        k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_heads, head_dim))
+        v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_heads, head_dim))
+        mask = jnp.ones((batch, seq_len))
 
-        result = dot_product_attention(q, k, v, mask, is_causal=False, head_dim=D)
-        assert result.shape == (B, 1, H, D)
+        result = dot_product_attention(q, k, v, mask, is_causal=False, head_dim=head_dim)
+        assert result.shape == (batch, 1, num_heads, head_dim)
 
     def test_gqa_different_kv_heads(self):
         """Grouped query attention with fewer KV heads."""
-        B, T, S = 2, 4, 4
-        num_heads, num_kv_heads, D = 8, 2, 16
+        batch, seq_len, num_heads, num_kv_heads, head_dim = 2, 4, 8, 2, 16
 
-        q = jax.random.normal(jax.random.key(0), (B, T, num_heads, D))
-        k = jax.random.normal(jax.random.key(1), (B, S, num_kv_heads, D))
-        v = jax.random.normal(jax.random.key(2), (B, S, num_kv_heads, D))
-        mask = jnp.ones((B, S))
+        q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim))
+        k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_kv_heads, head_dim))
+        v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_kv_heads, head_dim))
+        mask = jnp.ones((batch, seq_len))
 
-        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=D)
-        assert result.shape == (B, T, num_heads, D)
+        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
+        assert result.shape == (batch, seq_len, num_heads, head_dim)
