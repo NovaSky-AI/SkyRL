@@ -385,8 +385,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # TODO(Charlie): add a config similar to vllm's `served_model_name`. See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
         model_name = model_path
 
+        from inspect import signature
+        sig = signature(OpenAIServingModels)
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-        models = OpenAIServingModels(engine, model_config, base_model_paths)
+        if len(sig.parameters) == 4:
+            # For OLD vllm (<0.11.2)
+            models = OpenAIServingModels(engine, model_config, base_model_paths)
+        else:
+            # For NEW vllm (>= 0.11.2)
+            models = OpenAIServingModels(engine, base_model_paths=base_model_paths)#model_config)
+
+        
+        
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
         self.openai_serving_chat = OpenAIServingChat(
