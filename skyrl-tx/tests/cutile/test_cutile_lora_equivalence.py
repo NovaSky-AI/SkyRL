@@ -408,8 +408,7 @@ class TestCutileRaggedDotEquivalence:
 
         compare_outputs(cutile_out, ragged_out, rtol=1e-3, atol=1e-5)
 
-    @pytest.mark.slow
-    def test_benchmark_performance(self):
+    def test_benchmark_performance(self, capsys):
         """Benchmark cutile vs ragged_dot performance."""
         m, d, out_features, num_experts = 1024, 512, 512, 16
 
@@ -417,14 +416,22 @@ class TestCutileRaggedDotEquivalence:
             m, d, out_features, num_experts, seed=505, distribution="imbalanced"
         )
 
-        ragged_time, cutile_time, speedup = benchmark_both(lhs, rhs, group_sizes, num_runs=100, warmup=10)
+        # Temporarily disable output capturing to show benchmark results
+        with capsys.disabled():
+            print(f"\n{'='*60}")
+            print(f"Benchmark: {m} tokens, {d} hidden, {num_experts} experts")
+            print(f"{'='*60}")
+            ragged_time, cutile_time, speedup = benchmark_both(lhs, rhs, group_sizes, num_runs=100, warmup=10)
+
+            # Print summary
+            status = "✓ FASTER" if speedup > 1.0 else "⚠ SLOWER" if speedup < 1.0 else "≈ EQUAL"
+            print(f"\n{status} than ragged_dot ({speedup:.2f}x)")
+            print(f"{'='*60}\n")
 
         # For Phase 1, just ensure cutile doesn't crash and produces correct output
         # Performance optimization comes later
         assert cutile_time > 0, "Cutile execution failed"
         assert ragged_time > 0, "Ragged_dot execution failed"
-
-        print(f"\nPerformance: {'✓ FASTER' if speedup > 1 else '⚠ SLOWER'} than ragged_dot")
 
 
 # ============================================================================
