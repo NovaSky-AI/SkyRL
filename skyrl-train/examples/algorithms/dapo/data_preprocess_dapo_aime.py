@@ -1,9 +1,11 @@
-import pandas as pd
-import polars as pl
+import os
 from pathlib import Path
 
+import pandas as pd
+import polars as pl
+
 # Define input and output files
-DATA_DIR = Path.home() / "data/dapo"
+DATA_DIR = Path(os.environ.get("DATA_DIR", Path.home() / "data/dapo"))
 FILES = {
     "dapo-math-17k": "dapo-math-17k.parquet",
     "aime-2024": "aime-2024.parquet",

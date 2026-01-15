@@ -9,18 +9,30 @@ set -x
 #
 # This script tests cross-tokenizer distillation with minimal resources.
 
+# reomve after testing and add a comment like https://github.com/NovaSky-AI/SkyRL/pull/585/changes#diff-cb036478b449f5bc58bc535668e8d17dee0956226baec8853c199799782893b4R6 to the example shell scripts
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "Generating DAPO parquet on Modal..."
+  (
+    cd "$REPO_ROOT/skyrl-train/integrations/modal" || exit 1
+    MODAL_GPU="${MODAL_GPU:-A100:2}" modal run main.py --command "bash examples/algorithms/dapo/prepare_dapo_data.sh"
+  )
+  exit $?
+fi
+
 echo "=== GOLD Integration Test ==="
 echo "Starting at: $(date)"
 
-# Prepare GSM8K data
-echo "=== Preparing GSM8K data ==="
-uv run python examples/gold_distillation/prepare_gsm8k_data.py
-DATA_DIR="/root/data/gsm8k"
+# Prepare DAPO data (AIME-style prompts)
+echo "=== Preparing DAPO data ==="
+DATA_DIR="/root/data/dapo"
+DATA_DIR="$DATA_DIR" bash examples/algorithms/dapo/prepare_dapo_data.sh
+TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
+TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 
-# Cross-tokenizer test: Qwen (teacher) -> Llama (student)
-# Using small models for quick testing
+# Cross-tokenizer test: Qwen (teacher) -> TinyLlama (student)
+# Using non-gated, small models for quick testing
 TEACHER_MODEL="Qwen/Qwen2.5-0.5B-Instruct"
-STUDENT_MODEL="meta-llama/Llama-3.2-1B"
+STUDENT_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
 # GOLD-specific settings
 ADVANTAGE_ESTIMATOR="no_op"
@@ -47,10 +59,10 @@ echo "=== Starting GOLD Training Test ==="
 echo "Teacher: $TEACHER_MODEL"
 echo "Student: $STUDENT_MODEL"
 
-# Use prepared GSM8K data
+# Use prepared DAPO data
 uv run --isolated --extra vllm -m examples.gold_distillation.main_gold_distill \
-  data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/test.parquet']" \
+  data.train_data="['$TRAIN_FILE']" \
+  data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator=$ADVANTAGE_ESTIMATOR \
   trainer.algorithm.policy_loss_type=$POLICY_LOSS \
   trainer.policy.model.path=$STUDENT_MODEL \
@@ -89,7 +101,7 @@ uv run --isolated --extra vllm -m examples.gold_distillation.main_gold_distill \
   generator.run_engines_locally=true \
   generator.async_engine=false \
   generator.batched=true \
-  environment.env_class=gsm8k \
+  environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.gpu_memory_utilization=0.7 \
   trainer.logger="none" \
