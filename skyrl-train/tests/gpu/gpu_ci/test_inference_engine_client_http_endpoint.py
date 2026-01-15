@@ -45,7 +45,6 @@ from transformers import AutoTokenizer
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 TP_SIZE = 1
-SERVER_PORT_START = 8123
 SERVER_HOST = "127.0.0.1"
 
 
@@ -88,21 +87,15 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> DictConfig:
 
 
 def set_up_http_server(client: InferenceEngineClient) -> Tuple[threading.Thread, int]:
-    def _find_available_port(host: str, start_port: int, max_attempts: int = 100) -> int:
-        """Find an available port starting from start_port."""
+    def _find_available_port(host: str) -> int:
+        """Find an available port by binding to port 0."""
         import socket
-
-        for port in range(start_port, start_port + max_attempts):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind((host, port))
-                    return port
-            except OSError:
-                continue
-        raise RuntimeError(f"Could not find available port in range {start_port}-{start_port + max_attempts}")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host, 0))
+            return s.getsockname()[1]
 
     # Find an available port
-    server_port = _find_available_port(SERVER_HOST, SERVER_PORT_START)
+    server_port = _find_available_port(SERVER_HOST)
 
     # Start server in background thread
     def run_server():
