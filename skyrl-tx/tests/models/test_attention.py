@@ -33,16 +33,20 @@ class TestShiftSequences:
 
     def test_per_batch_shift(self):
         """Different shift amounts per batch element."""
-        x = jnp.array([
-            [[0, 0], [1, 1], [2, 2]],  # batch 0: shift=0
-            [[0, 0], [0, 0], [3, 3]],  # batch 1: shift=2
-        ])
+        x = jnp.array(
+            [
+                [[0, 0], [1, 1], [2, 2]],  # batch 0: shift=0
+                [[0, 0], [0, 0], [3, 3]],  # batch 1: shift=2
+            ]
+        )
         shift = jnp.array([0, 2])
         result = _shift_sequences(x, shift)
-        expected = jnp.array([
-            [[0, 0], [1, 1], [2, 2]],  # unchanged
-            [[3, 3], [0, 0], [0, 0]],  # shifted left by 2
-        ])
+        expected = jnp.array(
+            [
+                [[0, 0], [1, 1], [2, 2]],  # unchanged
+                [[3, 3], [0, 0], [0, 0]],  # shifted left by 2
+            ]
+        )
         assert jnp.allclose(result, expected)
 
     def test_4d_tensor(self):

@@ -55,7 +55,7 @@ def dot_product_attention(
 
     # Decode: use mask-based attention (flash attention provides minimal benefit
     # for single-token queries since attention is already O(S) not O(S^2))
-    if not is_causal or jax.default_backend() != 'gpu':
+    if not is_causal or jax.default_backend() != "gpu":
         return jax.nn.dot_product_attention(
             q, k, v, scale=scale, mask=attention_mask[:, None, None, :].astype(bool), is_causal=is_causal
         )
@@ -70,10 +70,14 @@ def dot_product_attention(
     v_shifted = _shift_sequences(v, shift)
 
     out = jax.nn.dot_product_attention(
-        q_shifted, k_shifted, v_shifted, scale=scale, is_causal=True,
+        q_shifted,
+        k_shifted,
+        v_shifted,
+        scale=scale,
+        is_causal=True,
         query_seq_lengths=seq_lengths,
         key_value_seq_lengths=seq_lengths,
-        implementation='cudnn',
+        implementation="cudnn",
     )
 
     return _shift_sequences(out, -shift)

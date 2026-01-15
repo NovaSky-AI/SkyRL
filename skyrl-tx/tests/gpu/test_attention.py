@@ -11,26 +11,21 @@ import pytest
 from tx.models.attention import dot_product_attention
 
 # Skip all tests if not on GPU
-pytestmark = pytest.mark.skipif(
-    jax.default_backend() != 'gpu',
-    reason='GPU tests require CUDA'
-)
+pytestmark = pytest.mark.skipif(jax.default_backend() != "gpu", reason="GPU tests require CUDA")
 
 
 def mask_based_attention(q, k, v, attention_mask, is_causal, head_dim):
     """Reference implementation using mask-based attention."""
     scale = 1.0 / head_dim**0.5
     return jax.nn.dot_product_attention(
-        q, k, v, scale=scale,
-        mask=attention_mask[:, None, None, :].astype(bool),
-        is_causal=is_causal
+        q, k, v, scale=scale, mask=attention_mask[:, None, None, :].astype(bool), is_causal=is_causal
     )
 
 
 class TestFlashAttentionNumericalEquivalence:
     """Verify cuDNN flash attention matches mask-based attention."""
 
-    @pytest.mark.parametrize('seq_len', [32, 128, 512])
+    @pytest.mark.parametrize("seq_len", [32, 128, 512])
     def test_right_padded_equivalence(self, seq_len):
         """cuDNN matches mask-based for right-padded sequences."""
         B, H, D = 2, 4, 64
@@ -48,11 +43,9 @@ class TestFlashAttentionNumericalEquivalence:
         # Check only valid positions (masked positions may differ)
         for b in range(B):
             valid_len = int(seq_lengths[b])
-            assert jnp.allclose(
-                result[b, :valid_len], expected[b, :valid_len], atol=1e-5
-            ), f'Mismatch at batch {b}'
+            assert jnp.allclose(result[b, :valid_len], expected[b, :valid_len], atol=1e-5), f"Mismatch at batch {b}"
 
-    @pytest.mark.parametrize('seq_len', [32, 128, 512])
+    @pytest.mark.parametrize("seq_len", [32, 128, 512])
     def test_left_padded_equivalence(self, seq_len):
         """cuDNN matches mask-based for left-padded sequences (prefill)."""
         B, H, D = 2, 4, 64
@@ -71,9 +64,7 @@ class TestFlashAttentionNumericalEquivalence:
         # Check only valid positions
         for b in range(B):
             pad_len = int(padding[b])
-            assert jnp.allclose(
-                result[b, pad_len:], expected[b, pad_len:], atol=1e-5
-            ), f'Mismatch at batch {b}'
+            assert jnp.allclose(result[b, pad_len:], expected[b, pad_len:], atol=1e-5), f"Mismatch at batch {b}"
 
     def test_full_sequence_no_padding(self):
         """All-ones mask (no padding) works correctly."""
@@ -105,9 +96,7 @@ class TestFlashAttentionNumericalEquivalence:
 
         for b in range(B):
             pad_len = int(padding[b])
-            assert jnp.allclose(
-                result[b, pad_len:], expected[b, pad_len:], atol=1e-5
-            ), f'Mismatch at batch {b}'
+            assert jnp.allclose(result[b, pad_len:], expected[b, pad_len:], atol=1e-5), f"Mismatch at batch {b}"
 
 
 class TestFlashAttentionGQA:
