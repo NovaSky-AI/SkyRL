@@ -69,7 +69,6 @@ def convert_prompts_responses_to_batch_tensors(
         action_mask: Response mask for the model. Size: (batch, response_len)
         rewards: Rewards for each output. Size: (batch, response_len)
         loss_masks: Loss masks for each output. Size: (batch, response_len)
-        logprobs_tensor: Rollout log probs for each output. Size: (batch, response_len)
         sampling_masks_tensor: Sampling masks tensor. Size: (batch, response_len, max_k) with -1 padding
     """
     _verify_inputs(prompts, responses, rewards, loss_masks)
