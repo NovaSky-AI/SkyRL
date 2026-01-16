@@ -64,7 +64,6 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -105,7 +104,7 @@ class BenchmarkConfig:
 
     # JAX/XLA environment configuration
     xla_preallocate: bool = False
-    gpu_allocator: str = ""  # Option: "cuda_malloc_async"
+    gpu_allocator: str = ""  # TF_GPU_ALLOCATOR (e.g., "cuda_malloc_async")
     jax_log_compiles: bool = False
     dump_xla: bool = False
 
@@ -256,28 +255,33 @@ class ServerManager:
         # Open log file
         self.log_file = open(self.log_path, "w")
 
-        # Set environment variables
-        env = os.environ.copy()
-        env["XLA_PYTHON_CLIENT_PREALLOCATE"] = str(self.config.xla_preallocate).lower()
-        env["TF_GPU_ALLOCATOR"] = self.config.gpu_allocator
-        if self.config.jax_log_compiles:
-            env["JAX_LOG_COMPILES"] = "1"
+        try:
+            # Set environment variables
+            env = os.environ.copy()
+            env["XLA_PYTHON_CLIENT_PREALLOCATE"] = str(self.config.xla_preallocate).lower()
+            env["TF_GPU_ALLOCATOR"] = self.config.gpu_allocator
+            if self.config.jax_log_compiles:
+                env["JAX_LOG_COMPILES"] = "1"
 
-        # Set up XLA dump if enabled
-        if self.config.dump_xla:
-            xla_dump_dir = self.config.output_dir / f"xla_dump_{self.test_name}"
-            xla_dump_dir.mkdir(parents=True, exist_ok=True)
-            env["XLA_FLAGS"] = f"--xla_dump_to={xla_dump_dir} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*"
+            # Set up XLA dump if enabled
+            if self.config.dump_xla:
+                xla_dump_dir = self.config.output_dir / f"xla_dump_{self.test_name}"
+                xla_dump_dir.mkdir(parents=True, exist_ok=True)
+                env["XLA_FLAGS"] = f"--xla_dump_to={xla_dump_dir} --xla_dump_hlo_as_text --xla_dump_hlo_pass_re=.*"
 
-        # Start server
-        cmd = self._build_command()
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=self.log_file,
-            stderr=subprocess.STDOUT,
-            env=env,
-            preexec_fn=os.setsid,  # Create new process group for cleanup
-        )
+            # Start server
+            cmd = self._build_command()
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=self.log_file,
+                stderr=subprocess.STDOUT,
+                env=env,
+                preexec_fn=os.setsid,  # Create new process group for cleanup
+            )
+        except Exception:
+            self.log_file.close()
+            self.log_file = None
+            raise
 
     def wait_ready(self, timeout: float = 120.0) -> bool:
         """Wait for server to respond to health check."""
@@ -381,16 +385,6 @@ class ServerManager:
         except OSError:
             pass
         return logs
-
-    @contextmanager
-    def running(self):
-        """Context manager for server lifecycle."""
-        try:
-            self.start()
-            yield self
-        finally:
-            self.stop()
-
 
 class BenchmarkRunner:
     """Main benchmark execution orchestrator."""
@@ -627,21 +621,6 @@ class ResultsReporter:
                     print(f"  {log}")
 
 
-# Global state for signal handling
-_active_server: ServerManager | None = None
-_active_monitor: GPUMonitor | None = None
-
-
-def cleanup_handler(signum, frame):
-    """Handle SIGINT/SIGTERM for graceful cleanup."""
-    print("\n\nReceived interrupt signal, cleaning up...")
-    if _active_monitor:
-        _active_monitor.stop()
-    if _active_server:
-        _active_server.stop()
-    sys.exit(1)
-
-
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -726,8 +705,8 @@ def parse_args() -> argparse.Namespace:
     )
     env_group.add_argument(
         "--gpu-allocator",
-        default="cuda_malloc_async",
-        help="GPU allocator (cuda_malloc_async, default, etc.)",
+        default="",
+        help="TF_GPU_ALLOCATOR value (e.g., 'cuda_malloc_async' for async memory pools)",
     )
     env_group.add_argument(
         "--jax-log-compiles",
@@ -763,10 +742,6 @@ def setup_output_dir(experiment_name: str | None, output_root: Path) -> Path:
 
 def main() -> int:
     """CLI entry point."""
-    # Set up signal handlers
-    signal.signal(signal.SIGINT, cleanup_handler)
-    signal.signal(signal.SIGTERM, cleanup_handler)
-
     args = parse_args()
 
     # Create output directory
