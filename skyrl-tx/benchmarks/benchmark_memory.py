@@ -446,7 +446,7 @@ class BenchmarkRunner:
             # Create client and run test
             service_client = tinker.ServiceClient(
                 base_url=f"http://{self.config.host}:{self.config.port}",
-                api_key="dummy",
+                api_key="tml-dummy",
             )
 
             try:
