@@ -413,7 +413,7 @@ class BenchmarkRunner:
         """Run a single benchmark test with given parameters."""
         # Create server config with appropriate batch size
         server_config = self._make_server_config(batch_size, mode)
-        test_name = f"{mode}_bs{batch_size}_seq{seq_len}"
+        test_name = f"{mode}_seq{seq_len}_bs{batch_size}"
         server = ServerManager(server_config, test_name)
         gpu_monitor = GPUMonitor(self.config.gpu_poll_interval)
 
