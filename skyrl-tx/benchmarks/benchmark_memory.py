@@ -386,6 +386,7 @@ class ServerManager:
             pass
         return logs
 
+
 class BenchmarkRunner:
     """Main benchmark execution orchestrator."""
 
@@ -464,12 +465,12 @@ class BenchmarkRunner:
 
         try:
             # Start server (kills existing servers first)
-            print(f"  Starting server...")
+            print("  Starting server...")
             if not server.start_and_wait_ready(timeout=120):
                 result.error_message = "Server failed to become ready"
                 return result
 
-            print(f"  Server ready, starting GPU monitoring...")
+            print("  Server ready, starting GPU monitoring...")
 
             # Start GPU monitoring
             gpu_monitor.start()
