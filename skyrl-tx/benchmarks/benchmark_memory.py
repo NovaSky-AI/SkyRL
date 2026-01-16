@@ -449,17 +449,21 @@ class BenchmarkRunner:
                 api_key="dummy",
             )
 
-            print(f"  Running {mode} test...")
-            if mode == "sample":
-                success, elapsed = self._test_sample(service_client, batch_size, seq_len)
-            else:
-                success, elapsed = self._test_forward_backward(service_client, batch_size, seq_len)
+            try:
+                print(f"  Running {mode} test...")
+                if mode == "sample":
+                    success, elapsed = self._test_sample(service_client, batch_size, seq_len)
+                else:
+                    success, elapsed = self._test_forward_backward(service_client, batch_size, seq_len)
 
-            # Collect results
-            result.peak_gpu_mem_mib = gpu_monitor.stop()
-            result.jit_logs = server.get_jit_logs()
-            result.client_e2e_sec = elapsed
-            result.status = "PASS" if success else "FAIL"
+                # Collect results
+                result.peak_gpu_mem_mib = gpu_monitor.stop()
+                result.jit_logs = server.get_jit_logs()
+                result.client_e2e_sec = elapsed
+                result.status = "PASS" if success else "FAIL"
+            finally:
+                # Close client to stop heartbeat thread before server shutdown
+                service_client.holder.close()
 
         except Exception as e:
             result.error_message = str(e)
