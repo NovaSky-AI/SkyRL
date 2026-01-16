@@ -43,7 +43,7 @@ class TestShiftSequences:
         assert jnp.allclose(result, expected)
 
     @pytest.mark.parametrize(
-        'shape,pad_lengths',
+        "shape,pad_lengths",
         [
             ((1, 5, 2), [2]),  # 3D: [batch, seq, features]
             ((2, 8, 4), [0, 3]),  # 3D: batch with different padding
@@ -83,10 +83,12 @@ class TestShiftSequences:
         assert jnp.argmax(mask_left, axis=1)[0] == 2
 
         # Mixed batch
-        mask_mixed = jnp.array([
-            [1, 1, 1, 0, 0],  # right-padded, shift=0
-            [0, 0, 1, 1, 1],  # left-padded, shift=2
-            [0, 0, 0, 1, 1],  # left-padded, shift=3
-        ])
+        mask_mixed = jnp.array(
+            [
+                [1, 1, 1, 0, 0],  # right-padded, shift=0
+                [0, 0, 1, 1, 1],  # left-padded, shift=2
+                [0, 0, 0, 1, 1],  # left-padded, shift=3
+            ]
+        )
         shifts = jnp.argmax(mask_mixed, axis=1)
         assert list(shifts) == [0, 2, 3]

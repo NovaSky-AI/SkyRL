@@ -43,9 +43,7 @@ def assert_valid_positions_match(result, expected, padding, atol=1e-5):
     """Assert outputs match at valid (non-padded) positions."""
     for b in range(result.shape[0]):
         pad_len = int(padding[b])
-        assert jnp.allclose(
-            result[b, pad_len:], expected[b, pad_len:], atol=atol
-        ), f"Mismatch at batch {b}"
+        assert jnp.allclose(result[b, pad_len:], expected[b, pad_len:], atol=atol), f"Mismatch at batch {b}"
 
 
 class TestFlashAttention:
