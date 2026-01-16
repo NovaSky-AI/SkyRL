@@ -70,6 +70,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
     )
     cfg.trainer.placement.colocate_all = False  # Disable colocation for simpler testing
     cfg.trainer.train_batch_size = NUM_GPUS
+    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.epochs = 1

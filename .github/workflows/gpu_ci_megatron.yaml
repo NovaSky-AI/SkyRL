@@ -5,9 +5,10 @@ on:
     branches: 
       - main
     paths:
-      - 'skyrl-train/workers/**'
-      - 'skyrl-train/distributed/megatron/**'
-      - 'skyrl-train/config/**'
+      - 'skyrl-train/skyrl_train/workers/**'
+      - 'skyrl-train/skyrl_train/distributed/megatron/**'
+      - 'skyrl-train/skyrl_train/config/**'
+      - 'skyrl-train/skyrl_train/trainer.py'
       - 'skyrl-train/tests/gpu/gpu_ci/**'
       - 'skyrl-train/pyproject.toml'
       - '!skyrl-train/docs/**'
