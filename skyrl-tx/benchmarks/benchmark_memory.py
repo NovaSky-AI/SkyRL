@@ -87,8 +87,6 @@ class BenchmarkConfig:
     base_model: str = DEFAULT_BASE_MODEL
     tp_size: int = 8
     max_lora_adapters: int = 2
-    train_micro_batch_size: int = 8
-    sample_max_num_sequences: int = 32
     gradient_checkpointing: bool = True
     extra_backend_config: dict = field(default_factory=dict)  # Additional backend config options
 
@@ -185,20 +183,42 @@ class GPUMonitor:
 class ServerManager:
     """Manage TX server subprocess lifecycle."""
 
-    def __init__(self, config: BenchmarkConfig, test_name: str):
+    def __init__(self, config: BenchmarkConfig, test_name: str, batch_size: int, mode: str | None = None):
+        """Initialize server manager.
+
+        Args:
+            config: Benchmark configuration
+            test_name: Name for log files
+            batch_size: Batch size for this test
+            mode: "sample", "train", or None (sets both for server-only mode)
+        """
         self.config = config
         self.test_name = test_name
+        self.batch_size = batch_size
+        self.mode = mode
         self.process: subprocess.Popen | None = None
         self.log_file = None
         self.log_path = config.output_dir / f"server_{test_name}.log"
 
     def _build_backend_config(self) -> str:
         """Build backend config JSON from configuration."""
+        # Determine batch sizes based on mode
+        if self.mode == "sample":
+            train_micro_batch_size = 1  # Not used for sampling
+            sample_max_num_sequences = self.batch_size
+        elif self.mode == "train":
+            train_micro_batch_size = self.batch_size
+            sample_max_num_sequences = 1  # Not used for training
+        else:
+            # Server-only mode: set both since user may test either
+            train_micro_batch_size = self.batch_size
+            sample_max_num_sequences = self.batch_size
+
         config = {
             "tensor_parallel_size": self.config.tp_size,
             "max_lora_adapters": self.config.max_lora_adapters,
-            "train_micro_batch_size": self.config.train_micro_batch_size,
-            "sample_max_num_sequences": self.config.sample_max_num_sequences,
+            "train_micro_batch_size": train_micro_batch_size,
+            "sample_max_num_sequences": sample_max_num_sequences,
             "gradient_checkpointing": self.config.gradient_checkpointing,
         }
         # Merge extra backend config (allows overriding defaults)
@@ -277,6 +297,48 @@ class ServerManager:
 
         return False
 
+    @staticmethod
+    def kill_existing_servers() -> None:
+        """Kill any existing server processes."""
+        subprocess.run(["pkill", "-f", "tx.tinker.api"], capture_output=True)
+        time.sleep(2)
+
+    def start_and_wait_ready(self, timeout: float = 120.0, stream_logs: bool = False) -> bool:
+        """Start server and wait for it to become ready.
+
+        Args:
+            timeout: Maximum time to wait for server to be ready
+            stream_logs: If True, stream log output while waiting
+
+        Returns:
+            True if server is ready, False if timeout
+        """
+        self.kill_existing_servers()
+        self.start()
+
+        if not stream_logs:
+            return self.wait_ready(timeout=timeout)
+
+        # Stream logs while waiting for server
+        with open(self.log_path, "r") as log:
+            deadline = time.time() + timeout
+            last_check = 0
+
+            while time.time() < deadline:
+                line = log.readline()
+                if line:
+                    print(line, end="", flush=True)
+                else:
+                    time.sleep(0.05)
+
+                # Check if server is ready (every 2 seconds)
+                if time.time() - last_check > 2:
+                    last_check = time.time()
+                    if self.wait_ready(timeout=0.5):
+                        return True
+
+        return False
+
     def stop(self) -> None:
         """Stop server subprocess gracefully."""
         if self.process is None:
@@ -337,12 +399,6 @@ class BenchmarkRunner:
         self.config = config
         self.tokenizer = AutoTokenizer.from_pretrained(config.base_model)
 
-    def _kill_existing_processes(self) -> None:
-        """Kill any existing server/client processes."""
-        subprocess.run(["pkill", "-f", "test_long_sequence.py"], capture_output=True)
-        subprocess.run(["pkill", "-f", "tx.tinker.api"], capture_output=True)
-        time.sleep(2)
-
     def _make_datum(self, seq_len: int) -> types.Datum:
         """Create a training datum with specified sequence length."""
         all_tokens = list(range(1, seq_len + 1))
@@ -395,24 +451,10 @@ class BenchmarkRunner:
 
         return len(result.loss_fn_outputs) == batch_size, elapsed
 
-    def _make_server_config(self, batch_size: int, mode: str) -> BenchmarkConfig:
-        """Create server config with batch size adjusted for mode."""
-        # Create a copy with adjusted batch size
-        import copy
-
-        config = copy.copy(self.config)
-        if mode == "sample":
-            config.sample_max_num_sequences = batch_size
-        else:
-            config.train_micro_batch_size = batch_size
-        return config
-
     def run_single_test(self, batch_size: int, seq_len: int, mode: str) -> TestResult:
         """Run a single benchmark test with given parameters."""
-        # Create server config with appropriate batch size
-        server_config = self._make_server_config(batch_size, mode)
         test_name = f"{mode}_seq{seq_len}_bs{batch_size}"
-        server = ServerManager(server_config, test_name)
+        server = ServerManager(self.config, test_name, batch_size, mode)
         gpu_monitor = GPUMonitor(self.config.gpu_poll_interval)
 
         result = TestResult(
@@ -427,14 +469,9 @@ class BenchmarkRunner:
         )
 
         try:
-            # Kill any existing server processes
-            self._kill_existing_processes()
-
-            # Start server
+            # Start server (kills existing servers first)
             print(f"  Starting server...")
-            server.start()
-
-            if not server.wait_ready(timeout=120):
+            if not server.start_and_wait_ready(timeout=120):
                 result.error_message = "Server failed to become ready"
                 return result
 
@@ -799,38 +836,34 @@ def main() -> int:
 
     # Server-only mode: launch server and stream logs
     if config.server_only:
+        first_batch_size = config.batch_sizes[0]
+        test_name = f"server_only_bs{first_batch_size}"
+
         print("Server-only mode: launching server...")
-        print(f"Log file: {config.output_dir.resolve()}/server_server_only.log")
+        print(f"Batch size: {first_batch_size}")
+        print(f"Log file: {config.output_dir.resolve()}/server_{test_name}.log")
         print("-" * 60)
 
-        server = ServerManager(config, "server_only")
+        server = ServerManager(config, test_name, first_batch_size)  # mode=None sets both
         try:
-            server.start()
+            # Start server and stream logs until ready
+            if not server.start_and_wait_ready(timeout=300, stream_logs=True):
+                print("\nERROR: Server failed to become ready")
+                return 1
 
-            # Stream log file while waiting for server
+            print("-" * 60)
+            print(f"Server ready at http://{config.host}:{config.port}")
+            print("-" * 60, flush=True)
+
+            # Continue streaming logs until interrupted
             with open(server.log_path, "r") as log:
-                ready = False
-                deadline = time.time() + 300
-                last_check = 0
-
+                log.seek(0, 2)  # Seek to end
                 while True:
                     line = log.readline()
                     if line:
                         print(line, end="", flush=True)
                     else:
                         time.sleep(0.05)
-
-                    # Check if server is ready (every 2 seconds)
-                    if not ready and time.time() - last_check > 2:
-                        last_check = time.time()
-                        if server.wait_ready(timeout=0.5):
-                            ready = True
-                            print("-" * 60)
-                            print(f"Server ready at http://{config.host}:{config.port}")
-                            print("-" * 60, flush=True)
-                        elif time.time() > deadline:
-                            print("\nERROR: Server failed to become ready")
-                            return 1
 
         except KeyboardInterrupt:
             print("\n" + "-" * 60)
