@@ -224,8 +224,6 @@ class ServerManager:
             self.config.base_model,
             "--database-url",
             f"sqlite:///{self.config.db_path!s}",
-            "--database-timeout",
-            "300",
             "--backend-config",
             self._build_backend_config(),
         ]
