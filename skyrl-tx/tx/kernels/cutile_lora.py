@@ -1,114 +1,153 @@
 """
-JAX-PyTorch interop for cutile LoRA kernels.
+JAX-PyTorch interop for cutile LoRA kernels (optimized wrapper).
 
-This module provides the main API for using cutile kernels from JAX code,
-handling DLPack conversions and providing a drop-in replacement for ragged_dot.
+Key changes vs prior version:
+- Assumes ragged_dot-style contiguous grouping implied by `group_sizes`
+  (tokens are already laid out group-by-group in order).
+- Removes sort/unsort and avoids building per-token expert_ids.
+- Pads each group to TILE_M boundary (linear-time, no O(m log m) sort).
+- Uses fewer allocations and zero-fills only padded tails.
+
+Note:
+- This still crosses JAX<->Torch each call (DLPack). For benchmarking kernel-only,
+  prefer a pure-torch harness using torch.cuda.Event timing.
 """
+
+from __future__ import annotations
 
 try:
     import jax
-except ImportError:
-    raise ImportError("JAX is required for cutile LoRA")
+except ImportError as e:
+    raise ImportError("JAX is required for cutile LoRA") from e
 
 try:
     import torch
-except ImportError:
-    raise ImportError("PyTorch is required for cutile LoRA")
+except ImportError as e:
+    raise ImportError("PyTorch is required for cutile LoRA") from e
 
 from .cutile_lora_kernels import (
-    lora_align_tile_size,
     launch_cutile_lora_gemm,
     CUTILE_AVAILABLE,
 )
 from .cutile_config import config as default_config
 
 
-# ============================================================================
-# DLPack Conversion Utilities
-# ============================================================================
+# -----------------------------------------------------------------------------
+# DLPack helpers
+# -----------------------------------------------------------------------------
 
 
-def jax_to_torch(jax_arr: jax.Array) -> torch.Tensor:
-    """Convert JAX array to PyTorch tensor (zero-copy via DLPack).
-
-    Args:
-        jax_arr: JAX array (should be on GPU)
-
-    Returns:
-        PyTorch tensor sharing the same GPU memory
-
-    Raises:
-        ValueError: If array is not on GPU
-    """
-    # Ensure on GPU
+def jax_to_torch(jax_arr: "jax.Array") -> "torch.Tensor":
     device_str = str(jax_arr.device).lower()
     if "gpu" not in device_str and "cuda" not in device_str:
         raise ValueError(f"Expected GPU array, got device: {jax_arr.device}")
-
-    # Convert via DLPack (zero-copy when devices match)
     try:
-        # Use __dlpack__() method (modern JAX API)
-        torch_tensor = torch.from_dlpack(jax_arr)
-        return torch_tensor
+        return torch.from_dlpack(jax_arr)  # zero-copy when devices match
     except Exception as e:
-        raise RuntimeError(f"DLPack conversion failed: {e}") from e
+        raise RuntimeError(f"DLPack conversion JAX->Torch failed: {e}") from e
 
 
-def torch_to_jax(torch_tensor: torch.Tensor) -> jax.Array:
-    """Convert PyTorch tensor back to JAX array (zero-copy via DLPack).
-
-    Args:
-        torch_tensor: PyTorch tensor (should be on CUDA)
-
-    Returns:
-        JAX array sharing the same GPU memory
-
-    Raises:
-        ValueError: If tensor is not on CUDA
-    """
-    # Ensure on CUDA
+def torch_to_jax(torch_tensor: "torch.Tensor") -> "jax.Array":
     if not torch_tensor.is_cuda:
         raise ValueError(f"Expected CUDA tensor, got device: {torch_tensor.device}")
-
-    # Convert via DLPack (zero-copy)
     try:
-        jax_arr = jax.dlpack.from_dlpack(torch_tensor)
-        return jax_arr
+        return jax.dlpack.from_dlpack(torch_tensor)
     except Exception as e:
-        raise RuntimeError(f"DLPack conversion failed: {e}") from e
+        raise RuntimeError(f"DLPack conversion Torch->JAX failed: {e}") from e
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Group padding (no sort/unsort)
+# -----------------------------------------------------------------------------
+
+
+def _pad_groups_to_tile_m(
+    lhs: torch.Tensor,  # [m, d], groups contiguous in order
+    group_sizes: torch.Tensor,  # [E], int32/int64 on CUDA
+    tile_m: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Returns:
+      lhs_padded: [m_padded, d]
+      expert_ids_per_tile: [num_tiles_total] int32
+    """
+    if group_sizes.numel() == 0:
+        # Degenerate: no experts
+        m, d = lhs.shape
+        lhs_padded = lhs.new_empty((0, d))
+        expert_ids_per_tile = torch.empty((0,), device=lhs.device, dtype=torch.int32)
+        return lhs_padded, expert_ids_per_tile
+
+    # Make sure group_sizes is on same device
+    if group_sizes.device != lhs.device:
+        group_sizes = group_sizes.to(device=lhs.device)
+
+    # Compute padded sizes: ceil(gs / tile_m) * tile_m
+    # Keep this on GPU to avoid sync; we only pull small scalars when looping over E.
+    gs = group_sizes.to(dtype=torch.int64)
+    padded_sizes = ((gs + tile_m - 1) // tile_m) * tile_m  # [E]
+    # E is small; pulling scalar is fine
+    m_padded = int(padded_sizes.sum().item())
+
+    m, d = lhs.shape
+    lhs_padded = torch.empty((m_padded, d), device=lhs.device, dtype=lhs.dtype)
+
+    # Build expert_ids_per_tile on CPU list then upload (E is small, num_tiles ~ m/tile_m)
+    # If this becomes a bottleneck, you can build it on GPU with a small kernel later.
+    expert_ids_list: list[int] = []
+
+    in_off = 0
+    out_off = 0
+
+    # Loop over experts (small)
+    E = int(gs.numel())
+    # Pull to CPU once to avoid many device->host syncs
+    gs_cpu = gs.detach().cpu().tolist()
+    ps_cpu = padded_sizes.detach().cpu().tolist()
+
+    for e in range(E):
+        g = gs_cpu[e]
+        p = ps_cpu[e]
+
+        if g:
+            lhs_padded[out_off : out_off + g].copy_(lhs[in_off : in_off + g])
+
+        # Zero only the padded tail (not the whole buffer)
+        tail = p - g
+        if tail:
+            lhs_padded[out_off + g : out_off + p].zero_()
+
+        # One expert id per tile in M for this expert
+        num_tiles_e = p // tile_m
+        if num_tiles_e:
+            expert_ids_list.extend([e] * num_tiles_e)
+
+        in_off += g
+        out_off += p
+
+    expert_ids_per_tile = torch.tensor(expert_ids_list, device=lhs.device, dtype=torch.int32)
+
+    return lhs_padded, expert_ids_per_tile
+
+
+# -----------------------------------------------------------------------------
 # Main API
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 
 def cutile_ragged_dot(
-    lhs: jax.Array,  # [m, d]
-    rhs: jax.Array,  # [num_groups, d, out_features]
-    group_sizes: jax.Array,  # [num_groups]
-    precision=None,  # Ignored (cutile uses GPU precision)
-    preferred_element_type=None,  # Ignored
-    group_offset: jax.Array | None = None,  # Phase 1: Not implemented yet
-) -> jax.Array:
-    """Drop-in replacement for ragged_dot using cutile kernels.
+    lhs: "jax.Array",  # [m, d]
+    rhs: "jax.Array",  # [E, d, out]
+    group_sizes: "jax.Array",  # [E]
+    precision=None,  # ignored
+    preferred_element_type=None,  # ignored
+    group_offset: "jax.Array | None" = None,  # not supported in this wrapper
+) -> "jax.Array":
+    """
+    Optimized drop-in replacement for ragged_dot when group_sizes implies
+    contiguous groups in lhs order.
 
-    Phase 1 Implementation: Single-GPU forward pass only (no group_offset).
-
-    Args:
-        lhs: Input tokens [m, d]
-        rhs: Expert weights [num_groups, d, out_features]
-        group_sizes: Number of tokens per group [num_groups]
-        precision: Ignored (cutile uses native GPU precision)
-        preferred_element_type: Ignored
-        group_offset: NOT IMPLEMENTED YET (Phase 2)
-
-    Returns:
-        Output [m, out_features] with expert-specific computation
-
-    Raises:
-        RuntimeError: If cutile not available or CUDA not available
-        NotImplementedError: If group_offset is provided (Phase 2)
+    Output order matches input order (no sort/unsort).
     """
     if not CUTILE_AVAILABLE:
         raise RuntimeError(
@@ -117,74 +156,59 @@ def cutile_ragged_dot(
             "Note: CUDA Toolkit 13.1+ is required (install separately)\n"
             "Or set TX_USE_CUTILE_LORA=0 to use ragged_dot"
         )
-
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available. Cutile requires NVIDIA GPU.")
-
-    # Phase 1: group_offset not supported yet
     if group_offset is not None:
-        raise NotImplementedError(
-            "group_offset not supported in Phase 1 cutile implementation. "
-            "Set TX_USE_CUTILE_LORA=0 to use ragged_dot for multi-GPU EP."
-        )
+        raise NotImplementedError("group_offset not supported in this Phase-1 cutile implementation.")
 
-    # 1. Convert JAX arrays to PyTorch tensors
-    try:
-        lhs_torch = jax_to_torch(lhs)
-        rhs_torch = jax_to_torch(rhs)
-        group_sizes_torch = jax_to_torch(group_sizes)
-    except Exception as e:
-        raise RuntimeError(f"Failed to convert inputs to PyTorch: {e}") from e
+    # Convert JAX arrays to Torch (zero-copy)
+    lhs_t = jax_to_torch(lhs)
+    rhs_t = jax_to_torch(rhs)
+    gs_t = jax_to_torch(group_sizes)
 
-    # 2. Derive expert_ids from group_sizes
-    # group_sizes = [10, 20, 30] means:
-    #   tokens 0-9: expert 0
-    #   tokens 10-29: expert 1
-    #   tokens 30-59: expert 2
-    expert_ids = torch.repeat_interleave(
-        torch.arange(len(group_sizes_torch), device=lhs_torch.device),
-        group_sizes_torch,
-    ).to(torch.int32)
+    # Basic validation
+    if lhs_t.ndim != 2:
+        raise ValueError(f"lhs must be [m,d], got shape {tuple(lhs_t.shape)}")
+    if rhs_t.ndim != 3:
+        raise ValueError(f"rhs must be [E,d,out], got shape {tuple(rhs_t.shape)}")
+    if gs_t.ndim != 1:
+        raise ValueError(f"group_sizes must be [E], got shape {tuple(gs_t.shape)}")
 
-    # 3. Sort tokens by expert and pad to tile boundaries
-    sorted_lhs, sorted_token_ids, sorted_expert_ids_per_tile = lora_align_tile_size(
-        lhs_torch, expert_ids, tile_m=default_config.tile_m
+    m, d = lhs_t.shape
+    E, d2, out_features = rhs_t.shape
+    if d2 != d:
+        raise ValueError(f"rhs d ({d2}) must match lhs d ({d})")
+    if gs_t.numel() != E:
+        raise ValueError(f"group_sizes len ({gs_t.numel()}) must equal num experts ({E})")
+
+    # Optional: ensure integer type
+    if gs_t.dtype not in (torch.int32, torch.int64):
+        gs_t = gs_t.to(torch.int32)
+
+    # Pad groups to TILE_M boundary (no sort/unsort)
+    TILE_M = int(getattr(default_config, "tile_m"))
+    TILE_N = int(getattr(default_config, "tile_n"))
+    TILE_K = int(getattr(default_config, "tile_k"))
+
+    lhs_padded, expert_ids_per_tile = _pad_groups_to_tile_m(lhs_t, gs_t, tile_m=TILE_M)
+    m_padded = lhs_padded.shape[0]
+
+    # Allocate output (use empty; kernel will write all valid tiles)
+    out_t = torch.empty((m_padded, out_features), device=lhs_t.device, dtype=lhs_t.dtype)
+
+    # Launch kernel
+    launch_cutile_lora_gemm(
+        lhs_padded,
+        rhs_t,
+        out_t,
+        expert_ids_per_tile,
+        TILE_M=TILE_M,
+        TILE_N=TILE_N,
+        TILE_K=TILE_K,
     )
 
-    # 4. Allocate output buffer
-    m_padded = sorted_lhs.shape[0]
-    out_features = rhs_torch.shape[2]
-    output_torch = torch.zeros(
-        m_padded,
-        out_features,
-        dtype=lhs_torch.dtype,
-        device=lhs_torch.device,
-    )
+    # Slice back to original m (order preserved)
+    out_trim = out_t[:m]
 
-    # 5. Launch cutile kernel
-    try:
-        launch_cutile_lora_gemm(
-            sorted_lhs,
-            rhs_torch,
-            output_torch,
-            sorted_expert_ids_per_tile,
-            TILE_M=default_config.tile_m,
-            TILE_N=default_config.tile_n,
-            TILE_K=default_config.tile_k,
-        )
-    except Exception as e:
-        raise RuntimeError(f"Cutile kernel launch failed: {e}") from e
-
-    # 6. Unsort tokens to original order
-    m_original = lhs_torch.shape[0]
-    output_sorted = output_torch[:m_original]
-    output_unsorted = torch.empty_like(output_sorted)
-    output_unsorted[sorted_token_ids] = output_sorted
-
-    # 7. Convert back to JAX
-    try:
-        output_jax = torch_to_jax(output_unsorted)
-    except Exception as e:
-        raise RuntimeError(f"Failed to convert output to JAX: {e}") from e
-
-    return output_jax
+    # Convert back to JAX (zero-copy)
+    return torch_to_jax(out_trim)

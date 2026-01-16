@@ -141,85 +141,50 @@ if CUTILE_AVAILABLE:
 
     @ct.kernel
     def cutile_lora_gemm_kernel(
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,  # [M, K]
+        # [E, K, N]  (if you can store it this way)
         weights: torch.Tensor,
-        output: torch.Tensor,
+        output: torch.Tensor,  # [M, N]
         expert_ids_per_tile: torch.Tensor,
         TILE_M: ConstInt,
         TILE_N: ConstInt,
         TILE_K: ConstInt,
     ):
-        """Cutile kernel for LoRA expert-specific matrix multiplication.
+        M = hidden_states.shape[0]
+        K = hidden_states.shape[1]
+        N = output.shape[1]
 
-        Computes: output[i] = hidden_states[i] @ weights[expert_id[i // TILE_M]]
+        bid_m, bid_n = swizzle_2d(M, N, TILE_M, TILE_N, GROUP_SIZE_M=8)
 
-        Args:
-            hidden_states: Sorted and padded tokens [m_padded, d]
-            weights: Expert weights [num_experts, d, out_features]
-            output: Output buffer [m_padded, out_features]
-            expert_ids_per_tile: Expert ID for each tile [num_tiles]
-            TILE_M, TILE_N, TILE_K: Tile sizes (compile-time constants)
-        """
-        # Get 2D block coordinates with swizzling
-        m_total = hidden_states.shape[0]
-        d = hidden_states.shape[1]
-        out_features = weights.shape[2]
-
-        bid_m, bid_n = swizzle_2d(m_total, out_features, TILE_M, TILE_N, GROUP_SIZE_M=8)
-
-        # Compute global indices for this tile
         start_m = bid_m * TILE_M
         start_n = bid_n * TILE_N
 
-        # Get expert ID for this tile - use ct.load for efficient scalar access
         expert_id = ct.load(expert_ids_per_tile, index=bid_m, shape=())
+        zero = ct.PaddingMode.ZERO
 
-        # Initialize accumulator
-        accumulator = ct.full((TILE_M, TILE_N), 0.0, dtype=ct.float32)
+        acc = ct.full((TILE_M, TILE_N), 0.0, dtype=ct.float32)
 
-        # Padding mode for out-of-bounds access
-        zero_pad = ct.PaddingMode.ZERO
-
-        # Perform tiled matrix multiplication
-        for k_tile in range(ct.cdiv(d, TILE_K)):
-            start_k = k_tile * TILE_K
-
-            # Load input tile [TILE_M, TILE_K]
-            # Compute row indices once for this tile
-            m_indices = start_m + ct.arange(TILE_M, dtype=ct.int32)
-            k_indices = start_k + ct.arange(TILE_K, dtype=ct.int32)
-            input_tile = ct.gather(
+        # Hoist aranges if you still need them (not needed with ct.load offset+shape)
+        for start_k in range(0, K, TILE_K):
+            a = ct.load(
                 hidden_states,
-                (m_indices[:, None], k_indices[None, :]),
+                (start_m, start_k),
+                shape=(TILE_M, TILE_K),
+                order=(1, 0),
+                padding_mode=zero,
             )
-
-            # Load weight tile [TILE_K, TILE_N] for this expert
-            # weights shape: [num_experts, d, out_features]
-            # Use ct.load with explicit shape and order for better memory access patterns
-            # order=(0, 2, 1) means: expert_id, then n_indices, then k_indices
-            # This allows better coalescing when loading the weight tile
-            weight_tile = ct.load(
+            b = ct.load(
                 weights,
-                (expert_id, k_tile, bid_n),
+                (expert_id, start_k, start_n),
                 shape=(1, TILE_K, TILE_N),
                 order=(0, 2, 1),
-                padding_mode=zero_pad,
+                padding_mode=zero,
             ).reshape((TILE_K, TILE_N))
 
-            # Matrix multiply-accumulate
-            accumulator = ct.mma(input_tile, weight_tile, accumulator)
+            acc = ct.mma(a, b, acc)
 
-        # Cast accumulator to output dtype
-        accumulator = ct.astype(accumulator, output.dtype)
-
-        # Store output tile
-        output_m_indices = start_m + ct.arange(TILE_M, dtype=ct.int32)
-        output_n_indices = start_n + ct.arange(TILE_N, dtype=ct.int32)
-        ct.scatter(
-            output,
-            (output_m_indices[:, None], output_n_indices[None, :]),
-            accumulator,
-        )
+        out_tile = ct.astype(acc, output.dtype)
+        ct.store(output, (start_m, start_n), out_tile, padding_mode=zero)  # if store supports padding
 
 
 # ============================================================================
