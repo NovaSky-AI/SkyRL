@@ -55,6 +55,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import os
@@ -459,7 +460,6 @@ class BenchmarkRunner:
         prompt_tokens = (base_tokens * ((prompt_len // len(base_tokens)) + 1))[:prompt_len]
         prompt = types.ModelInput.from_ints(prompt_tokens)
 
-        # Run sampling
         start_time = time.time()
         request = sampling_client.sample(
             prompt=prompt,
@@ -478,7 +478,6 @@ class BenchmarkRunner:
         # Create training data
         data = [self._make_datum(seq_len) for _ in range(batch_size)]
 
-        # Run forward-backward
         start_time = time.time()
         fwdbwd_future = training_client.forward_backward(data, "cross_entropy")
         result = fwdbwd_future.result()
@@ -527,10 +526,23 @@ class BenchmarkRunner:
 
             try:
                 print(f"  Running {mode} test...")
-                if mode == "sample":
-                    success, elapsed = self._test_sample(service_client, batch_size, seq_len)
-                else:
-                    success, elapsed = self._test_forward_backward(service_client, batch_size, seq_len)
+
+                # Run test in background thread, monitor server aliveness
+                def run_test():
+                    if mode == "sample":
+                        return self._test_sample(service_client, batch_size, seq_len)
+                    else:
+                        return self._test_forward_backward(service_client, batch_size, seq_len)
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(run_test)
+                    while True:
+                        try:
+                            success, elapsed = future.result(timeout=1.0)
+                            break
+                        except concurrent.futures.TimeoutError:
+                            if not server.is_alive():
+                                raise RuntimeError("Server crashed during test")
 
                 # Collect results
                 result.peak_gpu_mem_mib = gpu_monitor.stop()
