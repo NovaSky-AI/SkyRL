@@ -87,6 +87,8 @@ class BenchmarkConfig:
     tp_size: int = 8
     max_lora_adapters: int = 2
     gradient_checkpointing: bool = True
+    train_micro_batch_size: int | None = None  # If None, uses batch_size
+    sample_max_num_sequences: int | None = None  # If None, uses batch_size
     extra_backend_config: dict = field(default_factory=dict)  # Additional backend config options
 
     # Test configuration
@@ -201,17 +203,9 @@ class ServerManager:
 
     def _build_backend_config(self) -> str:
         """Build backend config JSON from configuration."""
-        # Determine batch sizes based on mode
-        if self.mode == "sample":
-            train_micro_batch_size = 1  # Not used for sampling
-            sample_max_num_sequences = self.batch_size
-        elif self.mode == "train":
-            train_micro_batch_size = self.batch_size
-            sample_max_num_sequences = 1  # Not used for training
-        else:
-            # Server-only mode: set both since user may test either
-            train_micro_batch_size = self.batch_size
-            sample_max_num_sequences = self.batch_size
+        # Use CLI overrides if set, otherwise use batch_size
+        train_micro_batch_size = self.config.train_micro_batch_size or self.batch_size
+        sample_max_num_sequences = self.config.sample_max_num_sequences or self.batch_size
 
         config = {
             "tensor_parallel_size": self.config.tp_size,
@@ -642,6 +636,18 @@ def parse_args() -> argparse.Namespace:
         help="Enable gradient checkpointing",
     )
     server_group.add_argument(
+        "--train-micro-batch-size",
+        type=int,
+        default=None,
+        help="Override train micro batch size (default: use --batch-sizes value)",
+    )
+    server_group.add_argument(
+        "--sample-max-num-sequences",
+        type=int,
+        default=None,
+        help="Override sample max num sequences (default: use --batch-sizes value)",
+    )
+    server_group.add_argument(
         "--backend-config",
         type=json.loads,
         default={},
@@ -754,6 +760,8 @@ def main() -> int:
         tp_size=args.tp_size,
         max_lora_adapters=args.max_lora_adapters,
         gradient_checkpointing=args.gradient_checkpointing,
+        train_micro_batch_size=args.train_micro_batch_size,
+        sample_max_num_sequences=args.sample_max_num_sequences,
         extra_backend_config=args.backend_config,
         test_mode=args.mode,
         batch_sizes=args.batch_sizes,
@@ -779,6 +787,8 @@ def main() -> int:
         "tp_size": config.tp_size,
         "max_lora_adapters": config.max_lora_adapters,
         "gradient_checkpointing": config.gradient_checkpointing,
+        "train_micro_batch_size": config.train_micro_batch_size,
+        "sample_max_num_sequences": config.sample_max_num_sequences,
         "extra_backend_config": config.extra_backend_config,
         "test_mode": config.test_mode,
         "batch_sizes": config.batch_sizes,
@@ -801,6 +811,10 @@ def main() -> int:
     print(f"Base Model: {config.base_model}")
     print(f"TP Size: {config.tp_size}")
     print(f"Gradient Checkpointing: {config.gradient_checkpointing}")
+    if config.train_micro_batch_size:
+        print(f"Train Micro Batch Size: {config.train_micro_batch_size}")
+    if config.sample_max_num_sequences:
+        print(f"Sample Max Num Sequences: {config.sample_max_num_sequences}")
     if config.extra_backend_config:
         print(f"Extra Backend Config: {json.dumps(config.extra_backend_config)}")
     print(f"Test Mode: {config.test_mode}")
