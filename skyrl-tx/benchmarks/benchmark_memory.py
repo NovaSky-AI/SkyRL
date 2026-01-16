@@ -115,6 +115,10 @@ class BenchmarkConfig:
     db_path: Path = field(default_factory=lambda: Path("/tmp/tinker_bench.db"))
     csv_path: Path = field(default_factory=lambda: Path("results.csv"))
 
+    def __str__(self) -> str:
+        lines = [f"  {k}: {v}" for k, v in self.__dict__.items()]
+        return "\n".join(lines)
+
 
 @dataclass
 class TestResult:
@@ -804,24 +808,10 @@ def main() -> int:
     with open(config.output_dir / "config.json", "w") as f:
         json.dump(config_dict, f, indent=2)
 
-    # Print configuration
     print("=" * 60)
     print("TX Memory Optimization Benchmark")
     print("=" * 60)
-    print(f"Base Model: {config.base_model}")
-    print(f"TP Size: {config.tp_size}")
-    print(f"Gradient Checkpointing: {config.gradient_checkpointing}")
-    if config.train_micro_batch_size:
-        print(f"Train Micro Batch Size: {config.train_micro_batch_size}")
-    if config.sample_max_num_sequences:
-        print(f"Sample Max Num Sequences: {config.sample_max_num_sequences}")
-    if config.extra_backend_config:
-        print(f"Extra Backend Config: {json.dumps(config.extra_backend_config)}")
-    print(f"Test Mode: {config.test_mode}")
-    print(f"Batch Sizes: {config.batch_sizes}")
-    print(f"Sequence Lengths: {config.seq_lens}")
-    print(f"Dump XLA: {config.dump_xla}")
-    print(f"Output Directory: {config.output_dir.resolve()}")
+    print(config)
     print()
 
     # Server-only mode: launch server and stream logs
