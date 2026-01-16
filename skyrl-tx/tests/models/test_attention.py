@@ -76,56 +76,80 @@ class TestShiftSequences:
 class TestDotProductAttentionCPU:
     """Tests that run on CPU (mask-based path)."""
 
-    def test_basic_attention(self):
-        """Basic attention computation on CPU."""
-        batch, seq_len, num_heads, head_dim = 2, 4, 2, 8
+    def test_masking_excludes_padding(self):
+        """Changing values at masked positions doesn't affect output at valid positions."""
+        batch, seq_len, num_heads, head_dim = 1, 4, 1, 8
+        q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim))
+        k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_heads, head_dim))
+        v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_heads, head_dim))
+
+        # Right-padded: first 2 positions valid, last 2 masked
+        mask = jnp.array([[1, 1, 0, 0]])
+
+        out1 = dot_product_attention(q, k, v, mask, is_causal=False, head_dim=head_dim)
+
+        # Modify K/V at masked positions - should not affect output at valid positions
+        k_modified = k.at[:, 2:, :, :].set(999.0)
+        v_modified = v.at[:, 2:, :, :].set(999.0)
+        out2 = dot_product_attention(q, k_modified, v_modified, mask, is_causal=False, head_dim=head_dim)
+
+        # Valid positions (0, 1) should be identical
+        assert jnp.allclose(out1[:, :2], out2[:, :2])
+
+    def test_causal_mask_blocks_future(self):
+        """With causal masking, position i only attends to positions <= i."""
+        batch, seq_len, num_heads, head_dim = 1, 4, 1, 8
         q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim))
         k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_heads, head_dim))
         v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_heads, head_dim))
         mask = jnp.ones((batch, seq_len))
 
-        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-        assert result.shape == (batch, seq_len, num_heads, head_dim)
+        out_causal = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
 
-    def test_masked_positions_ignored(self):
-        """Masked positions (0s) don't affect output for valid positions."""
-        batch, seq_len, num_heads, head_dim = 1, 3, 1, 4
-        q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim))
-        k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_heads, head_dim))
-        v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_heads, head_dim))
+        # Modify future K/V (positions 2, 3) - should not affect output at position 1
+        k_modified = k.at[:, 2:, :, :].set(999.0)
+        v_modified = v.at[:, 2:, :, :].set(999.0)
+        out_modified = dot_product_attention(q, k_modified, v_modified, mask, is_causal=True, head_dim=head_dim)
 
-        # Full mask
-        mask_full = jnp.array([[1, 1, 1]])
-        out_full = dot_product_attention(q, k, v, mask_full, is_causal=False, head_dim=head_dim)
+        # Positions 0 and 1 should be unaffected by changes to positions 2, 3
+        assert jnp.allclose(out_causal[:, :2], out_modified[:, :2])
 
-        # Mask with padding at end (right-padded) - only first 2 valid
-        mask_right = jnp.array([[1, 1, 0]])
-        out_right = dot_product_attention(q, k, v, mask_right, is_causal=False, head_dim=head_dim)
+        # But position 2 should be affected (it can see position 2's K/V)
+        assert not jnp.allclose(out_causal[:, 2], out_modified[:, 2])
 
-        # First two positions should only attend to first two K/V
-        # Output at masked positions doesn't matter
-        # We mainly verify it runs without error
-        assert out_full.shape == out_right.shape
+    def test_decode_attends_to_all_kv(self):
+        """In decode mode (is_causal=False), query attends to all K/V positions."""
+        batch, kv_len, num_heads, head_dim = 1, 8, 1, 16
+        q = jax.random.normal(jax.random.key(0), (batch, 1, num_heads, head_dim))
+        k = jax.random.normal(jax.random.key(1), (batch, kv_len, num_heads, head_dim))
+        v = jax.random.normal(jax.random.key(2), (batch, kv_len, num_heads, head_dim))
+        mask = jnp.ones((batch, kv_len))
 
-    def test_decode_single_query(self):
-        """Decode mode with single query token."""
-        batch, seq_len, num_heads, head_dim = 2, 10, 4, 16
-        q = jax.random.normal(jax.random.key(0), (batch, 1, num_heads, head_dim))  # single query
-        k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_heads, head_dim))
-        v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_heads, head_dim))
-        mask = jnp.ones((batch, seq_len))
+        out1 = dot_product_attention(q, k, v, mask, is_causal=False, head_dim=head_dim)
 
-        result = dot_product_attention(q, k, v, mask, is_causal=False, head_dim=head_dim)
-        assert result.shape == (batch, 1, num_heads, head_dim)
+        # Modify last K/V position - should affect output since we attend to all
+        k_modified = k.at[:, -1, :, :].set(999.0)
+        v_modified = v.at[:, -1, :, :].set(999.0)
+        out2 = dot_product_attention(q, k_modified, v_modified, mask, is_causal=False, head_dim=head_dim)
 
-    def test_gqa_different_kv_heads(self):
-        """Grouped query attention with fewer KV heads."""
-        batch, seq_len, num_heads, num_kv_heads, head_dim = 2, 4, 8, 2, 16
+        # Output should be different
+        assert not jnp.allclose(out1, out2)
+
+    def test_gqa_head_broadcasting(self):
+        """GQA: multiple query heads share the same KV head."""
+        batch, seq_len = 1, 4
+        num_heads, num_kv_heads, head_dim = 4, 1, 8  # 4 query heads share 1 KV head
 
         q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim))
         k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_kv_heads, head_dim))
         v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_kv_heads, head_dim))
         mask = jnp.ones((batch, seq_len))
 
-        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
+        result = dot_product_attention(q, k, v, mask, is_causal=False, head_dim=head_dim)
+
+        # All query heads see the same K/V, so with identical Q they'd produce identical output
+        # With different Q per head, outputs differ but shape is correct
         assert result.shape == (batch, seq_len, num_heads, head_dim)
+
+        # Verify output varies across heads (since Q varies)
+        assert not jnp.allclose(result[:, :, 0, :], result[:, :, 1, :])
