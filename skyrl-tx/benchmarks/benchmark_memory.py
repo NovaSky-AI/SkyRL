@@ -35,7 +35,7 @@ Usage:
         --dump-xla --batch-sizes 4 --seq-lens 4096
 
 Output directory (default: /tmp/skyrl_tx_memory_benchmark/):
-    tx_memory_benchmark_{experiment_name or timestamp}/
+    tx_memory_benchmark_{experiment_name}_{timestamp}/
         config.json         # Full benchmark configuration (JSON)
         results.csv         # Results table (mode, batch, seq, status, peak_mem, e2e_time)
         tinker.db           # SQLite database used by tinker API
@@ -673,7 +673,7 @@ def parse_args() -> argparse.Namespace:
     runtime_group.add_argument(
         "--experiment-name",
         default=None,
-        help="Experiment name for output directory (default: timestamp)",
+        help="Experiment name prefix for output directory (format: {name}_{timestamp})",
     )
     runtime_group.add_argument(
         "--output-root",
@@ -718,11 +718,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def setup_output_dir(experiment_name: str | None, output_root: Path) -> Path:
-    """Create and return the output directory for this benchmark run."""
+    """Create and return the output directory for this benchmark run.
+
+    Directory name format: tx_memory_benchmark_{experiment_name}_{timestamp}
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if experiment_name:
-        dir_name = f"tx_memory_benchmark_{experiment_name}"
+        dir_name = f"tx_memory_benchmark_{experiment_name}_{timestamp}"
     else:
-        dir_name = f"tx_memory_benchmark_{datetime.now():%Y%m%d_%H%M%S}"
+        dir_name = f"tx_memory_benchmark_{timestamp}"
 
     output_dir = output_root / dir_name
     output_dir.mkdir(parents=True, exist_ok=True)
