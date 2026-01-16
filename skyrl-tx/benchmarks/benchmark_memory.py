@@ -15,6 +15,7 @@ Features:
     - Per-test server logs with JIT compilation time extraction
     - Optional XLA HLO graph dumps for debugging
     - Configurable JAX/XLA environment variables
+    - Pass-through additional backend config options via JSON
     - Server-only mode for manual testing
 
 Usage:
@@ -33,6 +34,10 @@ Usage:
     # Enable XLA graph dumps for debugging
     uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
         --dump-xla --batch-sizes 4 --seq-lens 4096
+
+    # Pass additional backend config options
+    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+        --backend-config '{"loss_chunk_size": 512, "enforce_eager": true}'
 
 Output directory (default: /tmp/skyrl_tx_memory_benchmark/):
     tx_memory_benchmark_{experiment_name}_{timestamp}/
@@ -84,10 +89,8 @@ class BenchmarkConfig:
     max_lora_adapters: int = 2
     train_micro_batch_size: int = 8
     sample_max_num_sequences: int = 32
-    shard_attention_heads: bool = True
-    enforce_eager: bool = False
-    loss_chunk_size: int = 1024
     gradient_checkpointing: bool = True
+    extra_backend_config: dict = field(default_factory=dict)  # Additional backend config options
 
     # Test configuration
     test_mode: Literal["sample", "train", "both"] = "both"
@@ -191,18 +194,16 @@ class ServerManager:
 
     def _build_backend_config(self) -> str:
         """Build backend config JSON from configuration."""
-        return json.dumps(
-            {
-                "tensor_parallel_size": self.config.tp_size,
-                "max_lora_adapters": self.config.max_lora_adapters,
-                "train_micro_batch_size": self.config.train_micro_batch_size,
-                "sample_max_num_sequences": self.config.sample_max_num_sequences,
-                "shard_attention_heads": self.config.shard_attention_heads,
-                "enforce_eager": self.config.enforce_eager,
-                "loss_chunk_size": self.config.loss_chunk_size,
-                "gradient_checkpointing": self.config.gradient_checkpointing,
-            }
-        )
+        config = {
+            "tensor_parallel_size": self.config.tp_size,
+            "max_lora_adapters": self.config.max_lora_adapters,
+            "train_micro_batch_size": self.config.train_micro_batch_size,
+            "sample_max_num_sequences": self.config.sample_max_num_sequences,
+            "gradient_checkpointing": self.config.gradient_checkpointing,
+        }
+        # Merge extra backend config (allows overriding defaults)
+        config.update(self.config.extra_backend_config)
+        return json.dumps(config)
 
     def _build_command(self) -> list[str]:
         """Build the server launch command."""
@@ -622,22 +623,10 @@ def parse_args() -> argparse.Namespace:
         help="Enable gradient checkpointing",
     )
     server_group.add_argument(
-        "--loss-chunk-size",
-        type=int,
-        default=1024,
-        help="Cross-entropy loss chunk size",
-    )
-    server_group.add_argument(
-        "--shard-attention-heads",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Shard attention heads for TP",
-    )
-    server_group.add_argument(
-        "--enforce-eager",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Disable JIT compilation",
+        "--backend-config",
+        type=json.loads,
+        default={},
+        help="Additional backend config as JSON (e.g., '{\"key\": value}')",
     )
 
     # Test configuration group
@@ -704,7 +693,7 @@ def parse_args() -> argparse.Namespace:
     env_group.add_argument(
         "--jax-log-compiles",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Enable JAX compilation logging",
     )
     env_group.add_argument(
@@ -750,9 +739,7 @@ def main() -> int:
         tp_size=args.tp_size,
         max_lora_adapters=args.max_lora_adapters,
         gradient_checkpointing=args.gradient_checkpointing,
-        loss_chunk_size=args.loss_chunk_size,
-        shard_attention_heads=args.shard_attention_heads,
-        enforce_eager=args.enforce_eager,
+        extra_backend_config=args.backend_config,
         test_mode=args.mode,
         batch_sizes=args.batch_sizes,
         seq_lens=args.seq_lens,
@@ -777,9 +764,7 @@ def main() -> int:
         "tp_size": config.tp_size,
         "max_lora_adapters": config.max_lora_adapters,
         "gradient_checkpointing": config.gradient_checkpointing,
-        "loss_chunk_size": config.loss_chunk_size,
-        "shard_attention_heads": config.shard_attention_heads,
-        "enforce_eager": config.enforce_eager,
+        "extra_backend_config": config.extra_backend_config,
         "test_mode": config.test_mode,
         "batch_sizes": config.batch_sizes,
         "seq_lens": config.seq_lens,
@@ -801,7 +786,8 @@ def main() -> int:
     print(f"Base Model: {config.base_model}")
     print(f"TP Size: {config.tp_size}")
     print(f"Gradient Checkpointing: {config.gradient_checkpointing}")
-    print(f"Loss Chunk Size: {config.loss_chunk_size}")
+    if config.extra_backend_config:
+        print(f"Extra Backend Config: {json.dumps(config.extra_backend_config)}")
     print(f"Test Mode: {config.test_mode}")
     print(f"Batch Sizes: {config.batch_sizes}")
     print(f"Sequence Lengths: {config.seq_lens}")
