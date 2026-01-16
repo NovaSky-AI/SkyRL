@@ -61,6 +61,7 @@ class BenchmarkConfig:
     test_mode: Literal["sample", "train", "both"] = "both"
     batch_sizes: list[int] = field(default_factory=lambda: [4, 8, 16, 32])
     seq_lens: list[int] = field(default_factory=lambda: [8192])
+    server_only: bool = False
 
     # Runtime configuration
     host: str = "localhost"
@@ -627,6 +628,11 @@ def parse_args() -> argparse.Namespace:
         type=lambda s: [int(x) for x in s.split(",")],
         help="Comma-separated sequence lengths to test",
     )
+    test_group.add_argument(
+        "--server-only",
+        action="store_true",
+        help="Only launch the server without running tests (for manual testing)",
+    )
 
     # Runtime configuration group
     runtime_group = parser.add_argument_group("Runtime Configuration")
@@ -714,6 +720,7 @@ def main() -> int:
         test_mode=args.mode,
         batch_sizes=args.batch_sizes,
         seq_lens=args.seq_lens,
+        server_only=args.server_only,
         host=args.host,
         port=args.port,
         experiment_name=args.experiment_name,
@@ -740,6 +747,7 @@ def main() -> int:
         "test_mode": config.test_mode,
         "batch_sizes": config.batch_sizes,
         "seq_lens": config.seq_lens,
+        "server_only": config.server_only,
         "output_root": str(config.output_root),
         "xla_preallocate": config.xla_preallocate,
         "gpu_allocator": config.gpu_allocator,
@@ -764,6 +772,48 @@ def main() -> int:
     print(f"Dump XLA: {config.dump_xla}")
     print(f"Output Directory: {config.output_dir.resolve()}")
     print()
+
+    # Server-only mode: launch server and stream logs
+    if config.server_only:
+        print("Server-only mode: launching server...")
+        print(f"Log file: {config.output_dir.resolve()}/server_server_only.log")
+        print("-" * 60)
+
+        server = ServerManager(config, "server_only")
+        try:
+            server.start()
+
+            # Stream log file while waiting for server
+            with open(server.log_path, "r") as log:
+                ready = False
+                deadline = time.time() + 300
+                last_check = 0
+
+                while True:
+                    line = log.readline()
+                    if line:
+                        print(line, end="", flush=True)
+                    else:
+                        time.sleep(0.05)
+
+                    # Check if server is ready (every 2 seconds)
+                    if not ready and time.time() - last_check > 2:
+                        last_check = time.time()
+                        if server.wait_ready(timeout=0.5):
+                            ready = True
+                            print("-" * 60)
+                            print(f"Server ready at http://{config.host}:{config.port}")
+                            print("-" * 60, flush=True)
+                        elif time.time() > deadline:
+                            print("\nERROR: Server failed to become ready")
+                            return 1
+
+        except KeyboardInterrupt:
+            print("\n" + "-" * 60)
+            print("Shutting down server...")
+        finally:
+            server.stop()
+        return 0
 
     # Run benchmarks
     runner = BenchmarkRunner(config)
