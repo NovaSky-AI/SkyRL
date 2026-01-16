@@ -64,7 +64,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -136,6 +136,20 @@ class TestResult:
 
 class GPUMonitor:
     """Monitor GPU memory usage via nvidia-smi subprocess polling."""
+
+    @staticmethod
+    def check_nvidia_smi() -> bool:
+        """Check if nvidia-smi is available. Returns True if available."""
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return False
 
     def __init__(self, poll_interval: float = 1.0):
         self.poll_interval = poll_interval
@@ -534,7 +548,7 @@ class BenchmarkRunner:
             else:
                 result.error_message = str(e)
             result.status = "ERROR"
-            gpu_monitor.stop()
+            result.peak_gpu_mem_mib = gpu_monitor.stop()
 
         finally:
             server.stop()
@@ -791,6 +805,10 @@ def main() -> int:
     """CLI entry point."""
     args = parse_args()
 
+    # Check nvidia-smi availability
+    if not GPUMonitor.check_nvidia_smi():
+        print("WARNING: nvidia-smi not available, GPU memory monitoring will report 0 MiB", file=sys.stderr)
+
     # Create output directory
     output_dir = setup_output_dir(args.experiment_name, args.output_root)
 
@@ -822,25 +840,12 @@ def main() -> int:
     )
 
     # Save config to output directory
-    config_dict = {
-        "base_model": config.base_model,
-        "tp_size": config.tp_size,
-        "max_lora_adapters": config.max_lora_adapters,
-        "gradient_checkpointing": config.gradient_checkpointing,
-        "train_micro_batch_size": config.train_micro_batch_size,
-        "sample_max_num_sequences": config.sample_max_num_sequences,
-        "extra_backend_config": config.extra_backend_config,
-        "test_mode": config.test_mode,
-        "batch_sizes": config.batch_sizes,
-        "seq_lens": config.seq_lens,
-        "server_only": config.server_only,
-        "output_root": str(config.output_root),
-        "xla_preallocate": config.xla_preallocate,
-        "gpu_allocator": config.gpu_allocator,
-        "jax_log_compiles": config.jax_log_compiles,
-        "dump_xla": config.dump_xla,
-        "timestamp": datetime.now().isoformat(),
-    }
+    config_dict = asdict(config)
+    # Convert Path objects to strings for JSON serialization
+    for key, value in config_dict.items():
+        if isinstance(value, Path):
+            config_dict[key] = str(value)
+    config_dict["timestamp"] = datetime.now().isoformat()
     with open(config.output_dir / "config.json", "w") as f:
         json.dump(config_dict, f, indent=2)
 
