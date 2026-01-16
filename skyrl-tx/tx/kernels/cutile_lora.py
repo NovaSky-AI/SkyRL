@@ -60,6 +60,20 @@ def torch_to_jax(torch_tensor: "torch.Tensor") -> "jax.Array":
 # Group padding (no sort/unsort)
 # -----------------------------------------------------------------------------
 
+# tx/kernels/cutile_lora.py (near top-level)
+_PAD_PLAN_CACHE = {}
+
+
+def _make_pad_plan(group_sizes_cpu, tile_m):
+    ps_cpu = [((g + tile_m - 1) // tile_m) * tile_m for g in group_sizes_cpu]
+    m_padded = sum(ps_cpu)
+
+    expert_ids_list = []
+    for e, p in enumerate(ps_cpu):
+        expert_ids_list.extend([e] * (p // tile_m))
+
+    return ps_cpu, m_padded, expert_ids_list
+
 
 def _pad_groups_to_tile_m(
     lhs: torch.Tensor,  # [m, d], groups contiguous in order
@@ -100,32 +114,33 @@ def _pad_groups_to_tile_m(
     out_off = 0
 
     # Loop over experts (small)
-    E = int(gs.numel())
+    # E = int(gs.numel())
     # Pull to CPU once to avoid many device->host syncs
-    gs_cpu = gs.detach().cpu().tolist()
-    ps_cpu = padded_sizes.detach().cpu().tolist()
+    gs_cpu = tuple(group_sizes.detach().cpu().tolist())
+    key = (tile_m, gs_cpu, lhs.dtype)
 
-    for e in range(E):
-        g = gs_cpu[e]
-        p = ps_cpu[e]
+    plan = _PAD_PLAN_CACHE.get(key)
+    if plan is None:
+        ps_cpu, m_padded, expert_ids_list = _make_pad_plan(gs_cpu, tile_m)
+        expert_ids_per_tile = torch.tensor(expert_ids_list, device=lhs.device, dtype=torch.int32)
+        plan = (ps_cpu, m_padded, expert_ids_per_tile)
+        _PAD_PLAN_CACHE[key] = plan
 
+    ps_cpu, m_padded, expert_ids_per_tile = plan
+
+    m, d = lhs.shape
+    lhs_padded = torch.empty((m_padded, d), device=lhs.device, dtype=lhs.dtype)
+
+    in_off = 0
+    out_off = 0
+    for e, (g, p) in enumerate(zip(gs_cpu, ps_cpu)):
         if g:
             lhs_padded[out_off : out_off + g].copy_(lhs[in_off : in_off + g])
-
-        # Zero only the padded tail (not the whole buffer)
         tail = p - g
         if tail:
             lhs_padded[out_off + g : out_off + p].zero_()
-
-        # One expert id per tile in M for this expert
-        num_tiles_e = p // tile_m
-        if num_tiles_e:
-            expert_ids_list.extend([e] * num_tiles_e)
-
         in_off += g
         out_off += p
-
-    expert_ids_per_tile = torch.tensor(expert_ids_list, device=lhs.device, dtype=torch.int32)
 
     return lhs_padded, expert_ids_per_tile
 
