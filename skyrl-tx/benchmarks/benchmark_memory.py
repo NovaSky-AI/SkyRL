@@ -534,15 +534,21 @@ class BenchmarkRunner:
                     else:
                         return self._test_forward_backward(service_client, batch_size, seq_len)
 
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(run_test)
+                # Run test in thread so we can check server aliveness while waiting.
+                # Note: if server crashes, the thread may be orphaned until HTTP timeout.
+                executor = concurrent.futures.ThreadPoolExecutor()
+                future = executor.submit(run_test)
+                try:
                     while True:
                         try:
                             success, elapsed = future.result(timeout=1.0)
                             break
                         except concurrent.futures.TimeoutError:
                             if not server.is_alive():
+                                executor.shutdown(wait=False, cancel_futures=True)
                                 raise RuntimeError("Server crashed during test")
+                finally:
+                    executor.shutdown(wait=False)
 
                 # Collect results
                 result.peak_gpu_mem_mib = gpu_monitor.stop()
