@@ -11,6 +11,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
+import os
 import subprocess
 import random
 import time
@@ -59,11 +60,27 @@ async def lifespan(app: FastAPI):
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = subprocess.Popen(cmd)
+    app.state.background_engine = background_engine
     logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
+
+    shutting_down = False
+
+    async def monitor_engine():
+        """Monitor engine process and exit API server if it crashes."""
+        loop = asyncio.get_event_loop()
+        exit_code = await loop.run_in_executor(None, background_engine.wait)
+        if not shutting_down:
+            logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
+            os._exit(1)
+
+    monitor_task = asyncio.create_task(monitor_engine())
 
     yield
 
-    logger.info(f"Stopping background engine (PID {background_engine.pid})")
+    shutting_down = True
+    monitor_task.cancel()
+
+    logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
     background_engine.terminate()
     try:
         background_engine.wait(timeout=5)
