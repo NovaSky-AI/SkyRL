@@ -184,7 +184,7 @@ if CUTILE_AVAILABLE:
             acc = ct.mma(a, b, acc)
 
         out_tile = ct.astype(acc, output.dtype)
-        ct.store(output, (start_m, start_n), out_tile, padding_mode=zero)  # if store supports padding
+        ct.store(output, (start_m, start_n), out_tile)
 
 
 # ============================================================================
