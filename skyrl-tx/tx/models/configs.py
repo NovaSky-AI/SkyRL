@@ -49,3 +49,4 @@ class ModelConfig(PretrainedConfig):
 # Model-specific aliases for clarity and backwards compatibility
 Llama3Config = ModelConfig
 Qwen3Config = ModelConfig
+DeepseekV3Config = ModelConfig
