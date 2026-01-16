@@ -281,6 +281,12 @@ class ServerManager:
             self.log_file = None
             raise
 
+    def is_alive(self) -> bool:
+        """Check if server process is still running."""
+        if self.process is None:
+            return False
+        return self.process.poll() is None
+
     def wait_ready(self, timeout: float = 120.0) -> bool:
         """Wait for server to respond to health check."""
         import httpx
@@ -289,6 +295,9 @@ class ServerManager:
         deadline = time.time() + timeout
 
         while time.time() < deadline:
+            # Check if process died
+            if not self.is_alive():
+                return False
             try:
                 response = httpx.get(url, timeout=2.0)
                 if response.status_code == 200:
@@ -327,6 +336,13 @@ class ServerManager:
             last_check = 0
 
             while time.time() < deadline:
+                # Check if process died
+                if not self.is_alive():
+                    # Drain remaining logs
+                    for line in log:
+                        print(line, end="", flush=True)
+                    return False
+
                 line = log.readline()
                 if line:
                     print(line, end="", flush=True)
@@ -367,6 +383,18 @@ class ServerManager:
             self.log_file.close()
 
         self.process = None
+
+    def print_last_logs(self, n: int = 30) -> None:
+        """Print last N lines of server log."""
+        if not self.log_path.exists():
+            return
+        print(f"\n  Server log: {self.log_path}")
+        print("  " + "-" * 40)
+        with open(self.log_path, "r") as f:
+            lines = f.readlines()
+            for line in lines[-n:]:
+                print(f"  {line}", end="")
+        print("  " + "-" * 40)
 
     def get_jit_logs(self) -> list[str]:
         """Extract all JIT compilation log lines from server log."""
@@ -465,7 +493,11 @@ class BenchmarkRunner:
             # Start server (kills existing servers first)
             print("  Starting server...")
             if not server.start_and_wait_ready(timeout=120):
-                result.error_message = "Server failed to become ready"
+                if not server.is_alive():
+                    result.error_message = "Server crashed during startup"
+                    server.print_last_logs()
+                else:
+                    result.error_message = "Server timed out during startup"
                 return result
 
             print("  Server ready, starting GPU monitoring...")
@@ -496,7 +528,11 @@ class BenchmarkRunner:
                 service_client.holder.close()
 
         except Exception as e:
-            result.error_message = str(e)
+            if not server.is_alive():
+                result.error_message = f"Server crashed: {e}"
+                server.print_last_logs()
+            else:
+                result.error_message = str(e)
             result.status = "ERROR"
             gpu_monitor.stop()
 
