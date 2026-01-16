@@ -13,7 +13,7 @@ from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
 
-class DeepseekV3MLA(nnx.Module):
+class DeepseekV3Attention(nnx.Module):
     """Multi-Head Latent Attention (MLA) Layer."""
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
@@ -229,118 +229,48 @@ class DeepseekV3MLP(nnx.Module):
         return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
 
 
-class DeepseekV3Gate(nnx.Module):
-    """DeepseekV3 MoE routing gate.
+class DeepseekV3TopkRouter(nnx.Module):
+    """DeepseekV3 MoE routing gate. Returns raw router logits."""
 
-    2-step routing, first group-based, then token-based.
+    def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.config = config
+        self.n_routed_experts = config.n_routed_experts
+
+        # Weight parameter: [n_routed_experts, hidden_size]
+        self.weight = Param(
+            config.n_routed_experts,
+            config.hidden_size,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None)),
+            rngs=rngs,
+        )
+        # bias buffer
+        self.e_score_correction_bias = nnx.Variable(jnp.zeros(config.n_routed_experts, dtype=dtype))
+
+    def __call__(self, hidden_states: jax.Array) -> jax.Array:
+        """Returns raw router logits of shape [num_tokens, n_routed_experts]."""
+        hidden_states = hidden_states.reshape(-1, self.config.hidden_size)
+        router_logits = hidden_states.astype(jnp.float32) @ self.weight.value.astype(jnp.float32).T
+        return router_logits
+
+
+class DeepseekV3NaiveMoe(nnx.Module):
+    """Collection of expert weights with fused gate_up_proj.
+
+    HuggingFace weight shapes (transposed for our ragged_dot):
+        gate_up_proj: HF [E, 2*I, H] -> ours [E, H, 2*I]
+        down_proj: HF [E, H, I] -> ours [E, I, H]
     """
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.num_experts = config.n_routed_experts
-        self.num_experts_per_tok = config.num_experts_per_tok
-        self.n_expert_groups = config.n_group
-        self.n_limited_groups = config.topk_group
-        self.score_func = getattr(config, "score_func", "softmax")
-        self.route_scale = getattr(config, "route_scale", 1.0)
-
-        self.gate = nnx.Linear(
-            config.hidden_size,
+        self.hidden_dim = config.hidden_size
+        self.intermediate_dim = config.moe_intermediate_size
+        self.gate_up_proj = LoRAExpert(
             self.num_experts,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None)),
-            rngs=rngs,
-        )
-
-        # Bias only for specific model sizes (7168 hidden_size in original)
-        self.use_bias = config.hidden_size == 7168
-        if self.use_bias:
-            self.bias = Param(
-                self.num_experts,
-                dtype=jnp.float32,
-                kernel_init=nnx.with_partitioning(nnx.initializers.zeros_init(), (None,)),
-                rngs=rngs,
-            )
-
-    def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-        """Compute routing weights and selected expert indices.
-
-        Args:
-            x: Input tensor of shape [num_tokens, hidden_size].
-
-        Returns:
-            Tuple of (routing_weights, selected_expert_indices).
-        """
-        scores = self.gate(x)
-
-        if self.score_func == "softmax":
-            scores = nnx.softmax(scores, axis=-1)
-        else:
-            scores = nnx.sigmoid(scores)
-
-        original_scores = scores
-
-        if self.use_bias:
-            scores = scores + self.bias.value
-
-        # Group-based expert selection
-        if self.n_expert_groups > 1:
-            num_tokens = x.shape[0]
-            experts_per_group = self.num_experts // self.n_expert_groups
-            scores = scores.reshape(num_tokens, self.n_expert_groups, experts_per_group)
-
-            if not self.use_bias:
-                group_scores = jnp.max(scores, axis=-1)
-            else:
-                top2, _ = jax.lax.top_k(scores, 2)
-                group_scores = jnp.sum(top2, axis=-1)
-
-            _, top_group_indices = jax.lax.top_k(group_scores, self.n_limited_groups)
-
-            # Create mask for non-selected groups
-            mask = jnp.ones((num_tokens, self.n_expert_groups), dtype=bool)
-            batch_indices = jnp.arange(num_tokens)[:, None]
-            mask = mask.at[batch_indices, top_group_indices].set(False)
-            mask = jnp.broadcast_to(mask[:, :, None], scores.shape)
-
-            scores = jnp.where(mask, -jnp.inf, scores)
-            scores = scores.reshape(num_tokens, self.num_experts)
-
-        # Select top-k experts
-        _, selected_experts = jax.lax.top_k(scores, self.num_experts_per_tok)
-        weights = jnp.take_along_axis(original_scores, selected_experts, axis=-1)
-
-        if self.score_func == "sigmoid":
-            weights = weights / jnp.sum(weights, axis=-1, keepdims=True)
-
-        weights = weights * self.route_scale
-        return weights.astype(x.dtype), selected_experts
-
-
-class DeepseekV3Experts(nnx.Module):
-
-    def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.config = config
-        self.num_experts = config.n_routed_experts
-        self.num_experts_per_tok = config.num_experts_per_tok
-        moe_inter_dim = config.moe_intermediate_size
-
-        self.gate_proj = LoRAExpert(
-            self.num_experts,
-            config.hidden_size,
-            moe_inter_dim,
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "fsdp", "tp")),
-            rngs=rngs,
-        )
-        self.up_proj = LoRAExpert(
-            self.num_experts,
-            config.hidden_size,
-            moe_inter_dim,
+            self.hidden_dim,
+            2 * self.intermediate_dim,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
@@ -349,8 +279,8 @@ class DeepseekV3Experts(nnx.Module):
         )
         self.down_proj = LoRAExpert(
             self.num_experts,
-            moe_inter_dim,
-            config.hidden_size,
+            self.intermediate_dim,
+            self.hidden_dim,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
@@ -359,14 +289,19 @@ class DeepseekV3Experts(nnx.Module):
         )
 
     def __call__(
-        self, hidden_states: jax.Array, router_weights: jax.Array, selected_experts: jax.Array,
-        adapter_indices: jax.Array | None = None
+        self,
+        hidden_states: jax.Array,
+        top_k_index: jax.Array,
+        top_k_weights: jax.Array,
+        adapter_indices: jax.Array | None = None,
     ) -> jax.Array:
+        num_experts_per_tok = top_k_index.shape[1]
+
         # Prepare for ragged_dot by sorting tokens based on their assigned expert
-        selected_experts_flat = selected_experts.ravel()
-        hidden_states_expanded = jnp.repeat(hidden_states, self.num_experts_per_tok, axis=0)
+        selected_experts_flat = top_k_index.ravel()
+        hidden_states_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
         adapter_indices_expanded = (
-            jnp.repeat(adapter_indices, self.num_experts_per_tok) if adapter_indices is not None else None
+            jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
         )
         hidden_states_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
             hidden_states_expanded,
@@ -375,26 +310,83 @@ class DeepseekV3Experts(nnx.Module):
             adapter_indices=adapter_indices_expanded,
         )
 
-        gate_out = self.gate_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted)
-        up_out = self.up_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted)
+        # Fused gate_up computation, then split
+        gate_up_out = self.gate_up_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted)
+        gate_out, up_out = jnp.split(gate_up_out, 2, axis=-1)
+
         down_out = self.down_proj(nnx.silu(gate_out) * up_out, group_sizes, adapter_indices_sorted)
 
         # Unsort and combine the expert outputs
         unsorted_out = down_out[unsort_indices]
-        reshaped_out = unsorted_out.reshape(-1, self.num_experts_per_tok, self.config.hidden_size)
-        return jnp.sum(reshaped_out * router_weights[..., None], axis=1)
+        reshaped_out = unsorted_out.reshape(-1, num_experts_per_tok, self.hidden_dim)
+        return jnp.sum(reshaped_out * top_k_weights[..., None], axis=1)
 
 
 class DeepseekV3MoE(nnx.Module):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.gate = DeepseekV3Gate(config, dtype=dtype, rngs=rngs)
-        self.experts = DeepseekV3Experts(config, dtype=dtype, rngs=rngs)
+        self.num_experts_per_tok = config.num_experts_per_tok
+        self.n_group = config.n_group
+        self.topk_group = config.topk_group
+        self.routed_scaling_factor = config.routed_scaling_factor
+
+        self.gate = DeepseekV3TopkRouter(config, dtype=dtype, rngs=rngs)
+        self.experts = DeepseekV3NaiveMoe(config, dtype=dtype, rngs=rngs)
 
         inter_dim = config.moe_intermediate_size * config.n_shared_experts
         self.shared_experts = DeepseekV3MLP(
             config.hidden_size, inter_dim, config=config, dtype=dtype, rngs=rngs)
+
+    def _compute_routing(self, router_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
+        """Compute top-k routing weights and indices from router logits.
+
+        Args:
+            router_logits: [num_tokens, n_routed_experts]
+
+        Returns:
+            top_k_weights: [num_tokens, num_experts_per_tok]
+            top_k_index: [num_tokens, num_experts_per_tok]
+        """
+        num_tokens = router_logits.shape[0]
+        num_experts = router_logits.shape[1]
+
+        # Apply sigmoid and add correction bias
+        scores = nnx.sigmoid(router_logits)
+        scores_with_bias = scores + self.gate.e_score_correction_bias.value
+
+        # Group-based expert selection
+        if self.n_group > 1:
+            experts_per_group = num_experts // self.n_group
+            scores_grouped = scores_with_bias.reshape(num_tokens, self.n_group, experts_per_group)
+
+            # Get top-2 scores per group and sum them for group scoring
+            top2, _ = jax.lax.top_k(scores_grouped, 2)
+            group_scores = jnp.sum(top2, axis=-1)
+
+            # Select top groups
+            _, top_group_indices = jax.lax.top_k(group_scores, self.topk_group)
+
+            # Mask non-selected groups
+            mask = jnp.ones((num_tokens, self.n_group), dtype=bool)
+            batch_indices = jnp.arange(num_tokens)[:, None]
+            mask = mask.at[batch_indices, top_group_indices].set(False)
+            mask = jnp.broadcast_to(mask[:, :, None], scores_grouped.shape)
+
+            scores_with_bias = jnp.where(mask, -jnp.inf, scores_grouped)
+            scores_with_bias = scores_with_bias.reshape(num_tokens, num_experts)
+
+        # Select top-k experts
+        _, top_k_index = jax.lax.top_k(scores_with_bias, self.num_experts_per_tok)
+
+        # Get weights from original scores (without bias)
+        top_k_weights = jnp.take_along_axis(scores, top_k_index, axis=-1)
+
+        # Normalize weights
+        top_k_weights = top_k_weights / jnp.sum(top_k_weights, axis=-1, keepdims=True)
+        top_k_weights = top_k_weights * self.routed_scaling_factor
+
+        return top_k_weights.astype(router_logits.dtype), top_k_index
 
     def __call__(
         self,
@@ -410,8 +402,10 @@ class DeepseekV3MoE(nnx.Module):
         else:
             adapter_indices_flat = None
 
-        router_weights, selected_experts = self.gate(hidden_states_flat)
-        expert_output = self.experts(hidden_states_flat, router_weights, selected_experts, adapter_indices_flat)
+        router_logits = self.gate(hidden_states_flat)
+        top_k_weights, top_k_index = self._compute_routing(router_logits)
+
+        expert_output = self.experts(hidden_states_flat, top_k_index, top_k_weights, adapter_indices_flat)
         shared_output = self.shared_experts(hidden_states_flat, adapter_indices_flat)
         expert_output = expert_output + shared_output
 
@@ -425,15 +419,14 @@ class DeepseekV3DecoderLayer(nnx.Module):
     ) -> None:
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-        self.self_attn = DeepseekV3MLA(config, dtype=dtype, rngs=rngs)
+        self.self_attn = DeepseekV3Attention(config, dtype=dtype, rngs=rngs)
 
         # Use dense MLP for initial layers, MoE for the rest
-        n_dense_layers = config.first_k_dense_replace
-        if layer_idx < n_dense_layers:
+        if layer_idx >= config.first_k_dense_replace:
+            self.mlp = DeepseekV3MoE(config, dtype=dtype, rngs=rngs)
+        else:
             self.mlp = DeepseekV3MLP(
                 config.hidden_size, config.intermediate_size, config=config, dtype=dtype, rngs=rngs)
-        else:
-            self.mlp = DeepseekV3MoE(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
