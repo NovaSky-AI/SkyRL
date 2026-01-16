@@ -1,18 +1,50 @@
 #!/usr/bin/env python3
 """
-Benchmark GRAM usage for skyrl-tx.
+Benchmark GPU memory (GRAM) usage for skyrl-tx training and sampling.
+
+This script measures peak GPU memory consumption across different batch sizes
+and sequence lengths for both sampling (inference) and training (forward-backward)
+workloads. It automatically manages server lifecycle, monitors GPU memory via
+nvidia-smi, and generates detailed reports.
+
+Features:
+    - Test sampling, training, or both modes
+    - Sweep across multiple batch sizes and sequence lengths
+    - Early termination: skips remaining batch sizes if one fails (e.g., OOM)
+    - GPU memory monitoring via nvidia-smi polling
+    - Per-test server logs with JIT compilation time extraction
+    - Optional XLA HLO graph dumps for debugging
+    - Configurable JAX/XLA environment variables
+    - Server-only mode for manual testing
 
 Usage:
+    # Run full benchmark sweep
     uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
-        --experiment-name my_test --mode sample --batch-sizes 32,64 --seq-lens 4096,8192
+        --experiment-name my_test --mode both --batch-sizes 4,8,16,32 --seq-lens 4096,8192
 
-Output directory structure:
+    # Test sampling only with specific config
+    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+        --mode sample --batch-sizes 32,64 --seq-lens 8192 --tp-size 8
+
+    # Launch server only for manual testing
+    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+        --server-only --batch-sizes 8 --seq-lens 8192
+
+    # Enable XLA graph dumps for debugging
+    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+        --dump-xla --batch-sizes 4 --seq-lens 4096
+
+Output directory (default: /tmp/skyrl_tx_memory_benchmark/):
     tx_memory_benchmark_{experiment_name or timestamp}/
-        config.json         # Benchmark configuration
-        results.csv         # Results summary
-        tinker.db           # SQLite database
-        server_*.log        # Server logs for each test
+        config.json         # Full benchmark configuration (JSON)
+        results.csv         # Results table (mode, batch, seq, status, peak_mem, e2e_time)
+        tinker.db           # SQLite database used by tinker API
+        server_*.log        # Server stdout/stderr for each test run
         xla_dump_*/         # XLA HLO graphs per test (if --dump-xla enabled)
+
+Exit codes:
+    0 - All tests passed (or server-only mode completed)
+    1 - One or more tests failed or errored
 """
 
 from __future__ import annotations
