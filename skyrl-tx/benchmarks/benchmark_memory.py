@@ -20,23 +20,23 @@ Features:
 
 Usage:
     # Run full benchmark sweep
-    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python benchmarks/benchmark_memory.py \\
         --experiment-name my_test --mode both --batch-sizes 4,8,16,32 --seq-lens 4096,8192
 
     # Test sampling only with specific config
-    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python benchmarks/benchmark_memory.py \\
         --mode sample --batch-sizes 32,64 --seq-lens 8192 --tp-size 8
 
     # Launch server only for manual testing
-    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python benchmarks/benchmark_memory.py \\
         --server-only --batch-sizes 8 --seq-lens 8192
 
     # Enable XLA graph dumps for debugging
-    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python benchmarks/benchmark_memory.py \\
         --dump-xla --batch-sizes 4 --seq-lens 4096
 
     # Pass additional backend config options
-    uv run --extra tinker --extra gpu python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python benchmarks/benchmark_memory.py \\
         --backend-config '{"loss_chunk_size": 512, "enforce_eager": true}'
 
 Output directory (default: /tmp/skyrl_tx_memory_benchmark/):
