@@ -106,6 +106,7 @@ def swizzle_2d(
     """Compute 2D block swizzling for better cache locality.
 
     This function must be called from within a cutile kernel context.
+    Matches the reference implementation from cutile-moe.py.
 
     Args:
         M: Total rows
@@ -118,14 +119,17 @@ def swizzle_2d(
         Tuple of (bid_m, bid_n) - block indices in M and N dimensions
     """
     bid = ct.bid(axis=0)
-    grid_m = ct.cdiv(M, TILE_M)
-    grid_n = ct.cdiv(N, TILE_N)
-
-    # 2D swizzle pattern
-    num_block_n = ct.cdiv(grid_m, GROUP_SIZE_M) * grid_n
-    bid_m = (bid % num_block_n) // grid_n * GROUP_SIZE_M + (bid // num_block_n)
-    bid_n = (bid % num_block_n) % grid_n
-
+    num_bid_m = ct.cdiv(M, TILE_M)
+    num_bid_n = ct.cdiv(N, TILE_N)
+    num_bid_in_group = GROUP_SIZE_M * num_bid_n
+    group_id = bid // num_bid_in_group
+    first_bid_m = group_id * GROUP_SIZE_M
+    # Handle edge case when remaining blocks < GROUP_SIZE_M
+    # Match reference implementation: use min() - cutile can handle Python min in this context
+    remaining = num_bid_m - first_bid_m
+    group_size_m = min(remaining, GROUP_SIZE_M)  # Python min works here
+    bid_m = first_bid_m + (bid % group_size_m)
+    bid_n = (bid % num_bid_in_group) // group_size_m
     return bid_m, bid_n
 
 
@@ -167,17 +171,21 @@ if CUTILE_AVAILABLE:
         start_m = bid_m * TILE_M
         start_n = bid_n * TILE_N
 
-        # Get expert ID for this tile
-        expert_id = ct.gather(expert_ids_per_tile, ct.full((1,), bid_m, dtype=ct.int32)).item()
+        # Get expert ID for this tile - use ct.load for efficient scalar access
+        expert_id = ct.load(expert_ids_per_tile, index=bid_m, shape=())
 
         # Initialize accumulator
         accumulator = ct.full((TILE_M, TILE_N), 0.0, dtype=ct.float32)
+
+        # Padding mode for out-of-bounds access
+        zero_pad = ct.PaddingMode.ZERO
 
         # Perform tiled matrix multiplication
         for k_tile in range(ct.cdiv(d, TILE_K)):
             start_k = k_tile * TILE_K
 
             # Load input tile [TILE_M, TILE_K]
+            # Compute row indices once for this tile
             m_indices = start_m + ct.arange(TILE_M, dtype=ct.int32)
             k_indices = start_k + ct.arange(TILE_K, dtype=ct.int32)
             input_tile = ct.gather(
@@ -187,14 +195,16 @@ if CUTILE_AVAILABLE:
 
             # Load weight tile [TILE_K, TILE_N] for this expert
             # weights shape: [num_experts, d, out_features]
-            # We want weights[expert_id, k_indices, n_indices]
-            n_indices = start_n + ct.arange(TILE_N, dtype=ct.int32)
-
-            # Use broadcasting: k_indices[:, None] x n_indices[None, :] creates 2D grid
-            weight_tile = ct.gather(
+            # Use ct.load with explicit shape and order for better memory access patterns
+            # order=(0, 2, 1) means: expert_id, then n_indices, then k_indices
+            # This allows better coalescing when loading the weight tile
+            weight_tile = ct.load(
                 weights,
-                (expert_id, k_indices[:, None], n_indices[None, :]),
-            )
+                (expert_id, k_tile, bid_n),
+                shape=(1, TILE_K, TILE_N),
+                order=(0, 2, 1),
+                padding_mode=zero_pad,
+            ).reshape((TILE_K, TILE_N))
 
             # Matrix multiply-accumulate
             accumulator = ct.mma(input_tile, weight_tile, accumulator)
