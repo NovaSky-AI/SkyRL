@@ -1,10 +1,17 @@
 from skyrl_agent.tools.base import BaseTool, register_tool, json_loads
+from importlib.metadata import version
 import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Union
 import requests
 import os
 import logging
+
+
+try:
+    _SKYRL_AGENT_VERSION = version("skyrl_agent")
+except Exception:
+    _SKYRL_AGENT_VERSION = "0.0.1"  # fallback version
 
 
 @register_tool("youcom_search_engine")
@@ -95,6 +102,7 @@ class YouComSearchEngine(BaseTool):
         headers = {
             "X-API-KEY": self.you_search_key,
             "Content-Type": "application/json",
+            "user-agent": f"SkyRL-Agent/{_SKYRL_AGENT_VERSION}",
         }
         # Optionally add negative site filters directly to the query
         q = query
