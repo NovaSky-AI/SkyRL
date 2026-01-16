@@ -70,6 +70,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+import httpx
 import tinker
 from tinker import types
 from transformers import AutoTokenizer
@@ -304,8 +305,6 @@ class ServerManager:
 
     def wait_ready(self, timeout: float = 120.0) -> bool:
         """Wait for server to respond to health check."""
-        import httpx
-
         url = f"http://{self.config.host}:{self.config.port}/api/v1/healthz"
         deadline = time.time() + timeout
 
@@ -326,6 +325,11 @@ class ServerManager:
     @staticmethod
     def kill_existing_servers() -> None:
         """Kill any existing server processes."""
+        # Check if any servers are running
+        result = subprocess.run(["pgrep", "-f", "tx.tinker.api"], capture_output=True)
+        if result.returncode == 0:
+            pids = result.stdout.decode().strip().split("\n")
+            print(f"  WARNING: Found existing server(s) (PIDs: {', '.join(pids)}), killing...", file=sys.stderr)
         subprocess.run(["pkill", "-f", "tx.tinker.api"], capture_output=True)
         time.sleep(2)
 
@@ -830,32 +834,23 @@ def main() -> int:
     # Create output directory
     output_dir = setup_output_dir(args.experiment_name, args.output_root)
 
-    # Build configuration with derived paths
-    config = BenchmarkConfig(
-        base_model=args.base_model,
-        tp_size=args.tp_size,
-        max_lora_adapters=args.max_lora_adapters,
-        gradient_checkpointing=args.gradient_checkpointing,
-        train_micro_batch_size=args.train_micro_batch_size,
-        sample_max_num_sequences=args.sample_max_num_sequences,
-        extra_backend_config=args.backend_config,
-        test_mode=args.mode,
-        batch_sizes=args.batch_sizes,
-        seq_lens=args.seq_lens,
-        server_only=args.server_only,
-        host=args.host,
-        port=args.port,
-        experiment_name=args.experiment_name,
-        output_root=args.output_root,
-        gpu_poll_interval=args.gpu_poll_interval,
-        xla_preallocate=args.xla_preallocate,
-        gpu_allocator=args.gpu_allocator,
-        jax_log_compiles=args.jax_log_compiles,
-        dump_xla=args.dump_xla,
-        output_dir=output_dir,
-        db_path=output_dir / "tinker.db",
-        csv_path=output_dir / "results.csv",
-    )
+    # Build configuration from args
+    # Map CLI arg names to config field names where they differ
+    arg_renames = {"mode": "test_mode", "backend_config": "extra_backend_config"}
+    config_fields = {f.name for f in BenchmarkConfig.__dataclass_fields__.values()}
+
+    config_kwargs = {}
+    for key, value in vars(args).items():
+        config_key = arg_renames.get(key, key)
+        if config_key in config_fields:
+            config_kwargs[config_key] = value
+
+    # Add derived paths
+    config_kwargs["output_dir"] = output_dir
+    config_kwargs["db_path"] = output_dir / "tinker.db"
+    config_kwargs["csv_path"] = output_dir / "results.csv"
+
+    config = BenchmarkConfig(**config_kwargs)
 
     # Save config to output directory
     config_dict = asdict(config)

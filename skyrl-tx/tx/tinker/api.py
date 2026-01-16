@@ -68,8 +68,7 @@ async def lifespan(app: FastAPI):
 
     async def monitor_engine():
         """Monitor engine process and exit API server if it crashes."""
-        loop = asyncio.get_event_loop()
-        exit_code = await loop.run_in_executor(None, background_engine.wait)
+        exit_code = await asyncio.to_thread(background_engine.wait)
         if not shutting_down:
             logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
             os.kill(os.getpid(), signal.SIGTERM)
