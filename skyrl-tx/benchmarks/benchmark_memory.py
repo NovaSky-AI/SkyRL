@@ -55,7 +55,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import csv
 import json
 import os
@@ -453,7 +452,7 @@ class BenchmarkRunner:
             },
         )
 
-    def _test_sample(self, service_client, batch_size: int, seq_len: int) -> tuple[bool, float]:
+    def _test_sample(self, service_client, server: ServerManager, batch_size: int, seq_len: int) -> tuple[bool, float]:
         """Execute sampling test."""
         sampling_client = service_client.create_sampling_client(base_model=self.config.base_model)
 
@@ -470,12 +469,19 @@ class BenchmarkRunner:
             sampling_params=types.SamplingParams(temperature=0.7, max_tokens=gen_len, seed=42),
             num_samples=batch_size,
         )
-        result = request.result()
+        # Poll with small timeout to allow server aliveness checks
+        while True:
+            try:
+                result = request.result(timeout=5)
+                break
+            except TimeoutError:
+                if not server.is_alive():
+                    raise RuntimeError("Server crashed during test")
         elapsed = time.time() - start_time
 
         return len(result.sequences) == batch_size, elapsed
 
-    def _test_forward_backward(self, service_client, batch_size: int, seq_len: int) -> tuple[bool, float]:
+    def _test_forward_backward(self, service_client, server: ServerManager, batch_size: int, seq_len: int) -> tuple[bool, float]:
         """Execute forward-backward test."""
         training_client = service_client.create_lora_training_client(base_model=self.config.base_model)
 
@@ -484,7 +490,14 @@ class BenchmarkRunner:
 
         start_time = time.time()
         fwdbwd_future = training_client.forward_backward(data, "cross_entropy")
-        result = fwdbwd_future.result()
+        # Poll with small timeout to allow server aliveness checks
+        while True:
+            try:
+                result = fwdbwd_future.result(timeout=5)
+                break
+            except TimeoutError:
+                if not server.is_alive():
+                    raise RuntimeError("Server crashed during test")
         elapsed = time.time() - start_time
 
         return len(result.loss_fn_outputs) == batch_size, elapsed
@@ -530,29 +543,10 @@ class BenchmarkRunner:
 
             try:
                 print(f"  Running {mode} test...")
-
-                # Run test in background thread, monitor server aliveness
-                def run_test():
-                    if mode == "sample":
-                        return self._test_sample(service_client, batch_size, seq_len)
-                    else:
-                        return self._test_forward_backward(service_client, batch_size, seq_len)
-
-                # Run test in thread so we can check server aliveness while waiting.
-                # Note: if server crashes, the thread may be orphaned until HTTP timeout.
-                executor = concurrent.futures.ThreadPoolExecutor()
-                future = executor.submit(run_test)
-                try:
-                    while True:
-                        try:
-                            success, elapsed = future.result(timeout=1.0)
-                            break
-                        except concurrent.futures.TimeoutError:
-                            if not server.is_alive():
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                raise RuntimeError("Server crashed during test")
-                finally:
-                    executor.shutdown(wait=False)
+                if mode == "sample":
+                    success, elapsed = self._test_sample(service_client, server, batch_size, seq_len)
+                else:
+                    success, elapsed = self._test_forward_backward(service_client, server, batch_size, seq_len)
 
                 # Collect results
                 result.peak_gpu_mem_mib = gpu_monitor.stop()
