@@ -7,7 +7,7 @@ from transformers import DeepseekV3Config
 
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
-from tx.layers.util import prepare_routing
+from tx.layers.util import Param, prepare_routing
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
@@ -139,11 +139,11 @@ class DeepseekV3MLA(nnx.Module):
             q = self.wq_b(self.q_norm(self.wq_a(x, adapter_indices=adapter_indices)), adapter_indices=adapter_indices)
 
         q = q.reshape(B, T, self.num_heads, self.qk_head_dim)
-        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim], axis=-1)
+        q_nope, q_pe = jnp.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], axis=-1)
         q_pe = apply_rope(q_pe, positions, self.qk_rope_head_dim, self.config.rope_theta)
 
         kv_out = self.wkv_a(x, adapter_indices=adapter_indices)
-        kv, k_pe = jnp.split(kv_out, [self.kv_lora_rank], axis=-1)
+        kv, k_pe = jnp.split(kv_out, [self.kv_lora_rank, self.qk_rope_head_dim], axis=-1)
 
         k_pe = apply_rope(k_pe, positions, self.qk_rope_head_dim, self.config.rope_theta)
 
@@ -178,10 +178,20 @@ class DeepseekV3MLA(nnx.Module):
 
 class DeepseekV3MLP(nnx.Module):
 
-    def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+    def __init__(
+        self,
+        dim: int,
+        inter_dim: int,
+        *,
+        config: DeepseekV3Config,
+        dtype: jnp.dtype,
+        rngs: nnx.Rngs,
+    ) -> None:
+        self.dim = dim
+        self.inter_dim = inter_dim
         self.gate_proj = LoRALinear(
-            config.hidden_size,
-            config.intermediate_size,
+            dim,
+            inter_dim,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -191,8 +201,8 @@ class DeepseekV3MLP(nnx.Module):
             rngs=rngs,
         )
         self.up_proj = LoRALinear(
-            config.hidden_size,
-            config.intermediate_size,
+            dim,
+            inter_dim,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -202,8 +212,8 @@ class DeepseekV3MLP(nnx.Module):
             rngs=rngs,
         )
         self.down_proj = LoRALinear(
-            config.intermediate_size,
-            config.hidden_size,
+            inter_dim,
+            dim,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -220,13 +230,17 @@ class DeepseekV3MLP(nnx.Module):
 
 
 class DeepseekV3Gate(nnx.Module):
+    """DeepseekV3 MoE routing gate.
+
+    2-step routing, first group-based, then token-based.
+    """
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.num_experts = config.n_routed_experts
         self.num_experts_per_tok = config.num_experts_per_tok
-        self.n_expert_groups = getattr(config, "n_expert_groups", 1)
-        self.n_limited_groups = getattr(config, "n_limited_groups", 1)
+        self.n_expert_groups = config.n_group
+        self.n_limited_groups = config.topk_group
         self.score_func = getattr(config, "score_func", "softmax")
         self.route_scale = getattr(config, "route_scale", 1.0)
 
@@ -243,8 +257,6 @@ class DeepseekV3Gate(nnx.Module):
         # Bias only for specific model sizes (7168 hidden_size in original)
         self.use_bias = config.hidden_size == 7168
         if self.use_bias:
-            from tx.layers.util import Param
-
             self.bias = Param(
                 self.num_experts,
                 dtype=jnp.float32,
@@ -380,11 +392,9 @@ class DeepseekV3MoE(nnx.Module):
         self.gate = DeepseekV3Gate(config, dtype=dtype, rngs=rngs)
         self.experts = DeepseekV3Experts(config, dtype=dtype, rngs=rngs)
 
-        n_shared_experts = getattr(config, "n_shared_experts", 0)
-        if n_shared_experts > 0:
-            self.shared_experts = DeepseekV3SharedMLP(config, dtype=dtype, rngs=rngs)
-        else:
-            self.shared_experts = None
+        inter_dim = config.moe_intermediate_size * config.n_shared_experts
+        self.shared_experts = DeepseekV3MLP(
+            config.hidden_size, inter_dim, config=config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -402,60 +412,10 @@ class DeepseekV3MoE(nnx.Module):
 
         router_weights, selected_experts = self.gate(hidden_states_flat)
         expert_output = self.experts(hidden_states_flat, router_weights, selected_experts, adapter_indices_flat)
-
-        if self.shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states_flat, adapter_indices_flat)
-            expert_output = expert_output + shared_output
+        shared_output = self.shared_experts(hidden_states_flat, adapter_indices_flat)
+        expert_output = expert_output + shared_output
 
         return expert_output.reshape(batch_size, seq_len, hidden_size)
-
-
-class DeepseekV3SharedMLP(nnx.Module):
-    """Always active shared experts."""
-
-    def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        n_shared_experts = getattr(config, "n_shared_experts", 2)
-        moe_inter_dim = config.moe_intermediate_size
-        shared_inter_dim = n_shared_experts * moe_inter_dim
-
-        self.gate_proj = LoRALinear(
-            config.hidden_size,
-            shared_inter_dim,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", "tp")),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-        self.up_proj = LoRALinear(
-            config.hidden_size,
-            shared_inter_dim,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", "tp")),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-        self.down_proj = LoRALinear(
-            shared_inter_dim,
-            config.hidden_size,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", "fsdp")),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-
-    def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
-        gate_out = self.gate_proj(x, adapter_indices)
-        up_out = self.up_proj(x, adapter_indices)
-        return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices)
 
 
 class DeepseekV3DecoderLayer(nnx.Module):
@@ -468,9 +428,10 @@ class DeepseekV3DecoderLayer(nnx.Module):
         self.self_attn = DeepseekV3MLA(config, dtype=dtype, rngs=rngs)
 
         # Use dense MLP for initial layers, MoE for the rest
-        n_dense_layers = getattr(config, "n_dense_layers", 1)
+        n_dense_layers = config.first_k_dense_replace
         if layer_idx < n_dense_layers:
-            self.mlp = DeepseekV3MLP(config, dtype=dtype, rngs=rngs)
+            self.mlp = DeepseekV3MLP(
+                config.hidden_size, config.intermediate_size, config=config, dtype=dtype, rngs=rngs)
         else:
             self.mlp = DeepseekV3MoE(config, dtype=dtype, rngs=rngs)
 
