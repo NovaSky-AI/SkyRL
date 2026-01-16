@@ -184,7 +184,13 @@ if CUTILE_AVAILABLE:
             acc = ct.mma(a, b, acc)
 
         out_tile = ct.astype(acc, output.dtype)
-        ct.store(output, (start_m, start_n), out_tile)
+        output_m_indices = start_m + ct.arange(TILE_M, dtype=ct.int32)
+        output_n_indices = start_n + ct.arange(TILE_N, dtype=ct.int32)
+        ct.scatter(
+            output,
+            (output_m_indices[:, None], output_n_indices[None, :]),
+            out_tile,
+        )
 
 
 # ============================================================================
