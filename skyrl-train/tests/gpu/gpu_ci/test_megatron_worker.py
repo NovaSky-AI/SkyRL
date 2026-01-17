@@ -111,19 +111,19 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
-    [(True, 4, 2, 2, 1, None, False), (False, 2, 2, 1, 1, None, False), (True, 4, 2, 2, 1, None, True)],
-    ids=["colocate_all", "non_colocated", "colocate_all_lora"],
+    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora", "model_name"),
+    [(True, 4, 2, 2, 1, None, False, MODEL_NAME), (False, 2, 2, 1, 1, None, False, MODEL_NAME), (True, 4, 2, 2, 1, None, True, MODEL_NAME), (True, 4, 4, 1, 4, 1, True, MOE_MODEL_NAME)],
+    ids=["colocate_all_qwen3_0.6b", "non_colocated_qwen3_0.6b", "colocate_all_lora_qwen3_0.6b", "colocate_all_moe_lora_qwen3_30b_a3b"],
 )
 @pytest.mark.megatron
 def test_megatron_policy_weight_sync(
-    colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+    colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora, model_name
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
-        cfg = get_test_actor_config(model_name=MODEL_NAME)
+        cfg = get_test_actor_config(model_name=model_name)
         if lora:
             cfg.trainer.policy.model.lora.rank = 16
             cfg.trainer.policy.model.lora.alpha = 16
@@ -141,7 +141,7 @@ def test_megatron_policy_weight_sync(
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(
-            model=MODEL_NAME,
+            model=model_name,
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -172,7 +172,7 @@ def test_megatron_policy_weight_sync(
         policy.offload_to_cpu()
         asyncio.run(client.wake_up(tags=["kv_cache"]))
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
+        outputs = asyncio.run(run_inference(client, get_test_prompts(model_name), sampling_params))
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:

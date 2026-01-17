@@ -137,6 +137,7 @@ class MegatronWeightExtractor(WeightExtractor):
                 self.actor_module,
                 show_progress=False,
                 conversion_tasks=None,
+                merge_weights=False,
             )
 
             for name, tensor in hf_params_generator:
@@ -156,7 +157,9 @@ class MegatronWeightExtractor(WeightExtractor):
                     self.actor_module,
                     show_progress=False,
                     conversion_tasks=bucket,
+                    merge_weights=False,
                 )
+                breakpoint(0)
 
                 # Collect all parameters in this bucket into one chunk
                 names = []
@@ -647,6 +650,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.cuda.empty_cache()
 
         # Extract and send weights using the sender created at init time
+        if self._is_lora:
+            # extract weights
+
+
+            # 
+            return
         await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
 
         if cache_reset_task is not None:

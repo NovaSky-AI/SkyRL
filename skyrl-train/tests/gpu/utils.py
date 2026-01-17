@@ -445,6 +445,9 @@ def init_remote_inference_servers(
             # For standalone server, we use mp for now.
             "--distributed-executor-backend",
             "mp",
+            # vLLM 0.13+ V1 engine spawns worker processes that can't inherit CUDA context
+            # when CUDA_VISIBLE_DEVICES is set. Disable frontend multiprocessing to fix this.
+            "--disable-frontend-multiprocessing",
             "--dtype",
             "bfloat16",
             "--host",
