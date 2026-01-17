@@ -441,10 +441,10 @@ def init_remote_inference_servers(
             "0.8",
             "--tensor-parallel-size",
             str(tp_size),
-            # NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
-            # For standalone server, we use mp for now.
+            # TODO (erictang000): for 0.13+ vllm, the MP backend runs into issues with CUDA_VISIBLE_DEVICES
+            # when we refactor the inference backend to use remote inference engines as a default, revisit this
             "--distributed-executor-backend",
-            "mp",
+            "ray",
             # vLLM 0.13+ V1 engine spawns worker processes that can't inherit CUDA context
             # when CUDA_VISIBLE_DEVICES is set. Disable frontend multiprocessing to fix this.
             "--disable-frontend-multiprocessing",
