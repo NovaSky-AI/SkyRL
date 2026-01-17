@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import random
+import threading
 import time
 
 from tx.tinker import types
@@ -36,6 +37,9 @@ from tx.utils.log import logger
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 ID_MAX_LENGTH = 255
+
+# Timeout for graceful shutdown when engine crashes
+SHUTDOWN_TIMEOUT_SECONDS = 10
 
 
 @asynccontextmanager
@@ -71,6 +75,20 @@ async def lifespan(app: FastAPI):
         exit_code = await asyncio.to_thread(background_engine.wait)
         if not shutting_down:
             logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
+
+            # Start a background thread that force-exits after timeout.
+            # Using a thread instead of asyncio task because SIGTERM handling
+            # may wait for pending asyncio tasks to complete before exiting.
+            def force_exit():
+                time.sleep(SHUTDOWN_TIMEOUT_SECONDS)
+                logger.warning("Graceful shutdown timed out, forcing exit")
+                os._exit(1)
+
+            threading.Thread(target=force_exit, daemon=True).start()
+
+            # Request graceful shutdown. Uvicorn will stop accepting new
+            # connections and wait for active requests to complete.
+            # If shutdown doesn't complete in time, force_exit() will terminate.
             os.kill(os.getpid(), signal.SIGTERM)
 
     monitor_task = asyncio.create_task(monitor_engine())
