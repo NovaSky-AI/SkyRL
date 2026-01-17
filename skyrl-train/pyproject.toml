@@ -79,7 +79,7 @@ override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
-    "transformer-engine[pytorch]==2.9.0",
+    "transformer-engine[pytorch]==2.10.0",
     "megatron-core==0.15.0"
 ]
 [tool.uv.extra-build-dependencies]
@@ -125,9 +125,9 @@ sandboxes = [
     "litellm[proxy]>=1.67.5",
 ]
 vllm = [
-    "vllm==0.11.0",
+    "vllm==0.13.0",
     "flash-attn==2.8.3",
-    "torch==2.8.0",
+    "torch==2.9.0",
     "flashinfer-python",
     "flashinfer-jit-cache",
     "torchvision"
@@ -140,15 +140,15 @@ sglang = [
     "torchvision",
 ]
 mcore = [
-  "transformer-engine[pytorch]==2.9.0",
+  "transformer-engine[pytorch]==2.10.0",
   "flash-attn==2.8.1",
-  "vllm==0.11.0",
-  "torch==2.8.0",
-  "flashinfer-python==0.5.2",
+  "vllm==0.13.0",
+  "torch==2.9.0",
+  "flashinfer-python==0.5.3",
   "torchvision",
   "megatron-bridge @ git+https://github.com/NVIDIA-NeMo/Megatron-Bridge.git@v0.2.0",
   "megatron-core==0.15.0",
-  "flashinfer-jit-cache==0.5.2",
+  "flashinfer-jit-cache==0.5.3",
   "nvidia-modelopt",
 ]
 flashrl = [
