@@ -571,8 +571,12 @@ class BenchmarkRunner:
 
         return result
 
-    def run_all_tests(self) -> list[TestResult]:
-        """Run all configured benchmark tests."""
+    def run_all_tests(self, results_writer: ResultsWriter | None = None) -> list[TestResult]:
+        """Run all configured benchmark tests.
+
+        Args:
+            results_writer: Optional writer for incremental CSV output
+        """
         results = []
 
         modes = ["sample", "train"] if self.config.test_mode == "both" else [self.config.test_mode]
@@ -586,6 +590,10 @@ class BenchmarkRunner:
 
                     result = self.run_single_test(batch_size, seq_len, mode)
                     results.append(result)
+
+                    # Write result to CSV immediately
+                    if results_writer:
+                        results_writer.append(result)
 
                     # Print immediate result
                     status_color = "\033[32m" if result.status == "PASS" else "\033[31m"
@@ -606,38 +614,38 @@ class BenchmarkRunner:
         return results
 
 
+class ResultsWriter:
+    """Write benchmark results to CSV incrementally."""
+
+    CSV_HEADER = ["mode", "batch_size", "seq_len", "status", "peak_gpu_mem_mib", "client_e2e_sec"]
+
+    def __init__(self, output_path: Path):
+        self.output_path = output_path
+        # Write header immediately
+        with open(self.output_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(self.CSV_HEADER)
+
+    def append(self, result: TestResult) -> None:
+        """Append a single result to the CSV file."""
+        with open(self.output_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                result.mode,
+                result.batch_size,
+                result.seq_len,
+                result.status,
+                result.peak_gpu_mem_mib,
+                f"{result.client_e2e_sec:.2f}" if result.client_e2e_sec else "",
+            ])
+
+
 class ResultsReporter:
     """Generate reports from benchmark results."""
 
     def __init__(self, results: list[TestResult], output_path: str):
         self.results = results
         self.output_path = output_path
-
-    def write_csv(self) -> None:
-        """Write results to CSV file."""
-        with open(self.output_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "mode",
-                    "batch_size",
-                    "seq_len",
-                    "status",
-                    "peak_gpu_mem_mib",
-                    "client_e2e_sec",
-                ]
-            )
-            for r in self.results:
-                writer.writerow(
-                    [
-                        r.mode,
-                        r.batch_size,
-                        r.seq_len,
-                        r.status,
-                        r.peak_gpu_mem_mib,
-                        f"{r.client_e2e_sec:.2f}" if r.client_e2e_sec else "",
-                    ]
-                )
 
     def print_summary(self) -> None:
         """Print human-readable summary to terminal."""
@@ -900,13 +908,13 @@ def main() -> int:
             server.stop()
         return 0
 
-    # Run benchmarks
+    # Run benchmarks with incremental CSV output
+    results_writer = ResultsWriter(config.csv_path)
     runner = BenchmarkRunner(config)
-    results = runner.run_all_tests()
+    results = runner.run_all_tests(results_writer)
 
     # Report results
     reporter = ResultsReporter(results, str(config.csv_path))
-    reporter.write_csv()
     reporter.print_summary()
 
     # Return exit code based on results
