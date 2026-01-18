@@ -21,6 +21,7 @@ PY
 )"
 
 NVCC_BIN="${NVCC_BIN:-nvcc}"
+NVCC_ARCH="${NVCC_ARCH:-sm_90a}"
 if ! command -v "${NVCC_BIN}" >/dev/null 2>&1; then
   echo "nvcc not found. Set NVCC_BIN or ensure CUDA is on PATH." >&2
   exit 1
@@ -32,6 +33,7 @@ mkdir -p "${OUT_DIR}"
 "${NVCC_BIN}" \
   -O3 \
   -std=c++17 \
+  -arch="${NVCC_ARCH}" \
   -shared \
   -Xcompiler -fPIC \
   -I"${JAX_INCLUDE_DIR}" \

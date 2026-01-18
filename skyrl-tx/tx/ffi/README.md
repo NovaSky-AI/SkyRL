@@ -3,6 +3,7 @@ Build (Linux + CUDA)
 1) Build the shared library (requires CUDA nvcc with C++17 support):
 ```
 export CUTLASS_DIR=/path/to/cutlass
+export NVCC_ARCH=sm_90a  # for H100, adjust if needed
 tx/ffi/build_ragged_dot_ffi.sh
 ```
 

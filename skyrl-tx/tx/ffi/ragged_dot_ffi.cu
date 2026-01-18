@@ -8,11 +8,14 @@
 #include "xla/ffi/api/ffi.h"
 
 #include <cutlass/cutlass.h>
+#include <cutlass/arch/memory.h>
 #include <cutlass/layout/matrix.h>
+#include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
 #include <cutlass/util/packed_stride.hpp>
 
 #include <cute/tensor.hpp>
+#include <cutlass/epilogue/threadblock/default_thread_map_tensor_op.h>
 #include <cutlass/epilogue/threadblock/fusion/visitors.hpp>
 #include <cutlass/gemm/collective/collective_builder.hpp>
 #include <cutlass/epilogue/collective/collective_builder.hpp>
@@ -29,9 +32,9 @@ using DtypeAccum = float;
 using LayoutA = cutlass::layout::RowMajor;
 using LayoutB = cutlass::layout::RowMajor;
 using LayoutOutput = cutlass::layout::RowMajor;
-constexpr int AlignmentA = 1;
-constexpr int AlignmentB = 1;
-constexpr int AlignmentOutput = 1;
+constexpr int AlignmentA = 8;
+constexpr int AlignmentB = 8;
+constexpr int AlignmentOutput = 8;
 
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
