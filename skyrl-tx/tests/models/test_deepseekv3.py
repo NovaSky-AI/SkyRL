@@ -54,14 +54,6 @@ def test_deepseekv3(tp: int):
 
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
 
-        # Print everything for thorough debugging
-        print("hf_outputs.hidden_states[0]", hf_outputs.hidden_states[0])
-        print("outputs.hidden_states[0]", outputs.hidden_states[0])
-        print("hf_outputs.hidden_states[1]", hf_outputs.hidden_states[1])
-        print("outputs.hidden_states[1]", outputs.hidden_states[1])
-        print("hf_outputs.hidden_states[-1]", hf_outputs.hidden_states[-1])
-        print("outputs.hidden_states[-1]", outputs.hidden_states[-1])
-
         assert outputs.hidden_states is not None
         assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
         assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
