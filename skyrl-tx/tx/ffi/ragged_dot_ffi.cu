@@ -96,6 +96,9 @@ ffi::Error RaggedDotCudaImpl(
   for (int32_t i = 0; i < g; ++i) {
     offsets[static_cast<size_t>(i) + 1] = offsets[static_cast<size_t>(i)] + sizes[i];
   }
+  if (offsets[static_cast<size_t>(g)] != m) {
+    return ffi::Error::InvalidArgument("group_sizes sum does not match lhs rows.");
+  }
 
   err = cudaMemsetAsync(out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(Dtype), stream);
   if (err != cudaSuccess) {
@@ -107,6 +110,7 @@ ffi::Error RaggedDotCudaImpl(
   }
 
   Gemm gemm;
+  size_t max_workspace = 0;
   for (int32_t gi = offset; gi < offset + g_local; ++gi) {
     int32_t rows = sizes[gi];
     if (rows == 0) {
@@ -129,10 +133,69 @@ ffi::Error RaggedDotCudaImpl(
         {C, n},
         {1.0f, 0.0f});
 
-    cutlass::Status status = gemm(args, stream);
+    size_t workspace_size = Gemm::get_workspace_size(args);
+    if (workspace_size > max_workspace) {
+      max_workspace = workspace_size;
+    }
+  }
+
+  void* workspace = nullptr;
+  if (max_workspace > 0) {
+    err = cudaMalloc(&workspace, max_workspace);
+    if (err != cudaSuccess) {
+      return CudaError("Failed to allocate CUTLASS workspace.");
+    }
+  }
+
+  for (int32_t gi = offset; gi < offset + g_local; ++gi) {
+    int32_t rows = sizes[gi];
+    if (rows == 0) {
+      continue;
+    }
+
+    int32_t local = gi - offset;
+    const Dtype* A = reinterpret_cast<const Dtype*>(lhs.typed_data()) +
+        static_cast<int64_t>(offsets[gi]) * k;
+    const Dtype* B = reinterpret_cast<const Dtype*>(rhs.typed_data()) +
+        static_cast<int64_t>(local) * k * n;
+    Dtype* C = reinterpret_cast<Dtype*>(out->typed_data()) +
+        static_cast<int64_t>(offsets[gi]) * n;
+
+    Gemm::Arguments args(
+        {rows, n, k},
+        {A, k},
+        {B, n},
+        {C, n},
+        {C, n},
+        {1.0f, 0.0f});
+
+    cutlass::Status status = gemm.can_implement(args);
     if (status != cutlass::Status::kSuccess) {
+      if (workspace != nullptr) {
+        cudaFree(workspace);
+      }
+      return ffi::Error::Internal("cutlass cannot implement.");
+    }
+
+    status = gemm.initialize(args, workspace);
+    if (status != cutlass::Status::kSuccess) {
+      if (workspace != nullptr) {
+        cudaFree(workspace);
+      }
+      return ffi::Error::Internal("cutlass cannot initialize.");
+    }
+
+    status = gemm.run(stream);
+    if (status != cutlass::Status::kSuccess) {
+      if (workspace != nullptr) {
+        cudaFree(workspace);
+      }
       return ffi::Error::Internal("cutlass gemm failed.");
     }
+  }
+
+  if (workspace != nullptr) {
+    cudaFree(workspace);
   }
 
   return ffi::Error::Success();
