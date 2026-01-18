@@ -24,7 +24,7 @@ static ffi::Error CudaError(const char* message) {
   return ffi::Error::Internal(message);
 }
 
-ffi::Error RaggedDotCuda(
+ffi::Error RaggedDotCudaImpl(
     cudaStream_t stream,
     ffi::Buffer<ffi::BF16> lhs,
     ffi::Buffer<ffi::BF16> rhs,
@@ -140,7 +140,7 @@ ffi::Error RaggedDotCuda(
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
     RaggedDotCuda,
-    RaggedDotCuda,
+    RaggedDotCudaImpl,
     ffi::Ffi::Bind()
         .Ctx<ffi::PlatformStream<cudaStream_t>>()
         .Arg<ffi::Buffer<ffi::BF16>>()  // lhs
