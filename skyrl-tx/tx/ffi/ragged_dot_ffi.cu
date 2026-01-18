@@ -8,25 +8,84 @@
 #include "xla/ffi/api/ffi.h"
 
 #include <cutlass/cutlass.h>
-#include <cutlass/gemm/device/gemm_grouped.h>
 #include <cutlass/layout/matrix.h>
 #include <cutlass/numeric_types.h>
+#include <cutlass/util/packed_stride.hpp>
+
+#include <cute/tensor.hpp>
+#include <cutlass/epilogue/threadblock/fusion/visitors.hpp>
+#include <cutlass/gemm/collective/collective_builder.hpp>
+#include <cutlass/epilogue/collective/collective_builder.hpp>
+#include <cutlass/gemm/device/gemm_universal_adapter.h>
+#include <cutlass/gemm/kernel/gemm_universal.hpp>
+#include <cutlass/gemm/dispatch_policy.hpp>
 
 namespace ffi = xla::ffi;
 
-using Dtype = cutlass::bfloat16_t;
+using DtypeA = cutlass::bfloat16_t;
+using DtypeB = cutlass::bfloat16_t;
+using DtypeOutput = cutlass::bfloat16_t;
+using DtypeAccum = float;
 using LayoutA = cutlass::layout::RowMajor;
 using LayoutB = cutlass::layout::RowMajor;
-using LayoutC = cutlass::layout::RowMajor;
-using Accum = float;
-using Gemm = cutlass::gemm::device::GemmGrouped<
-    Dtype,
-    LayoutA,
-    Dtype,
-    LayoutB,
-    Dtype,
-    LayoutC,
-    Accum>;
+using LayoutOutput = cutlass::layout::RowMajor;
+constexpr int AlignmentA = 1;
+constexpr int AlignmentB = 1;
+constexpr int AlignmentOutput = 1;
+
+using ArchTag = cutlass::arch::Sm90;
+using OperatorClass = cutlass::arch::OpClassTensorOp;
+using TileShape = cute::Shape<cute::_128, cute::_128, cute::_64>;
+using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
+using ProblemShape = cutlass::gemm::GroupProblemShape<
+    cute::Shape<int32_t, int32_t, int32_t>>;
+
+using CollectiveEpilogue =
+    typename cutlass::epilogue::collective::CollectiveBuilder<
+        ArchTag,
+        OperatorClass,
+        TileShape,
+        ClusterShape,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        DtypeAccum,
+        DtypeAccum,
+        void,
+        LayoutOutput*,
+        AlignmentOutput,
+        DtypeOutput,
+        LayoutOutput*,
+        AlignmentOutput,
+        EpilogueSchedule,
+        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
+
+using CollectiveMainloop =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag,
+        OperatorClass,
+        DtypeA,
+        LayoutA*,
+        AlignmentA,
+        DtypeB,
+        LayoutB*,
+        AlignmentB,
+        DtypeAccum,
+        TileShape,
+        ClusterShape,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+        KernelSchedule>::CollectiveOp;
+
+using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+    ProblemShape,
+    CollectiveMainloop,
+    CollectiveEpilogue>;
+
+using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+using StrideA = typename Gemm::GemmKernel::InternalStrideA;
+using StrideB = typename Gemm::GemmKernel::InternalStrideB;
+using StrideOutput = typename Gemm::GemmKernel::InternalStrideD;
 
 static ffi::Error CudaError(const char* message) {
   return ffi::Error::Internal(message);
@@ -35,21 +94,24 @@ static ffi::Error CudaError(const char* message) {
 using Strides = std::array<int64_t, 3>;
 
 __global__ void prepare_grouped_gemm_data(
-    const Dtype* A,
-    const Dtype* B,
-    Dtype* output,
+    const DtypeA* A,
+    const DtypeB* B,
+    DtypeOutput* output,
     const int32_t* offs,
     int32_t group_count,
     int32_t k,
     int32_t n,
-    int64_t lda,
-    int64_t ldb_group,
-    int64_t ldout,
+    const Strides tensor_StrideA,
+    const Strides tensor_StrideB,
+    const Strides tensor_StrideOutput,
     const Strides tensor_ShapeA,
-    Dtype** A_ptrs,
-    Dtype** B_ptrs,
-    Dtype** output_ptrs,
-    cutlass::gemm::GemmCoord* problem_sizes) {
+    DtypeA** A_ptrs,
+    DtypeB** B_ptrs,
+    DtypeOutput** output_ptrs,
+    StrideA* stride_A,
+    StrideB* stride_B,
+    StrideOutput* stride_output,
+    ProblemShape::UnderlyingProblemShape* problem_sizes) {
   int32_t tid = threadIdx.x;
   if (tid >= group_count) {
     return;
@@ -66,10 +128,18 @@ __global__ void prepare_grouped_gemm_data(
     return;
   }
 
-  A_ptrs[tid] = const_cast<Dtype*>(A) + static_cast<int64_t>(start) * lda;
-  B_ptrs[tid] = const_cast<Dtype*>(B) + static_cast<int64_t>(tid) * ldb_group;
-  output_ptrs[tid] = output + static_cast<int64_t>(start) * ldout;
-  problem_sizes[tid] = cutlass::gemm::GemmCoord(m, n, k);
+  int64_t lda = tensor_StrideA[0];
+  int64_t ldb = tensor_StrideB[1];
+  int64_t ldoutput = tensor_StrideOutput[0];
+
+  A_ptrs[tid] = const_cast<DtypeA*>(A) + static_cast<int64_t>(start) * lda;
+  B_ptrs[tid] = const_cast<DtypeB*>(B) + static_cast<int64_t>(tid) * tensor_StrideB[0];
+  output_ptrs[tid] = output + static_cast<int64_t>(start) * ldoutput;
+  problem_sizes[tid] = ProblemShape::UnderlyingProblemShape(m, n, k);
+
+  stride_A[tid] = cutlass::make_cute_packed_stride(StrideA{}, {lda, lda, 1});
+  stride_B[tid] = cutlass::make_cute_packed_stride(StrideB{}, {ldb, ldb, 1});
+  stride_output[tid] = cutlass::make_cute_packed_stride(StrideOutput{}, {m, ldoutput, 1});
 }
 
 ffi::Error RaggedDotCudaImpl(
@@ -148,7 +218,8 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::InvalidArgument("group_sizes sum does not match lhs rows.");
   }
 
-  err = cudaMemsetAsync(out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(Dtype), stream);
+  err = cudaMemsetAsync(
+      out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream);
   if (err != cudaSuccess) {
     return CudaError("Failed to zero output.");
   }
@@ -170,16 +241,15 @@ ffi::Error RaggedDotCudaImpl(
     local_offs[static_cast<size_t>(i)] = running;
   }
 
-  const Dtype* A_base = reinterpret_cast<const Dtype*>(lhs.typed_data()) +
+  const DtypeA* A_base = reinterpret_cast<const DtypeA*>(lhs.typed_data()) +
       static_cast<int64_t>(shard_start) * k;
-  const Dtype* B_base = reinterpret_cast<const Dtype*>(rhs.typed_data());
-  Dtype* out_base = reinterpret_cast<Dtype*>(out->typed_data()) +
+  const DtypeB* B_base = reinterpret_cast<const DtypeB*>(rhs.typed_data());
+  DtypeOutput* out_base = reinterpret_cast<DtypeOutput*>(out->typed_data()) +
       static_cast<int64_t>(shard_start) * n;
 
-  int64_t lda = k;
-  int64_t ldb_group = static_cast<int64_t>(k) * n;
-  int64_t ldout = n;
-
+  Strides strideA = {k, 1, 1};
+  Strides strideB = {static_cast<int64_t>(k) * n, n, 1};
+  Strides strideOut = {n, 1, 1};
   Strides shapeA = {m, k, 1};
 
   auto align_up = [](size_t value, size_t alignment) -> size_t {
@@ -192,16 +262,25 @@ ffi::Error RaggedDotCudaImpl(
   bytes += sizeof(int32_t) * static_cast<size_t>(g_local);
   bytes = align_up(bytes, 16);
   size_t A_ptrs_offset = bytes;
-  bytes += sizeof(Dtype*) * static_cast<size_t>(g_local);
+  bytes += sizeof(DtypeA*) * static_cast<size_t>(g_local);
   bytes = align_up(bytes, 16);
   size_t B_ptrs_offset = bytes;
-  bytes += sizeof(Dtype*) * static_cast<size_t>(g_local);
+  bytes += sizeof(DtypeB*) * static_cast<size_t>(g_local);
   bytes = align_up(bytes, 16);
   size_t out_ptrs_offset = bytes;
-  bytes += sizeof(Dtype*) * static_cast<size_t>(g_local);
+  bytes += sizeof(DtypeOutput*) * static_cast<size_t>(g_local);
+  bytes = align_up(bytes, 16);
+  size_t stride_A_offset = bytes;
+  bytes += sizeof(StrideA) * static_cast<size_t>(g_local);
+  bytes = align_up(bytes, 16);
+  size_t stride_B_offset = bytes;
+  bytes += sizeof(StrideB) * static_cast<size_t>(g_local);
+  bytes = align_up(bytes, 16);
+  size_t stride_output_offset = bytes;
+  bytes += sizeof(StrideOutput) * static_cast<size_t>(g_local);
   bytes = align_up(bytes, 16);
   size_t problem_sizes_offset = bytes;
-  bytes += sizeof(cutlass::gemm::GemmCoord) * static_cast<size_t>(g_local);
+  bytes += sizeof(ProblemShape::UnderlyingProblemShape) * static_cast<size_t>(g_local);
 
   void* slab = nullptr;
   err = cudaMalloc(&slab, bytes);
@@ -211,11 +290,14 @@ ffi::Error RaggedDotCudaImpl(
 
   char* base = reinterpret_cast<char*>(slab);
   int32_t* d_offs = reinterpret_cast<int32_t*>(base + offs_offset);
-  Dtype** d_A_ptrs = reinterpret_cast<Dtype**>(base + A_ptrs_offset);
-  Dtype** d_B_ptrs = reinterpret_cast<Dtype**>(base + B_ptrs_offset);
-  Dtype** d_out_ptrs = reinterpret_cast<Dtype**>(base + out_ptrs_offset);
-  cutlass::gemm::GemmCoord* d_problem_sizes =
-      reinterpret_cast<cutlass::gemm::GemmCoord*>(base + problem_sizes_offset);
+  DtypeA** d_A_ptrs = reinterpret_cast<DtypeA**>(base + A_ptrs_offset);
+  DtypeB** d_B_ptrs = reinterpret_cast<DtypeB**>(base + B_ptrs_offset);
+  DtypeOutput** d_out_ptrs = reinterpret_cast<DtypeOutput**>(base + out_ptrs_offset);
+  StrideA* d_stride_A = reinterpret_cast<StrideA*>(base + stride_A_offset);
+  StrideB* d_stride_B = reinterpret_cast<StrideB*>(base + stride_B_offset);
+  StrideOutput* d_stride_output = reinterpret_cast<StrideOutput*>(base + stride_output_offset);
+  ProblemShape::UnderlyingProblemShape* d_problem_sizes =
+      reinterpret_cast<ProblemShape::UnderlyingProblemShape*>(base + problem_sizes_offset);
 
   err = cudaMemcpyAsync(
       d_offs,
@@ -236,24 +318,27 @@ ffi::Error RaggedDotCudaImpl(
       g_local,
       k,
       n,
-      lda,
-      ldb_group,
-      ldout,
+      strideA,
+      strideB,
+      strideOut,
       shapeA,
       d_A_ptrs,
       d_B_ptrs,
       d_out_ptrs,
+      d_stride_A,
+      d_stride_B,
+      d_stride_output,
       d_problem_sizes);
 
   Gemm gemm;
-  typename Gemm::Arguments args(
-      d_problem_sizes,
-      g_local,
-      {d_A_ptrs, lda},
-      {d_B_ptrs, n},
-      {d_out_ptrs, ldout},
-      {d_out_ptrs, ldout},
-      {1.0f, 0.0f});
+  typename Gemm::Arguments args{
+      cutlass::gemm::GemmUniversalMode::kGrouped,
+      {g_local, d_problem_sizes, nullptr},
+      {(const DtypeA**)d_A_ptrs, d_stride_A, (const DtypeB**)d_B_ptrs, d_stride_B},
+      {{}, nullptr, d_stride_output, d_out_ptrs, d_stride_output}};
+
+  args.epilogue.thread.alpha = 1.0f;
+  args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
 
   cutlass::Status status = gemm.can_implement(args);
   if (status != cutlass::Status::kSuccess) {
@@ -261,7 +346,13 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
   }
 
-  size_t workspace_size = gemm.get_workspace_size(args);
+  int device = 0;
+  cudaDeviceProp props;
+  if (cudaGetDevice(&device) == cudaSuccess && cudaGetDeviceProperties(&props, device) == cudaSuccess) {
+    args.hw_info.sm_count = props.multiProcessorCount;
+  }
+
+  size_t workspace_size = Gemm::get_workspace_size(args);
   void* workspace = nullptr;
   if (workspace_size > 0) {
     err = cudaMalloc(&workspace, workspace_size);
