@@ -78,5 +78,5 @@ def ragged_dot(
         raise ValueError("group_offset must have shape (1,).")
 
     out = jax.ShapeDtypeStruct((lhs.shape[0], rhs.shape[2]), lhs.dtype)
-    call = jax_ffi.ffi_call("ragged_dot_cuda", out, vmap_method="disabled")
+    call = jax_ffi.ffi_call("ragged_dot_cuda", out, vmap_method=None)
     return call(lhs, rhs, group_sizes, group_offset)
