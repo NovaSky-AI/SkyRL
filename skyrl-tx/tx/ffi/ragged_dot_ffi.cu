@@ -8,10 +8,11 @@
 #include "xla/ffi/api/ffi.h"
 
 #include <cutlass/cutlass.h>
-#include <cutlass/arch/memory.h>
+#include <cutlass/version.h>
 #include <cutlass/layout/matrix.h>
-#include <cutlass/numeric_conversion.h>
 #include <cutlass/numeric_types.h>
+#include <cutlass/arch/memory.h>
+#include <cutlass/numeric_conversion.h>
 #include <cutlass/util/packed_stride.hpp>
 
 #include <cute/tensor.hpp>
@@ -22,6 +23,10 @@
 #include <cutlass/gemm/device/gemm_universal_adapter.h>
 #include <cutlass/gemm/kernel/gemm_universal.hpp>
 #include <cutlass/gemm/dispatch_policy.hpp>
+
+#if !defined(CUTLASS_MAJOR) || CUTLASS_MAJOR < 3
+#error "This kernel requires CUTLASS >= 3.x (SM90 grouped GEMM)."
+#endif
 
 namespace ffi = xla::ffi;
 
@@ -89,6 +94,7 @@ using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 using StrideA = typename Gemm::GemmKernel::InternalStrideA;
 using StrideB = typename Gemm::GemmKernel::InternalStrideB;
 using StrideOutput = typename Gemm::GemmKernel::InternalStrideD;
+using ProblemShapeType = ProblemShape::UnderlyingProblemShape;
 
 static ffi::Error CudaError(const char* message) {
   return ffi::Error::Internal(message);
@@ -114,7 +120,7 @@ __global__ void prepare_grouped_gemm_data(
     StrideA* stride_A,
     StrideB* stride_B,
     StrideOutput* stride_output,
-    ProblemShape::UnderlyingProblemShape* problem_sizes) {
+    ProblemShapeType* problem_sizes) {
   int32_t tid = threadIdx.x;
   if (tid >= group_count) {
     return;
@@ -138,7 +144,7 @@ __global__ void prepare_grouped_gemm_data(
   A_ptrs[tid] = const_cast<DtypeA*>(A) + static_cast<int64_t>(start) * lda;
   B_ptrs[tid] = const_cast<DtypeB*>(B) + static_cast<int64_t>(tid) * tensor_StrideB[0];
   output_ptrs[tid] = output + static_cast<int64_t>(start) * ldoutput;
-  problem_sizes[tid] = ProblemShape::UnderlyingProblemShape(m, n, k);
+  problem_sizes[tid] = ProblemShapeType(m, n, k);
 
   stride_A[tid] = cutlass::make_cute_packed_stride(StrideA{}, {lda, lda, 1});
   stride_B[tid] = cutlass::make_cute_packed_stride(StrideB{}, {ldb, ldb, 1});
