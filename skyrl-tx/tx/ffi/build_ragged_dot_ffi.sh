@@ -36,6 +36,7 @@ mkdir -p "${OUT_DIR}"
   -Xcompiler -fPIC \
   -I"${JAX_INCLUDE_DIR}" \
   -I"${CUTLASS_DIR}/include" \
+  -I"${CUTLASS_DIR}/tools/util/include/" \
   "${SCRIPT_DIR}/ragged_dot_ffi.cu" \
   -o "${OUT_DIR}/libragged_dot_ffi.so"
 
