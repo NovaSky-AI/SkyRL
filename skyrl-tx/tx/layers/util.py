@@ -4,6 +4,14 @@ from jax import lax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh, PartitionSpec
 
+try:
+    from tx.ffi import ragged_dot_ffi, ragged_dot_ffi_available
+except Exception:  # pragma: no cover - optional GPU extension
+    ragged_dot_ffi = None
+
+    def ragged_dot_ffi_available() -> bool:
+        return False
+
 
 def ragged_dot(
     lhs: jax.Array,
@@ -26,6 +34,16 @@ def ragged_dot(
             precision=precision,
             preferred_element_type=preferred_element_type,
         )
+
+    if (
+        ragged_dot_ffi_available()
+        and jax.default_backend() == "gpu"
+        and lhs.dtype == jnp.bfloat16
+        and rhs.dtype == jnp.bfloat16
+        and group_sizes.dtype == jnp.int32
+        and group_offset.dtype == jnp.int32
+    ):
+        return ragged_dot_ffi(lhs, rhs, group_sizes, group_offset)
 
     assert group_offset.shape == (1,), "group_offset must have shape (1,)"
     offset = group_offset[0]
