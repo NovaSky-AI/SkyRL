@@ -31,7 +31,7 @@ mkdir -p "${OUT_DIR}"
 
 "${NVCC_BIN}" \
   -O3 \
-  -std=c++14 \
+  -std=c++17 \
   -shared \
   -Xcompiler -fPIC \
   -I"${JAX_INCLUDE_DIR}" \

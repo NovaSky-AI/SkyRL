@@ -1,6 +1,6 @@
 Build (Linux + CUDA)
 
-1) Build the shared library:
+1) Build the shared library (requires CUDA nvcc with C++17 support):
 ```
 export CUTLASS_DIR=/path/to/cutlass
 tx/ffi/build_ragged_dot_ffi.sh
