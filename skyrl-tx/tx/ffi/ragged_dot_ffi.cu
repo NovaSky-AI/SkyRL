@@ -106,7 +106,9 @@ __global__ void prepare_grouped_gemm_data(
     const DtypeA* A,
     const DtypeB* B,
     DtypeOutput* output,
-    const int32_t* offs,
+    const int32_t* group_sizes,
+    const int32_t* group_offset,
+    int32_t num_groups,
     int32_t group_count,
     int32_t k,
     int32_t n,
@@ -126,14 +128,22 @@ __global__ void prepare_grouped_gemm_data(
     return;
   }
 
-  int32_t start = tid == 0 ? 0 : offs[tid - 1];
-  int32_t end = offs[tid];
-  int32_t m = end - start;
+  int32_t offset = group_offset[0];
+  int32_t global = offset + tid;
+  if (global < 0 || global >= num_groups) {
+    return;
+  }
+
+  int32_t start = 0;
+  for (int32_t i = 0; i < global; ++i) {
+    start += group_sizes[i];
+  }
+  int32_t m = group_sizes[global];
   if (m < 0) {
     return;
   }
 
-  if (end > tensor_ShapeA[0]) {
+  if (start + m > tensor_ShapeA[0]) {
     return;
   }
 
@@ -189,43 +199,9 @@ ffi::Error RaggedDotCudaImpl(
   int32_t g = static_cast<int32_t>(g64);
   int32_t g_local = static_cast<int32_t>(g_local64);
 
-  int32_t offset = 0;
-  cudaError_t err = cudaMemcpyAsync(
-      &offset, group_offset.typed_data(), sizeof(int32_t), cudaMemcpyDeviceToHost, stream);
-  if (err != cudaSuccess) {
-    return CudaError("Failed to copy group_offset.");
-  }
-
-  std::vector<int32_t> sizes(static_cast<size_t>(g));
-  if (g > 0) {
-    err = cudaMemcpyAsync(
-        sizes.data(),
-        group_sizes.typed_data(),
-        static_cast<size_t>(g) * sizeof(int32_t),
-        cudaMemcpyDeviceToHost,
-        stream);
-    if (err != cudaSuccess) {
-      return CudaError("Failed to copy group_sizes.");
-    }
-  }
-
-  err = cudaStreamSynchronize(stream);
-  if (err != cudaSuccess) {
-    return CudaError("Failed to synchronize stream.");
-  }
-
-  if (offset < 0 || offset > g || offset + g_local > g) {
-    return ffi::Error::InvalidArgument("group_offset out of range.");
-  }
-
-  std::vector<int32_t> offsets(static_cast<size_t>(g) + 1);
-  offsets[0] = 0;
-  for (int32_t i = 0; i < g; ++i) {
-    offsets[static_cast<size_t>(i) + 1] = offsets[static_cast<size_t>(i)] + sizes[i];
-  }
-  if (offsets[static_cast<size_t>(g)] != m) {
-    return ffi::Error::InvalidArgument("group_sizes sum does not match lhs rows.");
-  }
+  const int32_t* group_sizes_ptr = group_sizes.typed_data();
+  const int32_t* group_offset_ptr = group_offset.typed_data();
+  cudaError_t err;
 
   err = cudaMemsetAsync(
       out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream);
@@ -241,20 +217,9 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::InvalidArgument("group_count must be <= 1024.");
   }
 
-  int32_t shard_start = offsets[static_cast<size_t>(offset)];
-
-  std::vector<int32_t> local_offs(static_cast<size_t>(g_local));
-  int32_t running = 0;
-  for (int32_t i = 0; i < g_local; ++i) {
-    running += sizes[offset + i];
-    local_offs[static_cast<size_t>(i)] = running;
-  }
-
-  const DtypeA* A_base = reinterpret_cast<const DtypeA*>(lhs.typed_data()) +
-      static_cast<int64_t>(shard_start) * k;
+  const DtypeA* A_base = reinterpret_cast<const DtypeA*>(lhs.typed_data());
   const DtypeB* B_base = reinterpret_cast<const DtypeB*>(rhs.typed_data());
-  DtypeOutput* out_base = reinterpret_cast<DtypeOutput*>(out->typed_data()) +
-      static_cast<int64_t>(shard_start) * n;
+  DtypeOutput* out_base = reinterpret_cast<DtypeOutput*>(out->typed_data());
 
   Strides strideA = {k, 1, 1};
   Strides strideB = {static_cast<int64_t>(k) * n, n, 1};
@@ -266,9 +231,6 @@ ffi::Error RaggedDotCudaImpl(
   };
 
   size_t bytes = 0;
-  bytes = align_up(bytes, 16);
-  size_t offs_offset = bytes;
-  bytes += sizeof(int32_t) * static_cast<size_t>(g_local);
   bytes = align_up(bytes, 16);
   size_t A_ptrs_offset = bytes;
   bytes += sizeof(DtypeA*) * static_cast<size_t>(g_local);
@@ -298,7 +260,6 @@ ffi::Error RaggedDotCudaImpl(
   }
 
   char* base = reinterpret_cast<char*>(slab);
-  int32_t* d_offs = reinterpret_cast<int32_t*>(base + offs_offset);
   DtypeA** d_A_ptrs = reinterpret_cast<DtypeA**>(base + A_ptrs_offset);
   DtypeB** d_B_ptrs = reinterpret_cast<DtypeB**>(base + B_ptrs_offset);
   DtypeOutput** d_out_ptrs = reinterpret_cast<DtypeOutput**>(base + out_ptrs_offset);
@@ -308,22 +269,13 @@ ffi::Error RaggedDotCudaImpl(
   ProblemShape::UnderlyingProblemShape* d_problem_sizes =
       reinterpret_cast<ProblemShape::UnderlyingProblemShape*>(base + problem_sizes_offset);
 
-  err = cudaMemcpyAsync(
-      d_offs,
-      local_offs.data(),
-      sizeof(int32_t) * g_local,
-      cudaMemcpyHostToDevice,
-      stream);
-  if (err != cudaSuccess) {
-    cudaFree(slab);
-    return CudaError("Failed to copy offs.");
-  }
-
   prepare_grouped_gemm_data<<<1, g_local, 0, stream>>>(
       A_base,
       B_base,
       out_base,
-      d_offs,
+      group_sizes_ptr,
+      group_offset_ptr,
+      g,
       g_local,
       k,
       n,
