@@ -65,7 +65,8 @@ def test_deepseekv3(tp: int):
         assert outputs.hidden_states is not None
         assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
         assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
-        assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=1e-3, atol=6*1e-3)
+        # TODO: absolute tolerance not going below 1e-3, investigate
+        assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=1e-3, atol=6e-3)
 
 
 def load_moe_base_weights(jax_moe_layer: DeepseekV3MoE, hf_moe_layer: HFDeepseekV3MoE) -> None:
