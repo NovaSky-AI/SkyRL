@@ -254,7 +254,7 @@ ffi::Error RaggedDotCudaImpl(
   bytes += sizeof(ProblemShape::UnderlyingProblemShape) * static_cast<size_t>(g_local);
 
   void* slab = nullptr;
-  err = cudaMalloc(&slab, bytes);
+  err = cudaMallocAsync(&slab, bytes, stream);
   if (err != cudaSuccess) {
     return CudaError("Failed to allocate grouped GEMM slab.");
   }
@@ -303,7 +303,7 @@ ffi::Error RaggedDotCudaImpl(
 
   cutlass::Status status = gemm.can_implement(args);
   if (status != cutlass::Status::kSuccess) {
-    cudaFree(slab);
+    cudaFreeAsync(slab, stream);
     return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
   }
 
@@ -316,9 +316,9 @@ ffi::Error RaggedDotCudaImpl(
   size_t workspace_size = Gemm::get_workspace_size(args);
   void* workspace = nullptr;
   if (workspace_size > 0) {
-    err = cudaMalloc(&workspace, workspace_size);
+    err = cudaMallocAsync(&workspace, workspace_size, stream);
     if (err != cudaSuccess) {
-      cudaFree(slab);
+      cudaFreeAsync(slab, stream);
       return CudaError("Failed to allocate CUTLASS workspace.");
     }
   }
@@ -326,16 +326,16 @@ ffi::Error RaggedDotCudaImpl(
   status = gemm(args, workspace, stream);
   if (status != cutlass::Status::kSuccess) {
     if (workspace != nullptr) {
-      cudaFree(workspace);
+      cudaFreeAsync(workspace, stream);
     }
-    cudaFree(slab);
+    cudaFreeAsync(slab, stream);
     return ffi::Error::Internal("cutlass grouped gemm failed.");
   }
 
   if (workspace != nullptr) {
-    cudaFree(workspace);
+    cudaFreeAsync(workspace, stream);
   }
-  cudaFree(slab);
+  cudaFreeAsync(slab, stream);
 
   return ffi::Error::Success();
 }
