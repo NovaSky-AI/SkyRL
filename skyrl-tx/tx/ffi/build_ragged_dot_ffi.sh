@@ -13,12 +13,10 @@ if [[ ! -d "${CUTLASS_DIR}" ]]; then
   exit 1
 fi
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
-JAX_INCLUDE_DIR="$("${PYTHON_BIN}" - <<'PY'
+JAX_INCLUDE_DIR="$(uv run --extra gpu - <<'PY'
 import os
 import jaxlib
-import jaxlib.xla_extension as xe
-print(os.path.join(os.path.dirname(xe.__file__), "include"))
+print(os.path.join(os.path.dirname(jaxlib.__file__), "include"))
 PY
 )"
 
