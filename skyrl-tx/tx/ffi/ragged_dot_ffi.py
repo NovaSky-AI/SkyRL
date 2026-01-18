@@ -105,9 +105,12 @@ def _ragged_dot_ffi_call(
     if group_offset.shape != (1,):
         raise ValueError("group_offset must have shape (1,).")
 
+    # Precompute cumulative sum to avoid O(n²) loop in CUDA kernel
+    group_offsets = jnp.cumsum(group_sizes, dtype=jnp.int32)
+
     out = jax.ShapeDtypeStruct((lhs.shape[0], rhs.shape[2]), lhs.dtype)
     call = jax_ffi.ffi_call("ragged_dot_cuda", out, vmap_method=None)
-    return call(lhs, rhs, group_sizes, group_offset)
+    return call(lhs, rhs, group_sizes, group_offset, group_offsets)
 
 
 @jax.custom_vjp

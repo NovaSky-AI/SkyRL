@@ -107,15 +107,16 @@ __global__ void prepare_grouped_gemm_data(
     const DtypeB* B,
     DtypeOutput* output,
     const int32_t* group_sizes,
-    const int32_t* group_offset,
+    const int32_t* group_offsets_cumsum,  // Precomputed cumsum of group_sizes
+    int32_t first_group_idx,
     int32_t num_groups,
     int32_t group_count,
     int32_t k,
     int32_t n,
-    const Strides tensor_StrideA,
-    const Strides tensor_StrideB,
-    const Strides tensor_StrideOutput,
-    const Strides tensor_ShapeA,
+    int64_t lda,
+    int64_t ldb,
+    int64_t ldoutput,
+    int32_t total_rows,
     DtypeA** A_ptrs,
     DtypeB** B_ptrs,
     DtypeOutput** output_ptrs,
@@ -128,31 +129,20 @@ __global__ void prepare_grouped_gemm_data(
     return;
   }
 
-  int32_t offset = group_offset[0];
-  int32_t global = offset + tid;
+  int32_t global = first_group_idx + tid;
   if (global < 0 || global >= num_groups) {
     return;
   }
 
-  int32_t start = 0;
-  for (int32_t i = 0; i < global; ++i) {
-    start += group_sizes[i];
-  }
+  // Use precomputed cumsum: start = cumsum[global-1] if global > 0, else 0
+  int32_t start = (global > 0) ? group_offsets_cumsum[global - 1] : 0;
   int32_t m = group_sizes[global];
-  if (m < 0) {
+  if (m < 0 || start + m > total_rows) {
     return;
   }
-
-  if (start + m > tensor_ShapeA[0]) {
-    return;
-  }
-
-  int64_t lda = tensor_StrideA[0];
-  int64_t ldb = tensor_StrideB[1];
-  int64_t ldoutput = tensor_StrideOutput[0];
 
   A_ptrs[tid] = const_cast<DtypeA*>(A) + static_cast<int64_t>(start) * lda;
-  B_ptrs[tid] = const_cast<DtypeB*>(B) + static_cast<int64_t>(tid) * tensor_StrideB[0];
+  B_ptrs[tid] = const_cast<DtypeB*>(B) + static_cast<int64_t>(tid) * ldb * k;
   output_ptrs[tid] = output + static_cast<int64_t>(start) * ldoutput;
   problem_sizes[tid] = ProblemShapeType(m, n, k);
 
@@ -168,6 +158,7 @@ ffi::Error RaggedDotCudaImpl(
     ffi::Buffer<ffi::BF16> rhs,
     ffi::Buffer<ffi::S32> group_sizes,
     ffi::Buffer<ffi::S32> group_offset,
+    ffi::Buffer<ffi::S32> group_offsets_cumsum,
     ffi::ResultBuffer<ffi::BF16> out) {
   auto lhs_dims = lhs.dimensions();
   auto rhs_dims = rhs.dimensions();
@@ -221,11 +212,13 @@ ffi::Error RaggedDotCudaImpl(
   const DtypeA* A_base = reinterpret_cast<const DtypeA*>(lhs.typed_data());
   const DtypeB* B_base = reinterpret_cast<const DtypeB*>(rhs.typed_data());
   DtypeOutput* out_base = reinterpret_cast<DtypeOutput*>(out->typed_data());
+  const int32_t* group_offsets_cumsum_ptr = group_offsets_cumsum.typed_data();
+  int32_t first_group_idx = group_offset_ptr[0];
 
-  Strides strideA = {k, 1, 1};
-  Strides strideB = {static_cast<int64_t>(k) * n, n, 1};
-  Strides strideOut = {n, 1, 1};
-  Strides shapeA = {m, k, 1};
+  // Strides for row-major layout
+  int64_t lda = k;
+  int64_t ldb = n;
+  int64_t ldoutput = n;
 
   auto align_up = [](size_t value, size_t alignment) -> size_t {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -275,15 +268,16 @@ ffi::Error RaggedDotCudaImpl(
       B_base,
       out_base,
       group_sizes_ptr,
-      group_offset_ptr,
+      group_offsets_cumsum_ptr,
+      first_group_idx,
       g,
       g_local,
       k,
       n,
-      strideA,
-      strideB,
-      strideOut,
-      shapeA,
+      lda,
+      ldb,
+      ldoutput,
+      m,
       d_A_ptrs,
       d_B_ptrs,
       d_out_ptrs,
@@ -341,4 +335,5 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()  // rhs
         .Arg<ffi::Buffer<ffi::S32>>()   // group_sizes
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offset
+        .Arg<ffi::Buffer<ffi::S32>>()   // group_offsets_cumsum
         .Ret<ffi::Buffer<ffi::BF16>>());  // out
