@@ -35,11 +35,7 @@ def ragged_dot(
             preferred_element_type=preferred_element_type,
         )
 
-    # CUTLASS kernel requires k and n dimensions divisible by 8
-    k = lhs.shape[-1]
-    n = rhs.shape[-1]
-    cutlass_alignment = 8
-
+    # Use CUTLASS kernel when available (supports any k/n dimensions including k=1 for LoRA rank 1)
     if (
         ragged_dot_ffi_available()
         and jax.default_backend() == "gpu"
@@ -47,8 +43,6 @@ def ragged_dot(
         and rhs.dtype == jnp.bfloat16
         and group_sizes.dtype == jnp.int32
         and group_offset.dtype == jnp.int32
-        and k % cutlass_alignment == 0
-        and n % cutlass_alignment == 0
     ):
         return ragged_dot_ffi(lhs, rhs, group_sizes, group_offset)
 

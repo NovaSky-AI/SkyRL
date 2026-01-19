@@ -97,6 +97,43 @@ using CollectiveMainloop_Bwd =
 using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
 using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
 
+// Unaligned kernel variants (alignment=1) for small k/n dimensions (e.g., LoRA rank=1)
+// Uses cooperative kernel schedule which supports alignment=1
+constexpr int AlignmentUnaligned = 1;
+using TileShapeUnaligned = cute::Shape<cute::_64, cute::_64, cute::_64>;
+using KernelScheduleUnaligned = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
+using EpilogueScheduleUnaligned = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
+
+using CollectiveEpilogueUnaligned =
+    typename cutlass::epilogue::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, TileShapeUnaligned, ClusterShape,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentUnaligned,
+        DtypeOutput, LayoutOutput*, AlignmentUnaligned, EpilogueScheduleUnaligned,
+        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
+
+using CollectiveMainloopUnaligned =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentUnaligned,
+        DtypeB, LayoutB*, AlignmentUnaligned, DtypeAccum, TileShapeUnaligned, ClusterShape,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogueUnaligned::SharedStorage))>,
+        KernelScheduleUnaligned>::CollectiveOp;
+
+using GemmKernelUnaligned = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopUnaligned, CollectiveEpilogueUnaligned>;
+using GemmUnaligned = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelUnaligned>;
+
+using CollectiveMainloopUnaligned_Bwd =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA_Bwd*, AlignmentUnaligned,
+        DtypeB, LayoutB*, AlignmentUnaligned, DtypeAccum, TileShapeUnaligned, ClusterShape,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogueUnaligned::SharedStorage))>,
+        KernelScheduleUnaligned>::CollectiveOp;
+
+using GemmKernelUnaligned_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopUnaligned_Bwd, CollectiveEpilogueUnaligned>;
+using GemmUnaligned_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelUnaligned_Bwd>;
+
 template <typename T>
 static T* carve_aligned(char*& p, size_t count) {
   T* out = reinterpret_cast<T*>((reinterpret_cast<uintptr_t>(p) + 15) & ~uintptr_t(15));
@@ -223,6 +260,10 @@ ffi::Error ExecuteGroupedGemm(
   return ffi::Error::Success();
 }
 
+static bool is_aligned(int32_t k, int32_t n) {
+  return (k % AlignmentA == 0) && (n % AlignmentB == 0);
+}
+
 ffi::Error RaggedDotCudaImpl(
     cudaStream_t stream,
     ffi::ScratchAllocator scratch,
@@ -250,12 +291,21 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::Internal("Failed to zero output.");
   }
 
-  return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
-      stream, scratch,
-      reinterpret_cast<const DtypeA*>(lhs.typed_data()),
-      reinterpret_cast<const DtypeB*>(rhs.typed_data()),
-      reinterpret_cast<DtypeOutput*>(out->typed_data()),
-      group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+  if (is_aligned(k, n)) {
+    return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
+        stream, scratch,
+        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+        reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+        reinterpret_cast<DtypeOutput*>(out->typed_data()),
+        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+  } else {
+    return ExecuteGroupedGemm<GemmUnaligned, GemmDir::Fwd>(
+        stream, scratch,
+        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+        reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+        reinterpret_cast<DtypeOutput*>(out->typed_data()),
+        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+  }
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
@@ -301,12 +351,23 @@ ffi::Error RaggedDotBwdCudaImpl(
     return ffi::Error::Internal("Failed to zero d_rhs output.");
   }
 
-  return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
-      stream, scratch,
-      reinterpret_cast<const DtypeA*>(lhs.typed_data()),
-      reinterpret_cast<const DtypeB*>(grad.typed_data()),
-      reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
-      group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+  // For backward pass: A is [M, K] viewed as [K, M] via ColumnMajor, B is [M, N]
+  // So we check alignment of K (output M dimension) and N (output N dimension)
+  if (is_aligned(k, n)) {
+    return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
+        stream, scratch,
+        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+        reinterpret_cast<const DtypeB*>(grad.typed_data()),
+        reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
+        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+  } else {
+    return ExecuteGroupedGemm<GemmUnaligned_Bwd, GemmDir::Bwd>(
+        stream, scratch,
+        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+        reinterpret_cast<const DtypeB*>(grad.typed_data()),
+        reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
+        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+  }
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
