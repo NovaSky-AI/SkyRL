@@ -70,5 +70,5 @@ class CudaBuildHook(BuildHookInterface):
     PLUGIN_NAME = "cuda_build"
 
     def initialize(self, version, build_data):
-        if self.target_name == "wheel":
+        if self.target_name in ("wheel", "editable"):
             build_ragged_dot()
