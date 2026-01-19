@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-#include <array>
+#include <optional>
 #include <vector>
 
 #include "xla/ffi/api/c_api.h"
@@ -89,23 +89,15 @@ using ProblemShapeType = ProblemShape::UnderlyingProblemShape;
 // Uses ColumnMajor for A to interpret row-major lhs as transposed
 using LayoutA_Bwd = cutlass::layout::ColumnMajor;
 
-using CollectiveEpilogue_Bwd =
-    typename cutlass::epilogue::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, TileShape, ClusterShape,
-        cutlass::epilogue::collective::EpilogueTileAuto,
-        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
-        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueSchedule,
-        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
-
 using CollectiveMainloop_Bwd =
     typename cutlass::gemm::collective::CollectiveBuilder<
         ArchTag, OperatorClass, DtypeA, LayoutA_Bwd*, AlignmentA,
         DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape, ClusterShape,
         cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogue_Bwd::SharedStorage))>,
+            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
         KernelSchedule>::CollectiveOp;
 
-using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue_Bwd>;
+using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
 using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
 using StrideA_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideA;
 using StrideB_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideB;
@@ -116,6 +108,68 @@ static T* carve_aligned(char*& p, size_t count) {
   T* out = reinterpret_cast<T*>((reinterpret_cast<uintptr_t>(p) + 15) & ~uintptr_t(15));
   p = reinterpret_cast<char*>(out + count);
   return out;
+}
+
+template <typename GemmT>
+struct GroupedGemmData {
+  using StrideA = typename GemmT::GemmKernel::InternalStrideA;
+  using StrideB = typename GemmT::GemmKernel::InternalStrideB;
+  using StrideOutput = typename GemmT::GemmKernel::InternalStrideD;
+
+  const DtypeA** A_ptrs;
+  const DtypeB** B_ptrs;
+  DtypeOutput** out_ptrs;
+  StrideA* stride_A;
+  StrideB* stride_B;
+  StrideOutput* stride_output;
+  ProblemShapeType* problem_sizes;
+
+  static std::optional<GroupedGemmData> Allocate(ffi::ScratchAllocator& scratch, size_t g) {
+    size_t bytes = 7 * 16 +
+                   sizeof(const DtypeA*) * g + sizeof(const DtypeB*) * g + sizeof(DtypeOutput*) * g +
+                   sizeof(StrideA) * g + sizeof(StrideB) * g + sizeof(StrideOutput) * g +
+                   sizeof(ProblemShapeType) * g;
+    auto slab_or = scratch.Allocate(bytes);
+    if (!slab_or.has_value()) {
+      return std::nullopt;
+    }
+    GroupedGemmData data;
+    char* p = reinterpret_cast<char*>(slab_or.value());
+    data.A_ptrs = carve_aligned<const DtypeA*>(p, g);
+    data.B_ptrs = carve_aligned<const DtypeB*>(p, g);
+    data.out_ptrs = carve_aligned<DtypeOutput*>(p, g);
+    data.stride_A = carve_aligned<StrideA>(p, g);
+    data.stride_B = carve_aligned<StrideB>(p, g);
+    data.stride_output = carve_aligned<StrideOutput>(p, g);
+    data.problem_sizes = carve_aligned<ProblemShapeType>(p, g);
+    return data;
+  }
+};
+
+template <typename GemmT>
+ffi::Error RunGroupedGemm(cudaStream_t stream, ffi::ScratchAllocator& scratch,
+                          typename GemmT::Arguments& args) {
+  GemmT gemm;
+  args.hw_info.sm_count = get_sm_count();
+
+  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
+    return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
+  }
+
+  void* workspace = nullptr;
+  if (size_t workspace_size = GemmT::get_workspace_size(args)) {
+    auto workspace_or = scratch.Allocate(workspace_size);
+    if (!workspace_or.has_value()) {
+      return ffi::Error::Internal("Failed to allocate CUTLASS workspace.");
+    }
+    workspace = workspace_or.value();
+  }
+
+  if (gemm(args, workspace, stream) != cutlass::Status::kSuccess) {
+    return ffi::Error::Internal("cutlass grouped gemm failed.");
+  }
+
+  return ffi::Error::Success();
 }
 
 __global__ void prepare_grouped_gemm_data(
@@ -198,9 +252,8 @@ ffi::Error RaggedDotCudaImpl(
     ffi::ResultBuffer<ffi::BF16> out) {
   auto lhs_dims = lhs.dimensions();
   auto rhs_dims = rhs.dimensions();
-  auto group_offset_dims = group_offset.dimensions();
 
-  if (lhs_dims.size() != 2 || rhs_dims.size() != 3 || group_offset_dims.size() != 1) {
+  if (lhs_dims.size() != 2 || rhs_dims.size() != 3 || group_offset.dimensions().size() != 1) {
     return ffi::Error::InvalidArgument("Unexpected ragged_dot dimensions.");
   }
   if (lhs_dims[1] != rhs_dims[1]) {
@@ -212,77 +265,33 @@ ffi::Error RaggedDotCudaImpl(
   int32_t g_local = static_cast<int32_t>(rhs_dims[0]);
   int32_t n = static_cast<int32_t>(rhs_dims[2]);
 
-  cudaError_t err = cudaMemsetAsync(
-      out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream);
-  if (err != cudaSuccess) {
+  if (cudaMemsetAsync(out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
     return ffi::Error::Internal("Failed to zero output.");
   }
 
-  if (g_local == 0 || m == 0 || n == 0 || k == 0) {
-    return ffi::Error::Success();
-  }
+  if (g_local == 0 || m == 0 || n == 0 || k == 0) return ffi::Error::Success();
+  if (g_local > 1024) return ffi::Error::InvalidArgument("group_count must be <= 1024.");
 
-  if (g_local > 1024) {
-    return ffi::Error::InvalidArgument("group_count must be <= 1024.");
-  }
-
-  size_t gl = static_cast<size_t>(g_local);
-  size_t bytes = 7 * 16 +  // alignment padding
-                 sizeof(const DtypeA*) * gl + sizeof(const DtypeB*) * gl + sizeof(DtypeOutput*) * gl +
-                 sizeof(StrideA) * gl + sizeof(StrideB) * gl + sizeof(StrideOutput) * gl +
-                 sizeof(ProblemShapeType) * gl;
-
-  auto slab_or = scratch.Allocate(bytes);
-  if (!slab_or.has_value()) {
-    return ffi::Error::Internal("Failed to allocate grouped GEMM slab from scratch.");
-  }
-
-  char* p = reinterpret_cast<char*>(slab_or.value());
-  auto d_A_ptrs = carve_aligned<const DtypeA*>(p, gl);
-  auto d_B_ptrs = carve_aligned<const DtypeB*>(p, gl);
-  auto d_out_ptrs = carve_aligned<DtypeOutput*>(p, gl);
-  auto d_stride_A = carve_aligned<StrideA>(p, gl);
-  auto d_stride_B = carve_aligned<StrideB>(p, gl);
-  auto d_stride_output = carve_aligned<StrideOutput>(p, gl);
-  auto d_problem_sizes = carve_aligned<ProblemShapeType>(p, gl);
+  auto data = GroupedGemmData<Gemm>::Allocate(scratch, g_local);
+  if (!data) return ffi::Error::Internal("Failed to allocate grouped GEMM slab.");
 
   prepare_grouped_gemm_data<<<1, g_local, 0, stream>>>(
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
       reinterpret_cast<const DtypeB*>(rhs.typed_data()),
       reinterpret_cast<DtypeOutput*>(out->typed_data()),
       group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n,
-      d_A_ptrs, d_B_ptrs, d_out_ptrs,
-      d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
+      data->A_ptrs, data->B_ptrs, data->out_ptrs,
+      data->stride_A, data->stride_B, data->stride_output, data->problem_sizes);
 
-  Gemm gemm;
   typename Gemm::Arguments args{
       cutlass::gemm::GemmUniversalMode::kGrouped,
-      {g_local, d_problem_sizes, nullptr},
-      {(const DtypeA**)d_A_ptrs, d_stride_A, (const DtypeB**)d_B_ptrs, d_stride_B},
-      {{}, nullptr, d_stride_output, d_out_ptrs, d_stride_output}};
-
+      {g_local, data->problem_sizes, nullptr},
+      {data->A_ptrs, data->stride_A, data->B_ptrs, data->stride_B},
+      {{}, nullptr, data->stride_output, data->out_ptrs, data->stride_output}};
   args.epilogue.thread.alpha = 1.0f;
   args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
-  args.hw_info.sm_count = get_sm_count();
 
-  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
-    return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
-  }
-
-  void* workspace = nullptr;
-  if (size_t workspace_size = Gemm::get_workspace_size(args)) {
-    auto workspace_or = scratch.Allocate(workspace_size);
-    if (!workspace_or.has_value()) {
-      return ffi::Error::Internal("Failed to allocate CUTLASS workspace from scratch.");
-    }
-    workspace = workspace_or.value();
-  }
-
-  if (gemm(args, workspace, stream) != cutlass::Status::kSuccess) {
-    return ffi::Error::Internal("cutlass grouped gemm failed.");
-  }
-
-  return ffi::Error::Success();
+  return RunGroupedGemm<Gemm>(stream, scratch, args);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
@@ -325,77 +334,33 @@ ffi::Error RaggedDotBwdCudaImpl(
   int32_t n = static_cast<int32_t>(grad_dims[1]);
   int32_t g_local = static_cast<int32_t>(d_rhs_dims[0]);
 
-  cudaError_t err = cudaMemsetAsync(
-      d_rhs->typed_data(), 0, static_cast<size_t>(g_local) * k * n * sizeof(DtypeOutput), stream);
-  if (err != cudaSuccess) {
+  if (cudaMemsetAsync(d_rhs->typed_data(), 0, static_cast<size_t>(g_local) * k * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
     return ffi::Error::Internal("Failed to zero d_rhs output.");
   }
 
-  if (g_local == 0 || m == 0 || n == 0 || k == 0) {
-    return ffi::Error::Success();
-  }
+  if (g_local == 0 || m == 0 || n == 0 || k == 0) return ffi::Error::Success();
+  if (g_local > 1024) return ffi::Error::InvalidArgument("group_count must be <= 1024.");
 
-  if (g_local > 1024) {
-    return ffi::Error::InvalidArgument("group_count must be <= 1024.");
-  }
-
-  size_t gl = static_cast<size_t>(g_local);
-  size_t bytes = 7 * 16 +
-                 sizeof(const DtypeA*) * gl + sizeof(const DtypeB*) * gl + sizeof(DtypeOutput*) * gl +
-                 sizeof(StrideA_Bwd) * gl + sizeof(StrideB_Bwd) * gl + sizeof(StrideOutput_Bwd) * gl +
-                 sizeof(ProblemShapeType) * gl;
-
-  auto slab_or = scratch.Allocate(bytes);
-  if (!slab_or.has_value()) {
-    return ffi::Error::Internal("Failed to allocate grouped GEMM bwd slab from scratch.");
-  }
-
-  char* p = reinterpret_cast<char*>(slab_or.value());
-  auto d_A_ptrs = carve_aligned<const DtypeA*>(p, gl);
-  auto d_B_ptrs = carve_aligned<const DtypeB*>(p, gl);
-  auto d_out_ptrs = carve_aligned<DtypeOutput*>(p, gl);
-  auto d_stride_A = carve_aligned<StrideA_Bwd>(p, gl);
-  auto d_stride_B = carve_aligned<StrideB_Bwd>(p, gl);
-  auto d_stride_output = carve_aligned<StrideOutput_Bwd>(p, gl);
-  auto d_problem_sizes = carve_aligned<ProblemShapeType>(p, gl);
+  auto data = GroupedGemmData<Gemm_Bwd>::Allocate(scratch, g_local);
+  if (!data) return ffi::Error::Internal("Failed to allocate grouped GEMM slab.");
 
   prepare_grouped_gemm_bwd_data<<<1, g_local, 0, stream>>>(
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
       reinterpret_cast<const DtypeB*>(grad.typed_data()),
       reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
       group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n,
-      d_A_ptrs, d_B_ptrs, d_out_ptrs,
-      d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
+      data->A_ptrs, data->B_ptrs, data->out_ptrs,
+      data->stride_A, data->stride_B, data->stride_output, data->problem_sizes);
 
-  Gemm_Bwd gemm;
   typename Gemm_Bwd::Arguments args{
       cutlass::gemm::GemmUniversalMode::kGrouped,
-      {g_local, d_problem_sizes, nullptr},
-      {(const DtypeA**)d_A_ptrs, d_stride_A, (const DtypeB**)d_B_ptrs, d_stride_B},
-      {{}, nullptr, d_stride_output, d_out_ptrs, d_stride_output}};
-
+      {g_local, data->problem_sizes, nullptr},
+      {data->A_ptrs, data->stride_A, data->B_ptrs, data->stride_B},
+      {{}, nullptr, data->stride_output, data->out_ptrs, data->stride_output}};
   args.epilogue.thread.alpha = 1.0f;
   args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
-  args.hw_info.sm_count = get_sm_count();
 
-  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
-    return ffi::Error::Internal("cutlass cannot implement grouped gemm bwd.");
-  }
-
-  void* workspace = nullptr;
-  if (size_t workspace_size = Gemm_Bwd::get_workspace_size(args)) {
-    auto workspace_or = scratch.Allocate(workspace_size);
-    if (!workspace_or.has_value()) {
-      return ffi::Error::Internal("Failed to allocate CUTLASS bwd workspace from scratch.");
-    }
-    workspace = workspace_or.value();
-  }
-
-  if (gemm(args, workspace, stream) != cutlass::Status::kSuccess) {
-    return ffi::Error::Internal("cutlass grouped gemm bwd failed.");
-  }
-
-  return ffi::Error::Success();
+  return RunGroupedGemm<Gemm_Bwd>(stream, scratch, args);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
