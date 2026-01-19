@@ -56,6 +56,7 @@ def build_ragged_dot():
             f"-I{cutlass_dir}/include",
             f"-I{cutlass_dir}/tools/util/include/",
             str(source_file), "-o", str(output_file),
+            "-lcuda",
         ]
 
         print(f"Building {output_file}...")
