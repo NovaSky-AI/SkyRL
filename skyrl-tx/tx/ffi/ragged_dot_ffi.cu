@@ -197,26 +197,16 @@ ffi::Error RaggedDotCudaImpl(
   if (lhs_dims.size() != 2 || rhs_dims.size() != 3 || group_offset_dims.size() != 1) {
     return ffi::Error::InvalidArgument("Unexpected ragged_dot dimensions.");
   }
-
-  int64_t m64 = lhs_dims[0];
-  int64_t k64 = lhs_dims[1];
-  int64_t g_local64 = rhs_dims[0];
-  int64_t rhs_k64 = rhs_dims[1];
-  int64_t n64 = rhs_dims[2];
-
-  if (k64 != rhs_k64) {
+  if (lhs_dims[1] != rhs_dims[1]) {
     return ffi::Error::InvalidArgument("lhs/rhs K dimension mismatch.");
   }
 
-  int32_t m = static_cast<int32_t>(m64);
-  int32_t k = static_cast<int32_t>(k64);
-  int32_t n = static_cast<int32_t>(n64);
-  int32_t g_local = static_cast<int32_t>(g_local64);
+  int32_t m = static_cast<int32_t>(lhs_dims[0]);
+  int32_t k = static_cast<int32_t>(lhs_dims[1]);
+  int32_t g_local = static_cast<int32_t>(rhs_dims[0]);
+  int32_t n = static_cast<int32_t>(rhs_dims[2]);
 
-  const int32_t* group_offset_ptr = group_offset.typed_data();
-  cudaError_t err;
-
-  err = cudaMemsetAsync(
+  cudaError_t err = cudaMemsetAsync(
       out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream);
   if (err != cudaSuccess) {
     return ffi::Error::Internal("Failed to zero output.");
@@ -233,6 +223,7 @@ ffi::Error RaggedDotCudaImpl(
   const DtypeA* A_base = reinterpret_cast<const DtypeA*>(lhs.typed_data());
   const DtypeB* B_base = reinterpret_cast<const DtypeB*>(rhs.typed_data());
   DtypeOutput* out_base = reinterpret_cast<DtypeOutput*>(out->typed_data());
+  const int32_t* group_offset_ptr = group_offset.typed_data();
   const int32_t* group_offsets_cumsum_ptr = group_offsets_cumsum.typed_data();
 
   size_t gl = static_cast<size_t>(g_local);
@@ -324,27 +315,19 @@ ffi::Error RaggedDotBwdCudaImpl(
   if (lhs_dims.size() != 2 || grad_dims.size() != 2 || d_rhs_dims.size() != 3) {
     return ffi::Error::InvalidArgument("Unexpected ragged_dot_bwd dimensions.");
   }
-
-  int64_t m64 = lhs_dims[0];
-  int64_t k64 = lhs_dims[1];
-  int64_t grad_m64 = grad_dims[0];
-  int64_t n64 = grad_dims[1];
-  int64_t g_local64 = d_rhs_dims[0];
-
-  if (m64 != grad_m64) {
+  if (lhs_dims[0] != grad_dims[0]) {
     return ffi::Error::InvalidArgument("lhs/grad M dimension mismatch.");
   }
-  if (d_rhs_dims[1] != k64 || d_rhs_dims[2] != n64) {
+  if (d_rhs_dims[1] != lhs_dims[1] || d_rhs_dims[2] != grad_dims[1]) {
     return ffi::Error::InvalidArgument("d_rhs shape must be [G, K, N].");
   }
 
-  int32_t m = static_cast<int32_t>(m64);
-  int32_t k = static_cast<int32_t>(k64);
-  int32_t n = static_cast<int32_t>(n64);
-  int32_t g_local = static_cast<int32_t>(g_local64);
+  int32_t m = static_cast<int32_t>(lhs_dims[0]);
+  int32_t k = static_cast<int32_t>(lhs_dims[1]);
+  int32_t n = static_cast<int32_t>(grad_dims[1]);
+  int32_t g_local = static_cast<int32_t>(d_rhs_dims[0]);
 
-  cudaError_t err;
-  err = cudaMemsetAsync(
+  cudaError_t err = cudaMemsetAsync(
       d_rhs->typed_data(), 0, static_cast<size_t>(g_local) * k * n * sizeof(DtypeOutput), stream);
   if (err != cudaSuccess) {
     return ffi::Error::Internal("Failed to zero d_rhs output.");
