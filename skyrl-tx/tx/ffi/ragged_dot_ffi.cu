@@ -99,9 +99,6 @@ using CollectiveMainloop_Bwd =
 
 using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
 using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
-using StrideA_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideA;
-using StrideB_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideB;
-using StrideOutput_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideD;
 
 template <typename T>
 static T* carve_aligned(char*& p, size_t count) {
@@ -144,6 +141,17 @@ struct GroupedGemmData {
     data.problem_sizes = carve_aligned<ProblemShapeType>(p, g);
     return data;
   }
+
+  typename GemmT::Arguments MakeArgs(int32_t g_local) const {
+    typename GemmT::Arguments args{
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {g_local, problem_sizes, nullptr},
+        {A_ptrs, stride_A, B_ptrs, stride_B},
+        {{}, nullptr, stride_output, out_ptrs, stride_output}};
+    args.epilogue.thread.alpha = 1.0f;
+    args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
+    return args;
+  }
 };
 
 template <typename GemmT>
@@ -172,74 +180,55 @@ ffi::Error RunGroupedGemm(cudaStream_t stream, ffi::ScratchAllocator& scratch,
   return ffi::Error::Success();
 }
 
-__global__ void prepare_grouped_gemm_data(
-    const DtypeA* A,
-    const DtypeB* B,
-    DtypeOutput* output,
-    const int32_t* group_offsets_cumsum,
-    const int32_t* group_offset_ptr,
-    int32_t k,
-    int32_t n,
-    const DtypeA** A_ptrs,
-    const DtypeB** B_ptrs,
-    DtypeOutput** output_ptrs,
-    StrideA* stride_A,
-    StrideB* stride_B,
-    StrideOutput* stride_output,
-    ProblemShapeType* problem_sizes) {
+template <typename GemmT>
+__global__ void prepare_grouped_gemm_fwd(
+    const DtypeA* A, const DtypeB* B, DtypeOutput* output,
+    const int32_t* group_offsets_cumsum, const int32_t* group_offset_ptr,
+    int32_t k, int32_t n, GroupedGemmData<GemmT> data) {
+  using Data = GroupedGemmData<GemmT>;
   int32_t tid = threadIdx.x;
   int32_t global = group_offset_ptr[0] + tid;
-
   int32_t start = (global > 0) ? group_offsets_cumsum[global - 1] : 0;
   int32_t m = group_offsets_cumsum[global] - start;
 
-  A_ptrs[tid] = A + static_cast<int64_t>(start) * k;
-  B_ptrs[tid] = B + static_cast<int64_t>(tid) * n * k;
-  output_ptrs[tid] = output + static_cast<int64_t>(start) * n;
-  problem_sizes[tid] = ProblemShapeType(m, n, k);
-
-  stride_A[tid] = cutlass::make_cute_packed_stride(StrideA{}, {k, k, 1});
-  stride_B[tid] = cutlass::make_cute_packed_stride(StrideB{}, {n, n, 1});
-  stride_output[tid] = cutlass::make_cute_packed_stride(StrideOutput{}, {m, n, 1});
+  data.A_ptrs[tid] = A + static_cast<int64_t>(start) * k;
+  data.B_ptrs[tid] = B + static_cast<int64_t>(tid) * n * k;
+  data.out_ptrs[tid] = output + static_cast<int64_t>(start) * n;
+  data.problem_sizes[tid] = ProblemShapeType(m, n, k);
+  data.stride_A[tid] = cutlass::make_cute_packed_stride(typename Data::StrideA{}, {k, k, 1});
+  data.stride_B[tid] = cutlass::make_cute_packed_stride(typename Data::StrideB{}, {n, n, 1});
+  data.stride_output[tid] = cutlass::make_cute_packed_stride(typename Data::StrideOutput{}, {m, n, 1});
 }
 
 // Backward kernel for d_rhs: lhs.T @ grad -> d_rhs[G, K, N]
 // Memory pattern: A=lhs (ragged), B=grad (ragged), output=d_rhs (per-group)
-__global__ void prepare_grouped_gemm_bwd_data(
+template <typename GemmT>
+__global__ void prepare_grouped_gemm_bwd(
     const DtypeA* lhs,           // [M_total, K] row-major (ragged)
     const DtypeB* grad,          // [M_total, N] row-major (ragged)
     DtypeOutput* d_rhs,          // [G, K, N] row-major (per-group)
-    const int32_t* group_offsets_cumsum,
-    const int32_t* group_offset_ptr,
-    int32_t k,
-    int32_t n,
-    const DtypeA** A_ptrs,
-    const DtypeB** B_ptrs,
-    DtypeOutput** output_ptrs,
-    StrideA_Bwd* stride_A,
-    StrideB_Bwd* stride_B,
-    StrideOutput_Bwd* stride_output,
-    ProblemShapeType* problem_sizes) {
+    const int32_t* group_offsets_cumsum, const int32_t* group_offset_ptr,
+    int32_t k, int32_t n, GroupedGemmData<GemmT> data) {
+  using Data = GroupedGemmData<GemmT>;
   int32_t tid = threadIdx.x;
   int32_t global = group_offset_ptr[0] + tid;
-
   int32_t start = (global > 0) ? group_offsets_cumsum[global - 1] : 0;
   int32_t m = group_offsets_cumsum[global] - start;
 
   // A = lhs slice, viewed as ColumnMajor [K, M_g] (transposed)
-  A_ptrs[tid] = lhs + static_cast<int64_t>(start) * k;
+  data.A_ptrs[tid] = lhs + static_cast<int64_t>(start) * k;
   // B = grad slice [M_g, N]
-  B_ptrs[tid] = grad + static_cast<int64_t>(start) * n;
+  data.B_ptrs[tid] = grad + static_cast<int64_t>(start) * n;
   // Output = d_rhs[tid] with shape [K, N]
-  output_ptrs[tid] = d_rhs + static_cast<int64_t>(tid) * k * n;
+  data.out_ptrs[tid] = d_rhs + static_cast<int64_t>(tid) * k * n;
 
   // GEMM: [K, M_g] @ [M_g, N] = [K, N]
-  problem_sizes[tid] = ProblemShapeType(k, n, m);
+  data.problem_sizes[tid] = ProblemShapeType(k, n, m);
 
   // ColumnMajor stride for A (lhs viewed as transposed)
-  stride_A[tid] = cutlass::make_cute_packed_stride(StrideA_Bwd{}, {m, m, 1});
-  stride_B[tid] = cutlass::make_cute_packed_stride(StrideB_Bwd{}, {n, n, 1});
-  stride_output[tid] = cutlass::make_cute_packed_stride(StrideOutput_Bwd{}, {k, n, 1});
+  data.stride_A[tid] = cutlass::make_cute_packed_stride(typename Data::StrideA{}, {m, m, 1});
+  data.stride_B[tid] = cutlass::make_cute_packed_stride(typename Data::StrideB{}, {n, n, 1});
+  data.stride_output[tid] = cutlass::make_cute_packed_stride(typename Data::StrideOutput{}, {k, n, 1});
 }
 
 ffi::Error RaggedDotCudaImpl(
@@ -275,22 +264,13 @@ ffi::Error RaggedDotCudaImpl(
   auto data = GroupedGemmData<Gemm>::Allocate(scratch, g_local);
   if (!data) return ffi::Error::Internal("Failed to allocate grouped GEMM slab.");
 
-  prepare_grouped_gemm_data<<<1, g_local, 0, stream>>>(
+  prepare_grouped_gemm_fwd<Gemm><<<1, g_local, 0, stream>>>(
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
       reinterpret_cast<const DtypeB*>(rhs.typed_data()),
       reinterpret_cast<DtypeOutput*>(out->typed_data()),
-      group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n,
-      data->A_ptrs, data->B_ptrs, data->out_ptrs,
-      data->stride_A, data->stride_B, data->stride_output, data->problem_sizes);
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n, *data);
 
-  typename Gemm::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGrouped,
-      {g_local, data->problem_sizes, nullptr},
-      {data->A_ptrs, data->stride_A, data->B_ptrs, data->stride_B},
-      {{}, nullptr, data->stride_output, data->out_ptrs, data->stride_output}};
-  args.epilogue.thread.alpha = 1.0f;
-  args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
-
+  auto args = data->MakeArgs(g_local);
   return RunGroupedGemm<Gemm>(stream, scratch, args);
 }
 
@@ -344,22 +324,13 @@ ffi::Error RaggedDotBwdCudaImpl(
   auto data = GroupedGemmData<Gemm_Bwd>::Allocate(scratch, g_local);
   if (!data) return ffi::Error::Internal("Failed to allocate grouped GEMM slab.");
 
-  prepare_grouped_gemm_bwd_data<<<1, g_local, 0, stream>>>(
+  prepare_grouped_gemm_bwd<Gemm_Bwd><<<1, g_local, 0, stream>>>(
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
       reinterpret_cast<const DtypeB*>(grad.typed_data()),
       reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
-      group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n,
-      data->A_ptrs, data->B_ptrs, data->out_ptrs,
-      data->stride_A, data->stride_B, data->stride_output, data->problem_sizes);
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n, *data);
 
-  typename Gemm_Bwd::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGrouped,
-      {g_local, data->problem_sizes, nullptr},
-      {data->A_ptrs, data->stride_A, data->B_ptrs, data->stride_B},
-      {{}, nullptr, data->stride_output, data->out_ptrs, data->stride_output}};
-  args.epilogue.thread.alpha = 1.0f;
-  args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
-
+  auto args = data->MakeArgs(g_local);
   return RunGroupedGemm<Gemm_Bwd>(stream, scratch, args);
 }
 
