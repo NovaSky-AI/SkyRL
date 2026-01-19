@@ -99,23 +99,14 @@ def _ragged_dot_ffi_call(
     rhs: jax.Array,
     group_sizes: jax.Array,
     group_offset: jax.Array,
+    group_offsets_cumsum: jax.Array,
 ) -> jax.Array:
     if not _ensure_registered():
         raise RuntimeError("ragged_dot_ffi is not available. Build and load the shared library first.")
 
-    if lhs.dtype != jnp.bfloat16 or rhs.dtype != jnp.bfloat16:
-        raise NotImplementedError("ragged_dot_ffi supports bfloat16 only.")
-    if group_sizes.dtype != jnp.int32 or group_offset.dtype != jnp.int32:
-        raise NotImplementedError("ragged_dot_ffi expects int32 group_sizes and group_offset.")
-    if group_offset.shape != (1,):
-        raise ValueError("group_offset must have shape (1,).")
-
-    # Precompute cumulative sum to avoid O(n²) loop in CUDA kernel
-    group_offsets = jnp.cumsum(group_sizes, dtype=jnp.int32)
-
     out = jax.ShapeDtypeStruct((lhs.shape[0], rhs.shape[2]), lhs.dtype)
     call = jax_ffi.ffi_call("ragged_dot_cuda", out, vmap_method=None)
-    return call(lhs, rhs, group_sizes, group_offset, group_offsets)
+    return call(lhs, rhs, group_sizes, group_offset, group_offsets_cumsum)
 
 
 def _ragged_dot_bwd_ffi_call(
@@ -123,27 +114,19 @@ def _ragged_dot_bwd_ffi_call(
     grad: jax.Array,
     group_sizes: jax.Array,
     group_offset: jax.Array,
+    group_offsets_cumsum: jax.Array,
     g_local: int,
 ) -> jax.Array:
     """Backward pass for d_rhs: computes lhs.T @ grad per group -> [G, K, N]."""
     if not _ensure_registered():
         raise RuntimeError("ragged_dot_ffi is not available. Build and load the shared library first.")
 
-    if lhs.dtype != jnp.bfloat16 or grad.dtype != jnp.bfloat16:
-        raise NotImplementedError("ragged_dot_bwd_ffi supports bfloat16 only.")
-    if group_sizes.dtype != jnp.int32 or group_offset.dtype != jnp.int32:
-        raise NotImplementedError("ragged_dot_bwd_ffi expects int32 group_sizes and group_offset.")
-    if group_offset.shape != (1,):
-        raise ValueError("group_offset must have shape (1,).")
-
     k = lhs.shape[1]
     n = grad.shape[1]
 
-    group_offsets = jnp.cumsum(group_sizes, dtype=jnp.int32)
-
     out = jax.ShapeDtypeStruct((g_local, k, n), lhs.dtype)
     call = jax_ffi.ffi_call("ragged_dot_bwd_cuda", out, vmap_method=None)
-    return call(lhs, grad, group_sizes, group_offset, group_offsets)
+    return call(lhs, grad, group_sizes, group_offset, group_offsets_cumsum)
 
 
 @jax.custom_vjp
@@ -153,7 +136,8 @@ def ragged_dot(
     group_sizes: jax.Array,
     group_offset: jax.Array,
 ) -> jax.Array:
-    return _ragged_dot_ffi_call(lhs, rhs, group_sizes, group_offset)
+    group_offsets_cumsum = jnp.cumsum(group_sizes, dtype=jnp.int32)
+    return _ragged_dot_ffi_call(lhs, rhs, group_sizes, group_offset, group_offsets_cumsum)
 
 
 def _ragged_dot_fwd(
@@ -162,21 +146,22 @@ def _ragged_dot_fwd(
     group_sizes: jax.Array,
     group_offset: jax.Array,
 ):
-    y = _ragged_dot_ffi_call(lhs, rhs, group_sizes, group_offset)
-    return y, (lhs, rhs, group_sizes, group_offset)
+    group_offsets_cumsum = jnp.cumsum(group_sizes, dtype=jnp.int32)
+    y = _ragged_dot_ffi_call(lhs, rhs, group_sizes, group_offset, group_offsets_cumsum)
+    return y, (lhs, rhs, group_sizes, group_offset, group_offsets_cumsum)
 
 
 def _ragged_dot_bwd(res, g):
-    lhs, rhs, group_sizes, group_offset = res
+    lhs, rhs, group_sizes, group_offset, group_offsets_cumsum = res
 
     # d_lhs: g @ rhs.T with ragged grouping - same structure as forward
     # g: [M, N], rhs: [G, K, N] -> rhs.T: [G, N, K], d_lhs: [M, K]
     rhs_t = jnp.swapaxes(rhs, 1, 2)  # [G, N, K]
-    d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_sizes, group_offset)
+    d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_sizes, group_offset, group_offsets_cumsum)
 
     # d_rhs: lhs.T @ g accumulated per group -> [G, K, N]
     g_local = rhs.shape[0]
-    d_rhs = _ragged_dot_bwd_ffi_call(lhs, g, group_sizes, group_offset, g_local)
+    d_rhs = _ragged_dot_bwd_ffi_call(lhs, g, group_sizes, group_offset, group_offsets_cumsum, g_local)
 
     return d_lhs, d_rhs, None, None
 
