@@ -1,27 +1,28 @@
 """
-vLLM Server Group - manages vLLM server actors with placement groups.
+Server Group - manages server actors with placement groups.
 """
 
 import logging
 from argparse import Namespace
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Type
 
 import ray
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from skyrl_train.inference_servers.common import ServerInfo
+from skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl_train.inference_servers.server_pool import ServerActorPool
 from skyrl_train.inference_servers.vllm_server_actor import VLLMServerActor
 
 logger = logging.getLogger(__name__)
 
 
-class VLLMServerGroup:
+class ServerGroup:
     """
-    Creates and manages a group of vLLM server actors.
+    Creates and manages a group of server actors.
 
-    This layer handles vLLM-specific actor creation with placement group support,
+    This layer handles actor creation with placement group support,
     then delegates pool management to ServerActorPool.
 
     Supports:
@@ -33,7 +34,7 @@ class VLLMServerGroup:
 
     def __init__(
         self,
-        vllm_cli_args: Namespace,
+        cli_args: Namespace,
         num_servers: int,
         start_port: int = 8000,
         placement_group: Optional[PlacementGroup] = None,
@@ -41,26 +42,30 @@ class VLLMServerGroup:
         enable_dp: bool = False,
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
+        server_actor_cls: Type[ServerActorProtocol] = VLLMServerActor,
     ):
         """
-        Initialize the vLLM server group.
+        Initialize the server group.
 
         Args:
-            vllm_cli_args: vLLM CLI arguments.
-            num_servers: Number of vLLM server instances to create
-            start_port: Base port for server ports
+            cli_args: CLI arguments for the server (engine-specific).
+            num_servers: Number of server instances to create.
+            start_port: Base port for server ports.
             placement_group: External placement group for colocation mode.
                 If None, creates internal placement group.
             placement_group_bundle_offset: Offset for bundle indices when using
                 external placement group (e.g., if training uses first N 
                 bundles).
-            enable_dp: Enable data parallelism across servers
-            enable_pd: Enable prefill-decode disaggregation
+            enable_dp: Enable data parallelism across servers.
+            enable_pd: Enable prefill-decode disaggregation.
             nixl_side_channel_base: Base port for NIXL side channels. Each 
                 server will be assigned a port of nixl_side_channel_base + 
                 server_idx.
+            server_actor_cls: Server actor class implementing ServerActorProtocol.
+                Defaults to VLLMServerActor.
         """
-        self._vllm_cli_args = vllm_cli_args
+        self._server_actor_cls = server_actor_cls
+        self._cli_args = cli_args
         self._num_servers = num_servers
         self._start_port = start_port
         self._external_pg = placement_group
@@ -72,10 +77,11 @@ class VLLMServerGroup:
         self._internal_pg: Optional[PlacementGroup] = None
 
         # Query the actor class for GPU requirements
-        self._num_gpus_per_server = VLLMServerActor.compute_num_gpus_per_server(vllm_cli_args)
+        self._num_gpus_per_server = server_actor_cls.compute_num_gpus_per_server(cli_args)
 
         logger.info(
-            f"VLLMServerGroup: num_servers={num_servers}, "
+            f"ServerGroup: actor_cls={server_actor_cls.__name__}, "
+            f"num_servers={num_servers}, "
             f"gpus_per_server={self._num_gpus_per_server}, "
             f"enable_dp={enable_dp}, enable_pd={enable_pd}, "
             f"external_pg={'yes' if placement_group else 'no'}"
@@ -100,7 +106,7 @@ class VLLMServerGroup:
 
     def _create_actor_class(self, pg: PlacementGroup, start_bundle_idx: int) -> Any:
         """Create actor class with scheduling constraints for a specific bundle."""
-        return ray.remote(VLLMServerActor).options(
+        return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=1,
             scheduling_strategy=PlacementGroupSchedulingStrategy(
@@ -111,7 +117,7 @@ class VLLMServerGroup:
         )
 
     def _create_actors(self) -> List[Any]:
-        """Create vLLM server actors with GPU resources."""
+        """Create server actors with GPU resources."""
         pg = self._get_placement_group()
 
         actors = []
@@ -126,7 +132,7 @@ class VLLMServerGroup:
             ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
 
             actor = ServerActorClass.remote(
-                self._vllm_cli_args,
+                self._cli_args,
                 self._start_port + server_idx,
                 server_idx=server_idx,
                 dp_size=self._num_servers if self._enable_dp else -1,
@@ -147,7 +153,7 @@ class VLLMServerGroup:
 
     def start(self) -> List[ServerInfo]:
         """Create actors, start the pool, and return endpoints."""
-        logger.info(f"Starting {self._num_servers} vLLM server(s)...")
+        logger.info(f"Starting {self._num_servers} server(s)...")
         actors = self._create_actors()
         self._pool = ServerActorPool(actors)
         server_infos = self._pool.start()
@@ -176,5 +182,5 @@ class VLLMServerGroup:
     def shutdown(self) -> None:
         """Shutdown all servers."""
         if self._pool:
-            logger.info("Shutting down vLLM servers...")
+            logger.info("Shutting down servers...")
             self._pool.shutdown()

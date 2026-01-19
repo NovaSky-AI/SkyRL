@@ -7,7 +7,7 @@ import logging
 import os
 import pickle
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from argparse import Namespace
 import httpx
@@ -27,13 +27,16 @@ from skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_op
 from skyrl_train.env_vars import (
     SKYRL_VLLM_DP_PORT_OFFSET, SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
+from skyrl_train.inference_servers.protocols import ServerActorProtocol
 
 logger = logging.getLogger(__name__)
 
 
-class VLLMServerActor:
+class VLLMServerActor(ServerActorProtocol):
     """
     Ray actor that runs a vLLM OpenAI-compatible API server.
+    
+    Implements ServerActorProtocol for use with ServerGroup.
 
     The server runs in the actor and exposes an HTTP endpoint that can be
     called from anywhere (other actors, driver, external processes).
@@ -174,7 +177,7 @@ class VLLMServerActor:
             "world_size": self._num_gpus_per_server,
         }
 
-    def get_dp_info(self) -> tuple:
+    def get_dp_info(self) -> Tuple[str, int]:
         """Get the DP master address and RPC port (for server 0 to share with others)."""
         dp_rpc_port = self._port + SKYRL_VLLM_DP_PORT_OFFSET
         return (self._ip, dp_rpc_port)
