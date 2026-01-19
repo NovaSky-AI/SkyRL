@@ -60,7 +60,9 @@ constexpr int AlignmentOutput = 8;
 
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
-using TileShape = cute::Shape<cute::_128, cute::_128, cute::_64>;
+// Tuned for Qwen3-30B-A3B MoE: small M per group, K=768/2048, N=768/2048/lora_rank
+// Smaller M tile (64) handles small groups better, K=64 for memory bandwidth
+using TileShape = cute::Shape<cute::_64, cute::_128, cute::_64>;
 // Use 2x1x1 cluster on H100 for better L2 cache utilization
 using ClusterShape = cute::Shape<cute::_2, cute::_1, cute::_1>;
 // Cooperative schedule for better work distribution across thread blocks
