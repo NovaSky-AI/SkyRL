@@ -262,8 +262,7 @@ ffi::Error RaggedDotCudaImpl(
   args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
   args.hw_info.sm_count = get_sm_count();
 
-  cutlass::Status status = gemm.can_implement(args);
-  if (status != cutlass::Status::kSuccess) {
+  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
     return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
   }
 
@@ -277,8 +276,7 @@ ffi::Error RaggedDotCudaImpl(
     workspace = workspace_or.value();
   }
 
-  status = gemm(args, workspace, stream);
-  if (status != cutlass::Status::kSuccess) {
+  if (gemm(args, workspace, stream) != cutlass::Status::kSuccess) {
     return ffi::Error::Internal("cutlass grouped gemm failed.");
   }
 
@@ -381,8 +379,7 @@ ffi::Error RaggedDotBwdCudaImpl(
   args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
   args.hw_info.sm_count = get_sm_count();
 
-  cutlass::Status status = gemm.can_implement(args);
-  if (status != cutlass::Status::kSuccess) {
+  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
     return ffi::Error::Internal("cutlass cannot implement grouped gemm bwd.");
   }
 
@@ -396,8 +393,7 @@ ffi::Error RaggedDotBwdCudaImpl(
     workspace = workspace_or.value();
   }
 
-  status = gemm(args, workspace, stream);
-  if (status != cutlass::Status::kSuccess) {
+  if (gemm(args, workspace, stream) != cutlass::Status::kSuccess) {
     return ffi::Error::Internal("cutlass grouped gemm bwd failed.");
   }
 
