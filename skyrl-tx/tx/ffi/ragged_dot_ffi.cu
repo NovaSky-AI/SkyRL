@@ -108,7 +108,7 @@ __global__ void prepare_grouped_gemm_data(
     DtypeOutput* output,
     const int32_t* group_sizes,
     const int32_t* group_offsets_cumsum,  // Precomputed cumsum of group_sizes
-    int32_t first_group_idx,
+    const int32_t* group_offset_ptr,      // Device pointer to first group index
     int32_t num_groups,
     int32_t group_count,
     int32_t k,
@@ -129,6 +129,7 @@ __global__ void prepare_grouped_gemm_data(
     return;
   }
 
+  int32_t first_group_idx = group_offset_ptr[0];
   int32_t global = first_group_idx + tid;
   if (global < 0 || global >= num_groups) {
     return;
@@ -213,7 +214,6 @@ ffi::Error RaggedDotCudaImpl(
   const DtypeB* B_base = reinterpret_cast<const DtypeB*>(rhs.typed_data());
   DtypeOutput* out_base = reinterpret_cast<DtypeOutput*>(out->typed_data());
   const int32_t* group_offsets_cumsum_ptr = group_offsets_cumsum.typed_data();
-  int32_t first_group_idx = group_offset_ptr[0];
 
   // Strides for row-major layout
   int64_t lda = k;
@@ -269,7 +269,7 @@ ffi::Error RaggedDotCudaImpl(
       out_base,
       group_sizes_ptr,
       group_offsets_cumsum_ptr,
-      first_group_idx,
+      group_offset_ptr,
       g,
       g_local,
       k,
