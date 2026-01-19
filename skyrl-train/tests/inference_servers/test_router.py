@@ -24,42 +24,42 @@ class TestRouterRoutingLogic:
         return InferenceRouter(server_urls, host="0.0.0.0", port=9999)
 
     def test_session_hash_consistency(self, router):
-        """Test that same session ID always maps to same backend."""
+        """Test that same session ID always maps to same server."""
         session_id = "user-123-session-456"
 
-        # Multiple calls should return the same backend
-        backend1 = router._get_backend_for_session(session_id)
-        backend2 = router._get_backend_for_session(session_id)
-        backend3 = router._get_backend_for_session(session_id)
+        # Multiple calls should return the same server
+        server1 = router._get_server_for_session(session_id)
+        server2 = router._get_server_for_session(session_id)
+        server3 = router._get_server_for_session(session_id)
 
-        assert backend1 == backend2 == backend3
+        assert server1 == server2 == server3
 
     def test_different_sessions_distribute(self, router):
-        """Test that different session IDs distribute across backends."""
-        # With enough session IDs, we should hit multiple backends
-        backends = set()
+        """Test that different session IDs distribute across servers."""
+        # With enough session IDs, we should hit multiple servers
+        servers = set()
         for i in range(100):
             session_id = f"session-{i}"
-            backend = router._get_backend_for_session(session_id)
-            backends.add(backend)
+            server = router._get_server_for_session(session_id)
+            servers.add(server)
 
-        # Should hit multiple backends (not all requests to one)
-        assert len(backends) >= 2
+        # Should hit multiple servers (not all requests to one)
+        assert len(servers) >= 2
 
     def test_round_robin_cycles(self, router):
-        """Test that round-robin cycles through all backends."""
-        backends = []
+        """Test that round-robin cycles through all servers."""
+        servers = []
         for _ in range(6):  # 2 full cycles
-            backend = router._get_backend_round_robin()
-            backends.append(backend)
+            server = router._get_server_round_robin()
+            servers.append(server)
 
         # First 3 should be unique
-        assert len(set(backends[:3])) == 3
+        assert len(set(servers[:3])) == 3
 
         # Should repeat the pattern
-        assert backends[0] == backends[3]
-        assert backends[1] == backends[4]
-        assert backends[2] == backends[5]
+        assert servers[0] == servers[3]
+        assert servers[1] == servers[4]
+        assert servers[2] == servers[5]
 
     def test_control_plane_route_detection(self, router):
         """Test control plane route detection."""
@@ -129,11 +129,11 @@ class TestRouterRequestRouting:
         request = MagicMock()
         request.headers = {"X-Session-ID": "test-session-123"}
 
-        backend1 = router._get_backend_for_request(request)
-        backend2 = router._get_backend_for_request(request)
+        server1 = router._get_server_for_request(request)
+        server2 = router._get_server_for_request(request)
 
-        # Same session should get same backend
-        assert backend1 == backend2
+        # Same session should get same server
+        assert server1 == server2
 
     def test_request_without_session_id_header(self, router):
         """Test that missing X-Session-ID header triggers round-robin."""
@@ -141,15 +141,15 @@ class TestRouterRequestRouting:
         request = MagicMock()
         request.headers = {}
 
-        backends = []
+        servers = []
         for _ in range(4):
-            backend = router._get_backend_for_request(request)
-            backends.append(backend)
+            server = router._get_server_for_request(request)
+            servers.append(server)
 
-        # Should alternate between backends (round-robin)
-        assert backends[0] == backends[2]
-        assert backends[1] == backends[3]
-        assert backends[0] != backends[1]
+        # Should alternate between servers (round-robin)
+        assert servers[0] == servers[2]
+        assert servers[1] == servers[3]
+        assert servers[0] != servers[1]
 
 
 class TestRouterInitialization:
@@ -168,5 +168,5 @@ class TestRouterInitialization:
         """Test that start fails with empty server list."""
         router = InferenceRouter([], host="0.0.0.0", port=8080)
 
-        with pytest.raises(ValueError, match="No backend servers"):
+        with pytest.raises(ValueError, match="No servers"):
             router.start()
