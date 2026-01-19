@@ -63,11 +63,10 @@ using OperatorClass = cutlass::arch::OpClassTensorOp;
 // Tuned for Qwen3-30B-A3B MoE: small M per group, K=768/2048, N=768/2048/lora_rank
 // Smaller M tile (64) handles small groups better, K=64 for memory bandwidth
 using TileShape = cute::Shape<cute::_64, cute::_128, cute::_64>;
-// Use 2x1x1 cluster on H100 for better L2 cache utilization
-using ClusterShape = cute::Shape<cute::_2, cute::_1, cute::_1>;
-// Cooperative schedule for better work distribution across thread blocks
-using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
-using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
+// Use 1x1x1 cluster with pingpong schedule (cooperative requires M tile >= 128)
+using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
 using ProblemShape = cutlass::gemm::GroupProblemShape<
     cute::Shape<int32_t, int32_t, int32_t>>;
 
