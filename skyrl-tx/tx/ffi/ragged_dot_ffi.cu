@@ -57,9 +57,9 @@ constexpr int AlignmentOutput = 8;
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
 using TileShape = cute::Shape<cute::_128, cute::_128, cute::_128>;
-using ClusterShape = cute::Shape<cute::_2, cute::_1, cute::_1>;
-using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
-using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
+using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
 using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int32_t, int32_t, int32_t>>;
 
 using CollectiveEpilogue =
