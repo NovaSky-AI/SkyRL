@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import functools
 import os
 from pathlib import Path
 
@@ -8,52 +9,23 @@ import jax
 import jax.numpy as jnp
 
 
-_REGISTERED = False
-_LOAD_ERROR: Exception | None = None
-
-
-def _find_library() -> Path | None:
-    env_path = os.environ.get("TX_RAGGED_DOT_FFI_PATH")
-    if env_path:
-        path = Path(env_path)
-        return path if path.exists() else None
-
-    here = Path(__file__).resolve().parent
-    for name in ("libragged_dot_ffi.so", "ragged_dot_ffi.so"):
-        candidate = here / name
-        if candidate.exists():
-            return candidate
-    return None
-
-
+@functools.lru_cache(maxsize=1)
 def _ensure_registered() -> bool:
-    global _REGISTERED, _LOAD_ERROR
-    if _REGISTERED:
-        return True
-    if _LOAD_ERROR is not None:
-        return False
+    if env_path := os.environ.get("TX_RAGGED_DOT_FFI_PATH"):
+        lib_path = Path(env_path)
+    else:
+        here = Path(__file__).resolve().parent
+        lib_path = next((p for p in [here / "libragged_dot_ffi.so", here / "ragged_dot_ffi.so"] if p.exists()), None)
 
-    lib_path = _find_library()
-    if lib_path is None:
-        _LOAD_ERROR = FileNotFoundError("ragged_dot_ffi shared library not found.")
+    if not lib_path or not lib_path.exists():
         return False
 
     try:
         lib = ctypes.cdll.LoadLibrary(str(lib_path))
-        jax.ffi.register_ffi_target(
-            "ragged_dot_cuda",
-            jax.ffi.pycapsule(lib.RaggedDotCuda),
-            platform="CUDA",
-        )
-        jax.ffi.register_ffi_target(
-            "ragged_dot_bwd_cuda",
-            jax.ffi.pycapsule(lib.RaggedDotBwdCuda),
-            platform="CUDA",
-        )
-        _REGISTERED = True
+        jax.ffi.register_ffi_target("ragged_dot_cuda", jax.ffi.pycapsule(lib.RaggedDotCuda), platform="CUDA")
+        jax.ffi.register_ffi_target("ragged_dot_bwd_cuda", jax.ffi.pycapsule(lib.RaggedDotBwdCuda), platform="CUDA")
         return True
-    except Exception as exc:  # pragma: no cover - load/registration failures
-        _LOAD_ERROR = exc
+    except Exception:
         return False
 
 
