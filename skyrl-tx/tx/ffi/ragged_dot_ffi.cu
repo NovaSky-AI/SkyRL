@@ -25,21 +25,16 @@
 
 namespace ffi = xla::ffi;
 
-// Cache SM count per device
-static int g_sm_count[16] = {0};
-
 static int get_sm_count() {
   int device = 0;
-  if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= 16) {
+  if (cudaGetDevice(&device) != cudaSuccess) {
     return 0;
   }
-  if (g_sm_count[device] == 0) {
-    cudaDeviceProp props;
-    if (cudaGetDeviceProperties(&props, device) == cudaSuccess) {
-      g_sm_count[device] = props.multiProcessorCount;
-    }
+  cudaDeviceProp props;
+  if (cudaGetDeviceProperties(&props, device) != cudaSuccess) {
+    return 0;
   }
-  return g_sm_count[device];
+  return props.multiProcessorCount;
 }
 
 using DtypeA = cutlass::bfloat16_t;
