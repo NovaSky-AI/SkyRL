@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 
 import jax
-from jax import lax
 import jax.numpy as jnp
 
 try:  # JAX >= 0.8
@@ -65,33 +64,6 @@ def _ensure_registered() -> bool:
 
 def is_available() -> bool:
     return _ensure_registered()
-
-
-def _ragged_dot_ref(
-    lhs: jax.Array,
-    rhs: jax.Array,
-    group_sizes: jax.Array,
-    group_offset: jax.Array,
-) -> jax.Array:
-    if group_offset.shape != (1,):
-        raise ValueError("group_offset must have shape (1,).")
-
-    offset = group_offset[0]
-    m = lhs.shape[0]
-    g_local = rhs.shape[0]
-
-    cumsum = jnp.cumulative_sum(group_sizes, include_initial=True)
-    shard_start = cumsum[offset]
-    shard_end = cumsum[offset + g_local]
-
-    token_idx = jnp.arange(m)
-    valid_mask = (token_idx >= shard_start) & (token_idx < shard_end)
-
-    local_group_sizes = lax.dynamic_slice_in_dim(group_sizes, offset, g_local, axis=0)
-    adjusted_group_sizes = local_group_sizes.at[0].add(shard_start).at[-1].add(m - shard_end)
-
-    result = lax.ragged_dot(lhs, rhs, adjusted_group_sizes)
-    return jnp.where(valid_mask[:, None], result, 0)
 
 
 def _ragged_dot_ffi_call(
