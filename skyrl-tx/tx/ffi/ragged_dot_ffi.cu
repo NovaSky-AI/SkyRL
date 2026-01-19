@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include <array>
+#include <vector>
 
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
@@ -25,14 +26,19 @@
 
 namespace ffi = xla::ffi;
 
+static std::vector<cudaDeviceProp> g_device_props;
+
 static int get_sm_count() {
   int device = 0;
-  if (cudaGetDevice(&device) != cudaSuccess) {
+  if (cudaGetDevice(&device) != cudaSuccess || device < 0) {
     return 0;
   }
-  cudaDeviceProp props;
-  if (cudaGetDeviceProperties(&props, device) != cudaSuccess) {
-    return 0;
+  if (static_cast<size_t>(device) >= g_device_props.size()) {
+    g_device_props.resize(device + 1);
+  }
+  cudaDeviceProp& props = g_device_props[device];
+  if (!props.multiProcessorCount) {
+    cudaGetDeviceProperties(&props, device);
   }
   return props.multiProcessorCount;
 }
