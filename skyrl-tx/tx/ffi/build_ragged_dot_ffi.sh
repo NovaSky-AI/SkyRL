@@ -35,6 +35,9 @@ mkdir -p "${OUT_DIR}"
   -std=c++17 \
   -arch=sm_${NVCC_ARCH} \
   --expt-relaxed-constexpr \
+  -DCUTLASS_ENABLE_TENSOR_CORE_MMA=1 \
+  -DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED \
+  -DCUTLASS_ENABLE_GDC_FOR_SM90=1 \
   -shared \
   -Xcompiler -fPIC \
   -I"${JAX_INCLUDE_DIR}" \
