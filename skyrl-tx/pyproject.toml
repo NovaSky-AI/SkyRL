@@ -70,6 +70,9 @@ dev = [
 [tool.hatch.version]
 path = "tx/__init__.py"
 
+[tool.hatch.build.targets.wheel]
+packages = ["tx"]
+
 [tool.hatch.build.hooks.custom]
 path = "tx/ffi/build.py"
 
