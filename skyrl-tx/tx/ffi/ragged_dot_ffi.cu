@@ -269,9 +269,8 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
   }
 
-  size_t workspace_size = Gemm::get_workspace_size(args);
   void* workspace = nullptr;
-  if (workspace_size > 0) {
+  if (size_t workspace_size = Gemm::get_workspace_size(args)) {
     auto workspace_or = scratch.Allocate(workspace_size);
     if (!workspace_or.has_value()) {
       return ffi::Error::Internal("Failed to allocate CUTLASS workspace from scratch.");
@@ -383,9 +382,8 @@ ffi::Error RaggedDotBwdCudaImpl(
     return ffi::Error::Internal("cutlass cannot implement grouped gemm bwd.");
   }
 
-  size_t workspace_size = Gemm_Bwd::get_workspace_size(args);
   void* workspace = nullptr;
-  if (workspace_size > 0) {
+  if (size_t workspace_size = Gemm_Bwd::get_workspace_size(args)) {
     auto workspace_or = scratch.Allocate(workspace_size);
     if (!workspace_or.has_value()) {
       return ffi::Error::Internal("Failed to allocate CUTLASS bwd workspace from scratch.");
