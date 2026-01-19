@@ -162,17 +162,21 @@ class InferenceRouter:
         else:
             return await self._proxy_to_one(request, path)
 
+    def _forward_headers(self, request: Request) -> dict:
+        """Forward headers (filter out hop-by-hop headers)."""
+        return {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length", "transfer-encoding")
+        }
+
     async def _proxy_to_one(self, request: Request, path: str) -> Response:
         """Proxy request to one server (data plane)."""
         server_url = self._get_server_for_request(request)
         url = f"{server_url}{path}"
 
         # Forward headers (filter out hop-by-hop headers)
-        headers = {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower() not in ("host", "content-length", "transfer-encoding")
-        }
+        headers = self._forward_headers(request)
 
         response = await self._client.request(
             method=request.method,
@@ -193,11 +197,7 @@ class InferenceRouter:
         body = await request.body()
 
         # Forward headers
-        headers = {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower() not in ("host", "content-length", "transfer-encoding")
-        }
+        headers = self._forward_headers(request)
 
         # Send to all servers concurrently
         async def call_server(server_url: str):

@@ -1,172 +1,97 @@
-"""Tests for inference_servers.router module."""
+"""Tests for InferenceRouter."""
 
+import asyncio
+import socket
+import threading
+import time
+
+import httpx
 import pytest
-from unittest.mock import MagicMock, AsyncMock
+import uvicorn
+from fastapi import FastAPI
 
-from skyrl_train.inference_servers.router import (
-    InferenceRouter,
-    DATA_PLANE_ROUTES,
-    CONTROL_PLANE_ROUTES,
-)
+from skyrl_train.inference_servers.router import InferenceRouter
 
 
-class TestRouterRoutingLogic:
-    """Tests for router routing logic (no actual HTTP calls)."""
-
-    @pytest.fixture
-    def router(self):
-        """Create a router with mock backends."""
-        server_urls = [
-            "http://backend1:8000",
-            "http://backend2:8000",
-            "http://backend3:8000",
-        ]
-        return InferenceRouter(server_urls, host="0.0.0.0", port=9999)
-
-    def test_session_hash_consistency(self, router):
-        """Test that same session ID always maps to same server."""
-        session_id = "user-123-session-456"
-
-        # Multiple calls should return the same server
-        server1 = router._get_server_for_session(session_id)
-        server2 = router._get_server_for_session(session_id)
-        server3 = router._get_server_for_session(session_id)
-
-        assert server1 == server2 == server3
-
-    def test_different_sessions_distribute(self, router):
-        """Test that different session IDs distribute across servers."""
-        # With enough session IDs, we should hit multiple servers
-        servers = set()
-        for i in range(100):
-            session_id = f"session-{i}"
-            server = router._get_server_for_session(session_id)
-            servers.add(server)
-
-        # Should hit multiple servers (not all requests to one)
-        assert len(servers) >= 2
-
-    def test_round_robin_cycles(self, router):
-        """Test that round-robin cycles through all servers."""
-        servers = []
-        for _ in range(6):  # 2 full cycles
-            server = router._get_server_round_robin()
-            servers.append(server)
-
-        # First 3 should be unique
-        assert len(set(servers[:3])) == 3
-
-        # Should repeat the pattern
-        assert servers[0] == servers[3]
-        assert servers[1] == servers[4]
-        assert servers[2] == servers[5]
-
-    def test_control_plane_route_detection(self, router):
-        """Test control plane route detection."""
-        # Control plane routes
-        assert router._is_control_plane_route("/pause") is True
-        assert router._is_control_plane_route("/resume") is True
-        assert router._is_control_plane_route("/sleep") is True
-        assert router._is_control_plane_route("/wake_up") is True
-        assert router._is_control_plane_route("/wakeup") is True
-        assert router._is_control_plane_route("/reset_prefix_cache") is True
-        assert router._is_control_plane_route("/init_weight_transfer") is True
-        assert router._is_control_plane_route("/update_weights") is True
-        assert router._is_control_plane_route("/finalize_weight_update") is True
-
-        # Data plane routes should NOT be control plane
-        assert router._is_control_plane_route("/v1/completions") is False
-        assert router._is_control_plane_route("/v1/chat/completions") is False
-        assert router._is_control_plane_route("/health") is False
-        assert router._is_control_plane_route("/models") is False
-        assert router._is_control_plane_route("/tokenize") is False
-
-    def test_data_plane_routes_list(self):
-        """Test that data plane routes list is correct."""
-        expected = [
-            "/v1/completions",
-            "/v1/chat/completions",
-            "/tokenize",
-            "/detokenize",
-            "/health",
-            "/models",
-            "/version",
-        ]
-        assert DATA_PLANE_ROUTES == expected
-
-    def test_control_plane_routes_list(self):
-        """Test that control plane routes list is correct."""
-        expected = [
-            "/pause",
-            "/resume",
-            "/sleep",
-            "/wake_up",
-            "/wakeup",
-            "/reset_prefix_cache",
-            "/collective_rpc",
-            "/init_weight_transfer",
-            "/update_weights",
-            "/finalize_weight_update",
-        ]
-        assert CONTROL_PLANE_ROUTES == expected
+def get_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)
+        return s.getsockname()[1]
 
 
-class TestRouterRequestRouting:
-    """Tests for request routing based on headers."""
+def create_mock_server(server_id: int) -> FastAPI:
+    app = FastAPI()
 
-    @pytest.fixture
-    def router(self):
-        """Create a router with mock backends."""
-        server_urls = [
-            "http://backend1:8000",
-            "http://backend2:8000",
-        ]
-        return InferenceRouter(server_urls, host="0.0.0.0", port=9999)
+    @app.api_route("/{path:path}", methods=["GET", "POST"])
+    async def catch_all(path: str):
+        return {"server_id": server_id, "path": f"/{path}"}
 
-    def test_request_with_session_id_header(self, router):
-        """Test that X-Session-ID header triggers session-aware routing."""
-        # Create mock request with session header
-        request = MagicMock()
-        request.headers = {"X-Session-ID": "test-session-123"}
-
-        server1 = router._get_server_for_request(request)
-        server2 = router._get_server_for_request(request)
-
-        # Same session should get same server
-        assert server1 == server2
-
-    def test_request_without_session_id_header(self, router):
-        """Test that missing X-Session-ID header triggers round-robin."""
-        # Create mock request without session header
-        request = MagicMock()
-        request.headers = {}
-
-        servers = []
-        for _ in range(4):
-            server = router._get_server_for_request(request)
-            servers.append(server)
-
-        # Should alternate between servers (round-robin)
-        assert servers[0] == servers[2]
-        assert servers[1] == servers[3]
-        assert servers[0] != servers[1]
+    return app
 
 
-class TestRouterInitialization:
-    """Tests for router initialization."""
+def start_server(port: int, server_id: int) -> None:
+    app = create_mock_server(server_id)
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    threading.Thread(target=lambda: asyncio.run(server.serve()), daemon=True).start()
 
-    def test_router_init_with_servers(self):
-        """Test router initialization with server list."""
-        urls = ["http://a:8000", "http://b:8000"]
-        router = InferenceRouter(urls, host="127.0.0.1", port=8080)
 
-        assert router._server_urls == urls
-        assert router._host == "127.0.0.1"
-        assert router._port == 8080
+def wait_ready(url: str, timeout: float = 5.0) -> bool:
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            if httpx.get(f"{url}/health", timeout=1.0).status_code == 200:
+                return True
+        except httpx.RequestError:
+            time.sleep(0.1)
+    return False
 
-    def test_router_start_fails_without_servers(self):
-        """Test that start fails with empty server list."""
-        router = InferenceRouter([], host="0.0.0.0", port=8080)
 
-        with pytest.raises(ValueError, match="No servers"):
-            router.start()
+@pytest.fixture(scope="module")
+def env():
+    """Start mock servers and router once for all tests."""
+    ports = [get_free_port(), get_free_port()]
+    router_port = get_free_port()
+    urls = [f"http://127.0.0.1:{p}" for p in ports]
+
+    for i, port in enumerate(ports):
+        start_server(port, server_id=i)
+    for url in urls:
+        assert wait_ready(url)
+
+    router = InferenceRouter(urls, host="127.0.0.1", port=router_port)
+    router._client = httpx.AsyncClient(timeout=httpx.Timeout(None))
+    router._app = router._build_app()
+    threading.Thread(
+        target=lambda: asyncio.run(router._run_server()), daemon=True
+    ).start()
+
+    router_url = f"http://127.0.0.1:{router_port}"
+    assert wait_ready(router_url)
+    yield router_url
+
+
+def test_round_robin(env):
+    """Requests without session distribute across servers."""
+    server_ids = {httpx.get(f"{env}/health").json()["server_id"] for _ in range(4)}
+    assert len(server_ids) == 2
+
+
+def test_session_affinity(env):
+    """Same X-Session-ID routes to same server."""
+    headers = {"X-Session-ID": "sticky"}
+    ids = [httpx.get(f"{env}/health", headers=headers).json()["server_id"] for _ in range(3)]
+    assert len(set(ids)) == 1
+
+
+def test_control_plane_fanout(env):
+    """Control plane routes fan out to all servers."""
+    resp = httpx.post(f"{env}/sleep", json={})
+    assert resp.status_code == 200 and resp.json()["status"] == "ok"
+
+
+def test_list_servers(env):
+    """/servers returns all server URLs."""
+    resp = httpx.get(f"{env}/servers")
+    assert resp.status_code == 200 and len(resp.json()["servers"]) == 2

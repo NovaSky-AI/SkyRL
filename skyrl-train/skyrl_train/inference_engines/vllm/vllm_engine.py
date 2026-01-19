@@ -68,7 +68,7 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
 
 # Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
 # This alias preserves the old import path for existing scripts/configs.
-# TODO: Remove this alias once all references are updated.
+# TODO (Kourosh): Remove this alias once all references are updated.
 from skyrl_train.inference_servers.vllm_worker import WorkerWrap  # noqa: F401
 
 
