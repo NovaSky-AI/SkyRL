@@ -38,10 +38,9 @@ CONTROL_PLANE_ROUTES = [
     "/wakeup",
     "/reset_prefix_cache",
     "/collective_rpc",
-    "/init_weight_update_communicator",
+    "/init_weight_transfer",
     "/update_weights",
     "/finalize_weight_update",
-    "/destroy_weights_update_group",
 ]
 
 

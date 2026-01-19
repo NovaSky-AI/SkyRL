@@ -7,14 +7,26 @@ import logging
 import os
 import pickle
 import time
-from argparse import Namespace
 from typing import Any, Dict, Optional
 
+from argparse import Namespace
 import httpx
 import uvicorn
 from fastapi import Request
 
-from skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_free_port
+
+from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.openai.api_server import build_app, create_server_socket, init_app_state
+from vllm.usage.usage_lib import UsageContext
+import vllm.envs as envs
+from vllm.utils.system_utils import set_ulimit
+
+
+from skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_open_port
+from skyrl_train.env_vars import (
+    SKYRL_VLLM_DP_PORT_OFFSET, SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,24 +39,27 @@ class VLLMServerActor:
     called from anywhere (other actors, driver, external processes).
 
     Custom endpoints added for SkyRL:
-    - /init_weight_update_communicator: Initialize weight sync process group
+    - /get_server_info: Return parallelism info
+    
+    - (vLLM RFC: https://github.com/vllm-project/vllm/issues/31848)
+    - /init_weight_transfer: Initialize weight sync process group
     - /update_weights: Update model weights via NCCL broadcast
     - /finalize_weight_update: Post-processing after weight sync
-    - /destroy_weights_update_group: Teardown weight sync
-    - /sleep: Offload weights to CPU
-    - /wake_up: Load weights back to GPU
-    - /reset_prefix_cache: Clear KV cache
-    - /get_server_info: Return parallelism info
     """
 
     @staticmethod
-    def compute_num_gpus_per_server(engine_args: Namespace) -> int:
-        """Compute the number of GPUs needed per server based on TP * PP."""
-        return engine_args.tensor_parallel_size * engine_args.pipeline_parallel_size
+    def compute_num_gpus_per_server(vllm_cli_args: Namespace) -> int:
+        """Compute the number of GPUs needed per server based on TP * PP.
+        
+        This logic might need adjustment if we want to support other 
+        parallelism schemes. If we get to this point, we should add a 
+        vllm-specific utility for it and keep the logic inside the engine.
+        """
+        return vllm_cli_args.tensor_parallel_size * vllm_cli_args.pipeline_parallel_size
 
     def __init__(
         self,
-        engine_args: Namespace,
+        vllm_cli_args: Namespace,
         start_port: int = 8000,
         server_idx: int = 0,
         dp_size: int = -1,
@@ -58,8 +73,8 @@ class VLLMServerActor:
         Initialize the vLLM server actor.
 
         Args:
-            engine_args: vLLM engine configuration (Namespace from make_arg_parser).
-                Required attributes: tensor_parallel_size, pipeline_parallel_size, model.
+            vllm_cli_args: vLLM CLI arguments.
+                Required attributes: tensor_parallel_size, pipeline_parallel_size.
                 Optional: uvicorn_log_level, ssl_*, disable_uvicorn_access_log, kv_transfer_config.
             start_port: Base port to start searching for free port
             server_idx: Index of this server in the group
@@ -69,15 +84,15 @@ class VLLMServerActor:
             enable_pd: Enable prefill-decode disaggregation
             nixl_side_channel_base: Base port for NIXL side channel
         """
-        self._engine_args = engine_args
+        self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
-        self._port = get_free_port(start_port)
+        self._port = get_open_port(start_port)
         self._server_idx = server_idx
-        self._num_gpus_per_server = self.compute_num_gpus_per_server(engine_args)
+        self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
 
         # Update args with our assigned host/port
-        self._engine_args.host = "0.0.0.0"
-        self._engine_args.port = self._port
+        self._cli_args.host = "0.0.0.0"
+        self._cli_args.port = self._port
 
         # PD disaggregation: setup NIXL side channel for KV transfer
         if enable_pd:
@@ -85,17 +100,20 @@ class VLLMServerActor:
 
         # Each engine needs to know its dp_rank and dp_size so DP process groups are formed
         if dp_size > 0:
-            self._engine_args.data_parallel_size = dp_size
-            self._engine_args.data_parallel_rank = server_idx
-            # All DP ranks need to know the master's address and RPC port for handshake
+            self._cli_args.data_parallel_size = dp_size
+            self._cli_args.data_parallel_rank = server_idx
+
+            # DP0 will be the master sharing its ip and port with others.
+            # So if we are not DP0, we need to pass master_ip and port from 
+            # outside. otherwise, we can use the local ip and port.
             if server_idx == 0:
                 dp_master_address, dp_rpc_port = self.get_dp_info()
 
             if dp_master_address is None or dp_rpc_port is None:
                 raise ValueError("DP address and RPC port must be set for non-server 0")
 
-            self._engine_args.data_parallel_address = dp_master_address
-            self._engine_args.data_parallel_rpc_port = dp_rpc_port
+            self._cli_args.data_parallel_address = dp_master_address
+            self._cli_args.data_parallel_rpc_port = dp_rpc_port
             logger.info(
                 f"Server {server_idx}: DP enabled - dp_size={dp_size}, dp_rank={server_idx}, "
                 f"dp_master_address={dp_master_address}, dp_rpc_port={dp_rpc_port}"
@@ -108,8 +126,9 @@ class VLLMServerActor:
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
 
-        self._engine = None
-        self._server_task = None
+        # Initialized lazily to not block the actor initialization.
+        self._engine: Optional[AsyncLLMEngine] = None
+        self._server_task: Optional[asyncio.Task] = None
 
     def _setup_nixl_side_channel(self, base_port: int) -> None:
         """
@@ -125,13 +144,16 @@ class VLLMServerActor:
 
         engine_id = f"server-{self._server_idx}-{self._ip}-{side_channel_port}"
 
-        if hasattr(self._engine_args, "kv_transfer_config") and self._engine_args.kv_transfer_config:
+        if hasattr(self._cli_args, "kv_transfer_config") and self._cli_args.kv_transfer_config:
             try:
-                kv_config = json.loads(self._engine_args.kv_transfer_config)
-                kv_config["engine_id"] = engine_id
-                self._engine_args.kv_transfer_config = json.dumps(kv_config)
-            except (json.JSONDecodeError, TypeError):
-                pass
+                kv_config = json.loads(self._cli_args.kv_transfer_config)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise ValueError(
+                    f"Invalid kv_transfer_config: expected valid JSON string, "
+                    f"got {type(self._cli_args.kv_transfer_config).__name__}: {e}"
+                ) from e
+            kv_config["engine_id"] = engine_id
+            self._cli_args.kv_transfer_config = json.dumps(kv_config)
 
         logger.info(
             f"Server {self._server_idx}: NIXL side channel configured - "
@@ -142,27 +164,23 @@ class VLLMServerActor:
         """Get the server's IP and port info."""
         return ServerInfo(ip=self._ip, port=self._port)
 
-    def get_extended_server_info(self) -> Dict[str, Any]:
+    def _get_extended_server_info(self) -> Dict[str, Any]:
         """Return extended server info including parallelism settings."""
         return {
             "ip": self._ip,
             "port": self._port,
             "url": f"http://{self._ip}:{self._port}",
             "server_idx": self._server_idx,
-            "tp_size": self._engine_args.tensor_parallel_size,
-            "pp_size": self._engine_args.pipeline_parallel_size,
-            "dp_size": getattr(self._engine_args, "data_parallel_size", 1),
             "world_size": self._num_gpus_per_server,
         }
 
     def get_dp_info(self) -> tuple:
         """Get the DP master address and RPC port (for server 0 to share with others)."""
-        dp_rpc_port = self._port + 500
+        dp_rpc_port = self._port + SKYRL_VLLM_DP_PORT_OFFSET
         return (self._ip, dp_rpc_port)
 
     async def start(self) -> ServerInfo:
         """Start the vLLM server. Blocks until server is healthy."""
-        from vllm.utils.system_utils import set_ulimit
 
         set_ulimit()
         logger.info(f"Starting server on {self._ip}:{self._port}...")
@@ -175,7 +193,7 @@ class VLLMServerActor:
 
         return self.get_server_info()
 
-    async def _wait_until_healthy(self, timeout: float = 600, interval: float = 1.0) -> None:
+    async def _wait_until_healthy(self, timeout: float = SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S) -> None:
         """Poll the /health endpoint until it responds OK."""
         url = f"http://{self._ip}:{self._port}/health"
         start_time = time.time()
@@ -200,23 +218,17 @@ class VLLMServerActor:
                 if time.time() - start_time > timeout:
                     raise TimeoutError(f"Server failed to become healthy within {timeout}s")
 
-                await asyncio.sleep(interval)
+                await asyncio.sleep(1.0)
 
     async def _run_server(self) -> None:
         """Internal method to run the HTTP server."""
-        from vllm import AsyncLLMEngine
-        from vllm.engine.arg_utils import AsyncEngineArgs
-        from vllm.entrypoints.openai.api_server import build_app, create_server_socket, init_app_state
-        from vllm.usage.usage_lib import UsageContext
-        import vllm.envs as envs
-
-        sock_addr = (self._engine_args.host, self._engine_args.port)
+        sock_addr = (self._cli_args.host, self._cli_args.port)
         sock = create_server_socket(sock_addr)
-        app = build_app(self._engine_args)
+        app = build_app(self._cli_args)
 
         # Initialize the engine (this loads the model - takes time)
-        engine_args = AsyncEngineArgs.from_cli_args(self._engine_args)
-        self._engine = AsyncLLMEngine.from_engine_args(
+        engine_args = AsyncEngineArgs.from_cli_args(self._cli_args)
+        self._engine = AsyncLLMEngine.from_cli_args(
             engine_args=engine_args,
             usage_context=UsageContext.OPENAI_API_SERVER,
         )
@@ -225,20 +237,20 @@ class VLLMServerActor:
         # Add custom SkyRL endpoints
         self._add_custom_endpoints(app)
 
-        await init_app_state(self._engine, app.state, self._engine_args)
+        await init_app_state(self._engine, app.state, self._cli_args)
 
         # Use uvicorn directly (serve_http tries to add signal handlers which fails in Ray actors)
         config = uvicorn.Config(
             app,
-            host=self._engine_args.host,
-            port=self._engine_args.port,
-            log_level=self._engine_args.uvicorn_log_level,
+            host=self._cli_args.host,
+            port=self._cli_args.port,
+            log_level=self._cli_args.uvicorn_log_level,
             timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
-            ssl_keyfile=self._engine_args.ssl_keyfile,
-            ssl_certfile=self._engine_args.ssl_certfile,
-            ssl_ca_certs=self._engine_args.ssl_ca_certs,
-            ssl_cert_reqs=self._engine_args.ssl_cert_reqs,
-            access_log=not getattr(self._engine_args, "disable_uvicorn_access_log", False),
+            ssl_keyfile=self._cli_args.ssl_keyfile,
+            ssl_certfile=self._cli_args.ssl_certfile,
+            ssl_ca_certs=self._cli_args.ssl_ca_certs,
+            ssl_cert_reqs=self._cli_args.ssl_cert_reqs,
+            access_log=not getattr(self._cli_args, "disable_uvicorn_access_log", False),
         )
         server = uvicorn.Server(config)
         await server.serve(sockets=[sock])
@@ -250,19 +262,25 @@ class VLLMServerActor:
         @app.get("/get_server_info")
         async def _get_server_info():
             """Return server parallelism info."""
-            return self.get_extended_server_info()
+            return self._get_extended_server_info()
 
-        @app.post("/init_weight_update_communicator")
-        async def _init_weight_update_communicator(request: Request):
+        # TODO (Kourosh): After https://github.com/vllm-project/vllm/pull/
+        # 31943/ is merged, use the native API.
+        @app.post("/init_weight_transfer")
+        async def _init_weight_transfer(request: Request):
             """Initialize weight sync process group."""
             from skyrl_train.weight_sync import BroadcastInitInfo
 
             data = await request.json()
-            init_info = BroadcastInitInfo(**data)
+            init_info = BroadcastInitInfo(**data).for_engine(
+                engine_index=self._server_idx, 
+                tp_size=self._cli_args.tensor_parallel_size, 
+                pp_size=self._cli_args.pipeline_parallel_size
+            )
             pickled_init_info = pickle.dumps(init_info)
 
             await engine.collective_rpc(
-                "init_weight_update_communicator",
+                "init_weight_transfer",
                 args=(pickled_init_info,),
             )
             return {"status": "ok"}
@@ -287,78 +305,11 @@ class VLLMServerActor:
             """
             Finalize weight update - post-processing hook.
 
-            Currently a no-op, reserved for future use (cache invalidation, etc).
+            Currently a no-op, reserved for future use e.g. Quantization
+            See https://github.com/vllm-project/vllm/issues/31848 for more 
+            details.
             """
             # No-op for now - placeholder for future post-processing
-            return {"status": "ok"}
-
-        @app.post("/destroy_weights_update_group")
-        async def _destroy_weights_update_group(request: Request):
-            """Teardown weight sync process group."""
-            await engine.collective_rpc(
-                "teardown_weight_receiver",
-                args=(),
-            )
-            return {"status": "ok"}
-
-        @app.post("/sleep")
-        async def _sleep(request: Request):
-            """Offload weights to CPU."""
-            data = await request.json()
-            level = data.get("level", 1)
-
-            # Reset prefix cache before sleep to avoid gibberish on wake
-            # See: https://github.com/vllm-project/vllm/issues/17103
-            await engine.reset_prefix_cache()
-            await engine.sleep(level)
-            return {"status": "ok"}
-
-        @app.post("/wake_up")
-        async def _wake_up(request: Request):
-            """Load weights back to GPU."""
-            data = await request.json()
-            tags = data.get("tags")
-            await engine.wake_up(tags)
-            return {"status": "ok"}
-
-        @app.post("/wakeup")
-        async def _wakeup(request: Request):
-            """Alias for /wake_up."""
-            data = await request.json()
-            tags = data.get("tags")
-            await engine.wake_up(tags)
-            return {"status": "ok"}
-
-        @app.post("/reset_prefix_cache")
-        async def _reset_prefix_cache(request: Request):
-            """Clear KV cache."""
-            data = await request.json()
-            reset_running = data.get("reset_running_requests", False)
-            if reset_running:
-                # If reset_running_requests is True, we need to abort first
-                await engine.abort_all_requests()
-            await engine.reset_prefix_cache()
-            return {"status": "ok"}
-
-        @app.post("/pause")
-        async def _pause(request: Request):
-            """Pause generation."""
-            data = await request.json()
-            wait_for_inflight = data.get("wait_for_inflight_request", False)
-            # vLLM's pause API - implementation depends on vLLM version
-            if hasattr(engine, "pause"):
-                await engine.pause(wait_for_inflight_request=wait_for_inflight)
-            else:
-                # Fallback: abort all if pause not available
-                if not wait_for_inflight:
-                    await engine.abort_all_requests()
-            return {"status": "ok"}
-
-        @app.post("/resume")
-        async def _resume(request: Request):
-            """Resume generation."""
-            if hasattr(engine, "resume"):
-                await engine.resume()
             return {"status": "ok"}
 
     async def shutdown(self) -> None:

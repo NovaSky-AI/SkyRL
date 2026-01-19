@@ -70,7 +70,7 @@ class TestRouterRoutingLogic:
         assert router._is_control_plane_route("/wake_up") is True
         assert router._is_control_plane_route("/wakeup") is True
         assert router._is_control_plane_route("/reset_prefix_cache") is True
-        assert router._is_control_plane_route("/init_weight_update_communicator") is True
+        assert router._is_control_plane_route("/init_weight_transfer") is True
         assert router._is_control_plane_route("/update_weights") is True
         assert router._is_control_plane_route("/finalize_weight_update") is True
 
@@ -104,10 +104,9 @@ class TestRouterRoutingLogic:
             "/wakeup",
             "/reset_prefix_cache",
             "/collective_rpc",
-            "/init_weight_update_communicator",
+            "/init_weight_transfer",
             "/update_weights",
             "/finalize_weight_update",
-            "/destroy_weights_update_group",
         ]
         assert CONTROL_PLANE_ROUTES == expected
 
