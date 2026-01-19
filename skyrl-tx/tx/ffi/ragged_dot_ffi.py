@@ -97,7 +97,6 @@ def _ragged_dot_ref(
 def _ragged_dot_ffi_call(
     lhs: jax.Array,
     rhs: jax.Array,
-    group_sizes: jax.Array,
     group_offset: jax.Array,
     group_offsets_cumsum: jax.Array,
 ) -> jax.Array:
@@ -106,13 +105,12 @@ def _ragged_dot_ffi_call(
 
     out = jax.ShapeDtypeStruct((lhs.shape[0], rhs.shape[2]), lhs.dtype)
     call = jax_ffi.ffi_call("ragged_dot_cuda", out, vmap_method=None)
-    return call(lhs, rhs, group_sizes, group_offset, group_offsets_cumsum)
+    return call(lhs, rhs, group_offset, group_offsets_cumsum)
 
 
 def _ragged_dot_bwd_ffi_call(
     lhs: jax.Array,
     grad: jax.Array,
-    group_sizes: jax.Array,
     group_offset: jax.Array,
     group_offsets_cumsum: jax.Array,
     g_local: int,
@@ -126,7 +124,7 @@ def _ragged_dot_bwd_ffi_call(
 
     out = jax.ShapeDtypeStruct((g_local, k, n), lhs.dtype)
     call = jax_ffi.ffi_call("ragged_dot_bwd_cuda", out, vmap_method=None)
-    return call(lhs, grad, group_sizes, group_offset, group_offsets_cumsum)
+    return call(lhs, grad, group_offset, group_offsets_cumsum)
 
 
 @jax.custom_vjp
@@ -137,7 +135,7 @@ def ragged_dot(
     group_offset: jax.Array,
 ) -> jax.Array:
     group_offsets_cumsum = jnp.cumsum(group_sizes, dtype=jnp.int32)
-    return _ragged_dot_ffi_call(lhs, rhs, group_sizes, group_offset, group_offsets_cumsum)
+    return _ragged_dot_ffi_call(lhs, rhs, group_offset, group_offsets_cumsum)
 
 
 def _ragged_dot_fwd(
@@ -147,21 +145,21 @@ def _ragged_dot_fwd(
     group_offset: jax.Array,
 ):
     group_offsets_cumsum = jnp.cumsum(group_sizes, dtype=jnp.int32)
-    y = _ragged_dot_ffi_call(lhs, rhs, group_sizes, group_offset, group_offsets_cumsum)
-    return y, (lhs, rhs, group_sizes, group_offset, group_offsets_cumsum)
+    y = _ragged_dot_ffi_call(lhs, rhs, group_offset, group_offsets_cumsum)
+    return y, (lhs, rhs, group_offset, group_offsets_cumsum)
 
 
 def _ragged_dot_bwd(res, g):
-    lhs, rhs, group_sizes, group_offset, group_offsets_cumsum = res
+    lhs, rhs, group_offset, group_offsets_cumsum = res
 
     # d_lhs: g @ rhs.T with ragged grouping - same structure as forward
     # g: [M, N], rhs: [G, K, N] -> rhs.T: [G, N, K], d_lhs: [M, K]
     rhs_t = jnp.swapaxes(rhs, 1, 2)  # [G, N, K]
-    d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_sizes, group_offset, group_offsets_cumsum)
+    d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_offset, group_offsets_cumsum)
 
     # d_rhs: lhs.T @ g accumulated per group -> [G, K, N]
     g_local = rhs.shape[0]
-    d_rhs = _ragged_dot_bwd_ffi_call(lhs, g, group_sizes, group_offset, group_offsets_cumsum, g_local)
+    d_rhs = _ragged_dot_bwd_ffi_call(lhs, g, group_offset, group_offsets_cumsum, g_local)
 
     return d_lhs, d_rhs, None, None
 

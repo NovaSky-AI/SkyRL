@@ -118,7 +118,6 @@ __global__ void prepare_grouped_gemm_data(
     const DtypeA* A,
     const DtypeB* B,
     DtypeOutput* output,
-    const int32_t* group_sizes,
     const int32_t* group_offsets_cumsum,
     const int32_t* group_offset_ptr,
     int32_t k,
@@ -134,7 +133,7 @@ __global__ void prepare_grouped_gemm_data(
   int32_t global = group_offset_ptr[0] + tid;
 
   int32_t start = (global > 0) ? group_offsets_cumsum[global - 1] : 0;
-  int32_t m = group_sizes[global];
+  int32_t m = group_offsets_cumsum[global] - start;
 
   A_ptrs[tid] = const_cast<DtypeA*>(A) + static_cast<int64_t>(start) * k;
   B_ptrs[tid] = const_cast<DtypeB*>(B) + static_cast<int64_t>(tid) * n * k;
@@ -152,7 +151,6 @@ __global__ void prepare_grouped_gemm_bwd_data(
     const DtypeA* lhs,           // [M_total, K] row-major (ragged)
     const DtypeB* grad,          // [M_total, N] row-major (ragged)
     DtypeOutput* d_rhs,          // [G, K, N] row-major (per-group)
-    const int32_t* group_sizes,
     const int32_t* group_offsets_cumsum,
     const int32_t* group_offset_ptr,
     int32_t k,
@@ -168,7 +166,7 @@ __global__ void prepare_grouped_gemm_bwd_data(
   int32_t global = group_offset_ptr[0] + tid;
 
   int32_t start = (global > 0) ? group_offsets_cumsum[global - 1] : 0;
-  int32_t m = group_sizes[global];
+  int32_t m = group_offsets_cumsum[global] - start;
 
   // A = lhs slice, viewed as ColumnMajor [K, M_g] (transposed)
   A_ptrs[tid] = const_cast<DtypeA*>(lhs) + static_cast<int64_t>(start) * k;
@@ -191,17 +189,14 @@ ffi::Error RaggedDotCudaImpl(
     ffi::ScratchAllocator scratch,
     ffi::Buffer<ffi::BF16> lhs,
     ffi::Buffer<ffi::BF16> rhs,
-    ffi::Buffer<ffi::S32> group_sizes,
     ffi::Buffer<ffi::S32> group_offset,
     ffi::Buffer<ffi::S32> group_offsets_cumsum,
     ffi::ResultBuffer<ffi::BF16> out) {
   auto lhs_dims = lhs.dimensions();
   auto rhs_dims = rhs.dimensions();
-  auto group_sizes_dims = group_sizes.dimensions();
   auto group_offset_dims = group_offset.dimensions();
 
-  if (lhs_dims.size() != 2 || rhs_dims.size() != 3 || group_sizes_dims.size() != 1 ||
-      group_offset_dims.size() != 1) {
+  if (lhs_dims.size() != 2 || rhs_dims.size() != 3 || group_offset_dims.size() != 1) {
     return ffi::Error::InvalidArgument("Unexpected ragged_dot dimensions.");
   }
 
@@ -220,7 +215,6 @@ ffi::Error RaggedDotCudaImpl(
   int32_t n = static_cast<int32_t>(n64);
   int32_t g_local = static_cast<int32_t>(g_local64);
 
-  const int32_t* group_sizes_ptr = group_sizes.typed_data();
   const int32_t* group_offset_ptr = group_offset.typed_data();
   cudaError_t err;
 
@@ -266,7 +260,7 @@ ffi::Error RaggedDotCudaImpl(
 
   prepare_grouped_gemm_data<<<1, g_local, 0, stream>>>(
       A_base, B_base, out_base,
-      group_sizes_ptr, group_offsets_cumsum_ptr, group_offset_ptr, k, n,
+      group_offsets_cumsum_ptr, group_offset_ptr, k, n,
       d_A_ptrs, d_B_ptrs, d_out_ptrs,
       d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
 
@@ -312,7 +306,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ctx<ffi::ScratchAllocator>()
         .Arg<ffi::Buffer<ffi::BF16>>()  // lhs
         .Arg<ffi::Buffer<ffi::BF16>>()  // rhs
-        .Arg<ffi::Buffer<ffi::S32>>()   // group_sizes
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offset
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offsets_cumsum
         .Ret<ffi::Buffer<ffi::BF16>>());  // out
@@ -323,7 +316,6 @@ ffi::Error RaggedDotBwdCudaImpl(
     ffi::ScratchAllocator scratch,
     ffi::Buffer<ffi::BF16> lhs,
     ffi::Buffer<ffi::BF16> grad,
-    ffi::Buffer<ffi::S32> group_sizes,
     ffi::Buffer<ffi::S32> group_offset,
     ffi::Buffer<ffi::S32> group_offsets_cumsum,
     ffi::ResultBuffer<ffi::BF16> d_rhs) {
@@ -371,7 +363,6 @@ ffi::Error RaggedDotBwdCudaImpl(
   const DtypeA* lhs_base = reinterpret_cast<const DtypeA*>(lhs.typed_data());
   const DtypeB* grad_base = reinterpret_cast<const DtypeB*>(grad.typed_data());
   DtypeOutput* d_rhs_base = reinterpret_cast<DtypeOutput*>(d_rhs->typed_data());
-  const int32_t* group_sizes_ptr = group_sizes.typed_data();
   const int32_t* group_offset_ptr = group_offset.typed_data();
   const int32_t* group_offsets_cumsum_ptr = group_offsets_cumsum.typed_data();
 
@@ -398,7 +389,7 @@ ffi::Error RaggedDotBwdCudaImpl(
 
   prepare_grouped_gemm_bwd_data<<<1, g_local, 0, stream>>>(
       lhs_base, grad_base, d_rhs_base,
-      group_sizes_ptr, group_offsets_cumsum_ptr, group_offset_ptr, k, n,
+      group_offsets_cumsum_ptr, group_offset_ptr, k, n,
       d_A_ptrs, d_B_ptrs, d_out_ptrs,
       d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
 
@@ -444,7 +435,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Ctx<ffi::ScratchAllocator>()
         .Arg<ffi::Buffer<ffi::BF16>>()  // lhs
         .Arg<ffi::Buffer<ffi::BF16>>()  // grad
-        .Arg<ffi::Buffer<ffi::S32>>()   // group_sizes
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offset
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offsets_cumsum
         .Ret<ffi::Buffer<ffi::BF16>>());  // d_rhs
