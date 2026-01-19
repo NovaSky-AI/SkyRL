@@ -151,32 +151,6 @@ struct GroupedGemmData {
   }
 };
 
-template <typename GemmT>
-ffi::Error RunGroupedGemm(cudaStream_t stream, ffi::ScratchAllocator& scratch,
-                          typename GemmT::Arguments& args) {
-  GemmT gemm;
-  args.hw_info.sm_count = get_sm_count();
-
-  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
-    return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
-  }
-
-  void* workspace = nullptr;
-  if (size_t workspace_size = GemmT::get_workspace_size(args)) {
-    auto workspace_or = scratch.Allocate(workspace_size);
-    if (!workspace_or.has_value()) {
-      return ffi::Error::Internal("Failed to allocate CUTLASS workspace.");
-    }
-    workspace = workspace_or.value();
-  }
-
-  if (gemm(args, workspace, stream) != cutlass::Status::kSuccess) {
-    return ffi::Error::Internal("cutlass grouped gemm failed.");
-  }
-
-  return ffi::Error::Success();
-}
-
 enum class GemmDir { Fwd, Bwd };
 
 // Unified prepare kernel for forward and backward passes
@@ -210,6 +184,44 @@ __global__ void prepare_grouped_gemm(
   data.stride_B[tid] = cutlass::make_cute_packed_stride(typename Data::StrideB{}, {n, n, 1});
 }
 
+template <typename GemmT, GemmDir Dir>
+ffi::Error ExecuteGroupedGemm(
+    cudaStream_t stream, ffi::ScratchAllocator& scratch,
+    const DtypeA* A, const DtypeB* B, DtypeOutput* out,
+    const int32_t* group_offsets_cumsum, const int32_t* group_offset,
+    int32_t g_local, int32_t k, int32_t n) {
+  if (g_local > 1024) return ffi::Error::InvalidArgument("group_count must be <= 1024.");
+
+  auto data = GroupedGemmData<GemmT>::Allocate(scratch, g_local);
+  if (!data) return ffi::Error::Internal("Failed to allocate grouped GEMM slab.");
+
+  prepare_grouped_gemm<GemmT, Dir><<<1, g_local, 0, stream>>>(
+      A, B, out, group_offsets_cumsum, group_offset, k, n, *data);
+
+  GemmT gemm;
+  auto args = data->MakeArgs(g_local);
+  args.hw_info.sm_count = get_sm_count();
+
+  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
+    return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
+  }
+
+  void* workspace = nullptr;
+  if (size_t workspace_size = GemmT::get_workspace_size(args)) {
+    auto workspace_or = scratch.Allocate(workspace_size);
+    if (!workspace_or.has_value()) {
+      return ffi::Error::Internal("Failed to allocate CUTLASS workspace.");
+    }
+    workspace = workspace_or.value();
+  }
+
+  if (gemm(args, workspace, stream) != cutlass::Status::kSuccess) {
+    return ffi::Error::Internal("cutlass grouped gemm failed.");
+  }
+
+  return ffi::Error::Success();
+}
+
 ffi::Error RaggedDotCudaImpl(
     cudaStream_t stream,
     ffi::ScratchAllocator scratch,
@@ -238,19 +250,13 @@ ffi::Error RaggedDotCudaImpl(
   }
 
   if (g_local == 0 || m == 0 || n == 0 || k == 0) return ffi::Error::Success();
-  if (g_local > 1024) return ffi::Error::InvalidArgument("group_count must be <= 1024.");
 
-  auto data = GroupedGemmData<Gemm>::Allocate(scratch, g_local);
-  if (!data) return ffi::Error::Internal("Failed to allocate grouped GEMM slab.");
-
-  prepare_grouped_gemm<Gemm, GemmDir::Fwd><<<1, g_local, 0, stream>>>(
+  return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
+      stream, scratch,
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
       reinterpret_cast<const DtypeB*>(rhs.typed_data()),
       reinterpret_cast<DtypeOutput*>(out->typed_data()),
-      group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n, *data);
-
-  auto args = data->MakeArgs(g_local);
-  return RunGroupedGemm<Gemm>(stream, scratch, args);
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
@@ -298,19 +304,13 @@ ffi::Error RaggedDotBwdCudaImpl(
   }
 
   if (g_local == 0 || m == 0 || n == 0 || k == 0) return ffi::Error::Success();
-  if (g_local > 1024) return ffi::Error::InvalidArgument("group_count must be <= 1024.");
 
-  auto data = GroupedGemmData<Gemm_Bwd>::Allocate(scratch, g_local);
-  if (!data) return ffi::Error::Internal("Failed to allocate grouped GEMM slab.");
-
-  prepare_grouped_gemm<Gemm_Bwd, GemmDir::Bwd><<<1, g_local, 0, stream>>>(
+  return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
+      stream, scratch,
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
       reinterpret_cast<const DtypeB*>(grad.typed_data()),
       reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
-      group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n, *data);
-
-  auto args = data->MakeArgs(g_local);
-  return RunGroupedGemm<Gemm_Bwd>(stream, scratch, args);
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
