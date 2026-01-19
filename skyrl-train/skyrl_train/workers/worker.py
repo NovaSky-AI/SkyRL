@@ -32,7 +32,12 @@ from transformers import PreTrainedModel
 from loguru import logger
 from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import (
+    BaseBatchIterator,
+    SampleBasedBatchIterator,
+    TokenBasedBatchIterator,
+    reduce_metrics,
+)
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -41,6 +46,15 @@ from omegaconf import DictConfig
 from pathlib import Path
 
 _SET_AFFINITY = False
+
+
+def _get_microbatch_iterator(
+    data: TrainingInputBatch, micro_batch_size: int, max_tokens_per_microbatch: int
+) -> BaseBatchIterator:
+    if max_tokens_per_microbatch > 0:
+        return TokenBasedBatchIterator(data, max_tokens_per_microbatch=max_tokens_per_microbatch)
+    else:
+        return SampleBasedBatchIterator(data, sample_batch_size=micro_batch_size, drop_last=False)
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -305,16 +319,22 @@ class Worker(DistributedTorchRayActor):
     ) -> TrainingOutputBatch:
         """Run forward pass on the input batch in inference mode.
 
-        This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
+        This is a wrapper around `_forward_micro_batch` that runs in micro batches.
+        Uses token-based chunking if `max_tokens_per_microbatch` is configured, otherwise
+        falls back to sample-based chunking with `micro_forward_batch_size_per_gpu`.
         """
-        # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+        microbatch_iterator = _get_microbatch_iterator(
+            data,
+            micro_batch_size=self.cfg.trainer.micro_forward_batch_size_per_gpu,
+            max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
+        )
 
         outputs = []
-        for micro_batch in micro_batches:
-            outputs.append(self._forward_micro_batch(micro_batch))
-        output = TrainingOutputBatch.cat(outputs)
+        for microbatch in microbatch_iterator:
+            outputs.append(self._forward_micro_batch(microbatch))
+        output = microbatch_iterator.reorder_and_combine_batches(outputs)
+
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
         return output
@@ -724,7 +744,7 @@ class PolicyWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        minibatch_iterator = BatchIterator(
+        minibatch_iterator = SampleBasedBatchIterator(
             train_data, sample_batch_size=self.policy_mini_batch_size_per_gpu, drop_last=False
         )
 
@@ -784,15 +804,22 @@ class PolicyWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for minibatch in minibatch_pbar:
-                microbatch_iterator = BatchIterator(
-                    minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+                microbatch_iterator = _get_microbatch_iterator(
+                    minibatch,
+                    micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                    max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
                 )
                 num_microbatches = len(microbatch_iterator)
-                microbatch_weight = 1.0 / num_microbatches
 
+                temp = []
                 for microbatch_idx, microbatch in enumerate(microbatch_iterator):
-                    microbatch_experience = BatchIterator.batch_to_experience(microbatch)
+                    microbatch_experience = BaseBatchIterator.batch_to_experience(microbatch)
+                    microbatch_weight = len(microbatch) / len(minibatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
+
+                    print("!!! loss", self.mesh_rank, status["final_loss"])
+
+                    temp.append(microbatch["attention_mask"].sum().item())
 
                     # Record status for all but the last microbatch in the minibatch.
                     # The last microbatch should be recorded after the optimizer step.
@@ -807,6 +834,8 @@ class PolicyWorkerBase(Worker):
                 grad_norm = self.optim_step()
                 if grad_norm is not None:
                     status["raw_grad_norm"] = grad_norm
+
+                # print(self.mesh_rank, temp)
 
                 if self.record_memory:
                     self.save_memory_snapshot(global_step, local_step)
@@ -991,7 +1020,7 @@ class CriticWorkerBase(Worker):
 
     def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         global_step = train_data.metadata["global_step"]
-        minibatch_iterator = BatchIterator(
+        minibatch_iterator = SampleBasedBatchIterator(
             train_data, sample_batch_size=self.critic_mini_batch_size_per_gpu, drop_last=False
         )
 
@@ -1019,14 +1048,16 @@ class CriticWorkerBase(Worker):
                 disable=not self.strategy.is_rank_0(),
             )
             for minibatch in minibatch_pbar:
-                microbatch_iterator = BatchIterator(
-                    minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
+                microbatch_iterator = _get_microbatch_iterator(
+                    minibatch,
+                    micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                    max_tokens_per_microbatch=self.cfg.trainer.max_tokens_per_microbatch,
                 )
                 num_microbatches = len(microbatch_iterator)
-                microbatch_weight = 1.0 / num_microbatches
 
                 for microbatch_idx, microbatch in enumerate(microbatch_iterator):
-                    microbatch_experience = BatchIterator.batch_to_experience(microbatch)
+                    microbatch_experience = BaseBatchIterator.batch_to_experience(microbatch)
+                    microbatch_weight = len(microbatch) / len(minibatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
                     if microbatch_idx < num_microbatches - 1:
