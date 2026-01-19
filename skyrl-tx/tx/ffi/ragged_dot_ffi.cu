@@ -50,52 +50,62 @@ using DtypeAccum = float;
 using LayoutA = cutlass::layout::RowMajor;
 using LayoutB = cutlass::layout::RowMajor;
 using LayoutOutput = cutlass::layout::RowMajor;
+using LayoutA_Bwd = cutlass::layout::ColumnMajor;
 constexpr int AlignmentA = 8;
 constexpr int AlignmentB = 8;
 constexpr int AlignmentOutput = 8;
 
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
-using TileShape = cute::Shape<cute::_64, cute::_256, cute::_64>;
 using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
 using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
 using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
 using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int32_t, int32_t, int32_t>>;
-
-using CollectiveEpilogue =
-    typename cutlass::epilogue::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, TileShape, ClusterShape,
-        cutlass::epilogue::collective::EpilogueTileAuto,
-        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
-        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueSchedule,
-        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
-
-using CollectiveMainloop =
-    typename cutlass::gemm::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
-        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape, ClusterShape,
-        cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-        KernelSchedule>::CollectiveOp;
-
-using GemmKernel = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop, CollectiveEpilogue>;
-using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 using ProblemShapeType = ProblemShape::UnderlyingProblemShape;
 
-// Backward kernel for d_rhs: computes lhs.T @ grad per group
-// Uses ColumnMajor for A to interpret row-major lhs as transposed
-using LayoutA_Bwd = cutlass::layout::ColumnMajor;
+// Tile configurations optimized for different shapes:
+// - SmallN (64, 64, 128): Best for K > N (e.g., gate_up: K=2048, N=768)
+// - LargeN (64, 256, 64): Best for N > K (e.g., down: K=768, N=2048)
+using TileShape_SmallN = cute::Shape<cute::_64, cute::_64, cute::_128>;
+using TileShape_LargeN = cute::Shape<cute::_64, cute::_256, cute::_64>;
 
-using CollectiveMainloop_Bwd =
-    typename cutlass::gemm::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, DtypeA, LayoutA_Bwd*, AlignmentA,
-        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape, ClusterShape,
-        cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-        KernelSchedule>::CollectiveOp;
+// Forward kernel types for SmallN tile
+template <typename TileShape>
+struct GemmTypes {
+  using CollectiveEpilogue =
+      typename cutlass::epilogue::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, TileShape, ClusterShape,
+          cutlass::epilogue::collective::EpilogueTileAuto,
+          DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
+          DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueSchedule,
+          cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
 
-using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
-using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
+  using CollectiveMainloop =
+      typename cutlass::gemm::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
+          DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape, ClusterShape,
+          cutlass::gemm::collective::StageCountAutoCarveout<
+              static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+          KernelSchedule>::CollectiveOp;
+
+  using CollectiveMainloop_Bwd =
+      typename cutlass::gemm::collective::CollectiveBuilder<
+          ArchTag, OperatorClass, DtypeA, LayoutA_Bwd*, AlignmentA,
+          DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape, ClusterShape,
+          cutlass::gemm::collective::StageCountAutoCarveout<
+              static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+          KernelSchedule>::CollectiveOp;
+
+  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop, CollectiveEpilogue>;
+  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
+  using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
+  using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
+};
+
+// Instantiate kernel types for both tile configurations
+using SmallN = GemmTypes<TileShape_SmallN>;
+using LargeN = GemmTypes<TileShape_LargeN>;
 
 template <typename T>
 static T* carve_aligned(char*& p, size_t count) {
@@ -223,6 +233,23 @@ ffi::Error ExecuteGroupedGemm(
   return ffi::Error::Success();
 }
 
+// Dispatch to the best kernel based on K and N dimensions
+template <GemmDir Dir, typename SmallNGemm, typename LargeNGemm>
+ffi::Error DispatchGroupedGemm(
+    cudaStream_t stream, ffi::ScratchAllocator& scratch,
+    const DtypeA* A, const DtypeB* B, DtypeOutput* out,
+    const int32_t* group_offsets_cumsum, const int32_t* group_offset,
+    int32_t g_local, int32_t k, int32_t n) {
+  // Use LargeN tile (64, 256, 64) when N > K, otherwise SmallN tile (64, 64, 128)
+  if (n > k) {
+    return ExecuteGroupedGemm<LargeNGemm, Dir>(
+        stream, scratch, A, B, out, group_offsets_cumsum, group_offset, g_local, k, n);
+  } else {
+    return ExecuteGroupedGemm<SmallNGemm, Dir>(
+        stream, scratch, A, B, out, group_offsets_cumsum, group_offset, g_local, k, n);
+  }
+}
+
 ffi::Error RaggedDotCudaImpl(
     cudaStream_t stream,
     ffi::ScratchAllocator scratch,
@@ -250,7 +277,7 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::Internal("Failed to zero output.");
   }
 
-  return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
+  return DispatchGroupedGemm<GemmDir::Fwd, SmallN::Gemm, LargeN::Gemm>(
       stream, scratch,
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
       reinterpret_cast<const DtypeB*>(rhs.typed_data()),
@@ -301,7 +328,7 @@ ffi::Error RaggedDotBwdCudaImpl(
     return ffi::Error::Internal("Failed to zero d_rhs output.");
   }
 
-  return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
+  return DispatchGroupedGemm<GemmDir::Bwd, SmallN::Gemm_Bwd, LargeN::Gemm_Bwd>(
       stream, scratch,
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
       reinterpret_cast<const DtypeB*>(grad.typed_data()),
