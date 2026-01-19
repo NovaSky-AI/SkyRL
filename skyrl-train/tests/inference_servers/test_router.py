@@ -1,23 +1,17 @@
 """Tests for InferenceRouter."""
 
 import asyncio
-import socket
 import threading
 import time
+from typing import List
 
 import httpx
 import pytest
 import uvicorn
 from fastapi import FastAPI
 
+from skyrl_train.inference_servers.common import get_open_port
 from skyrl_train.inference_servers.router import InferenceRouter
-
-
-def get_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        s.listen(1)
-        return s.getsockname()[1]
 
 
 def create_mock_server(server_id: int) -> FastAPI:
@@ -30,11 +24,17 @@ def create_mock_server(server_id: int) -> FastAPI:
     return app
 
 
-def start_server(port: int, server_id: int) -> None:
+def start_server(port: int, server_id: int) -> uvicorn.Server:
+    """Start a mock server, return the server instance for cleanup."""
     app = create_mock_server(server_id)
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
-    threading.Thread(target=lambda: asyncio.run(server.serve()), daemon=True).start()
+
+    def run():
+        asyncio.run(server.serve())
+
+    threading.Thread(target=run, daemon=True).start()
+    return server
 
 
 def wait_ready(url: str, timeout: float = 5.0) -> bool:
@@ -50,26 +50,44 @@ def wait_ready(url: str, timeout: float = 5.0) -> bool:
 
 @pytest.fixture(scope="module")
 def env():
-    """Start mock servers and router once for all tests."""
-    ports = [get_free_port(), get_free_port()]
-    router_port = get_free_port()
+    """Start mock servers and router, clean up after tests."""
+    servers: List[uvicorn.Server] = []
+
+    # Start mock servers
+    ports = [get_open_port(), get_open_port()]
+    router_port = get_open_port()
     urls = [f"http://127.0.0.1:{p}" for p in ports]
 
     for i, port in enumerate(ports):
-        start_server(port, server_id=i)
+        servers.append(start_server(port, server_id=i))
     for url in urls:
         assert wait_ready(url)
 
+    # Start router
     router = InferenceRouter(urls, host="127.0.0.1", port=router_port)
     router._client = httpx.AsyncClient(timeout=httpx.Timeout(None))
     router._app = router._build_app()
-    threading.Thread(
-        target=lambda: asyncio.run(router._run_server()), daemon=True
-    ).start()
+
+    router_config = uvicorn.Config(
+        router._app, host="127.0.0.1", port=router_port, log_level="error"
+    )
+    router_server = uvicorn.Server(router_config)
+    servers.append(router_server)
+
+    def run_router():
+        asyncio.run(router_server.serve())
+
+    threading.Thread(target=run_router, daemon=True).start()
 
     router_url = f"http://127.0.0.1:{router_port}"
     assert wait_ready(router_url)
+
     yield router_url
+
+    # Cleanup: signal all servers to shutdown
+    for server in servers:
+        server.should_exit = True
+    time.sleep(0.5)  # Give servers time to shutdown
 
 
 def test_round_robin(env):
