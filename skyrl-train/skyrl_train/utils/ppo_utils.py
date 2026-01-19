@@ -1087,7 +1087,7 @@ def compute_gdpo_outcome_advantage(
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    gdpo_norm_by_std: bool = True,
+    grpo_norm_by_std: bool = True,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1098,12 +1098,14 @@ def compute_gdpo_outcome_advantage(
         - response_mask: Float[torch.Tensor, "batch_size seqlen"]
         - index: np.ndarray (batch_size)
         - epsilon: float
-        - gdpo_norm_by_std: bool
+        - grpo_norm_by_std: bool (used for GDPO as well)
 
     Returns:
         - advantages: Float[torch.Tensor, "batch_size seqlen"]
         - returns: Float[torch.Tensor, "batch_size seqlen"]
     """
+
+    gdpo_norm_by_std = grpo_norm_by_std
 
     # this assumes reward-level rewards assigned as well as single scalar outcome reward for each response
     scores = token_level_rewards.sum(dim=-2)
@@ -1126,7 +1128,7 @@ def compute_gdpo_outcome_advantage(
                 rwd_fn_means = torch.mean(reward_fn_scores, dim=0)
                 rwd_fn_stds = torch.std(reward_fn_scores, dim=0, unbiased=False)
                 if gdpo_norm_by_std:
-                    reward_fn_scores = (reward_fn_scores - rwd_fn_means) / (rwd_fn_stds) + epsilon
+                    reward_fn_scores = (reward_fn_scores - rwd_fn_means) / (rwd_fn_stds + epsilon)
                 else:
                     reward_fn_scores = reward_fn_scores - rwd_fn_means
 
