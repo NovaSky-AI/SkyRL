@@ -43,7 +43,7 @@ def rebuild_kernel() -> bool:
 
     # Rebuild using uv with hatchling
     result = subprocess.run(
-        ["uv", "run", "--with", "hatchling", "-c",
+        ["uv", "run", "--with", "hatchling", "python", "-c",
          "from tx.ffi.build import build_ragged_dot; build_ragged_dot()"],
         capture_output=True,
         text=True,
