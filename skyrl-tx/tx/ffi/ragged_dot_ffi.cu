@@ -98,16 +98,18 @@ using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, Collec
 using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
 
 // Low-rank (LR) kernel variant for unaligned K dimension (e.g., LoRA rank=1)
-// K alignment can be 1, but N (output) alignment must still be 8 for TMA
+// Uses CpAsync (non-TMA) schedule which has no alignment requirements
 constexpr int AlignmentLR = 1;
 using TileShapeLR = cute::Shape<cute::_64, cute::_64, cute::_64>;
+using KernelScheduleLR = cutlass::gemm::KernelPtrArrayCpAsyncWarpSpecializedCooperative;
+using EpilogueScheduleLR = cutlass::epilogue::PtrArrayNoSmemWarpSpecialized;
 
 using CollectiveEpilogueLR =
     typename cutlass::epilogue::collective::CollectiveBuilder<
         ArchTag, OperatorClass, TileShapeLR, ClusterShape,
         cutlass::epilogue::collective::EpilogueTileAuto,
-        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
-        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueSchedule,
+        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentLR,
+        DtypeOutput, LayoutOutput*, AlignmentLR, EpilogueScheduleLR,
         cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
 
 using CollectiveMainloopLR =
@@ -116,7 +118,7 @@ using CollectiveMainloopLR =
         DtypeB, LayoutB*, AlignmentLR, DtypeAccum, TileShapeLR, ClusterShape,
         cutlass::gemm::collective::StageCountAutoCarveout<
             static_cast<int>(sizeof(typename CollectiveEpilogueLR::SharedStorage))>,
-        KernelSchedule>::CollectiveOp;
+        KernelScheduleLR>::CollectiveOp;
 
 using GemmKernelLR = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopLR, CollectiveEpilogueLR>;
 using GemmLR = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelLR>;
@@ -127,7 +129,7 @@ using CollectiveMainloopLR_Bwd =
         DtypeB, LayoutB*, AlignmentLR, DtypeAccum, TileShapeLR, ClusterShape,
         cutlass::gemm::collective::StageCountAutoCarveout<
             static_cast<int>(sizeof(typename CollectiveEpilogueLR::SharedStorage))>,
-        KernelSchedule>::CollectiveOp;
+        KernelScheduleLR>::CollectiveOp;
 
 using GemmKernelLR_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopLR_Bwd, CollectiveEpilogueLR>;
 using GemmLR_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelLR_Bwd>;
@@ -258,8 +260,8 @@ ffi::Error ExecuteGroupedGemm(
   return ffi::Error::Success();
 }
 
-static bool is_k_aligned(int32_t k) {
-  return k % AlignmentA == 0;
+static bool is_aligned(int32_t k, int32_t n) {
+  return (k % AlignmentA == 0) && (n % AlignmentB == 0);
 }
 
 ffi::Error RaggedDotCudaImpl(
@@ -289,7 +291,7 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::Internal("Failed to zero output.");
   }
 
-  if (is_k_aligned(k)) {
+  if (is_aligned(k, n)) {
     return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
         stream, scratch,
         reinterpret_cast<const DtypeA*>(lhs.typed_data()),
@@ -350,8 +352,8 @@ ffi::Error RaggedDotBwdCudaImpl(
   }
 
   // For backward pass: computes [K, N] = [K, M] @ [M, N] where M is the contraction dim
-  // K alignment affects the output, use LR kernel when K is not aligned
-  if (is_k_aligned(k)) {
+  // Use LR kernel when K or N is not aligned
+  if (is_aligned(k, n)) {
     return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
         stream, scratch,
         reinterpret_cast<const DtypeA*>(lhs.typed_data()),
