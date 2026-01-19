@@ -111,6 +111,12 @@ using StrideA_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideA;
 using StrideB_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideB;
 using StrideOutput_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideD;
 
+template <typename T>
+static T* carve_aligned(char*& p, size_t count) {
+  T* out = reinterpret_cast<T*>((reinterpret_cast<uintptr_t>(p) + 15) & ~uintptr_t(15));
+  p = reinterpret_cast<char*>(out + count);
+  return out;
+}
 
 __global__ void prepare_grouped_gemm_data(
     const DtypeA* A,
@@ -120,8 +126,8 @@ __global__ void prepare_grouped_gemm_data(
     const int32_t* group_offset_ptr,
     int32_t k,
     int32_t n,
-    DtypeA** A_ptrs,
-    DtypeB** B_ptrs,
+    const DtypeA** A_ptrs,
+    const DtypeB** B_ptrs,
     DtypeOutput** output_ptrs,
     StrideA* stride_A,
     StrideB* stride_B,
@@ -133,8 +139,8 @@ __global__ void prepare_grouped_gemm_data(
   int32_t start = (global > 0) ? group_offsets_cumsum[global - 1] : 0;
   int32_t m = group_offsets_cumsum[global] - start;
 
-  A_ptrs[tid] = const_cast<DtypeA*>(A) + static_cast<int64_t>(start) * k;
-  B_ptrs[tid] = const_cast<DtypeB*>(B) + static_cast<int64_t>(tid) * n * k;
+  A_ptrs[tid] = A + static_cast<int64_t>(start) * k;
+  B_ptrs[tid] = B + static_cast<int64_t>(tid) * n * k;
   output_ptrs[tid] = output + static_cast<int64_t>(start) * n;
   problem_sizes[tid] = ProblemShapeType(m, n, k);
 
@@ -153,8 +159,8 @@ __global__ void prepare_grouped_gemm_bwd_data(
     const int32_t* group_offset_ptr,
     int32_t k,
     int32_t n,
-    DtypeA** A_ptrs,
-    DtypeB** B_ptrs,
+    const DtypeA** A_ptrs,
+    const DtypeB** B_ptrs,
     DtypeOutput** output_ptrs,
     StrideA_Bwd* stride_A,
     StrideB_Bwd* stride_B,
@@ -167,9 +173,9 @@ __global__ void prepare_grouped_gemm_bwd_data(
   int32_t m = group_offsets_cumsum[global] - start;
 
   // A = lhs slice, viewed as ColumnMajor [K, M_g] (transposed)
-  A_ptrs[tid] = const_cast<DtypeA*>(lhs) + static_cast<int64_t>(start) * k;
+  A_ptrs[tid] = lhs + static_cast<int64_t>(start) * k;
   // B = grad slice [M_g, N]
-  B_ptrs[tid] = const_cast<DtypeB*>(grad) + static_cast<int64_t>(start) * n;
+  B_ptrs[tid] = grad + static_cast<int64_t>(start) * n;
   // Output = d_rhs[tid] with shape [K, N]
   output_ptrs[tid] = d_rhs + static_cast<int64_t>(tid) * k * n;
 
@@ -222,7 +228,7 @@ ffi::Error RaggedDotCudaImpl(
 
   size_t gl = static_cast<size_t>(g_local);
   size_t bytes = 7 * 16 +  // alignment padding
-                 sizeof(DtypeA*) * gl + sizeof(DtypeB*) * gl + sizeof(DtypeOutput*) * gl +
+                 sizeof(const DtypeA*) * gl + sizeof(const DtypeB*) * gl + sizeof(DtypeOutput*) * gl +
                  sizeof(StrideA) * gl + sizeof(StrideB) * gl + sizeof(StrideOutput) * gl +
                  sizeof(ProblemShapeType) * gl;
 
@@ -231,15 +237,14 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::Internal("Failed to allocate grouped GEMM slab from scratch.");
   }
 
-  auto align16 = [](char*& p) { p = reinterpret_cast<char*>((reinterpret_cast<uintptr_t>(p) + 15) & ~15); };
   char* p = reinterpret_cast<char*>(slab_or.value());
-  align16(p); DtypeA** d_A_ptrs = reinterpret_cast<DtypeA**>(p); p += sizeof(DtypeA*) * gl;
-  align16(p); DtypeB** d_B_ptrs = reinterpret_cast<DtypeB**>(p); p += sizeof(DtypeB*) * gl;
-  align16(p); DtypeOutput** d_out_ptrs = reinterpret_cast<DtypeOutput**>(p); p += sizeof(DtypeOutput*) * gl;
-  align16(p); StrideA* d_stride_A = reinterpret_cast<StrideA*>(p); p += sizeof(StrideA) * gl;
-  align16(p); StrideB* d_stride_B = reinterpret_cast<StrideB*>(p); p += sizeof(StrideB) * gl;
-  align16(p); StrideOutput* d_stride_output = reinterpret_cast<StrideOutput*>(p); p += sizeof(StrideOutput) * gl;
-  align16(p); ProblemShapeType* d_problem_sizes = reinterpret_cast<ProblemShapeType*>(p);
+  auto d_A_ptrs = carve_aligned<const DtypeA*>(p, gl);
+  auto d_B_ptrs = carve_aligned<const DtypeB*>(p, gl);
+  auto d_out_ptrs = carve_aligned<DtypeOutput*>(p, gl);
+  auto d_stride_A = carve_aligned<StrideA>(p, gl);
+  auto d_stride_B = carve_aligned<StrideB>(p, gl);
+  auto d_stride_output = carve_aligned<StrideOutput>(p, gl);
+  auto d_problem_sizes = carve_aligned<ProblemShapeType>(p, gl);
 
   prepare_grouped_gemm_data<<<1, g_local, 0, stream>>>(
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
@@ -337,7 +342,7 @@ ffi::Error RaggedDotBwdCudaImpl(
 
   size_t gl = static_cast<size_t>(g_local);
   size_t bytes = 7 * 16 +
-                 sizeof(DtypeA*) * gl + sizeof(DtypeB*) * gl + sizeof(DtypeOutput*) * gl +
+                 sizeof(const DtypeA*) * gl + sizeof(const DtypeB*) * gl + sizeof(DtypeOutput*) * gl +
                  sizeof(StrideA_Bwd) * gl + sizeof(StrideB_Bwd) * gl + sizeof(StrideOutput_Bwd) * gl +
                  sizeof(ProblemShapeType) * gl;
 
@@ -346,15 +351,14 @@ ffi::Error RaggedDotBwdCudaImpl(
     return ffi::Error::Internal("Failed to allocate grouped GEMM bwd slab from scratch.");
   }
 
-  auto align16 = [](char*& p) { p = reinterpret_cast<char*>((reinterpret_cast<uintptr_t>(p) + 15) & ~15); };
   char* p = reinterpret_cast<char*>(slab_or.value());
-  align16(p); DtypeA** d_A_ptrs = reinterpret_cast<DtypeA**>(p); p += sizeof(DtypeA*) * gl;
-  align16(p); DtypeB** d_B_ptrs = reinterpret_cast<DtypeB**>(p); p += sizeof(DtypeB*) * gl;
-  align16(p); DtypeOutput** d_out_ptrs = reinterpret_cast<DtypeOutput**>(p); p += sizeof(DtypeOutput*) * gl;
-  align16(p); StrideA_Bwd* d_stride_A = reinterpret_cast<StrideA_Bwd*>(p); p += sizeof(StrideA_Bwd) * gl;
-  align16(p); StrideB_Bwd* d_stride_B = reinterpret_cast<StrideB_Bwd*>(p); p += sizeof(StrideB_Bwd) * gl;
-  align16(p); StrideOutput_Bwd* d_stride_output = reinterpret_cast<StrideOutput_Bwd*>(p); p += sizeof(StrideOutput_Bwd) * gl;
-  align16(p); ProblemShapeType* d_problem_sizes = reinterpret_cast<ProblemShapeType*>(p);
+  auto d_A_ptrs = carve_aligned<const DtypeA*>(p, gl);
+  auto d_B_ptrs = carve_aligned<const DtypeB*>(p, gl);
+  auto d_out_ptrs = carve_aligned<DtypeOutput*>(p, gl);
+  auto d_stride_A = carve_aligned<StrideA_Bwd>(p, gl);
+  auto d_stride_B = carve_aligned<StrideB_Bwd>(p, gl);
+  auto d_stride_output = carve_aligned<StrideOutput_Bwd>(p, gl);
+  auto d_problem_sizes = carve_aligned<ProblemShapeType>(p, gl);
 
   prepare_grouped_gemm_bwd_data<<<1, g_local, 0, stream>>>(
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
