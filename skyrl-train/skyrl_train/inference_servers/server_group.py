@@ -33,7 +33,7 @@ class VLLMServerGroup:
 
     def __init__(
         self,
-        engine_args: Namespace,
+        vllm_cli_args: Namespace,
         num_servers: int,
         start_port: int = 8000,
         placement_group: Optional[PlacementGroup] = None,
@@ -46,19 +46,21 @@ class VLLMServerGroup:
         Initialize the vLLM server group.
 
         Args:
-            engine_args: vLLM engine configuration (Namespace from make_arg_parser).
-                Required attributes: tensor_parallel_size, pipeline_parallel_size, model.
+            vllm_cli_args: vLLM CLI arguments.
             num_servers: Number of vLLM server instances to create
             start_port: Base port for server ports
             placement_group: External placement group for colocation mode.
-                           If None, creates internal placement group.
+                If None, creates internal placement group.
             placement_group_bundle_offset: Offset for bundle indices when using
-                           external placement group (e.g., if training uses first N bundles)
+                external placement group (e.g., if training uses first N 
+                bundles).
             enable_dp: Enable data parallelism across servers
             enable_pd: Enable prefill-decode disaggregation
-            nixl_side_channel_base: Base port for NIXL side channels
+            nixl_side_channel_base: Base port for NIXL side channels. Each 
+                server will be assigned a port of nixl_side_channel_base + 
+                server_idx.
         """
-        self._engine_args = engine_args
+        self._vllm_cli_args = vllm_cli_args
         self._num_servers = num_servers
         self._start_port = start_port
         self._external_pg = placement_group
@@ -69,8 +71,8 @@ class VLLMServerGroup:
         self._pool: Optional[ServerActorPool] = None
         self._internal_pg: Optional[PlacementGroup] = None
 
-        # Query the actor class for GPU requirements (single source of truth)
-        self._num_gpus_per_server = VLLMServerActor.compute_num_gpus_per_server(engine_args)
+        # Query the actor class for GPU requirements
+        self._num_gpus_per_server = VLLMServerActor.compute_num_gpus_per_server(vllm_cli_args)
 
         logger.info(
             f"VLLMServerGroup: num_servers={num_servers}, "
@@ -124,7 +126,7 @@ class VLLMServerGroup:
             ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
 
             actor = ServerActorClass.remote(
-                self._engine_args,
+                self._vllm_cli_args,
                 self._start_port + server_idx,
                 server_idx=server_idx,
                 dp_size=self._num_servers if self._enable_dp else -1,
