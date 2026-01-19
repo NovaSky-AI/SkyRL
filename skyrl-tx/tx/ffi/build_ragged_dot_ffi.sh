@@ -33,9 +33,9 @@ mkdir -p "${OUT_DIR}"
 "${NVCC_BIN}" \
   -O3 \
   -std=c++17 \
+  -gencode=arch=compute_${NVCC_ARCH},code=lto_${NVCC_ARCH} \
   -gencode=arch=compute_${NVCC_ARCH},code=sm_${NVCC_ARCH} \
   --expt-relaxed-constexpr \
-  -dlto \
   -shared \
   -Xcompiler -fPIC \
   -I"${JAX_INCLUDE_DIR}" \
