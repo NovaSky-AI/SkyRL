@@ -1,15 +1,26 @@
-Build (Linux + CUDA)
+# CUDA FFI Extensions
 
-1) Build the shared library (requires CUDA nvcc with C++17 support):
+## Building
+
+The CUDA extension is built automatically when creating a wheel:
+
+```bash
+uv build
 ```
-export CUTLASS_DIR=/path/to/cutlass
-export NVCC_ARCH=sm_90a  # for H100, adjust if needed
-tx/ffi/build_ragged_dot_ffi.sh
+
+For development, build manually:
+
+```bash
+uv run build-ffi
 ```
 
-2) Make the shared library discoverable:
-- Copy `tx/ffi/_build/libragged_dot_ffi.so` to `tx/ffi/libragged_dot_ffi.so`, or
-- Set `TX_RAGGED_DOT_FFI_PATH=/path/to/libragged_dot_ffi.so`.
+### Environment Variables
 
-Notes:
-- The FFI kernel expects bfloat16 inputs/outputs and int32 group metadata.
+- `CUTLASS_DIR` - Path to CUTLASS checkout (optional, clones automatically if not set)
+- `NVCC_BIN` - Path to nvcc (default: `nvcc`)
+- `NVCC_ARCH` - CUDA architecture (default: `90a` for H100)
+
+### Notes
+
+- Requires CUDA nvcc with C++17 support
+- The FFI kernel expects bfloat16 inputs/outputs and int32 group metadata

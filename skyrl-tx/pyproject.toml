@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "skyrl-tx"
@@ -67,11 +67,14 @@ dev = [
     "alembic",
 ]
 
-[tool.setuptools]
-include-package-data = true
+[tool.hatch.version]
+path = "tx/__init__.py"
 
-[tool.setuptools.dynamic]
-version = {attr = "tx.__version__"}
+[tool.hatch.build.hooks.custom]
+path = "tx/ffi/build.py"
 
 [project.scripts]
 tx = "tx.run.main:app"
+
+[tool.uv.scripts]
+build-ffi = "python -c 'from tx.ffi.build import build_ragged_dot; build_ragged_dot()'"
