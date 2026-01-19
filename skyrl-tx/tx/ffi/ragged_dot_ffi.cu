@@ -97,11 +97,11 @@ using CollectiveMainloop_Bwd =
 using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
 using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
 
-// Low-rank (LR) kernel variant for unaligned K dimension (e.g., LoRA rank=1)
-// Uses CpAsync (non-TMA) schedule which has no alignment requirements
+// Low-rank (LR) kernel variant for unaligned K/N dimensions (e.g., LoRA rank=1)
+// Uses KernelPtrArrayMultistage which doesn't have TMA alignment requirements
 constexpr int AlignmentLR = 1;
-using TileShapeLR = cute::Shape<cute::_64, cute::_64, cute::_64>;
-using KernelScheduleLR = cutlass::gemm::KernelPtrArrayCpAsyncWarpSpecializedCooperative;
+using TileShapeLR = cute::Shape<cute::_64, cute::_64, cute::_32>;
+using KernelScheduleLR = cutlass::gemm::KernelPtrArrayMultistage;
 using EpilogueScheduleLR = cutlass::epilogue::PtrArrayNoSmemWarpSpecialized;
 
 using CollectiveEpilogueLR =
