@@ -115,8 +115,8 @@ __global__ void prepare_grouped_gemm_data(
   output_ptrs[tid] = output + static_cast<int64_t>(start) * n;
   problem_sizes[tid] = ProblemShapeType(m, n, k);
 
-  stride_A[tid] = cutlass::make_cute_packed_stride(StrideA{}, {m, k, 1});
-  stride_B[tid] = cutlass::make_cute_packed_stride(StrideB{}, {k, n, 1});
+  stride_A[tid] = cutlass::make_cute_packed_stride(StrideA{}, {k, k, 1});
+  stride_B[tid] = cutlass::make_cute_packed_stride(StrideB{}, {n, n, 1});
   stride_output[tid] = cutlass::make_cute_packed_stride(StrideOutput{}, {m, n, 1});
 }
 
