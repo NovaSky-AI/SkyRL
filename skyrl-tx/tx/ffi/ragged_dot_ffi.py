@@ -51,6 +51,11 @@ def _ensure_registered() -> bool:
             jax_ffi.pycapsule(lib.RaggedDotCuda),
             platform="CUDA",
         )
+        jax_ffi.register_ffi_target(
+            "ragged_dot_bwd_cuda",
+            jax_ffi.pycapsule(lib.RaggedDotBwdCuda),
+            platform="CUDA",
+        )
         _REGISTERED = True
         return True
     except Exception as exc:  # pragma: no cover - load/registration failures
@@ -113,6 +118,34 @@ def _ragged_dot_ffi_call(
     return call(lhs, rhs, group_sizes, group_offset, group_offsets)
 
 
+def _ragged_dot_bwd_ffi_call(
+    lhs: jax.Array,
+    grad: jax.Array,
+    group_sizes: jax.Array,
+    group_offset: jax.Array,
+    g_local: int,
+) -> jax.Array:
+    """Backward pass for d_rhs: computes lhs.T @ grad per group -> [G, K, N]."""
+    if not _ensure_registered():
+        raise RuntimeError("ragged_dot_ffi is not available. Build and load the shared library first.")
+
+    if lhs.dtype != jnp.bfloat16 or grad.dtype != jnp.bfloat16:
+        raise NotImplementedError("ragged_dot_bwd_ffi supports bfloat16 only.")
+    if group_sizes.dtype != jnp.int32 or group_offset.dtype != jnp.int32:
+        raise NotImplementedError("ragged_dot_bwd_ffi expects int32 group_sizes and group_offset.")
+    if group_offset.shape != (1,):
+        raise ValueError("group_offset must have shape (1,).")
+
+    k = lhs.shape[1]
+    n = grad.shape[1]
+
+    group_offsets = jnp.cumsum(group_sizes, dtype=jnp.int32)
+
+    out = jax.ShapeDtypeStruct((g_local, k, n), lhs.dtype)
+    call = jax_ffi.ffi_call("ragged_dot_bwd_cuda", out, vmap_method=None)
+    return call(lhs, grad, group_sizes, group_offset, group_offsets)
+
+
 @jax.custom_vjp
 def ragged_dot(
     lhs: jax.Array,
@@ -142,12 +175,8 @@ def _ragged_dot_bwd(res, g):
     d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_sizes, group_offset)
 
     # d_rhs: lhs.T @ g accumulated per group -> [G, K, N]
-    # This has a different structure, use JAX's autodiff
-    def _ref_rhs_only(rhs_):
-        return _ragged_dot_ref(lhs, rhs_, group_sizes, group_offset)
-
-    (_, pullback) = jax.vjp(_ref_rhs_only, rhs)
-    (d_rhs,) = pullback(g)
+    g_local = rhs.shape[0]
+    d_rhs = _ragged_dot_bwd_ffi_call(lhs, g, group_sizes, group_offset, g_local)
 
     return d_lhs, d_rhs, None, None
 
