@@ -243,7 +243,9 @@ generator:
   http_endpoint_port: 8000
   max_turns: 1
 
-  # chat template configuration
+  # chat template configuration for SkyRLGymGenerator.
+  # For `/chat/completions` with vllm via the HTTP endpoint for rollout, instead use say
+  # `+generator.engine_init_kwargs.chat_template=/path/to/templates/qwen3_acc_thinking.jinja2`
   chat_template:
     source: "name"  # "name" or "file"
     name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
