@@ -111,9 +111,6 @@ using StrideA_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideA;
 using StrideB_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideB;
 using StrideOutput_Bwd = typename Gemm_Bwd::GemmKernel::InternalStrideD;
 
-static ffi::Error CudaError(const char* message) {
-  return ffi::Error::Internal(message);
-}
 
 __global__ void prepare_grouped_gemm_data(
     const DtypeA* A,
@@ -222,7 +219,7 @@ ffi::Error RaggedDotCudaImpl(
   err = cudaMemsetAsync(
       out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream);
   if (err != cudaSuccess) {
-    return CudaError("Failed to zero output.");
+    return ffi::Error::Internal("Failed to zero output.");
   }
 
   if (g_local == 0 || m == 0 || n == 0 || k == 0) {
@@ -350,7 +347,7 @@ ffi::Error RaggedDotBwdCudaImpl(
   err = cudaMemsetAsync(
       d_rhs->typed_data(), 0, static_cast<size_t>(g_local) * k * n * sizeof(DtypeOutput), stream);
   if (err != cudaSuccess) {
-    return CudaError("Failed to zero d_rhs output.");
+    return ffi::Error::Internal("Failed to zero d_rhs output.");
   }
 
   if (g_local == 0 || m == 0 || n == 0 || k == 0) {
