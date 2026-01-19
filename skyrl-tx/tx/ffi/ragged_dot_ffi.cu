@@ -156,6 +156,7 @@ enum class GemmDir { Fwd, Bwd };
 // Unified prepare kernel for forward and backward passes
 // Fwd: A[M,K] @ B[G,K,N] -> out[M,N] (ragged by group)
 // Bwd: A.T[K,M] @ B[M,N] -> out[G,K,N] (lhs transposed via ColumnMajor layout)
+// group_offsets_cumsum has length G+1 with cumsum[0]=0 (include_initial=True)
 template <typename GemmT, GemmDir Dir>
 __global__ void prepare_grouped_gemm(
     const DtypeA* A, const DtypeB* B, DtypeOutput* out,
@@ -164,8 +165,8 @@ __global__ void prepare_grouped_gemm(
   using Data = GroupedGemmData<GemmT>;
   int32_t tid = threadIdx.x;
   int32_t global = group_offset_ptr[0] + tid;
-  int32_t start = (global > 0) ? group_offsets_cumsum[global - 1] : 0;
-  int32_t m = group_offsets_cumsum[global] - start;
+  int32_t start = group_offsets_cumsum[global];
+  int32_t m = group_offsets_cumsum[global + 1] - start;
 
   data.A_ptrs[tid] = A + static_cast<int64_t>(start) * k;
   if constexpr (Dir == GemmDir::Fwd) {
@@ -245,10 +246,6 @@ ffi::Error RaggedDotCudaImpl(
   int32_t g_local = static_cast<int32_t>(rhs_dims[0]);
   int32_t n = static_cast<int32_t>(rhs_dims[2]);
 
-  if (cudaMemsetAsync(out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
-    return ffi::Error::Internal("Failed to zero output.");
-  }
-
   return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
       stream, scratch,
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
@@ -295,10 +292,6 @@ ffi::Error RaggedDotBwdCudaImpl(
   int32_t k = static_cast<int32_t>(lhs_dims[1]);
   int32_t n = static_cast<int32_t>(grad_dims[1]);
   int32_t g_local = static_cast<int32_t>(d_rhs_dims[0]);
-
-  if (cudaMemsetAsync(d_rhs->typed_data(), 0, static_cast<size_t>(g_local) * k * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
-    return ffi::Error::Internal("Failed to zero d_rhs output.");
-  }
 
   return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
       stream, scratch,
