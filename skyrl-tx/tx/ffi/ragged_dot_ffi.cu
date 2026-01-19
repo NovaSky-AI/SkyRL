@@ -220,10 +220,6 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::InvalidArgument("group_count must be <= 1024.");
   }
 
-  const DtypeA* A_base = reinterpret_cast<const DtypeA*>(lhs.typed_data());
-  const DtypeB* B_base = reinterpret_cast<const DtypeB*>(rhs.typed_data());
-  DtypeOutput* out_base = reinterpret_cast<DtypeOutput*>(out->typed_data());
-
   size_t gl = static_cast<size_t>(g_local);
   size_t bytes = 7 * 16 +  // alignment padding
                  sizeof(DtypeA*) * gl + sizeof(DtypeB*) * gl + sizeof(DtypeOutput*) * gl +
@@ -246,7 +242,9 @@ ffi::Error RaggedDotCudaImpl(
   align16(p); ProblemShapeType* d_problem_sizes = reinterpret_cast<ProblemShapeType*>(p);
 
   prepare_grouped_gemm_data<<<1, g_local, 0, stream>>>(
-      A_base, B_base, out_base,
+      reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+      reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+      reinterpret_cast<DtypeOutput*>(out->typed_data()),
       group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n,
       d_A_ptrs, d_B_ptrs, d_out_ptrs,
       d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
@@ -337,10 +335,6 @@ ffi::Error RaggedDotBwdCudaImpl(
     return ffi::Error::InvalidArgument("group_count must be <= 1024.");
   }
 
-  const DtypeA* lhs_base = reinterpret_cast<const DtypeA*>(lhs.typed_data());
-  const DtypeB* grad_base = reinterpret_cast<const DtypeB*>(grad.typed_data());
-  DtypeOutput* d_rhs_base = reinterpret_cast<DtypeOutput*>(d_rhs->typed_data());
-
   size_t gl = static_cast<size_t>(g_local);
   size_t bytes = 7 * 16 +
                  sizeof(DtypeA*) * gl + sizeof(DtypeB*) * gl + sizeof(DtypeOutput*) * gl +
@@ -363,7 +357,9 @@ ffi::Error RaggedDotBwdCudaImpl(
   align16(p); ProblemShapeType* d_problem_sizes = reinterpret_cast<ProblemShapeType*>(p);
 
   prepare_grouped_gemm_bwd_data<<<1, g_local, 0, stream>>>(
-      lhs_base, grad_base, d_rhs_base,
+      reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+      reinterpret_cast<const DtypeB*>(grad.typed_data()),
+      reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
       group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n,
       d_A_ptrs, d_B_ptrs, d_out_ptrs,
       d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
