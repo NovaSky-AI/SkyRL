@@ -223,8 +223,6 @@ ffi::Error RaggedDotCudaImpl(
   const DtypeA* A_base = reinterpret_cast<const DtypeA*>(lhs.typed_data());
   const DtypeB* B_base = reinterpret_cast<const DtypeB*>(rhs.typed_data());
   DtypeOutput* out_base = reinterpret_cast<DtypeOutput*>(out->typed_data());
-  const int32_t* group_offset_ptr = group_offset.typed_data();
-  const int32_t* group_offsets_cumsum_ptr = group_offsets_cumsum.typed_data();
 
   size_t gl = static_cast<size_t>(g_local);
   size_t bytes = 7 * 16 +  // alignment padding
@@ -249,7 +247,7 @@ ffi::Error RaggedDotCudaImpl(
 
   prepare_grouped_gemm_data<<<1, g_local, 0, stream>>>(
       A_base, B_base, out_base,
-      group_offsets_cumsum_ptr, group_offset_ptr, k, n,
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n,
       d_A_ptrs, d_B_ptrs, d_out_ptrs,
       d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
 
@@ -344,8 +342,6 @@ ffi::Error RaggedDotBwdCudaImpl(
   const DtypeA* lhs_base = reinterpret_cast<const DtypeA*>(lhs.typed_data());
   const DtypeB* grad_base = reinterpret_cast<const DtypeB*>(grad.typed_data());
   DtypeOutput* d_rhs_base = reinterpret_cast<DtypeOutput*>(d_rhs->typed_data());
-  const int32_t* group_offset_ptr = group_offset.typed_data();
-  const int32_t* group_offsets_cumsum_ptr = group_offsets_cumsum.typed_data();
 
   size_t gl = static_cast<size_t>(g_local);
   size_t bytes = 7 * 16 +
@@ -370,7 +366,7 @@ ffi::Error RaggedDotBwdCudaImpl(
 
   prepare_grouped_gemm_bwd_data<<<1, g_local, 0, stream>>>(
       lhs_base, grad_base, d_rhs_base,
-      group_offsets_cumsum_ptr, group_offset_ptr, k, n,
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), k, n,
       d_A_ptrs, d_B_ptrs, d_out_ptrs,
       d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
 
