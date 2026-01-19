@@ -24,10 +24,11 @@ from vllm.utils.system_utils import set_ulimit
 
 
 from skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_open_port
+from skyrl_train.inference_servers.protocols import ServerActorProtocol
+from skyrl_train.inference_servers.vllm_worker import VLLM_WORKER_EXTENSION_CLS
 from skyrl_train.env_vars import (
     SKYRL_VLLM_DP_PORT_OFFSET, SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
-from skyrl_train.inference_servers.protocols import ServerActorProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,9 @@ class VLLMServerActor(ServerActorProtocol):
         self._port = get_open_port(start_port)
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
+        
+        # Ensure SkyRL's custom worker extension is used for weight sync
+        self._ensure_worker_extension()
 
         # Update args with our assigned host/port
         self._cli_args.host = "0.0.0.0"
@@ -132,6 +136,19 @@ class VLLMServerActor(ServerActorProtocol):
         # Initialized lazily to not block the actor initialization.
         self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
+
+    def _ensure_worker_extension(self) -> None:
+        """
+        Ensure the SkyRL worker extension is configured.
+        
+        The worker extension (WorkerWrap) provides the RPC methods needed for
+        weight synchronization (init_weight_update_communicator, load_weights).
+        """
+        if not hasattr(self._cli_args, "worker_extension_cls") or not self._cli_args.worker_extension_cls:
+            self._cli_args.worker_extension_cls = VLLM_WORKER_EXTENSION_CLS
+            logger.info(f"Using default worker extension: {VLLM_WORKER_EXTENSION_CLS}")
+        else:
+            logger.info(f"Using provided worker extension: {self._cli_args.worker_extension_cls}")
 
     def _setup_nixl_side_channel(self, base_port: int) -> None:
         """
@@ -283,7 +300,7 @@ class VLLMServerActor(ServerActorProtocol):
             pickled_init_info = pickle.dumps(init_info)
 
             await engine.collective_rpc(
-                "init_weight_transfer",
+                "init_weight_update_communicator",
                 args=(pickled_init_info,),
             )
             return {"status": "ok"}
