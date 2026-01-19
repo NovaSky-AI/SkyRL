@@ -35,6 +35,7 @@ mkdir -p "${OUT_DIR}"
   -std=c++17 \
   -arch="${NVCC_ARCH}" \
   --expt-relaxed-constexpr \
+  -dlto \
   -shared \
   -Xcompiler -fPIC \
   -I"${JAX_INCLUDE_DIR}" \
