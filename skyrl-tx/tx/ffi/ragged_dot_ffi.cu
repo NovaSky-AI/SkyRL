@@ -30,6 +30,23 @@
 
 namespace ffi = xla::ffi;
 
+// Cache SM count per device to avoid repeated cudaGetDeviceProperties calls
+static int g_sm_count[16] = {0};
+
+static int get_sm_count() {
+  int device = 0;
+  if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= 16) {
+    return 0;
+  }
+  if (g_sm_count[device] == 0) {
+    cudaDeviceProp props;
+    if (cudaGetDeviceProperties(&props, device) == cudaSuccess) {
+      g_sm_count[device] = props.multiProcessorCount;
+    }
+  }
+  return g_sm_count[device];
+}
+
 using DtypeA = cutlass::bfloat16_t;
 using DtypeB = cutlass::bfloat16_t;
 using DtypeOutput = cutlass::bfloat16_t;
@@ -124,13 +141,19 @@ __global__ void prepare_grouped_gemm_data(
     StrideB* stride_B,
     StrideOutput* stride_output,
     ProblemShapeType* problem_sizes) {
+  // Use shared memory to broadcast first_group_idx to all threads
+  __shared__ int32_t s_first_group_idx;
+  if (threadIdx.x == 0) {
+    s_first_group_idx = group_offset_ptr[0];
+  }
+  __syncthreads();
+
   int32_t tid = threadIdx.x;
   if (tid >= group_count) {
     return;
   }
 
-  int32_t first_group_idx = group_offset_ptr[0];
-  int32_t global = first_group_idx + tid;
+  int32_t global = s_first_group_idx + tid;
   if (global < 0 || global >= num_groups) {
     return;
   }
@@ -301,11 +324,7 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
   }
 
-  int device = 0;
-  cudaDeviceProp props;
-  if (cudaGetDevice(&device) == cudaSuccess && cudaGetDeviceProperties(&props, device) == cudaSuccess) {
-    args.hw_info.sm_count = props.multiProcessorCount;
-  }
+  args.hw_info.sm_count = get_sm_count();
 
   size_t workspace_size = Gemm::get_workspace_size(args);
   void* workspace = nullptr;
