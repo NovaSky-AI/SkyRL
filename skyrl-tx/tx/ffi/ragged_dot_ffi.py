@@ -60,14 +60,6 @@ def _ragged_dot_bwd_ffi_call(
     return call(lhs, grad, group_offset, group_offsets_cumsum)
 
 
-def _apply_mask(result: jax.Array, cumsum: jax.Array, group_offset: jax.Array, g_local: int) -> jax.Array:
-    """Zero out tokens outside the local group range [offset, offset+g_local)."""
-    offset = group_offset[0]
-    token_idx = jnp.arange(result.shape[0])
-    valid = (token_idx >= cumsum[offset]) & (token_idx < cumsum[offset + g_local])
-    return jnp.where(valid[:, None], result, 0)
-
-
 @jax.custom_vjp
 def ragged_dot(
     lhs: jax.Array,
@@ -76,8 +68,7 @@ def ragged_dot(
     group_offset: jax.Array,
 ) -> jax.Array:
     cumsum = jnp.cumulative_sum(group_sizes, include_initial=True).astype(jnp.int32)
-    result = _ragged_dot_ffi_call(lhs, rhs, group_offset, cumsum)
-    return _apply_mask(result, cumsum, group_offset, rhs.shape[0])
+    return _ragged_dot_ffi_call(lhs, rhs, group_offset, cumsum)
 
 
 def _ragged_dot_fwd(
@@ -87,8 +78,7 @@ def _ragged_dot_fwd(
     group_offset: jax.Array,
 ):
     cumsum = jnp.cumulative_sum(group_sizes, include_initial=True).astype(jnp.int32)
-    result = _ragged_dot_ffi_call(lhs, rhs, group_offset, cumsum)
-    y = _apply_mask(result, cumsum, group_offset, rhs.shape[0])
+    y = _ragged_dot_ffi_call(lhs, rhs, group_offset, cumsum)
     return y, (lhs, rhs, group_offset, cumsum)
 
 
@@ -98,7 +88,7 @@ def _ragged_dot_bwd(res, g):
 
     # d_lhs: g @ rhs.T with ragged grouping
     rhs_t = jnp.swapaxes(rhs, 1, 2)
-    d_lhs = _apply_mask(_ragged_dot_ffi_call(g, rhs_t, group_offset, cumsum), cumsum, group_offset, g_local)
+    d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_offset, cumsum)
 
     # d_rhs: lhs.T @ g accumulated per group
     d_rhs = _ragged_dot_bwd_ffi_call(lhs, g, group_offset, cumsum, g_local)

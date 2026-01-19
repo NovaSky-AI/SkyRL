@@ -246,6 +246,10 @@ ffi::Error RaggedDotCudaImpl(
   int32_t g_local = static_cast<int32_t>(rhs_dims[0]);
   int32_t n = static_cast<int32_t>(rhs_dims[2]);
 
+  if (cudaMemsetAsync(out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
+    return ffi::Error::Internal("Failed to zero output.");
+  }
+
   return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
       stream, scratch,
       reinterpret_cast<const DtypeA*>(lhs.typed_data()),
@@ -292,6 +296,10 @@ ffi::Error RaggedDotBwdCudaImpl(
   int32_t k = static_cast<int32_t>(lhs_dims[1]);
   int32_t n = static_cast<int32_t>(grad_dims[1]);
   int32_t g_local = static_cast<int32_t>(d_rhs_dims[0]);
+
+  if (cudaMemsetAsync(d_rhs->typed_data(), 0, static_cast<size_t>(g_local) * k * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
+    return ffi::Error::Internal("Failed to zero d_rhs output.");
+  }
 
   return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
       stream, scratch,
