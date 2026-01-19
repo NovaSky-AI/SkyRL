@@ -431,6 +431,20 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
         )
 
+    def _normalize_mini_batch_size(self):
+        """
+        Override to set Megatron-specific batch size attributes.
+
+        Megatron's ppo_train method needs policy_mini_batch_size_per_gpu to compute
+        how many micro batches fit in a mini batch for gradient accumulation.
+        """
+        super()._normalize_mini_batch_size()  # Sets _micro_batches_accumulated
+
+        # Megatron-specific: compute mini batch size per GPU for ppo_train
+        n_samples = self.cfg.generator.n_samples_per_prompt
+        dp_size = self.mesh_rank.dp_size
+        self.policy_mini_batch_size_per_gpu = (self.cfg.trainer.policy_mini_batch_size * n_samples) // dp_size
+
     def init_model(self, model_path, num_training_steps: int = 1e9):
         """
         Initialize the model, optimizer, and scheduler for the policy worker.
@@ -537,8 +551,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
             # TODO: Convert this into 2 loops for minibatches and microbatches.
             micro_buffer = []
-            for local_step, microbatch in enumerate(pbar):
-                experience = BatchIterator.batch_to_experience(microbatch)
+            for local_step, experience in enumerate(pbar):
+                # BatchIterator now yields Experience objects directly
                 experience.to_device(torch.cuda.current_device())
                 sequences = experience.sequences
                 attention_mask = experience.attention_mask
