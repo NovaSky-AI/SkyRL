@@ -7,11 +7,6 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 
-try:  # JAX >= 0.8
-    from jax import ffi as jax_ffi
-except Exception:  # pragma: no cover - older JAX fallback
-    from jax.experimental import ffi as jax_ffi
-
 
 _REGISTERED = False
 _LOAD_ERROR: Exception | None = None
@@ -45,14 +40,14 @@ def _ensure_registered() -> bool:
 
     try:
         lib = ctypes.cdll.LoadLibrary(str(lib_path))
-        jax_ffi.register_ffi_target(
+        jax.ffi.register_ffi_target(
             "ragged_dot_cuda",
-            jax_ffi.pycapsule(lib.RaggedDotCuda),
+            jax.ffi.pycapsule(lib.RaggedDotCuda),
             platform="CUDA",
         )
-        jax_ffi.register_ffi_target(
+        jax.ffi.register_ffi_target(
             "ragged_dot_bwd_cuda",
-            jax_ffi.pycapsule(lib.RaggedDotBwdCuda),
+            jax.ffi.pycapsule(lib.RaggedDotBwdCuda),
             platform="CUDA",
         )
         _REGISTERED = True
@@ -76,7 +71,7 @@ def _ragged_dot_ffi_call(
         raise RuntimeError("ragged_dot_ffi is not available. Build and load the shared library first.")
 
     out = jax.ShapeDtypeStruct((lhs.shape[0], rhs.shape[2]), lhs.dtype)
-    call = jax_ffi.ffi_call("ragged_dot_cuda", out, vmap_method=None)
+    call = jax.ffi.ffi_call("ragged_dot_cuda", out, vmap_method=None)
     return call(lhs, rhs, group_offset, group_offsets_cumsum)
 
 
@@ -95,7 +90,7 @@ def _ragged_dot_bwd_ffi_call(
     n = grad.shape[1]
 
     out = jax.ShapeDtypeStruct((g_local, k, n), lhs.dtype)
-    call = jax_ffi.ffi_call("ragged_dot_bwd_cuda", out, vmap_method=None)
+    call = jax.ffi.ffi_call("ragged_dot_bwd_cuda", out, vmap_method=None)
     return call(lhs, grad, group_offset, group_offsets_cumsum)
 
 
