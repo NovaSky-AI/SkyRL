@@ -64,9 +64,10 @@ using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int32_t, int32
 using ProblemShapeType = ProblemShape::UnderlyingProblemShape;
 
 // ============================================================================
-// Kernel variant 1: Up/Gate projection (K=2048, N=768) - 64x128x64 tile
+// Kernel variant 1: Up/Gate projection (K=2048, N=768) - 64x128x128 tile
+// Larger K tile (128) for better compute intensity with large K
 // ============================================================================
-using TileShape_UpGate = cute::Shape<cute::_64, cute::_128, cute::_64>;
+using TileShape_UpGate = cute::Shape<cute::_64, cute::_128, cute::_128>;
 using ClusterShape_UpGate = cute::Shape<cute::_1, cute::_1, cute::_1>;
 using KernelSchedule_UpGate = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
 using EpilogueSchedule_UpGate = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
@@ -91,9 +92,10 @@ using Gemm_UpGate = cutlass::gemm::device::GemmUniversalAdapter<
     cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_UpGate, CollectiveEpilogue_UpGate>>;
 
 // ============================================================================
-// Kernel variant 2: Down projection (K=768, N=2048) - 64x256x64 tile for large N
+// Kernel variant 2: Down projection (K=768, N=2048) - 64x256x128 tile
+// Larger K tile (128) + larger N tile (256) for large N output
 // ============================================================================
-using TileShape_Down = cute::Shape<cute::_64, cute::_256, cute::_64>;
+using TileShape_Down = cute::Shape<cute::_64, cute::_256, cute::_128>;
 using ClusterShape_Down = cute::Shape<cute::_1, cute::_1, cute::_1>;
 using KernelSchedule_Down = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
 using EpilogueSchedule_Down = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
