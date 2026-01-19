@@ -11,7 +11,7 @@ SO_FILE = Path(__file__).parent.parent / "tx/ffi/libragged_dot_ffi.so"
 # Tile configurations to test: (M, N, K)
 # Constraints: dimensions should be powers of 2 or multiples that work with SM90
 TILE_CONFIGS = [
-    (128, 256, 64),   # current
+    (128, 256, 64),
     (128, 128, 64),
     (64, 128, 64),
     (64, 256, 64),
@@ -20,6 +20,12 @@ TILE_CONFIGS = [
     (64, 64, 128),
     (128, 128, 128),
 ]
+
+# Qwen3-30B-A3B MoE shapes
+MOE_SHAPES = {
+    "gate_up": {"hidden_size": 2048, "intermediate_size": 768},   # K=2048, N=768
+    "down":    {"hidden_size": 768,  "intermediate_size": 2048},  # K=768, N=2048
+}
 
 
 def set_tile_shape(m: int, n: int, k: int) -> None:
@@ -57,14 +63,17 @@ def rebuild_kernel() -> bool:
     return SO_FILE.exists()
 
 
-def run_benchmark(num_tokens: int = 8192) -> dict | None:
+def run_benchmark(num_tokens: int, hidden_size: int, intermediate_size: int) -> dict | None:
     """Run the benchmark and parse results."""
     # Need to run in a fresh process to reload the .so
     result = subprocess.run(
         [sys.executable, "benchmarks/bench_ragged_dot.py",
          "--num-tokens", str(num_tokens),
+         "--hidden-size", str(hidden_size),
+         "--intermediate-size", str(intermediate_size),
          "--num-warmup", "3",
-         "--num-iters", "10"],
+         "--num-iters", "10",
+         "--forward-only"],
         capture_output=True,
         text=True,
         cwd=CUDA_FILE.parent.parent.parent,
@@ -84,12 +93,6 @@ def run_benchmark(num_tokens: int = 8192) -> dict | None:
         results['fwd_ms'] = float(match.group(1))
         results['fwd_tflops'] = float(match.group(2))
 
-    # Find backward pass (second occurrence)
-    matches = list(re.finditer(r'CUTLASS FFI:\s+([\d.]+)\s+ms\s+([\d.]+)\s+TFLOPS', output))
-    if len(matches) >= 2:
-        results['bwd_ms'] = float(matches[1].group(1))
-        results['bwd_tflops'] = float(matches[1].group(2))
-
     return results if results else None
 
 
@@ -102,7 +105,9 @@ def main():
 
     print("CUTLASS Tile Size Sweep")
     print("=" * 70)
-    print(f"Qwen3-30B-A3B shapes: K=2048, N=768, M={args.num_tokens}")
+    print(f"Qwen3-30B-A3B MoE shapes, M={args.num_tokens}")
+    print(f"  gate_up: K=2048, N=768")
+    print(f"  down:    K=768,  N=2048")
     print()
 
     if args.dry_run:
@@ -122,44 +127,53 @@ def main():
 
         if not rebuild_kernel():
             print("  FAILED to build")
-            results.append((m, n, k, None))
+            results.append((m, n, k, None, None))
             continue
 
-        bench_results = run_benchmark(args.num_tokens)
-        if bench_results:
-            print(f"  Forward:  {bench_results.get('fwd_ms', 'N/A'):>8.3f} ms  {bench_results.get('fwd_tflops', 'N/A'):>8.2f} TFLOPS")
-            print(f"  Backward: {bench_results.get('bwd_ms', 'N/A'):>8.3f} ms  {bench_results.get('bwd_tflops', 'N/A'):>8.2f} TFLOPS")
-            results.append((m, n, k, bench_results))
-        else:
-            print("  FAILED to benchmark")
-            results.append((m, n, k, None))
+        tile_results = {}
+        for shape_name, shape_cfg in MOE_SHAPES.items():
+            bench_result = run_benchmark(
+                args.num_tokens,
+                shape_cfg["hidden_size"],
+                shape_cfg["intermediate_size"],
+            )
+            tile_results[shape_name] = bench_result
+            if bench_result:
+                print(f"  {shape_name:>8}: {bench_result['fwd_ms']:>8.3f} ms  {bench_result['fwd_tflops']:>8.2f} TFLOPS")
+            else:
+                print(f"  {shape_name:>8}: FAILED")
+
+        results.append((m, n, k, tile_results.get("gate_up"), tile_results.get("down")))
 
     # Summary
     print(f"\n{'='*70}")
     print("SUMMARY")
     print("=" * 70)
-    print(f"{'TileShape':<20} {'Fwd (ms)':>10} {'Fwd TFLOPS':>12} {'Bwd (ms)':>10} {'Bwd TFLOPS':>12}")
+    print(f"{'TileShape':<20} {'gate_up ms':>12} {'TFLOPS':>8} {'down ms':>12} {'TFLOPS':>8} {'Total ms':>10}")
     print("-" * 70)
 
-    for m, n, k, res in results:
+    for m, n, k, gate_up, down in results:
         tile_str = f"({m}, {n}, {k})"
-        if res:
-            fwd_ms = f"{res.get('fwd_ms', 0):.3f}"
-            fwd_tf = f"{res.get('fwd_tflops', 0):.2f}"
-            bwd_ms = f"{res.get('bwd_ms', 0):.3f}"
-            bwd_tf = f"{res.get('bwd_tflops', 0):.2f}"
-            print(f"{tile_str:<20} {fwd_ms:>10} {fwd_tf:>12} {bwd_ms:>10} {bwd_tf:>12}")
+        if gate_up and down:
+            gu_ms = gate_up['fwd_ms']
+            gu_tf = gate_up['fwd_tflops']
+            dn_ms = down['fwd_ms']
+            dn_tf = down['fwd_tflops']
+            total_ms = gu_ms + dn_ms
+            print(f"{tile_str:<20} {gu_ms:>12.3f} {gu_tf:>8.2f} {dn_ms:>12.3f} {dn_tf:>8.2f} {total_ms:>10.3f}")
         else:
-            print(f"{tile_str:<20} {'FAILED':>10}")
+            print(f"{tile_str:<20} {'FAILED':>12}")
 
     # Find best
-    valid_results = [(m, n, k, r) for m, n, k, r in results if r and 'fwd_tflops' in r]
+    valid_results = [(m, n, k, gu, dn) for m, n, k, gu, dn in results if gu and dn]
     if valid_results:
-        best_fwd = max(valid_results, key=lambda x: x[3]['fwd_tflops'])
-        best_bwd = max(valid_results, key=lambda x: x[3].get('bwd_tflops', 0))
+        best_gate_up = max(valid_results, key=lambda x: x[3]['fwd_tflops'])
+        best_down = max(valid_results, key=lambda x: x[4]['fwd_tflops'])
+        best_total = min(valid_results, key=lambda x: x[3]['fwd_ms'] + x[4]['fwd_ms'])
         print()
-        print(f"Best forward:  ({best_fwd[0]}, {best_fwd[1]}, {best_fwd[2]}) - {best_fwd[3]['fwd_tflops']:.2f} TFLOPS")
-        print(f"Best backward: ({best_bwd[0]}, {best_bwd[1]}, {best_bwd[2]}) - {best_bwd[3].get('bwd_tflops', 0):.2f} TFLOPS")
+        print(f"Best gate_up: ({best_gate_up[0]}, {best_gate_up[1]}, {best_gate_up[2]}) - {best_gate_up[3]['fwd_tflops']:.2f} TFLOPS")
+        print(f"Best down:    ({best_down[0]}, {best_down[1]}, {best_down[2]}) - {best_down[4]['fwd_tflops']:.2f} TFLOPS")
+        print(f"Best total:   ({best_total[0]}, {best_total[1]}, {best_total[2]}) - {best_total[3]['fwd_ms'] + best_total[4]['fwd_ms']:.3f} ms")
 
 
 if __name__ == "__main__":
