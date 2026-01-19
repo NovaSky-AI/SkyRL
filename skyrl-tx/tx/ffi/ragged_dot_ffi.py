@@ -2,26 +2,20 @@ from __future__ import annotations
 
 import ctypes
 import functools
-import os
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 
+_LIB_PATH = Path(__file__).resolve().parent / "libragged_dot_ffi.so"
+
 
 @functools.lru_cache(maxsize=1)
 def _ensure_registered() -> bool:
-    if env_path := os.environ.get("TX_RAGGED_DOT_FFI_PATH"):
-        lib_path = Path(env_path)
-    else:
-        here = Path(__file__).resolve().parent
-        lib_path = next((p for p in [here / "libragged_dot_ffi.so", here / "ragged_dot_ffi.so"] if p.exists()), None)
-
-    if not lib_path or not lib_path.exists():
+    if not _LIB_PATH.exists():
         return False
-
     try:
-        lib = ctypes.cdll.LoadLibrary(str(lib_path))
+        lib = ctypes.cdll.LoadLibrary(str(_LIB_PATH))
         jax.ffi.register_ffi_target("ragged_dot_cuda", jax.ffi.pycapsule(lib.RaggedDotCuda), platform="CUDA")
         jax.ffi.register_ffi_target("ragged_dot_bwd_cuda", jax.ffi.pycapsule(lib.RaggedDotBwdCuda), platform="CUDA")
         return True
