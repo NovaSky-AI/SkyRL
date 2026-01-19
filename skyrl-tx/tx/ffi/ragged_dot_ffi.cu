@@ -49,9 +49,9 @@ using DtypeAccum = float;
 using LayoutA = cutlass::layout::RowMajor;
 using LayoutB = cutlass::layout::RowMajor;
 using LayoutOutput = cutlass::layout::RowMajor;
-constexpr int AlignmentA = 16;
-constexpr int AlignmentB = 16;
-constexpr int AlignmentOutput = 16;
+constexpr int AlignmentA = 8;
+constexpr int AlignmentB = 8;
+constexpr int AlignmentOutput = 8;
 
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
