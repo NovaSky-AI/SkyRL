@@ -45,7 +45,6 @@ def test_deepseekv3(tp: int):
         hf_model.save_pretrained(tmp, safe_serialization=True)
 
         base_config = PretrainedConfig.from_pretrained(model_name, trust_remote_code=True)
-        print(base_config)
         config = DeepseekV3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
         mesh = jax.make_mesh((1, tp), ("fsdp", "tp"))
         with jax.set_mesh(mesh):

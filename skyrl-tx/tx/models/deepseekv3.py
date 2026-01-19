@@ -174,10 +174,10 @@ class DeepseekV3Attention(nnx.Module):
             k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
             v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
         
+        updated_cache = (k, v)
+
         # Jax attention expects v to have the same shape as k
         v = jnp.pad(v, ((0, 0), (0, 0), (0, 0), (0, self.qk_head_dim - self.v_head_dim)))
-
-        updated_cache = (k, v)
 
         attn_output = jax.nn.dot_product_attention(
             q,
