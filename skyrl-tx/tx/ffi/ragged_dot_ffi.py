@@ -136,11 +136,19 @@ def _ragged_dot_fwd(
 def _ragged_dot_bwd(res, g):
     lhs, rhs, group_sizes, group_offset = res
 
-    def _ref_lhs_rhs(lhs_, rhs_):
-        return _ragged_dot_ref(lhs_, rhs_, group_sizes, group_offset)
+    # d_lhs: g @ rhs.T with ragged grouping - same structure as forward
+    # g: [M, N], rhs: [G, K, N] -> rhs.T: [G, N, K], d_lhs: [M, K]
+    rhs_t = jnp.swapaxes(rhs, 1, 2)  # [G, N, K]
+    d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_sizes, group_offset)
 
-    (_, pullback) = jax.vjp(_ref_lhs_rhs, lhs, rhs)
-    d_lhs, d_rhs = pullback(g)
+    # d_rhs: lhs.T @ g accumulated per group -> [G, K, N]
+    # This has a different structure, use JAX's autodiff
+    def _ref_rhs_only(rhs_):
+        return _ragged_dot_ref(lhs, rhs_, group_sizes, group_offset)
+
+    (_, pullback) = jax.vjp(_ref_rhs_only, rhs)
+    (d_rhs,) = pullback(g)
+
     return d_lhs, d_rhs, None, None
 
 
