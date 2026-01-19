@@ -8,12 +8,6 @@ The CUDA extension is built automatically when creating a wheel:
 uv build
 ```
 
-For development, build manually:
-
-```bash
-uv run build-ffi
-```
-
 ### Environment Variables
 
 - `CUTLASS_DIR` - Path to CUTLASS checkout (optional, clones automatically if not set)

@@ -63,14 +63,12 @@ def build_ragged_dot():
         print(f"Built {output_file}")
 
 
-try:
-    from hatchling.builders.hooks.plugin.interface import BuildHookInterface
+from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
-    class CudaBuildHook(BuildHookInterface):
-        PLUGIN_NAME = "cuda_build"
 
-        def initialize(self, version, build_data):
-            if self.target_name == "wheel":
-                build_ragged_dot()
-except ImportError:
-    pass
+class CudaBuildHook(BuildHookInterface):
+    PLUGIN_NAME = "cuda_build"
+
+    def initialize(self, version, build_data):
+        if self.target_name == "wheel":
+            build_ragged_dot()

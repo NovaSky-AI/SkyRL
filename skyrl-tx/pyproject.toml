@@ -75,6 +75,3 @@ path = "tx/ffi/build.py"
 
 [project.scripts]
 tx = "tx.run.main:app"
-
-[tool.uv.scripts]
-build-ffi = "python -c 'from tx.ffi.build import build_ragged_dot; build_ragged_dot()'"
