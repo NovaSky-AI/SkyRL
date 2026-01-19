@@ -10,8 +10,7 @@ from skyrl_train.inference_servers.common import ServerInfo
 
 
 class ServerActorPool:
-    """
-    Generic pool that manages a list of server actors.
+    """Generic pool that manages a list of server actors.
 
     Actors must implement:
       - start() -> ServerInfo
