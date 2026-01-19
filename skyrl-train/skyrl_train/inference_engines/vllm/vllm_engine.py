@@ -373,7 +373,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             models=models,
             response_role="assistant",
             request_logger=None,
-            chat_template=None,
+            chat_template=openai_kwargs.pop("chat_template", None),  # used to template /chat/completions requests
             chat_template_content_format="auto",
             **openai_kwargs,
         )

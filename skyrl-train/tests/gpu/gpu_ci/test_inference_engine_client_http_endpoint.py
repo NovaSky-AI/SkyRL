@@ -15,6 +15,7 @@ import pytest
 import asyncio
 from http import HTTPStatus
 from typing import Any, Dict, List, Union, Tuple
+from pathlib import Path
 import ray
 import hydra
 import threading
@@ -43,7 +44,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from transformers import AutoTokenizer
 
-MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
 TP_SIZE = 1
 SERVER_HOST = "127.0.0.1"
 
@@ -225,7 +227,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
     try:
         # 1. Build engine
-        cfg = get_test_actor_config(num_inference_engines=2, model=MODEL)
+        cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -237,18 +239,18 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
-            model=MODEL,
+            model=MODEL_QWEN2_5,
             num_inference_engines=cfg.generator.num_inference_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
-        tokenizer = AutoTokenizer.from_pretrained(MODEL)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
 
         # 2. Build prompts
         num_samples = 20
-        test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL, num_samples=num_samples)
+        test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
         text_prompts = [
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list
@@ -259,12 +261,12 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
                 if not batched:
                     outputs = []
                     for i, p in enumerate(text_prompts):
-                        payload = {"model": MODEL, "prompt": p, **sampling_params}
+                        payload = {"model": MODEL_QWEN2_5, "prompt": p, **sampling_params}
                         if with_traj:
                             payload["session_id"] = i
                         outputs.append(requests.post(f"{base_url}/completions", json=payload).json())
                 else:
-                    payload = {"model": MODEL, "prompt": text_prompts, **sampling_params}
+                    payload = {"model": MODEL_QWEN2_5, "prompt": text_prompts, **sampling_params}
                     if with_traj:
                         payload["session_id"] = list(range(len(text_prompts)))
                     outputs = [requests.post(f"{base_url}/completions", json=payload).json()]
@@ -293,7 +295,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     endpoints = ["chat_completions", "completions"]
     try:
         # 1. Set up engine
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -304,11 +306,11 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
-            model=MODEL,
+            model=MODEL_QWEN2_5,
             num_inference_engines=cfg.generator.num_inference_engines,
             sleep_level=2,  # since we explicitly sync weights
         )
-        tokenizer = AutoTokenizer.from_pretrained(MODEL)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
@@ -327,7 +329,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
 
         # 2. Do tests
         num_samples = 20
-        test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL, num_samples=num_samples)
+        test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
         # For /completions, we test both string and token IDs input
         test_prompts_half_str_half_tokens_list: List[Union[str, List[int]]] = [
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
@@ -341,14 +343,14 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             def payload_builder(session_id, prompt):
                 if endpoint == "chat_completions":
                     return {
-                        "model": MODEL,
+                        "model": MODEL_QWEN2_5,
                         "messages": prompt,
                         "session_id": session_id,
                         **sampling_params,
                     }
                 else:
                     return {
-                        "model": MODEL,
+                        "model": MODEL_QWEN2_5,
                         "prompt": prompt,
                         "session_id": session_id,
                         **sampling_params,
@@ -402,7 +404,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                     async def generate_output(session_id, prompt):
                         if endpoint == "chat_completions":
                             return await litellm_async_completion(
-                                model=f"openai/{MODEL}",
+                                model=f"openai/{MODEL_QWEN2_5}",
                                 messages=prompt,
                                 api_base=base_url,
                                 api_key="DUMMY_KEY",
@@ -411,7 +413,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                             )
                         else:
                             return await litellm_async_text_completion(
-                                model=f"openai/{MODEL}",
+                                model=f"openai/{MODEL_QWEN2_5}",
                                 prompt=[prompt],
                                 api_base=base_url,
                                 api_key="DUMMY_KEY",
@@ -463,11 +465,11 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.generator.backend = backend
-        tokenizer = AutoTokenizer.from_pretrained(MODEL)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
-        client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
+        client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL_QWEN2_5)
 
         # 2. Start HTTP endpoint in background thread using serve function directly
         server_thread, server_port = set_up_http_server(client)
@@ -475,7 +477,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 
         # 3. Generate outputs using litellm and check outputs
         num_samples = 20
-        test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL, num_samples=num_samples)
+        test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
         test_prompts_half_str_half_tokens_list: List[Union[str, List[int]]] = [
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list[: num_samples // 2]
@@ -497,7 +499,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
                 async def generate_output(session_id, prompt):
                     if endpoint == "chat_completions":
                         return await litellm_async_completion(
-                            model=f"openai/{MODEL}",
+                            model=f"openai/{MODEL_QWEN2_5}",
                             messages=prompt,
                             api_base=base_url,
                             api_key="DUMMY_KEY",
@@ -506,7 +508,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
                         )
                     else:
                         return await litellm_async_text_completion(
-                            model=f"openai/{MODEL}",
+                            model=f"openai/{MODEL_QWEN2_5}",
                             prompt=[prompt],
                             api_base=base_url,
                             api_key="DUMMY_KEY",
@@ -541,7 +543,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 @pytest.mark.vllm
 def test_structured_generation(ray_init_fixture):
     try:
-        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -553,7 +555,7 @@ def test_structured_generation(ray_init_fixture):
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
-            model=MODEL,
+            model=MODEL_QWEN2_5,
             num_inference_engines=cfg.generator.num_inference_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
@@ -573,7 +575,7 @@ def test_structured_generation(ray_init_fixture):
         ]
 
         output = litellm_completion(
-            model=f"openai/{MODEL}",
+            model=f"openai/{MODEL_QWEN2_5}",
             api_base=base_url,
             api_key="DUMMY_KEY",
             messages=prompt,
@@ -604,7 +606,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
     Test error handling for various invalid requests.
     """
     try:
-        cfg = get_test_actor_config(num_inference_engines=2, model=MODEL)
+        cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
@@ -616,7 +618,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
-            model=MODEL,
+            model=MODEL_QWEN2_5,
             num_inference_engines=cfg.generator.num_inference_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
@@ -627,7 +629,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         # Test 1: Invalid request - streaming not supported, raised by SkyRL
         response = requests.post(
             f"{base_url}/v1/chat/completions",
-            json={"model": MODEL, "messages": [{"role": "user", "content": "Hello"}], "stream": True},
+            json={"model": MODEL_QWEN2_5, "messages": [{"role": "user", "content": "Hello"}], "stream": True},
         )
         assert response.status_code == HTTPStatus.BAD_REQUEST  # 400
         error_data = response.json()
@@ -637,7 +639,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         # Test 2: OAI can take fields not listed in the protocol
         response = requests.post(
             f"{base_url}/v1/chat/completions",
-            json={"model": MODEL, "messages": [{"role": "user", "content": "Hello"}], "xxx": "yyy"},
+            json={"model": MODEL_QWEN2_5, "messages": [{"role": "user", "content": "Hello"}], "xxx": "yyy"},
         )
         assert response.status_code == HTTPStatus.OK  # 200
 
@@ -645,7 +647,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         response = requests.post(
             f"{base_url}/v1/chat/completions",
             json={
-                "model": MODEL,
+                "model": MODEL_QWEN2_5,
                 # Missing messages field
             },
         )
@@ -664,7 +666,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         assert "Invalid JSON error" in error_data["error"]["message"]  # JSON decode error
 
         # Test 5: Invalid request - empty messages array, raised by SkyRL
-        response = requests.post(f"{base_url}/v1/chat/completions", json={"model": MODEL, "messages": []})
+        response = requests.post(f"{base_url}/v1/chat/completions", json={"model": MODEL_QWEN2_5, "messages": []})
         assert response.status_code == HTTPStatus.BAD_REQUEST  # 400
         error_data = response.json()
         print(f"Error data: {error_data}")
@@ -692,7 +694,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         # C1: streaming not supported
         response = requests.post(
             f"{base_url}/v1/completions",
-            json={"model": MODEL, "prompt": "Hello", "stream": True},
+            json={"model": MODEL_QWEN2_5, "prompt": "Hello", "stream": True},
         )
         assert response.status_code == HTTPStatus.BAD_REQUEST
         # C2: wrong model
@@ -711,16 +713,104 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         # C4: n > 1
         response = requests.post(
             f"{base_url}/v1/completions",
-            json={"model": MODEL, "prompt": "Hello", "n": 2},
+            json={"model": MODEL_QWEN2_5, "prompt": "Hello", "n": 2},
         )
         assert response.status_code == HTTPStatus.BAD_REQUEST
         error_data = response.json()
         assert "n is not supported in SkyRL for /completions " in error_data["error"]["message"]
 
         # When batched and session_id wrong length -> 400 from server or client-side error
-        bad_payload = {"model": MODEL, "prompt": ["hi", "hello", "ok"], "session_id": [0, 1]}
+        bad_payload = {"model": MODEL_QWEN2_5, "prompt": ["hi", "hello", "ok"], "session_id": [0, 1]}
         r = requests.post(f"{base_url}/v1/completions", json=bad_payload)
         assert r.status_code == HTTPStatus.BAD_REQUEST
+
+    finally:
+        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread.is_alive():
+            server_thread.join(timeout=5)
+
+
+@pytest.mark.vllm
+@pytest.mark.parametrize("use_custom_template", [False, True])
+def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_template):
+    """
+    Test the HTTP endpoint /chat/completions with and without custom chat template.
+    Check the output correspondingly.
+    """
+    try:
+        # 1. Set up engine
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
+        cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+        template_path = "skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+        engine_init_kwargs = {}
+        if use_custom_template:
+            # use relative path to workspace root
+            # __file__ is skyrl-train/tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
+            repo_root = Path(__file__).parent.parent.parent.parent
+            engine_init_kwargs["chat_template"] = str(repo_root / template_path)
+
+        client, _ = init_inference_engines(
+            cfg=cfg,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
+            model=MODEL_QWEN3,
+            num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,  # since we do not explicitly sync weights
+            engine_init_kwargs=engine_init_kwargs,
+        )
+
+        server_thread, server_port = set_up_http_server(client)
+        base_url = f"http://{SERVER_HOST}:{server_port}/v1"
+
+        # 2. Send request
+        # Test that the custom template will not strip thinking tokens, unlike the default template.
+        messages = [
+            {
+                "role": "user",
+                "content": "Hello",
+            },
+            {
+                "role": "assistant",
+                "content": "<think>Thinking...</think>Hello",
+            },
+            {
+                "role": "user",
+                "content": "Hello",
+            },
+        ]
+        payload = {
+            "model": MODEL_QWEN3,
+            "messages": messages,
+            "max_tokens": 10,
+            "return_token_ids": True,
+        }
+
+        response = requests.post(f"{base_url}/chat/completions", json=payload)
+        assert response.status_code == HTTPStatus.OK
+        data = response.json()
+
+        # 3. Check output
+        assert "choices" in data and len(data["choices"]) > 0
+        content = data["choices"][0]["message"]["content"]
+        assert isinstance(content, str)
+
+        # 4. Check thinking tokens stripped or not
+        assert "prompt_token_ids" in data, f"prompt_token_ids not found in response. Keys: {data.keys()}"
+        prompt_token_ids = data["prompt_token_ids"]
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN3)
+        prompt_str = tokenizer.decode(prompt_token_ids)
+
+        if use_custom_template:
+            # The custom template qwen3_acc_thinking.jinja2 will keep the thinking tokens.
+            assert "<think>" in prompt_str and "</think>" in prompt_str
+        else:
+            # Default template strips thinking tokens
+            assert "<think>" not in prompt_str and "</think>" not in prompt_str
 
     finally:
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
