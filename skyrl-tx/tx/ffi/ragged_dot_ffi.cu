@@ -60,71 +60,34 @@ constexpr int AlignmentOutput = 8;
 
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
+using TileShape = cute::Shape<cute::_64, cute::_128, cute::_64>;
+using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
 using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int32_t, int32_t, int32_t>>;
+
+using CollectiveEpilogue =
+    typename cutlass::epilogue::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, TileShape, ClusterShape,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
+        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueSchedule,
+        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
+
+using CollectiveMainloop =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
+        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape, ClusterShape,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+        KernelSchedule>::CollectiveOp;
+
+using GemmKernel = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop, CollectiveEpilogue>;
+using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+using StrideA = typename Gemm::GemmKernel::InternalStrideA;
+using StrideB = typename Gemm::GemmKernel::InternalStrideB;
+using StrideOutput = typename Gemm::GemmKernel::InternalStrideD;
 using ProblemShapeType = ProblemShape::UnderlyingProblemShape;
-
-// ============================================================================
-// Kernel variant 1: Up/Gate projection (K=2048, N=768) - 64x128x128 tile
-// Larger K tile (128) for better compute intensity with large K
-// ============================================================================
-using TileShape_UpGate = cute::Shape<cute::_64, cute::_128, cute::_128>;
-using ClusterShape_UpGate = cute::Shape<cute::_1, cute::_1, cute::_1>;
-using KernelSchedule_UpGate = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
-using EpilogueSchedule_UpGate = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-
-using CollectiveEpilogue_UpGate =
-    typename cutlass::epilogue::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, TileShape_UpGate, ClusterShape_UpGate,
-        cutlass::epilogue::collective::EpilogueTileAuto,
-        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
-        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueSchedule_UpGate,
-        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
-
-using CollectiveMainloop_UpGate =
-    typename cutlass::gemm::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
-        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape_UpGate, ClusterShape_UpGate,
-        cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogue_UpGate::SharedStorage))>,
-        KernelSchedule_UpGate>::CollectiveOp;
-
-using Gemm_UpGate = cutlass::gemm::device::GemmUniversalAdapter<
-    cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_UpGate, CollectiveEpilogue_UpGate>>;
-
-// ============================================================================
-// Kernel variant 2: Down projection (K=768, N=2048) - 64x256x128 tile
-// Larger K tile (128) + larger N tile (256) for large N output
-// ============================================================================
-using TileShape_Down = cute::Shape<cute::_64, cute::_256, cute::_128>;
-using ClusterShape_Down = cute::Shape<cute::_1, cute::_1, cute::_1>;
-using KernelSchedule_Down = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
-using EpilogueSchedule_Down = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-
-using CollectiveEpilogue_Down =
-    typename cutlass::epilogue::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, TileShape_Down, ClusterShape_Down,
-        cutlass::epilogue::collective::EpilogueTileAuto,
-        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
-        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueSchedule_Down,
-        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
-
-using CollectiveMainloop_Down =
-    typename cutlass::gemm::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
-        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape_Down, ClusterShape_Down,
-        cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogue_Down::SharedStorage))>,
-        KernelSchedule_Down>::CollectiveOp;
-
-using Gemm_Down = cutlass::gemm::device::GemmUniversalAdapter<
-    cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Down, CollectiveEpilogue_Down>>;
-
-// ============================================================================
-// Common types
-// ============================================================================
-using StrideA = typename Gemm_UpGate::GemmKernel::InternalStrideA;
-using StrideB = typename Gemm_UpGate::GemmKernel::InternalStrideB;
-using StrideOutput = typename Gemm_UpGate::GemmKernel::InternalStrideD;
 
 static ffi::Error CudaError(const char* message) {
   return ffi::Error::Internal(message);
@@ -182,43 +145,6 @@ __global__ void prepare_grouped_gemm_data(
   stride_A[tid] = cutlass::make_cute_packed_stride(StrideA{}, {lda, lda, 1});
   stride_B[tid] = cutlass::make_cute_packed_stride(StrideB{}, {ldb, ldb, 1});
   stride_output[tid] = cutlass::make_cute_packed_stride(StrideOutput{}, {m, ldoutput, 1});
-}
-
-template <typename GemmType>
-cutlass::Status run_gemm(
-    int32_t g_local,
-    ProblemShapeType* d_problem_sizes,
-    const DtypeA** d_A_ptrs, StrideA* d_stride_A,
-    const DtypeB** d_B_ptrs, StrideB* d_stride_B,
-    StrideOutput* d_stride_output, DtypeOutput** d_out_ptrs,
-    void* workspace, cudaStream_t stream) {
-
-  GemmType gemm;
-  typename GemmType::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGrouped,
-      {g_local, d_problem_sizes, nullptr},
-      {d_A_ptrs, d_stride_A, d_B_ptrs, d_stride_B},
-      {{}, nullptr, d_stride_output, d_out_ptrs, d_stride_output}};
-
-  args.epilogue.thread.alpha = 1.0f;
-  args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
-  args.hw_info.sm_count = get_sm_count();
-
-  cutlass::Status status = gemm.can_implement(args);
-  if (status != cutlass::Status::kSuccess) {
-    return status;
-  }
-  return gemm(args, workspace, stream);
-}
-
-template <typename GemmType>
-size_t get_workspace_size(int32_t g_local, ProblemShapeType* d_problem_sizes) {
-  typename GemmType::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGrouped,
-      {g_local, d_problem_sizes, nullptr},
-      {nullptr, nullptr, nullptr, nullptr},
-      {{}, nullptr, nullptr, nullptr, nullptr}};
-  return GemmType::get_workspace_size(args);
 }
 
 ffi::Error RaggedDotCudaImpl(
@@ -337,13 +263,23 @@ ffi::Error RaggedDotCudaImpl(
       d_A_ptrs, d_B_ptrs, d_out_ptrs,
       d_stride_A, d_stride_B, d_stride_output, d_problem_sizes);
 
-  // Select kernel: N >= 1024 uses LargeN tile (down projection), otherwise UpGate tile
-  bool use_large_n = (n >= 1024);
+  Gemm gemm;
+  typename Gemm::Arguments args{
+      cutlass::gemm::GemmUniversalMode::kGrouped,
+      {g_local, d_problem_sizes, nullptr},
+      {(const DtypeA**)d_A_ptrs, d_stride_A, (const DtypeB**)d_B_ptrs, d_stride_B},
+      {{}, nullptr, d_stride_output, d_out_ptrs, d_stride_output}};
 
-  size_t workspace_size = use_large_n
-      ? get_workspace_size<Gemm_Down>(g_local, d_problem_sizes)
-      : get_workspace_size<Gemm_UpGate>(g_local, d_problem_sizes);
+  args.epilogue.thread.alpha = 1.0f;
+  args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
+  args.hw_info.sm_count = get_sm_count();
 
+  cutlass::Status status = gemm.can_implement(args);
+  if (status != cutlass::Status::kSuccess) {
+    return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
+  }
+
+  size_t workspace_size = Gemm::get_workspace_size(args);
   void* workspace = nullptr;
   if (workspace_size > 0) {
     auto workspace_or = scratch.Allocate(workspace_size);
@@ -353,16 +289,7 @@ ffi::Error RaggedDotCudaImpl(
     workspace = workspace_or.value();
   }
 
-  cutlass::Status status = use_large_n
-      ? run_gemm<Gemm_Down>(g_local, d_problem_sizes,
-            (const DtypeA**)d_A_ptrs, d_stride_A,
-            (const DtypeB**)d_B_ptrs, d_stride_B,
-            d_stride_output, d_out_ptrs, workspace, stream)
-      : run_gemm<Gemm_UpGate>(g_local, d_problem_sizes,
-            (const DtypeA**)d_A_ptrs, d_stride_A,
-            (const DtypeB**)d_B_ptrs, d_stride_B,
-            d_stride_output, d_out_ptrs, workspace, stream);
-
+  status = gemm(args, workspace, stream);
   if (status != cutlass::Status::kSuccess) {
     return ffi::Error::Internal("cutlass grouped gemm failed.");
   }
