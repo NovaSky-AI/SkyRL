@@ -41,9 +41,10 @@ def rebuild_kernel() -> bool:
     if SO_FILE.exists():
         SO_FILE.unlink()
 
-    # Rebuild using the build script directly
+    # Rebuild using uv with hatchling
     result = subprocess.run(
-        [sys.executable, "-c", "from tx.ffi.build import build_ragged_dot; build_ragged_dot()"],
+        ["uv", "run", "--with", "hatchling", "-c",
+         "from tx.ffi.build import build_ragged_dot; build_ragged_dot()"],
         capture_output=True,
         text=True,
         cwd=CUDA_FILE.parent.parent.parent,
