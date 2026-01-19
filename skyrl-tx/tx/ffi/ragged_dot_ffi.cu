@@ -97,43 +97,6 @@ using CollectiveMainloop_Bwd =
 using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
 using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
 
-// Low-rank (LR) kernel variant for unaligned K/N dimensions (e.g., LoRA rank=1)
-// Uses KernelPtrArrayMultistage which doesn't have TMA alignment requirements
-constexpr int AlignmentLR = 1;
-using TileShapeLR = cute::Shape<cute::_64, cute::_64, cute::_32>;
-using KernelScheduleLR = cutlass::gemm::KernelPtrArrayMultistage;
-using EpilogueScheduleLR = cutlass::epilogue::PtrArrayNoSmemWarpSpecialized;
-
-using CollectiveEpilogueLR =
-    typename cutlass::epilogue::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, TileShapeLR, ClusterShape,
-        cutlass::epilogue::collective::EpilogueTileAuto,
-        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentLR,
-        DtypeOutput, LayoutOutput*, AlignmentLR, EpilogueScheduleLR,
-        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
-
-using CollectiveMainloopLR =
-    typename cutlass::gemm::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentLR,
-        DtypeB, LayoutB*, AlignmentLR, DtypeAccum, TileShapeLR, ClusterShape,
-        cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogueLR::SharedStorage))>,
-        KernelScheduleLR>::CollectiveOp;
-
-using GemmKernelLR = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopLR, CollectiveEpilogueLR>;
-using GemmLR = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelLR>;
-
-using CollectiveMainloopLR_Bwd =
-    typename cutlass::gemm::collective::CollectiveBuilder<
-        ArchTag, OperatorClass, DtypeA, LayoutA_Bwd*, AlignmentLR,
-        DtypeB, LayoutB*, AlignmentLR, DtypeAccum, TileShapeLR, ClusterShape,
-        cutlass::gemm::collective::StageCountAutoCarveout<
-            static_cast<int>(sizeof(typename CollectiveEpilogueLR::SharedStorage))>,
-        KernelScheduleLR>::CollectiveOp;
-
-using GemmKernelLR_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopLR_Bwd, CollectiveEpilogueLR>;
-using GemmLR_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelLR_Bwd>;
-
 template <typename T>
 static T* carve_aligned(char*& p, size_t count) {
   T* out = reinterpret_cast<T*>((reinterpret_cast<uintptr_t>(p) + 15) & ~uintptr_t(15));
@@ -260,10 +223,6 @@ ffi::Error ExecuteGroupedGemm(
   return ffi::Error::Success();
 }
 
-static bool is_aligned(int32_t k, int32_t n) {
-  return (k % AlignmentA == 0) && (n % AlignmentB == 0);
-}
-
 ffi::Error RaggedDotCudaImpl(
     cudaStream_t stream,
     ffi::ScratchAllocator scratch,
@@ -291,21 +250,12 @@ ffi::Error RaggedDotCudaImpl(
     return ffi::Error::Internal("Failed to zero output.");
   }
 
-  if (is_aligned(k, n)) {
-    return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
-        stream, scratch,
-        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
-        reinterpret_cast<const DtypeB*>(rhs.typed_data()),
-        reinterpret_cast<DtypeOutput*>(out->typed_data()),
-        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
-  } else {
-    return ExecuteGroupedGemm<GemmLR, GemmDir::Fwd>(
-        stream, scratch,
-        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
-        reinterpret_cast<const DtypeB*>(rhs.typed_data()),
-        reinterpret_cast<DtypeOutput*>(out->typed_data()),
-        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
-  }
+  return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
+      stream, scratch,
+      reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+      reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+      reinterpret_cast<DtypeOutput*>(out->typed_data()),
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
@@ -351,23 +301,12 @@ ffi::Error RaggedDotBwdCudaImpl(
     return ffi::Error::Internal("Failed to zero d_rhs output.");
   }
 
-  // For backward pass: computes [K, N] = [K, M] @ [M, N] where M is the contraction dim
-  // Use LR kernel when K or N is not aligned
-  if (is_aligned(k, n)) {
-    return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
-        stream, scratch,
-        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
-        reinterpret_cast<const DtypeB*>(grad.typed_data()),
-        reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
-        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
-  } else {
-    return ExecuteGroupedGemm<GemmLR_Bwd, GemmDir::Bwd>(
-        stream, scratch,
-        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
-        reinterpret_cast<const DtypeB*>(grad.typed_data()),
-        reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
-        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
-  }
+  return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
+      stream, scratch,
+      reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+      reinterpret_cast<const DtypeB*>(grad.typed_data()),
+      reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
