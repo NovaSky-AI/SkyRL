@@ -225,7 +225,7 @@ ffi::Error ExecuteGroupedGemm(
 
 ffi::Error RaggedDotCudaImpl(
     cudaStream_t stream,
-    ffi::ScratchAllocator scratch,
+    ffi::ScratchAllocator& scratch,
     ffi::Buffer<ffi::BF16> lhs,
     ffi::Buffer<ffi::BF16> rhs,
     ffi::Buffer<ffi::S32> group_offset,
@@ -273,7 +273,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 // Backward pass for d_rhs: computes lhs.T @ grad per group -> d_rhs[G, K, N]
 ffi::Error RaggedDotBwdCudaImpl(
     cudaStream_t stream,
-    ffi::ScratchAllocator scratch,
+    ffi::ScratchAllocator& scratch,
     ffi::Buffer<ffi::BF16> lhs,
     ffi::Buffer<ffi::BF16> grad,
     ffi::Buffer<ffi::S32> group_offset,
