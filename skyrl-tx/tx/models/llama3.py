@@ -302,7 +302,7 @@ class Llama3Model(nnx.Module):
             hs, _ = layer(
                 hs, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices, kv_cache=None
             )
-            return hs, hs  # carry, output (collected if output_hidden_states)
+            return hs, hs if output_hidden_states else None
 
         body_fn = jax.checkpoint(body_fn)
         final_hs, all_hs = jax.lax.scan(body_fn, hidden_states, jnp.arange(num_layers))
