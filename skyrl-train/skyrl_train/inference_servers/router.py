@@ -12,7 +12,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
 
-from skyrl_train.inference_servers.common import ServerInfo, get_node_ip
+from skyrl_train.inference_servers.common import get_node_ip
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +157,7 @@ class InferenceRouter:
 
     async def _fan_out_get(self, path: str) -> dict:
         """Fan out a GET request to all servers, return mapping of server_url -> response."""
+
         async def call_server(server_url: str):
             try:
                 resp = await self._client.get(f"{server_url}{path}", timeout=30.0)
@@ -218,9 +219,7 @@ class InferenceRouter:
                     "error": str(e),
                 }
 
-        results = await asyncio.gather(
-            *[call_server(url) for url in self._server_urls]
-        )
+        results = await asyncio.gather(*[call_server(url) for url in self._server_urls])
 
         # Build mapping from server_url to response
         response_map = {url: resp for url, resp in results}
@@ -271,8 +270,8 @@ class InferenceRouter:
         ip = get_node_ip()
         router_url = f"http://{ip}:{self._port}"
         logger.info(f"Router started at {router_url}")
-        logger.info(f"  GET /servers - list servers")
-        logger.info(f"  GET /get_server_info - get parallelism info")
+        logger.info("  GET /servers - list servers")
+        logger.info("  GET /get_server_info - get parallelism info")
         return router_url
 
     async def _run_server(self) -> None:

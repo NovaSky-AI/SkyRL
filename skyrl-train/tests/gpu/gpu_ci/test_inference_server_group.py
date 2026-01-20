@@ -29,7 +29,9 @@ MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 # Skip entire module if not enough GPUs
 _gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
 if _gpu_count < 4:
-    pytest.skip(f"Need 4 GPUs for full test suite, found {_gpu_count}", allow_module_level=True)
+    pytest.skip(
+        f"Need 4 GPUs for full test suite, found {_gpu_count}", allow_module_level=True
+    )
 
 
 def make_vllm_cli_args(
@@ -40,14 +42,21 @@ def make_vllm_cli_args(
     """Create CLI args for vLLM server using official parser."""
     parser = FlexibleArgumentParser(description="vLLM server")
     parser = make_arg_parser(parser)
-    return parser.parse_args([
-        "--model", model,
-        "--tensor-parallel-size", str(tp_size),
-        "--enforce-eager",
-        "--gpu-memory-utilization", "0.5",
-        "--max-model-len", "2048",
-        "--load-format", load_format,
-    ])
+    return parser.parse_args(
+        [
+            "--model",
+            model,
+            "--tensor-parallel-size",
+            str(tp_size),
+            "--enforce-eager",
+            "--gpu-memory-utilization",
+            "0.5",
+            "--max-model-len",
+            "2048",
+            "--load-format",
+            load_format,
+        ]
+    )
 
 
 def wait_for_url(url: str, timeout: float = 180.0) -> bool:
@@ -119,12 +128,12 @@ class TestServerGroupAndRouter:
         """/get_server_info returns mapping of server_url -> info for all servers."""
         router_url = server_group_and_router["router_url"]
         server_urls = server_group_and_router["server_urls"]
-        
+
         resp = httpx.get(f"{router_url}/get_server_info", timeout=10.0)
         assert resp.status_code == 200
         info_map = resp.json()
         print(f"Server info map: {info_map}")
-        
+
         # Should have info for each server
         assert len(info_map) == 2
         for url in server_urls:
@@ -159,30 +168,38 @@ class TestServerGroupAndRouter:
 
         async with httpx.AsyncClient() as client:
             # Pause
-            resp = await client.post(f"{router_url}/pause", json={"wait_for_inflight_request": False}, timeout=30.0)
+            resp = await client.post(
+                f"{router_url}/pause",
+                json={"wait_for_inflight_request": False},
+                timeout=30.0,
+            )
             assert resp.status_code == 200
-            
+
             # Check is paused
             resp = await client.get(f"{router_url}/is_paused", timeout=30.0)
             assert resp.status_code == 200
-            assert resp.json()["is_paused"] == True
-            
+            assert resp.json()["is_paused"] is True
+
             # Send a request while paused (should block)
             async def send_request():
-                r = await client.post(f"{router_url}/v1/completions", json={"model": MODEL, "prompt": "Test", "max_tokens": 4}, timeout=60.0)
+                r = await client.post(
+                    f"{router_url}/v1/completions",
+                    json={"model": MODEL, "prompt": "Test", "max_tokens": 4},
+                    timeout=60.0,
+                )
                 assert r.status_code == 200
                 return r.json()
-            
+
             task = asyncio.create_task(send_request())
             await asyncio.sleep(1)
-            
+
             # Task should not be done here (request blocked by pause)
             assert not task.done()
-            
+
             # Resume
             resp = await client.post(f"{router_url}/resume", json={}, timeout=30.0)
             assert resp.status_code == 200
-            
+
             # Verify that after resume, the request is completed
             result = await task
             assert result["choices"][0]["text"] is not None

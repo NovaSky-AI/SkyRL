@@ -54,12 +54,12 @@ class ServerGroup:
             placement_group: External placement group for colocation mode.
                 If None, creates internal placement group.
             placement_group_bundle_offset: Offset for bundle indices when using
-                external placement group (e.g., if training uses first N 
+                external placement group (e.g., if training uses first N
                 bundles).
             enable_dp: Enable data parallelism across servers.
             enable_pd: Enable prefill-decode disaggregation.
-            nixl_side_channel_base: Base port for NIXL side channels. Each 
-                server will be assigned a port of nixl_side_channel_base + 
+            nixl_side_channel_base: Base port for NIXL side channels. Each
+                server will be assigned a port of nixl_side_channel_base +
                 server_idx.
             server_actor_cls: Server actor class implementing ServerActorProtocol.
                 Defaults to VLLMServerActor.
@@ -77,7 +77,9 @@ class ServerGroup:
         self._internal_pg: Optional[PlacementGroup] = None
 
         # Query the actor class for GPU requirements
-        self._num_gpus_per_server = server_actor_cls.compute_num_gpus_per_server(cli_args)
+        self._num_gpus_per_server = server_actor_cls.compute_num_gpus_per_server(
+            cli_args
+        )
 
         logger.info(
             f"ServerGroup: actor_cls={server_actor_cls.__name__}, "

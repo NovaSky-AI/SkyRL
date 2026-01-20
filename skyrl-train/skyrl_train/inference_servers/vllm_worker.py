@@ -2,7 +2,7 @@
 vLLM Worker Extension for SkyRL weight synchronization.
 
 This module provides WorkerWrap, a vLLM worker extension class that enables
-efficient NCCL-based and CUDA IPC-based weight updates from the training 
+efficient NCCL-based and CUDA IPC-based weight updates from the training
 process to inference workers.
 
 TODO: This will be removed once vLLM natively supports weight sync APIs.
@@ -10,7 +10,7 @@ See: https://github.com/vllm-project/vllm/issues/31848
 
 Usage:
     Pass as --worker-extension-cls to vLLM:
-    
+
     vllm serve ... --worker-extension-cls skyrl_train.inference_servers.vllm_worker.WorkerWrap
 """
 
@@ -26,17 +26,17 @@ VLLM_WORKER_EXTENSION_CLS = f"{__name__}.WorkerWrap"
 class WorkerWrap:
     """
     vLLM worker extension for SkyRL weight synchronization.
-    
+
     This class is injected into vLLM workers via --worker-extension-cls and
     provides methods that can be called via engine.collective_rpc() to
     coordinate weight updates across all TP/PP workers.
-    
+
     Methods:
         init_weight_update_communicator: Initialize the weight receiver
         load_weights: Receive and load weights from trainer
         teardown_weight_receiver: Clean up weight receiver resources
     """
-    
+
     def test_rpc(self, *args, **kwargs):
         """Test RPC call to worker."""
         return args, kwargs
@@ -50,10 +50,14 @@ class WorkerWrap:
         """
         import pickle
 
-        assert torch.distributed.is_initialized(), "default torch process group must be initialized"
+        assert torch.distributed.is_initialized(), (
+            "default torch process group must be initialized"
+        )
 
         # Unpickle init_info to restore the original object type
-        assert isinstance(init_info, bytes), f"Expected bytes, got {type(init_info).__name__}"
+        assert isinstance(init_info, bytes), (
+            f"Expected bytes, got {type(init_info).__name__}"
+        )
         init_info = pickle.loads(init_info)
 
         strategy_cls = init_info.strategy_type()
@@ -84,7 +88,9 @@ class WorkerWrap:
         import pickle
 
         # Unpickle request to restore the original object type
-        assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
+        assert isinstance(request, bytes), (
+            f"Expected bytes, got {type(request).__name__}"
+        )
         request = pickle.loads(request)
 
         weight_list = []
