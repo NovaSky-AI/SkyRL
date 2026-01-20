@@ -63,36 +63,24 @@ def env():
     for url in urls:
         assert wait_ready(url)
 
-    # Start router
-    router = InferenceRouter(urls, host="127.0.0.1", port=router_port)
-    router._client = httpx.AsyncClient(timeout=httpx.Timeout(None))
-    router._app = router._build_app()
-
-    router_config = uvicorn.Config(router._app, host="127.0.0.1", port=router_port, log_level="error")
-    router_server = uvicorn.Server(router_config)
-    servers.append(router_server)
-
-    def run_router():
-        asyncio.run(router_server.serve())
-
-    threading.Thread(target=run_router, daemon=True).start()
-
-    router_url = f"http://127.0.0.1:{router_port}"
-    assert wait_ready(router_url)
+    # Start router using public API 
+    # (use 0.0.0.0 so get_node_ip() health check works)
+    router = InferenceRouter(urls, host="0.0.0.0", port=router_port)
+    router_url = router.start()
 
     yield router_url
 
-    # Cleanup: signal all servers to shutdown
+    # Cleanup
+    router.shutdown()
     for server in servers:
         server.should_exit = True
-    time.sleep(0.5)  # Give servers time to shutdown
+    time.sleep(0.5)
 
 
 def test_round_robin(env):
     """Requests without session distribute across servers."""
     server_ids = {httpx.get(f"{env}/health").json()["server_id"] for _ in range(4)}
     assert len(server_ids) == 2
-
 
 def test_session_affinity(env):
     """Same X-Session-ID routes to same server."""
