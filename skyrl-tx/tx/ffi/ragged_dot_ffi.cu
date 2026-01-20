@@ -1,7 +1,6 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
-#include <cassert>
 #include <optional>
 #include <vector>
 
@@ -27,10 +26,12 @@
 
 namespace ffi = xla::ffi;
 
-static int get_sm_count() {
+static std::optional<int> get_sm_count() {
   static std::vector<cudaDeviceProp> device_props = [] {
     int num_gpus = 0;
-    assert(cudaGetDeviceCount(&num_gpus) == cudaSuccess && num_gpus > 0);
+    if (cudaGetDeviceCount(&num_gpus) != cudaSuccess || num_gpus <= 0) {
+      return std::vector<cudaDeviceProp>{};
+    }
     std::vector<cudaDeviceProp> props(num_gpus);
     for (int i = 0; i < num_gpus; ++i) {
       cudaGetDeviceProperties(&props[i], i);
@@ -39,7 +40,9 @@ static int get_sm_count() {
   }();
 
   int device = 0;
-  assert(cudaGetDevice(&device) == cudaSuccess && device >= 0 && device < device_props.size());
+  if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= device_props.size()) {
+    return {};
+  }
   return device_props[device].multiProcessorCount;
 }
 
@@ -204,7 +207,9 @@ ffi::Error ExecuteGroupedGemm(
 
   GemmT gemm;
   auto args = data->MakeArgs(g_local);
-  args.hw_info.sm_count = get_sm_count();
+  auto sm_count = get_sm_count();
+  if (!sm_count) return ffi::Error::Internal("Failed to get SM count.");
+  args.hw_info.sm_count = *sm_count;
 
   if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
     return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
