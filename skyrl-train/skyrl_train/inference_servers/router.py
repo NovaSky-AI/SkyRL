@@ -26,6 +26,7 @@ CONTROL_PLANE_ROUTES = [
     # BUILT-IN ROUTES
     "/pause",
     "/resume",
+    "/is_paused",
     "/sleep",
     "/wake_up",
     "/reset_prefix_cache",
