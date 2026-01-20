@@ -57,7 +57,8 @@ class BaseTextEnv(Env[ConversationType, str]):
                     return group.execute_tool(tool_name, **tool_input)
                 elif isinstance(tool_input, (tuple, list)):
                     return group.execute_tool(tool_name, *tool_input)
-                return group.execute_tool(tool_name, tool_input)
+                else:
+                    return group.execute_tool(tool_name, tool_input)
 
         raise ValueError(f"ToolGroup '{tool_group_name}' not found.")
 

@@ -74,7 +74,7 @@ class RLMExecutorEnv(BaseTextEnv):
 
     def _force_rlm_tool_call(self, action: str) -> str:
 
-        print(f"[GSM8K ENV] Turn {self.current_turn}: Forcing rlm call")
+        print(f"[RLM ENV] Turn {self.current_turn}: Forcing rlm call")
         query = "Solve this math problem step by step and provide the final numerical answer."
         return f"<tool><rlm>{query}</rlm></tool>"
 
