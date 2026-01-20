@@ -168,7 +168,7 @@ class JaxBackendImpl(AbstractBackend):
         if config.max_lora_rank % 8 != 0:
             logger.warning(
                 f"[bold yellow]max_lora_rank={config.max_lora_rank} is not divisible by 8. "
-                "This could lead to degraded performance for MoE models.[/bold yellow]"
+                "This could lead to degraded performance.[/bold yellow]"
             )
 
         model_class = get_model_class(self.model_config)
