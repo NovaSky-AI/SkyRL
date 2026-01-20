@@ -6,7 +6,6 @@ if TYPE_CHECKING:
 from dataclasses import dataclass
 from http import HTTPStatus
 import ray
-import torch
 import asyncio
 import vllm
 from types import SimpleNamespace
@@ -24,7 +23,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.lora.request import LoRARequest
 from uuid import uuid4
-import warnings
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -69,7 +67,7 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
 # Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
 # This alias preserves the old import path for existing scripts/configs.
 # TODO (Kourosh): Remove this alias once all references are updated.
-from skyrl_train.inference_servers.vllm_worker import WorkerWrap  # noqa: F401
+from skyrl_train.inference_servers.vllm_worker import WorkerWrap  # noqa: F401, E402
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):

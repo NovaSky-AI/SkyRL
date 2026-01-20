@@ -29,8 +29,7 @@ class TestGetOpenPort:
         assert isinstance(port, int)
         assert 1 <= port <= 65535
         self._verify_port_is_free(port)
-        
-        
+
     def _verify_port_is_free(self, port: int):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

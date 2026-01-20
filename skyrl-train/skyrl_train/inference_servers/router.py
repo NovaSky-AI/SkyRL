@@ -6,13 +6,15 @@ import asyncio
 import hashlib
 import itertools
 import logging
+import threading
+import time
 from typing import List, Optional
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
 
-from skyrl_train.inference_servers.common import get_node_ip
+from skyrl_train.inference_servers.common import get_node_ip, SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +73,8 @@ class InferenceRouter:
         self._server_cycle = itertools.cycle(server_urls)
         self._client: Optional[httpx.AsyncClient] = None
         self._app: Optional[FastAPI] = None
-        self._server_task: Optional[asyncio.Task] = None
-        self._shutdown_event: Optional[asyncio.Event] = None
+        self._server: Optional[uvicorn.Server] = None
+        self._server_thread: Optional[threading.Thread] = None
 
         logger.info(f"InferenceRouter: {len(server_urls)} servers, port={port}")
 
@@ -245,35 +247,8 @@ class InferenceRouter:
         # Create HTTP client for proxying
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(None))
 
-        # Build FastAPI app
+        # Build FastAPI app and uvicorn server
         self._app = self._build_app()
-
-        # Create shutdown event
-        self._shutdown_event = asyncio.Event()
-
-        # Start server in background thread (since we're not in async context)
-        import threading
-
-        def run_server():
-            asyncio.run(self._run_server())
-
-        self._server_thread = threading.Thread(target=run_server, daemon=True)
-        self._server_thread.start()
-
-        # Wait a bit for server to start
-        import time
-
-        time.sleep(1)
-
-        ip = get_node_ip()
-        router_url = f"http://{ip}:{self._port}"
-        logger.info(f"Router started at {router_url}")
-        logger.info("  GET /servers - list servers")
-        logger.info("  GET /get_server_info - get parallelism info")
-        return router_url
-
-    async def _run_server(self) -> None:
-        """Run the uvicorn server."""
         config = uvicorn.Config(
             app=self._app,
             host=self._host,
@@ -281,12 +256,40 @@ class InferenceRouter:
             log_level="warning",
             access_log=False,
         )
-        server = uvicorn.Server(config)
-        await server.serve()
+        self._server = uvicorn.Server(config)
+
+        # Start server in background thread
+        self._server_thread = threading.Thread(target=asyncio.run, args=(self._server.serve(),), daemon=True)
+        self._server_thread.start()
+
+        ip = get_node_ip()
+        router_url = f"http://{ip}:{self._port}"
+        self._wait_until_healthy(router_url)
+
+        logger.info(f"Router started at {router_url}")
+        logger.info("  GET /servers - list servers")
+        logger.info("  GET /get_server_info - get parallelism info")
+        return router_url
+
+    def _wait_until_healthy(
+        self, router_url: str, timeout: float = SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
+    ) -> None:
+        """Poll health endpoint until server is ready."""
+        health_url = f"{router_url}/health"
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                with httpx.Client() as client:
+                    if client.get(health_url, timeout=1).status_code == 200:
+                        return
+            except httpx.RequestError:
+                time.sleep(0.1)
+        raise RuntimeError(f"Router failed to start within {timeout}s")
 
     def shutdown(self) -> None:
-        """Shutdown the router."""
+        """Shutdown the router gracefully."""
         logger.info("Shutting down router...")
-        if self._shutdown_event:
-            self._shutdown_event.set()
-        # Note: Thread will exit when uvicorn server stops
+        if self._server:
+            self._server.should_exit = True
+        if self._server_thread:
+            self._server_thread.join(timeout=5)

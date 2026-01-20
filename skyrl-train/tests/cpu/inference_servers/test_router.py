@@ -68,9 +68,7 @@ def env():
     router._client = httpx.AsyncClient(timeout=httpx.Timeout(None))
     router._app = router._build_app()
 
-    router_config = uvicorn.Config(
-        router._app, host="127.0.0.1", port=router_port, log_level="error"
-    )
+    router_config = uvicorn.Config(router._app, host="127.0.0.1", port=router_port, log_level="error")
     router_server = uvicorn.Server(router_config)
     servers.append(router_server)
 
@@ -106,7 +104,12 @@ def test_session_affinity(env):
 def test_control_plane_fanout(env):
     """Control plane routes fan out to all servers."""
     resp = httpx.post(f"{env}/sleep", json={})
-    assert resp.status_code == 200 and resp.json()["status"] == "ok"
+    assert resp.status_code == 200
+    # Response is a mapping of server_url -> {status, body}
+    response_map = resp.json()
+    assert len(response_map) == 2  # Both servers received the request
+    for server_url, result in response_map.items():
+        assert result["status"] == 200
 
 
 def test_list_servers(env):
