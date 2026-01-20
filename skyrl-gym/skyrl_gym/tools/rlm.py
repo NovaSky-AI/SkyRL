@@ -18,35 +18,11 @@ from openai import OpenAI
 
 from skyrl_gym.tools.core import ToolGroup, tool
 
+# =========================================================================
+#   Initial Library and Utils Setup
+# =========================================================================
 
-## Add allowed imports here, for now only allow imports that are needed for the RLMExecutorToolGroup
-_ALLOWED_IMPORTS = {
-    "collections",
-    "datetime",
-    "functools",
-    "itertools",
-    "json",
-    "math",
-    "random",
-    "re",
-    "statistics",
-    "string",
-}
-
-
-def safe_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
-
-    if level != 0:
-        raise ImportError("Relative imports are disabled in this environment")
-    if not isinstance(name, str) or not name:
-        raise ImportError("Invalid module name")
-
-    top_level = name.split(".", 1)[0]
-    if top_level not in _ALLOWED_IMPORTS:
-        raise ImportError(f"Import of '{top_level}' is not allowed")
-
-    return __import__(name, globals, locals, fromlist, level)
-
+# TODO(devpatel): update prompt to be better and more general. Currently, it's copied and modified from the rlm repo ()
 
 DEFAULT_INIT_PROMPT = """
 You are tasked with answering a query with associated context. You can access, transform, and analyze this context interactively in a REPL environment that can recursively query sub-LLMs, which you are strongly encouraged to use as much as possible. You will be queried iteratively until you provide a final answer.
@@ -124,6 +100,39 @@ IMPORTANT: When you are done with the iterative process, you MUST provide a fina
 
 Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this" or "I will do that". Output to the REPL environment and recursive LLMs as much as possible. Remember to explicitly answer the original query in your final answer.
 """
+
+
+## Add allowed imports here, for now only allow imports that are needed for the RLMExecutorToolGroup
+
+_ALLOWED_IMPORTS = {
+    "collections",
+    "datetime",
+    "functools",
+    "itertools",
+    "json",
+    "math",
+    "random",
+    "re",
+    "string",
+}
+
+
+def safe_import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+    """
+    Allow safe imports for only sub-lm calls, not top level
+    """
+    if level != 0:
+        raise ImportError("Relative imports are disabled in this environment")
+    if not isinstance(name, str) or not name:
+        raise ImportError("Invalid module name")
+
+    top_level = name.split(".", 1)[0]
+    if top_level not in _ALLOWED_IMPORTS:
+        raise ImportError(f"Import of '{top_level}' is not allowed")
+
+    return __import__(name, globals, locals, fromlist, level)
+
+
 SAFE_BUILTINS = {
     # Core types and functions
     "print": print,
@@ -218,6 +227,9 @@ SAFE_BUILTINS = {
 
 
 def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
+    """
+    Truncate any prints or stdio outputs to max characters to prevent excessive context size increase.
+    """
     if max_chars <= 0:
         return "", True
     if text is None:
@@ -236,6 +248,7 @@ def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
     return truncated, True
 
 
+# Colored terminal box for debugging and logging (this was vibecoded so we can remove and add to logger instead)
 def print_box(title: str, content: str, *, color: str = "cyan", width: int = 96) -> None:
     """
     Print a simple colored box to the terminal (no extra deps).
@@ -291,6 +304,11 @@ def print_box(title: str, content: str, *, color: str = "cyan", width: int = 96)
     print(c + bot + reset)
 
 
+# =========================================================================
+#   Core RLM Implementation
+# =========================================================================
+
+
 class RLMExecutorToolGroup(ToolGroup):
     """
     A persistent, sandboxed Python REPL + iterative RLM loop.
@@ -298,8 +316,17 @@ class RLMExecutorToolGroup(ToolGroup):
     - Subsequent tool calls share variables unless explicitly reset/closed
     - Expose `llm_query(...)` inside the REPL so code can make recursive LM calls
 
-    TODO(dev): pass query endpoint to explicit inference engine, currently we use the OpenAI API directly
+    By treating the RLM as a tool call, we can easily integrate it into any environment that supports tool calling.
+    This allows us to pass in any context or query from any given environment, either as a preprocessing or postprocessing step.
+    The hope is that this RLM environment is persistent until it returns a valid context or reaches a maximum number of turns.
+
+    TODO(devpatel): Benchmark and test on more complex tasks and larger contexts.
+
     """
+
+    # =========================================================================
+    #   Setup and Initialization
+    # =========================================================================
 
     def __init__(
         self,
@@ -307,8 +334,10 @@ class RLMExecutorToolGroup(ToolGroup):
         max_tokens: int = 1024,
         max_repl_output_chars: int = 4000,
     ):
-        self.temp_dir = tempfile.mkdtemp(prefix=f"repl_env_{uuid.uuid4()}_")
-        self._lock = threading.Lock()
+        self.temp_dir = tempfile.mkdtemp(
+            prefix=f"repl_env_{uuid.uuid4()}_"
+        )  # Create a temporary directory for the REPL environment
+        self._lock = threading.Lock()  # Create lock for every code execution (cell in notebook)
         self.original_cwd = os.getcwd()
 
         self.globals_dict: dict[str, Any] = {}
@@ -318,18 +347,57 @@ class RLMExecutorToolGroup(ToolGroup):
         self.max_tokens = int(max_tokens)
         self.max_repl_output_chars = int(max_repl_output_chars)
 
-        self.lm_client: OpenAI | None = None
+        self.lm_client: OpenAI | None = None  # Currently, we support vLLM and OpenAI as inference engines.
         self.model: str | None = None
-        self.init_prompt: str | None = None
+        self.init_prompt: str | None = None  # This is set to the DEFAULT_INIT_PROMPT.
 
         self.turns = 0
-        self._reset_repl_namespace()
+        self._reset_repl_namespace()  # Initialize the REPL namespace with the default builtins and custom builtins.
+
         super().__init__(name="RLMExecutorToolGroup")
+
+    def _reset_repl_namespace(self) -> None:
+        """
+        Initialize the REPL namespace with the default builtins and custom builtins.
+        """
+        safe_builtins = SAFE_BUILTINS.copy()
+
+        ## Register custom builtins here
+        safe_builtins["open"] = self._safe_open
+
+        self.globals_dict = {
+            "__builtins__": safe_builtins,
+            "__name__": "__main__",
+            "llm_query": self.llm_query,
+        }
+
+    def reset(self, *, keep_context: bool = True) -> None:
+        """
+        Reset REPL variables (locals), but keep configuration and temp dir.
+        """
+        context = self.locals_dict.get("context") if keep_context else None
+        context_path = self.locals_dict.get("context_path") if keep_context else None
+        self.locals_dict = {}
+        if keep_context and context is not None:
+            self.locals_dict["context"] = context
+        if keep_context and context_path is not None:
+            self.locals_dict["context_path"] = context_path
+        self.turns = 0
+        self._reset_repl_namespace()
+
+    def _ensure_setup(self) -> None:
+        """Ensure the recursive LM client is initialized."""
+        if self.lm_client is not None and self.model is not None and self.init_prompt is not None:
+            return
+        else:
+            raise ValueError(
+                "Inference engine not setup; call engine_setup(base_url, model, init_prompt, api_key) first."
+            )
 
     def _safe_open(self, file: str, mode: str = "r", *args, **kwargs):
         """
         Restricted open():
-        - only allows paths under this tool's temp_dir
+        - only allows paths under this tool's temp_dir (we create a new temp dir for every RLM tool call)
         - disallows write/append/update modes by default
         """
         if not isinstance(file, str) or not file:
@@ -347,32 +415,9 @@ class RLMExecutorToolGroup(ToolGroup):
 
         return open(abs_path, mode, *args, **kwargs)
 
-    def _reset_repl_namespace(self) -> None:
-        safe_builtins = SAFE_BUILTINS.copy()
-
-        ## Register custom builtins here
-        safe_builtins["open"] = self._safe_open
-
-        self.globals_dict = {
-            "__builtins__": safe_builtins,
-            "__name__": "__main__",
-            "llm_query": self.llm_query,
-            "FINAL_VAR": self.final_var,
-        }
-
-    def reset(self, *, keep_context: bool = True) -> None:
-        """
-        Reset REPL variables (locals), but keep configuration and temp dir.
-        """
-        context = self.locals_dict.get("context") if keep_context else None
-        context_path = self.locals_dict.get("context_path") if keep_context else None
-        self.locals_dict = {}
-        if keep_context and context is not None:
-            self.locals_dict["context"] = context
-        if keep_context and context_path is not None:
-            self.locals_dict["context_path"] = context_path
-        self.turns = 0
-        self._reset_repl_namespace()
+    # =========================================================================
+    #   String and Context Helper Methods
+    # =========================================================================
 
     def _context_metadata_prompt(self) -> str:
         """
@@ -382,6 +427,7 @@ class RLMExecutorToolGroup(ToolGroup):
         """
         ctx = self.locals_dict.get("context", None)
         ctx_type = type(ctx).__name__
+        # Preview the length and type of the context, not really too important since subsequent lm calls will have access to the full context.
         if isinstance(ctx, str):
             total = len(ctx)
             preview = [min(2000, total)]
@@ -398,6 +444,9 @@ class RLMExecutorToolGroup(ToolGroup):
         return f"Your context is a {ctx_type} with {total} total characters. " f"(Preview lens: {preview})"
 
     def _extract_final_answer(self, response: str) -> Optional[str]:
+        """
+        Supports FINAL_VAR and FINAL directives.
+        """
         final_var_match = re.search(
             r"^\s*FINAL_VAR\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*$",
             response,
@@ -410,14 +459,6 @@ class RLMExecutorToolGroup(ToolGroup):
                 return str(value)
             return f"Error: Variable '{variable_name}' not found in environment"
 
-        final_answer_match = re.search(
-            r'^\s*FINAL\s*\(\s*["\'](.+?)["\']\s*\)\s*$',
-            response,
-            re.IGNORECASE | re.DOTALL | re.MULTILINE,
-        )
-        if final_answer_match:
-            return final_answer_match.group(1)
-
         final_direct_match = re.search(
             r"^\s*FINAL\s*\(\s*(.+?)\s*\)\s*$",
             response,
@@ -428,25 +469,35 @@ class RLMExecutorToolGroup(ToolGroup):
 
         return None
 
+    # =========================================================================
+    #   Code Execution and REPL Environment Management
+    # =========================================================================
+
     def _execute_code(self, code: str) -> dict:
-        """Execute Python in the persistent REPL namespace."""
+        """
+        Execute Python in the persistent REPL namespace.
+        Use lock
+        """
 
         start_time = time.perf_counter()
 
         with self._lock:
             old_stdout, old_stderr = sys.stdout, sys.stderr
-            stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
+            stdout_buf, stderr_buf = io.StringIO(), io.StringIO()  # Capture print and error outputs to strings
             try:
                 sys.stdout, sys.stderr = stdout_buf, stderr_buf
                 old_cwd = os.getcwd()
                 try:
-                    os.chdir(self.temp_dir)
-                    combined = {**self.globals_dict, **self.locals_dict}
-                    exec(code, combined, combined)
+                    os.chdir(self.temp_dir)  # Create temp dir before executing anyc ode
+                    combined = {
+                        **self.globals_dict,
+                        **self.locals_dict,
+                    }  # Combine global and local variables for execution.
+                    exec(code, combined, combined)  # Execute the code in the REPL namespace.
                 finally:
-                    os.chdir(old_cwd)
+                    os.chdir(old_cwd)  # Don't execute code unless we're in the temp dir.
 
-                # Persist variables across calls, including deletions.
+                # Update local variables with any new variables created across calls, including deletions.
                 self.locals_dict = {
                     key: value
                     for key, value in combined.items()
@@ -470,6 +521,9 @@ class RLMExecutorToolGroup(ToolGroup):
         }
 
     def close(self) -> None:
+        """
+        Close the REPL environment and clear the temp directory.
+        """
         if getattr(self, "temp_dir", None) and os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         self.temp_dir = None
@@ -477,52 +531,63 @@ class RLMExecutorToolGroup(ToolGroup):
         self.locals_dict.clear()
 
     def __enter__(self):
+        """
+        Enter the REPL environment. Required for with-statement context management.
+        """
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type, exc_value, traceback):
+        """
+        Exit the REPL environment. Required for with-statement context management.
+        """
         self.close()
         return False
 
     def __del__(self):
+        """
+        Delete the REPL environment. Required for garbage collection.
+        """
         try:
             self.close()
         except Exception:
             pass
 
-    def llm_query(
-        self,
-        prompt: str,
-        model: Optional[str] = None,
-        system_prompt: Optional[str] = None,
-    ) -> str:
-        """Recursive LM call available inside the REPL."""
-        assert self.lm_client is not None, "Inference engine not setup; call _rlm_setup(...) first."
-        used_model = model or self.model
-        assert used_model is not None, "Model not configured; call rlm_setup(...) first."
+    # =========================================================================
+    #   LM Query Method Definitions
+    # =========================================================================
+    def _load_context(self, context: str) -> str:  # 1. Load Context into the REPL.
+        """
+        Load context into the REPL (internal method).
+        """
+        context_payload: Any = context
+        if isinstance(context, str):
+            s = context.strip()
+            looks_like_json = s and ((s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")))
+            if looks_like_json:
+                try:
+                    context_payload = json.loads(s)
+                except json.JSONDecodeError:
+                    # Keep original string (including whitespace) if parsing fails.
+                    context_payload = context
 
-        msgs: list[dict[str, str]] = []
-        if system_prompt:
-            msgs.append({"role": "system", "content": system_prompt})
-        msgs.append({"role": "user", "content": prompt})
+        self.locals_dict["context"] = context_payload
 
-        return (
-            self.lm_client.chat.completions.create(
-                model=used_model,
-                messages=msgs,
-                max_tokens=self.max_tokens,
-            )
-            .choices[0]
-            .message.content
+        # Write to a file inside temp_dir for convenience/debugging.
+        is_text = isinstance(context_payload, str)
+        context_path = os.path.join(self.temp_dir, "context.txt" if is_text else "context.json")
+        with open(context_path, "w", encoding="utf-8") as f:
+            if is_text:
+                f.write(context_payload)
+            else:
+                json.dump(context_payload, f, ensure_ascii=False)
+
+        self.locals_dict["context_path"] = context_path
+
+        return json.dumps(
+            {"status": 200, "message": "Context loaded successfully", "context_type": type(context_payload).__name__}
         )
 
-    def final_var(self, variable_name: str) -> str:
-        variable_name = variable_name.strip().strip("\"'").strip()
-        if variable_name in self.locals_dict:
-            return str(self.locals_dict[variable_name])
-        return f"Error: Variable '{variable_name}' not found in environment"
-
-    @tool
-    def rlm_setup(
+    def engine_setup(
         self,
         base_url: str | None = None,
         model: str = "gpt-4o-mini",
@@ -561,74 +626,40 @@ class RLMExecutorToolGroup(ToolGroup):
         self._reset_repl_namespace()
         return json.dumps({"status": "ok"})
 
-    def _ensure_setup(self) -> None:
-        """Ensure the recursive LM client is initialized."""
-        if self.lm_client is not None and self.model is not None and self.init_prompt is not None:
-            return
-        self.rlm_setup(base_url="https://api.openai.com/v1", model="gpt-4o-mini", init_prompt="")
-
-    @tool
-    def rlm_load_context(self, context: str) -> str:
+    def llm_query(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> str:
         """
-        Load context into the REPL. Call this before calling `rlm` to set the context.
+        Recursive LM call available inside the REPL.
         """
-        context_payload: Any = context
-        if isinstance(context, str):
-            s = context.strip()
-            looks_like_json = s and ((s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")))
-            if looks_like_json:
-                try:
-                    context_payload = json.loads(s)
-                except json.JSONDecodeError:
-                    # Keep original string (including whitespace) if parsing fails.
-                    context_payload = context
 
-        self.locals_dict["context"] = context_payload
+        assert self.lm_client is not None, "Inference engine not setup; call _rlm_setup(...) first."
+        used_model = model or self.model
+        assert used_model is not None, "Model not configured; call rlm_setup(...) first."
 
-        # Write to a file inside temp_dir for convenience/debugging.
-        is_text = isinstance(context_payload, str)
-        context_path = os.path.join(self.temp_dir, "context.txt" if is_text else "context.json")
-        with open(context_path, "w", encoding="utf-8") as f:
-            if is_text:
-                f.write(context_payload)
-            else:
-                json.dump(context_payload, f, ensure_ascii=False)
+        msgs: list[dict[str, str]] = []
+        if system_prompt:
+            msgs.append({"role": "system", "content": system_prompt})
+        msgs.append({"role": "user", "content": prompt})
 
-        self.locals_dict["context_path"] = context_path
-
-        return json.dumps(
-            {"status": 200, "message": "Context loaded successfully", "context_type": type(context_payload).__name__}
+        return (
+            self.lm_client.chat.completions.create(
+                model=used_model,
+                messages=msgs,
+                max_tokens=self.max_tokens,
+            )
+            .choices[0]
+            .message.content
         )
 
-    def _load_context(self, context: str) -> str:
-        self.rlm_load_context(context)
+    # =========================================================================
+    #   Tool Call API (Add all Tool Methods Here)
+    # =========================================================================
 
-    @tool
-    def repl_exec(self, code: str) -> str:
-        """
-        Execute Python directly in the persistent REPL namespace.
-        """
-        self._ensure_setup()
-        res = self._execute_code(code)
-        stdout = res.get("stdout", "") or ""
-        stderr = res.get("stderr", "") or ""
-        stdout, _ = truncate_text(stdout, self.max_repl_output_chars)
-        stderr, _ = truncate_text(stderr, self.max_repl_output_chars)
-        return json.dumps(
-            {
-                "stdout": stdout,
-                "stderr": stderr,
-                "execution_time": res.get("execution_time", 0),
-                "locals_keys": sorted([k for k in self.locals_dict.keys() if not k.startswith("_")])[:200],
-            }
-        )
-
-    @tool
-    def rlm_close(self) -> str:
-        self.close()
-        return json.dumps({"status": "closed"})
-
-    @tool
+    @tool  # 2. RLM Tool Call - Main entry point for RLM tool calling.
     def rlm(self, query: str, context: str) -> str:
 
         self._ensure_setup()
@@ -665,12 +696,9 @@ class RLMExecutorToolGroup(ToolGroup):
 
             has_final_answer = bool(re.search(r"\bFINAL_VAR\b|\bFINAL\s*\(", response_text, re.IGNORECASE))
 
-            # Find ALL REPL blocks in the response. Support both:
-            # - <repl>...</repl>
-            # - ```repl ... ```
+            # Find ALL REPL blocks in the response. Support <repl>...</repl>
 
             code_matches = re.findall(r"<repl>(.*?)</repl>", response_text, re.DOTALL | re.IGNORECASE)
-            code_matches += re.findall(r"```repl\s*(.*?)\s*```", response_text, re.DOTALL | re.IGNORECASE)
 
             print_box(
                 f"MODEL OUTPUT (turn {self.turns}/{self.max_turns})",
@@ -758,6 +786,6 @@ class RLMExecutorToolGroup(ToolGroup):
                 "final_answer": final_answer_value,
                 "has_final_answer": bool(has_final_answer),
                 "metadata": metadata,
-                "tail_messages": messages[-3:],
+                "tail_messages": messages[-3:] if len(messages) >= 3 else messages,
             }
         )
