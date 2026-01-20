@@ -34,7 +34,7 @@ def apply_rope_interleave(inputs: jax.Array, position_ids: jax.Array, head_dim: 
         theta: Base for the geometric progression (rope_theta)
 
     Returns:
-        Tensor with interleaved RoPE applied, same shape as inputs
+        Tensor with RoPE applied, same shape as inputs, in grouped order
     """
     fraction = 2 * jnp.arange(0, head_dim // 2, dtype=jnp.float32) / head_dim
     timescale = jnp.pow(theta, fraction)
@@ -45,6 +45,4 @@ def apply_rope_interleave(inputs: jax.Array, position_ids: jax.Array, head_dim: 
     x1 = inputs[..., ::2]
     x2 = inputs[..., 1::2]
 
-    rotated = jnp.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)
-
-    return rotated.reshape(inputs.shape).astype(inputs.dtype)
+    return jnp.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1).astype(inputs.dtype)

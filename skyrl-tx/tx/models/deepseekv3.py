@@ -114,7 +114,9 @@ class DeepseekV3Attention(nnx.Module):
         self.scaling = self.qk_head_dim ** (-0.5)
 
         rope_params = config.rope_scaling
-        if rope_params.get("rope_type", "default") != "default":
+        # HF has both fields, which are set to same on initialization.
+        rope_type = rope_params.get("rope_type") or rope_params.get("type", "default")
+        if rope_type != "default":
             mscale_all_dim = rope_params.get("mscale_all_dim", 0)
             scaling_factor = rope_params.get("factor", 1.0)
             if mscale_all_dim:
