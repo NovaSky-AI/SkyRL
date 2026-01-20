@@ -403,9 +403,9 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
     def lm_head_weight(self) -> jax.Array:
         """Returns lm_head weight [H, V] for external matmul (e.g., chunked cross-entropy)."""
         if self.config.tie_word_embeddings:
-            return self.model.embed_tokens.embedding.value.T
+            return self.model.embed_tokens.embedding[...].T
         else:
-            return self.lm_head.kernel.value
+            return self.lm_head.kernel[...]
 
     def __call__(
         self,
@@ -437,7 +437,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             # Compute logits with LoRA applied (required for train_unembed=True)
             hidden_states = outputs.last_hidden_state
             if self.config.tie_word_embeddings:
-                logits = hidden_states @ self.model.embed_tokens.embedding.value.T
+                logits = hidden_states @ self.model.embed_tokens.embedding[...].T
             else:
                 logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
