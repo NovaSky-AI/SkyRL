@@ -150,9 +150,7 @@ class InferenceRouter:
     def _forward_headers(self, request: Request) -> dict:
         """Forward headers (filter out hop-by-hop headers)."""
         return {
-            k: v
-            for k, v in request.headers.items()
-            if k.lower() not in ("host", "content-length", "transfer-encoding")
+            k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length", "transfer-encoding")
         }
 
     async def _fan_out_get(self, path: str) -> dict:

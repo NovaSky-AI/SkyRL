@@ -18,7 +18,6 @@ import warnings
 
 import torch
 
-
 # Path to this worker extension class for use in CLI args (derived from module path)
 VLLM_WORKER_EXTENSION_CLS = f"{__name__}.WorkerWrap"
 
@@ -50,14 +49,10 @@ class WorkerWrap:
         """
         import pickle
 
-        assert torch.distributed.is_initialized(), (
-            "default torch process group must be initialized"
-        )
+        assert torch.distributed.is_initialized(), "default torch process group must be initialized"
 
         # Unpickle init_info to restore the original object type
-        assert isinstance(init_info, bytes), (
-            f"Expected bytes, got {type(init_info).__name__}"
-        )
+        assert isinstance(init_info, bytes), f"Expected bytes, got {type(init_info).__name__}"
         init_info = pickle.loads(init_info)
 
         strategy_cls = init_info.strategy_type()
@@ -88,9 +83,7 @@ class WorkerWrap:
         import pickle
 
         # Unpickle request to restore the original object type
-        assert isinstance(request, bytes), (
-            f"Expected bytes, got {type(request).__name__}"
-        )
+        assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
         request = pickle.loads(request)
 
         weight_list = []

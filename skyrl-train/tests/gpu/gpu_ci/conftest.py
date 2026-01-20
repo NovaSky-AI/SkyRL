@@ -33,7 +33,7 @@ def ray_init_fixture():
     # needed for megatron tests
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
-    
+
     if SKYRL_INCLUDE_PYTHONPATH_IN_RUNTIME_ENV:
         env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
 

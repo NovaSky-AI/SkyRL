@@ -57,9 +57,7 @@ def get_open_port(start_port: int | None = None) -> int:
             except OSError:
                 port += 1
                 if port > 65535:
-                    raise RuntimeError(
-                        f"No available port found starting from {start_port}"
-                    )
+                    raise RuntimeError(f"No available port found starting from {start_port}")
 
     # Let OS assign a free port
     # Try IPv4 first

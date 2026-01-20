@@ -7,33 +7,30 @@ import logging
 import os
 import pickle
 import time
+from argparse import Namespace
 from typing import Any, Dict, Optional, Tuple
 
-from argparse import Namespace
 import httpx
 import uvicorn
+import vllm.envs as envs
 from fastapi import Request
-
-
-from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.api_server import (
     build_app,
     create_server_socket,
     init_app_state,
 )
 from vllm.usage.usage_lib import UsageContext
-import vllm.envs as envs
 from vllm.utils.system_utils import set_ulimit
 
-
-from skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_open_port
-from skyrl_train.inference_servers.protocols import ServerActorProtocol
-from skyrl_train.inference_servers.vllm_worker import VLLM_WORKER_EXTENSION_CLS
 from skyrl_train.env_vars import (
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
+from skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_open_port
+from skyrl_train.inference_servers.protocols import ServerActorProtocol
+from skyrl_train.inference_servers.vllm_worker import VLLM_WORKER_EXTENSION_CLS
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +134,7 @@ class VLLMServerActor(ServerActorProtocol):
             )
 
         # Set bundle indices for this server's TP/PP workers in the placement group
-        bundle_indices = list(
-            range(start_bundle_idx, start_bundle_idx + self._num_gpus_per_server)
-        )
+        bundle_indices = list(range(start_bundle_idx, start_bundle_idx + self._num_gpus_per_server))
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
 
@@ -154,16 +149,11 @@ class VLLMServerActor(ServerActorProtocol):
         The worker extension (WorkerWrap) provides the RPC methods needed for
         weight synchronization (init_weight_update_communicator, load_weights).
         """
-        if (
-            not hasattr(self._cli_args, "worker_extension_cls")
-            or not self._cli_args.worker_extension_cls
-        ):
+        if not hasattr(self._cli_args, "worker_extension_cls") or not self._cli_args.worker_extension_cls:
             self._cli_args.worker_extension_cls = VLLM_WORKER_EXTENSION_CLS
             logger.info(f"Using default worker extension: {VLLM_WORKER_EXTENSION_CLS}")
         else:
-            logger.info(
-                f"Using provided worker extension: {self._cli_args.worker_extension_cls}"
-            )
+            logger.info(f"Using provided worker extension: {self._cli_args.worker_extension_cls}")
 
     def _ensure_ray_executor(self) -> None:
         """
@@ -193,10 +183,7 @@ class VLLMServerActor(ServerActorProtocol):
 
         engine_id = f"server-{self._server_idx}-{self._ip}-{side_channel_port}"
 
-        if (
-            hasattr(self._cli_args, "kv_transfer_config")
-            and self._cli_args.kv_transfer_config
-        ):
+        if hasattr(self._cli_args, "kv_transfer_config") and self._cli_args.kv_transfer_config:
             try:
                 kv_config = json.loads(self._cli_args.kv_transfer_config)
             except (json.JSONDecodeError, TypeError) as e:
@@ -245,9 +232,7 @@ class VLLMServerActor(ServerActorProtocol):
 
         return self.get_server_info()
 
-    async def _wait_until_healthy(
-        self, timeout: float = SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
-    ) -> None:
+    async def _wait_until_healthy(self, timeout: float = SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S) -> None:
         """Poll the /health endpoint until it responds OK."""
         url = f"http://{self._ip}:{self._port}/health"
         start_time = time.time()
@@ -270,9 +255,7 @@ class VLLMServerActor(ServerActorProtocol):
                     pass
 
                 if time.time() - start_time > timeout:
-                    raise TimeoutError(
-                        f"Server failed to become healthy within {timeout}s"
-                    )
+                    raise TimeoutError(f"Server failed to become healthy within {timeout}s")
 
                 await asyncio.sleep(1.0)
 
@@ -288,9 +271,7 @@ class VLLMServerActor(ServerActorProtocol):
             engine_args=engine_args,
             usage_context=UsageContext.OPENAI_API_SERVER,
         )
-        logger.info(
-            f"Engine initialized on {self._ip}:{self._port}, adding custom endpoints..."
-        )
+        logger.info(f"Engine initialized on {self._ip}:{self._port}, adding custom endpoints...")
 
         # Add custom SkyRL endpoints
         self._add_custom_endpoints(app)

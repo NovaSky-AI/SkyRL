@@ -19,9 +19,9 @@ import torch
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+from skyrl_train.inference_servers.common import get_open_port
 from skyrl_train.inference_servers.router import InferenceRouter
 from skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl_train.inference_servers.common import get_open_port
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -29,9 +29,7 @@ MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 # Skip entire module if not enough GPUs
 _gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
 if _gpu_count < 4:
-    pytest.skip(
-        f"Need 4 GPUs for full test suite, found {_gpu_count}", allow_module_level=True
-    )
+    pytest.skip(f"Need 4 GPUs for full test suite, found {_gpu_count}", allow_module_level=True)
 
 
 def make_vllm_cli_args(

@@ -22,9 +22,9 @@ from transformers import AutoModelForCausalLM
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+from skyrl_train.inference_servers.common import get_node_ip, get_open_port
 from skyrl_train.inference_servers.router import InferenceRouter
 from skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl_train.inference_servers.common import get_open_port, get_node_ip
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -32,9 +32,7 @@ MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 # Skip entire module if not enough GPUs (need 3: 1 trainer + 2 for TP=2 server)
 _gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
 if _gpu_count < 3:
-    pytest.skip(
-        f"Need 3 GPUs for weight sync test, found {_gpu_count}", allow_module_level=True
-    )
+    pytest.skip(f"Need 3 GPUs for weight sync test, found {_gpu_count}", allow_module_level=True)
 
 
 def make_vllm_cli_args(
@@ -97,9 +95,7 @@ class Trainer:
         """Check if the trainer is ready."""
         return True
 
-    def init_weight_sync(
-        self, master_address: str, master_port: int, world_size: int, group_name: str
-    ):
+    def init_weight_sync(self, master_address: str, master_port: int, world_size: int, group_name: str):
         """Initialize the weight sync process group as rank 0 (trainer)."""
         from skyrl_train.distributed.utils import init_custom_process_group
         from skyrl_train.utils import get_tcp_url
@@ -237,9 +233,7 @@ class TestWeightUpdateFlow:
             print(f"[Step 1] Dummy weights output: {text_before!r}")
 
             # Dummy weights should NOT produce coherent output about Paris
-            assert "Paris" not in text_before, (
-                "Dummy weights unexpectedly produced correct answer"
-            )
+            assert "Paris" not in text_before, "Dummy weights unexpectedly produced correct answer"
 
             # ===== Step 2: Init weight transfer (both sides concurrently) =====
             master_address = get_node_ip()
@@ -250,15 +244,11 @@ class TestWeightUpdateFlow:
             assert resp.status_code == 200
             server_info_map = resp.json()
             # Sum world_size across all servers
-            inference_world_size = sum(
-                info["world_size"] for info in server_info_map.values()
-            )
+            inference_world_size = sum(info["world_size"] for info in server_info_map.values())
             world_size = 1 + inference_world_size  # 1 trainer + all inference workers
             group_name = f"weight_sync_test_{master_port}"
 
-            print(
-                f"[Step 2] Init weight transfer: master={master_address}:{master_port}, world_size={world_size}"
-            )
+            print(f"[Step 2] Init weight transfer: master={master_address}:{master_port}, world_size={world_size}")
 
             init_info = {
                 "master_addr": master_address,
@@ -273,17 +263,11 @@ class TestWeightUpdateFlow:
 
             # Both sides must init concurrently (NCCL blocks until all ranks join)
             # Start trainer init (returns immediately, runs in Ray actor)
-            trainer_init_ref = trainer.init_weight_sync.remote(
-                master_address, master_port, world_size, group_name
-            )
+            trainer_init_ref = trainer.init_weight_sync.remote(master_address, master_port, world_size, group_name)
 
             # Await server init (triggers NCCL join on server side)
-            server_resp = await client.post(
-                f"{router_url}/init_weight_transfer", json=init_info
-            )
-            assert server_resp.status_code == 200, (
-                f"Server init failed: {server_resp.text}"
-            )
+            server_resp = await client.post(f"{router_url}/init_weight_transfer", json=init_info)
+            assert server_resp.status_code == 200, f"Server init failed: {server_resp.text}"
 
             # Trainer should be done now (NCCL group formed)
             ray.get(trainer_init_ref)
@@ -300,12 +284,8 @@ class TestWeightUpdateFlow:
             trainer_broadcast_ref = trainer.broadcast_weights.remote()
 
             # Await server receive (triggers NCCL receive on server side)
-            server_resp = await client.post(
-                f"{router_url}/update_weights", json=weight_info
-            )
-            assert server_resp.status_code == 200, (
-                f"Update weights failed: {server_resp.text}"
-            )
+            server_resp = await client.post(f"{router_url}/update_weights", json=weight_info)
+            assert server_resp.status_code == 200, f"Update weights failed: {server_resp.text}"
 
             # Trainer should be done now (NCCL broadcast complete)
             ray.get(trainer_broadcast_ref)
@@ -323,8 +303,6 @@ class TestWeightUpdateFlow:
             text_after = resp.json()["choices"][0]["text"]
             print(f"[Step 5] Real weights output: {text_after!r}")
 
-            assert "Paris" in text_after, (
-                f"Weight sync failed - expected 'Paris' but got: {text_after!r}"
-            )
+            assert "Paris" in text_after, f"Weight sync failed - expected 'Paris' but got: {text_after!r}"
 
             print("[SUCCESS] Weight sync test passed!")

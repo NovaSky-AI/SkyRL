@@ -77,9 +77,7 @@ class ServerGroup:
         self._internal_pg: Optional[PlacementGroup] = None
 
         # Query the actor class for GPU requirements
-        self._num_gpus_per_server = server_actor_cls.compute_num_gpus_per_server(
-            cli_args
-        )
+        self._num_gpus_per_server = server_actor_cls.compute_num_gpus_per_server(cli_args)
 
         logger.info(
             f"ServerGroup: actor_cls={server_actor_cls.__name__}, "
@@ -127,9 +125,7 @@ class ServerGroup:
 
         for server_idx in range(self._num_servers):
             # Calculate bundle index accounting for offset (colocation mode)
-            start_bundle_idx = (
-                self._bundle_offset + server_idx * self._num_gpus_per_server
-            )
+            start_bundle_idx = self._bundle_offset + server_idx * self._num_gpus_per_server
 
             ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
 
