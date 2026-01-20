@@ -408,7 +408,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         Returns stat_loggers in the format expected by vLLM's from_engine_args().
         For vLLM v1 (0.9.0+), this returns a list of StatLoggerFactory callables.
-        For older versions, this returns a dict of stat logger instances.
+        For older versions where the v1 API is not available, this returns `None`.
 
         See: https://docs.vllm.ai/en/latest/api/vllm/v1/metrics/ray_wrappers/
         """
