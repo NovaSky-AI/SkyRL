@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
+#include <deque>
 #include <mutex>
 #include <optional>
 #include <vector>
@@ -27,19 +28,38 @@
 
 namespace ffi = xla::ffi;
 
-static int get_sm_count() {
-  constexpr int kMaxDevices = 16;
-  static std::once_flag flags[kMaxDevices];
-  static cudaDeviceProp props[kMaxDevices];
+namespace {
 
+int g_num_gpus = -1;
+std::deque<std::once_flag> g_device_flags;
+std::vector<cudaDeviceProp> g_device_props;
+
+void initDeviceVectors() {
+  static bool init [[maybe_unused]] = [] {
+    if (cudaGetDeviceCount(&g_num_gpus) != cudaSuccess || g_num_gpus <= 0) {
+      g_num_gpus = 0;
+    }
+    g_device_flags.resize(g_num_gpus);
+    g_device_props.resize(g_num_gpus);
+    return true;
+  }();
+}
+
+}  // namespace
+
+static int get_sm_count() {
   int device = 0;
-  if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= kMaxDevices) {
+  if (cudaGetDevice(&device) != cudaSuccess || device < 0) {
     return 0;
   }
-  std::call_once(flags[device], [device] {
-    cudaGetDeviceProperties(&props[device], device);
+  initDeviceVectors();
+  if (device >= g_num_gpus) {
+    return 0;
+  }
+  std::call_once(g_device_flags[device], [device] {
+    cudaGetDeviceProperties(&g_device_props[device], device);
   });
-  return props[device].multiProcessorCount;
+  return g_device_props[device].multiProcessorCount;
 }
 
 using DtypeA = cutlass::bfloat16_t;
