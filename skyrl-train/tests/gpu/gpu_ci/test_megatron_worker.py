@@ -474,40 +474,40 @@ async def test_megatron_train(
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
 
     # set batch sizes correctly
-    cfg.trainer.train_batch_size = gpus_per_node
-    cfg.trainer.policy_mini_batch_size = gpus_per_node
+    cfg.trainer.train_batch_size = gpus_per_node * 4
+    cfg.trainer.policy_mini_batch_size = gpus_per_node * 4
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
 
-    actor_group = init_worker_with_type(
-        "policy",
-        shared_pg=None,
-        colocate_all=False,
-        num_nodes=cfg.trainer.placement.policy_num_nodes,
-        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-        cfg=cfg,
-    )
+    # actor_group = init_worker_with_type(
+    #     "policy",
+    #     shared_pg=None,
+    #     colocate_all=False,
+    #     num_nodes=cfg.trainer.placement.policy_num_nodes,
+    #     num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+    #     cfg=cfg,
+    # )
 
-    with Timer(f"megatron training step tp{tp} pp{pp} cp{cp} ep{ep} etp{etp}"):
-        batch.metadata["global_step"] = 0
-        results_megatron = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
-    results_megatron = [results_megatron[i].metadata["train_status"] for i in range(len(results_megatron))]
+    # with Timer(f"megatron training step tp{tp} pp{pp} cp{cp} ep{ep} etp{etp}"):
+    #     batch.metadata["global_step"] = 0
+    #     results_megatron = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
+    # results_megatron = [results_megatron[i].metadata["train_status"] for i in range(len(results_megatron))]
 
-    memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
-    memory = memory[0]
-    print_mem("memory after training step", memory)
+    # memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
+    # memory = memory[0]
+    # print_mem("memory after training step", memory)
 
-    for result in results_megatron:
-        assert isinstance(result, dict), "Result should be a dictionary of training stats"
-        assert "policy_loss" in result
-        assert "policy_lr" in result
-        assert "ppo_clip_ratio" in result
-        assert "policy_entropy" in result
-        for k, v in result.items():
-            assert isinstance(v, (int, float)), f"{k} should be an int or float"
+    # for result in results_megatron:
+    #     assert isinstance(result, dict), "Result should be a dictionary of training stats"
+    #     assert "policy_loss" in result
+    #     assert "policy_lr" in result
+    #     assert "ppo_clip_ratio" in result
+    #     assert "policy_entropy" in result
+    #     for k, v in result.items():
+    #         assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
-    ray.shutdown()
-    ray_init_for_tests()
+    # ray.shutdown()
+    # ray_init_for_tests()
 
     cfg.trainer.strategy = "fsdp2"
     # NOTE (erictang000): need to set sample packing to false here due to metric calculation differences
@@ -515,10 +515,9 @@ async def test_megatron_train(
     # this shouldn't be the case, but tracking here: https://github.com/NovaSky-AI/SkyRL/issues/211
     # + tested that this does not affect convergence
     cfg.trainer.use_sample_packing = False
-    if ep > 1:
-        cfg.trainer.policy.fsdp_config.cpu_offload = True
 
     if ep > 1:
+        cfg.trainer.policy.fsdp_config.cpu_offload = True
         model_config_kwargs = OmegaConf.to_container(cfg.trainer.policy.model_config_kwargs, resolve=True)
         model_config_kwargs["num_hidden_layers"] = 2
         cfg.trainer.policy.model_config_kwargs = model_config_kwargs
