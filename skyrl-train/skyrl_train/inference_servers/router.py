@@ -14,7 +14,8 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
 
-from skyrl_train.inference_servers.common import get_node_ip, SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
+from skyrl_train.inference_servers.common import get_node_ip
+from skyrl_train.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
