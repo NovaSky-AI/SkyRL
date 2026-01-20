@@ -44,7 +44,7 @@ from skyrl_train.utils import (
     ppo_utils,
     trainer_utils,
 )
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.utils.ppo_utils import (
