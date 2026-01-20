@@ -308,8 +308,9 @@ class Llama3Model(nnx.Module):
         final_hs, all_hs = jax.lax.scan(body_fn, hidden_states, jnp.arange(num_layers))
 
         if output_hidden_states:
-            # all_hs is [num_layers, batch, seq, hidden], convert to list and prepend input
-            all_hidden_states = [hidden_states] + [all_hs[i] for i in range(num_layers)]
+            # all_hs is [num_layers, batch, seq, hidden]. Exclude last layer output since
+            # it gets normed and appended in __call__ (matching non-checkpointed path).
+            all_hidden_states = [hidden_states] + [all_hs[i] for i in range(num_layers - 1)]
         else:
             all_hidden_states = []
 
