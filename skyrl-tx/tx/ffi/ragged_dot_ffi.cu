@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -26,20 +27,15 @@
 
 namespace ffi = xla::ffi;
 
-static std::vector<cudaDeviceProp> g_device_props;
-
 static int get_sm_count() {
-  int device = 0;
-  if (cudaGetDevice(&device) != cudaSuccess || device < 0) {
-    return 0;
-  }
-  if (static_cast<size_t>(device) >= g_device_props.size()) {
-    g_device_props.resize(device + 1);
-  }
-  cudaDeviceProp& props = g_device_props[device];
-  if (!props.multiProcessorCount) {
-    cudaGetDeviceProperties(&props, device);
-  }
+  static std::once_flag flag;
+  static cudaDeviceProp props;
+  std::call_once(flag, [] {
+    int device = 0;
+    if (cudaGetDevice(&device) == cudaSuccess && device >= 0) {
+      cudaGetDeviceProperties(&props, device);
+    }
+  });
   return props.multiProcessorCount;
 }
 
