@@ -21,6 +21,22 @@ TILE_CONFIGS = [
     (128, 128, 128),
 ]
 
+# Workload presets for benchmarking
+WORKLOAD_PRESETS = {
+    "moe": {
+        "description": "MoE expert layer (Qwen3-30B-A3B)",
+        "args": ["--preset", "moe"],
+    },
+    "lora": {
+        "description": "LoRA adapter layer (rank=8)",
+        "args": ["--preset", "lora"],
+    },
+    "lora-moe": {
+        "description": "LoRA on MoE experts",
+        "args": ["--preset", "lora-moe"],
+    },
+}
+
 
 def set_tile_shape(m: int, n: int, k: int) -> None:
     """Update the TileShape in the CUDA file."""
@@ -57,14 +73,20 @@ def rebuild_kernel() -> bool:
     return SO_FILE.exists()
 
 
-def run_benchmark(num_tokens: int = 8192) -> dict | None:
+def run_benchmark(workload: str = "moe", num_tokens: int = 8192) -> dict | None:
     """Run the benchmark and parse results."""
+    # Build command with workload preset or custom args
+    cmd = [sys.executable, "benchmarks/bench_ragged_dot.py", "--num-warmup", "3", "--num-iters", "10"]
+
+    if workload in WORKLOAD_PRESETS:
+        cmd.extend(WORKLOAD_PRESETS[workload]["args"])
+    else:
+        # Legacy: custom num_tokens only
+        cmd.extend(["--num-tokens", str(num_tokens)])
+
     # Need to run in a fresh process to reload the .so
     result = subprocess.run(
-        [sys.executable, "benchmarks/bench_ragged_dot.py",
-         "--num-tokens", str(num_tokens),
-         "--num-warmup", "3",
-         "--num-iters", "10"],
+        cmd,
         capture_output=True,
         text=True,
         cwd=CUDA_FILE.parent.parent.parent,
@@ -96,22 +118,30 @@ def run_benchmark(num_tokens: int = 8192) -> dict | None:
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Sweep tile sizes for CUTLASS kernel")
-    parser.add_argument("--num-tokens", type=int, default=8192, help="Number of tokens")
+    parser.add_argument("--workload", choices=list(WORKLOAD_PRESETS.keys()), default="moe",
+                        help="Workload preset to benchmark (moe, lora, lora-moe)")
+    parser.add_argument("--all-workloads", action="store_true", help="Sweep all workloads")
+    parser.add_argument("--num-tokens", type=int, default=8192, help="Number of tokens (for custom workload)")
     parser.add_argument("--dry-run", action="store_true", help="Only show configs, don't run")
     args = parser.parse_args()
 
     print("CUTLASS Tile Size Sweep")
     print("=" * 70)
-    print(f"Qwen3-30B-A3B shapes: K=2048, N=768, M={args.num_tokens}")
-    print()
+
+    workloads = list(WORKLOAD_PRESETS.keys()) if args.all_workloads else [args.workload]
 
     if args.dry_run:
         print("Tile configurations to test:")
         for m, n, k in TILE_CONFIGS:
             print(f"  ({m}, {n}, {k})")
+        print()
+        print("Workloads to test:")
+        for w in workloads:
+            print(f"  {w}: {WORKLOAD_PRESETS[w]['description']}")
         return
 
-    results = []
+    # Store results per workload
+    all_results: dict[str, list] = {w: [] for w in workloads}
 
     for m, n, k in TILE_CONFIGS:
         print(f"\n{'='*70}")
@@ -122,44 +152,49 @@ def main():
 
         if not rebuild_kernel():
             print("  FAILED to build")
-            results.append((m, n, k, None))
+            for w in workloads:
+                all_results[w].append((m, n, k, None))
             continue
 
-        bench_results = run_benchmark(args.num_tokens)
-        if bench_results:
-            print(f"  Forward:  {bench_results.get('fwd_ms', 'N/A'):>8.3f} ms  {bench_results.get('fwd_tflops', 'N/A'):>8.2f} TFLOPS")
-            print(f"  Backward: {bench_results.get('bwd_ms', 'N/A'):>8.3f} ms  {bench_results.get('bwd_tflops', 'N/A'):>8.2f} TFLOPS")
-            results.append((m, n, k, bench_results))
-        else:
-            print("  FAILED to benchmark")
-            results.append((m, n, k, None))
+        for workload in workloads:
+            print(f"\n  Workload: {workload} ({WORKLOAD_PRESETS[workload]['description']})")
+            bench_results = run_benchmark(workload)
+            if bench_results:
+                print(f"    Forward:  {bench_results.get('fwd_ms', 'N/A'):>8.3f} ms  {bench_results.get('fwd_tflops', 'N/A'):>8.2f} TFLOPS")
+                print(f"    Backward: {bench_results.get('bwd_ms', 'N/A'):>8.3f} ms  {bench_results.get('bwd_tflops', 'N/A'):>8.2f} TFLOPS")
+                all_results[workload].append((m, n, k, bench_results))
+            else:
+                print("    FAILED to benchmark")
+                all_results[workload].append((m, n, k, None))
 
-    # Summary
-    print(f"\n{'='*70}")
-    print("SUMMARY")
-    print("=" * 70)
-    print(f"{'TileShape':<20} {'Fwd (ms)':>10} {'Fwd TFLOPS':>12} {'Bwd (ms)':>10} {'Bwd TFLOPS':>12}")
-    print("-" * 70)
+    # Summary per workload
+    for workload in workloads:
+        results = all_results[workload]
+        print(f"\n{'='*70}")
+        print(f"SUMMARY: {workload} ({WORKLOAD_PRESETS[workload]['description']})")
+        print("=" * 70)
+        print(f"{'TileShape':<20} {'Fwd (ms)':>10} {'Fwd TFLOPS':>12} {'Bwd (ms)':>10} {'Bwd TFLOPS':>12}")
+        print("-" * 70)
 
-    for m, n, k, res in results:
-        tile_str = f"({m}, {n}, {k})"
-        if res:
-            fwd_ms = f"{res.get('fwd_ms', 0):.3f}"
-            fwd_tf = f"{res.get('fwd_tflops', 0):.2f}"
-            bwd_ms = f"{res.get('bwd_ms', 0):.3f}"
-            bwd_tf = f"{res.get('bwd_tflops', 0):.2f}"
-            print(f"{tile_str:<20} {fwd_ms:>10} {fwd_tf:>12} {bwd_ms:>10} {bwd_tf:>12}")
-        else:
-            print(f"{tile_str:<20} {'FAILED':>10}")
+        for m, n, k, res in results:
+            tile_str = f"({m}, {n}, {k})"
+            if res:
+                fwd_ms = f"{res.get('fwd_ms', 0):.3f}"
+                fwd_tf = f"{res.get('fwd_tflops', 0):.2f}"
+                bwd_ms = f"{res.get('bwd_ms', 0):.3f}"
+                bwd_tf = f"{res.get('bwd_tflops', 0):.2f}"
+                print(f"{tile_str:<20} {fwd_ms:>10} {fwd_tf:>12} {bwd_ms:>10} {bwd_tf:>12}")
+            else:
+                print(f"{tile_str:<20} {'FAILED':>10}")
 
-    # Find best
-    valid_results = [(m, n, k, r) for m, n, k, r in results if r and 'fwd_tflops' in r]
-    if valid_results:
-        best_fwd = max(valid_results, key=lambda x: x[3]['fwd_tflops'])
-        best_bwd = max(valid_results, key=lambda x: x[3].get('bwd_tflops', 0))
-        print()
-        print(f"Best forward:  ({best_fwd[0]}, {best_fwd[1]}, {best_fwd[2]}) - {best_fwd[3]['fwd_tflops']:.2f} TFLOPS")
-        print(f"Best backward: ({best_bwd[0]}, {best_bwd[1]}, {best_bwd[2]}) - {best_bwd[3].get('bwd_tflops', 0):.2f} TFLOPS")
+        # Find best
+        valid_results = [(m, n, k, r) for m, n, k, r in results if r and 'fwd_tflops' in r]
+        if valid_results:
+            best_fwd = max(valid_results, key=lambda x: x[3]['fwd_tflops'])
+            best_bwd = max(valid_results, key=lambda x: x[3].get('bwd_tflops', 0))
+            print()
+            print(f"Best forward:  ({best_fwd[0]}, {best_fwd[1]}, {best_fwd[2]}) - {best_fwd[3]['fwd_tflops']:.2f} TFLOPS")
+            print(f"Best backward: ({best_bwd[0]}, {best_bwd[1]}, {best_bwd[2]}) - {best_bwd[3].get('bwd_tflops', 0):.2f} TFLOPS")
 
 
 if __name__ == "__main__":
