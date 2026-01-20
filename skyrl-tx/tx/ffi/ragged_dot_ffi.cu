@@ -97,9 +97,12 @@ using CollectiveMainloop_Bwd =
 using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
 using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
 
+// 128-byte alignment for TMA requirements on SM90
+constexpr size_t kTmaAlignment = 128;
+
 template <typename T>
 static T* carve_aligned(char*& p, size_t count) {
-  T* out = reinterpret_cast<T*>((reinterpret_cast<uintptr_t>(p) + 15) & ~uintptr_t(15));
+  T* out = reinterpret_cast<T*>((reinterpret_cast<uintptr_t>(p) + kTmaAlignment - 1) & ~uintptr_t(kTmaAlignment - 1));
   p = reinterpret_cast<char*>(out + count);
   return out;
 }
@@ -119,8 +122,7 @@ struct GroupedGemmData {
   ProblemShapeType* problem_sizes;
 
   static std::optional<GroupedGemmData> Allocate(ffi::ScratchAllocator& scratch, size_t g) {
-    // 128-byte alignment per array for TMA requirements on SM90
-    size_t bytes = 7 * 128 +
+    size_t bytes = 7 * kTmaAlignment +
                    sizeof(const DtypeA*) * g + sizeof(const DtypeB*) * g + sizeof(DtypeOutput*) * g +
                    sizeof(StrideA) * g + sizeof(StrideB) * g + sizeof(StrideOutput) * g +
                    sizeof(ProblemShapeType) * g;
