@@ -63,7 +63,7 @@ def env():
     for url in urls:
         assert wait_ready(url)
 
-    # Start router using public API 
+    # Start router using public API
     # (use 0.0.0.0 so get_node_ip() health check works)
     router = InferenceRouter(urls, host="0.0.0.0", port=router_port)
     router_url = router.start()
@@ -81,6 +81,7 @@ def test_round_robin(env):
     """Requests without session distribute across servers."""
     server_ids = {httpx.get(f"{env}/health").json()["server_id"] for _ in range(4)}
     assert len(server_ids) == 2
+
 
 def test_session_affinity(env):
     """Same X-Session-ID routes to same server."""
