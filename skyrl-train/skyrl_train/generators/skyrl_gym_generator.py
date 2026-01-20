@@ -7,6 +7,7 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_gene
 
 import asyncio
 import copy
+import re
 from uuid import uuid4
 import skyrl_gym
 from typing import List, Dict, Any, Optional, Union, Tuple
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
+from skyrl_train.generators.context_folding import ContextFolder
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
 from omegaconf import DictConfig
@@ -47,7 +49,6 @@ class StepWiseOutput:
 
     step_outputs: List[TrajectoryOutput]
 
-
 @dataclass
 class AgentLoopState:
     chat_history: ConversationType
@@ -56,7 +57,6 @@ class AgentLoopState:
     rollout_logprobs: Optional[List[float]]
     response_end_idx: Optional[int]
     done: bool
-
 
 @dataclass
 class TurnOutput:
@@ -123,6 +123,17 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.custom_chat_template = get_custom_chat_template(generator_cfg.chat_template)
         # get generation prompt ids for the tokenizer if needed
         self.generation_prompt_ids = get_generation_prompt_ids(tokenizer) if self.use_conversation_multi_turn else None
+        self.context_folder = None
+        context_folding_cfg = getattr(generator_cfg, "context_folding", None)
+        if context_folding_cfg is not None and context_folding_cfg.get("enabled", False):
+            self.context_folder = ContextFolder(
+                context_folding_cfg,
+                tokenizer=self.tokenizer,
+                inference_engine_client=self.inference_engine_client,
+                backend=self.generator_cfg.backend,
+                base_sampling_params=self.generator_cfg.sampling_params,
+                chat_template_kwargs=self.generator_cfg.chat_template_kwargs,
+            )
         if self.skyrl_gym_cfg.max_env_workers > 0:
             self.env_executor = ThreadPoolExecutor(
                 max_workers=self.skyrl_gym_cfg.max_env_workers, thread_name_prefix="skyrl-gym-env-"
@@ -172,6 +183,13 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if not self.use_conversation_multi_turn:
                 raise ValueError("`step_wise_trajectories` doesn't support `use_conversation_multi_turn=False`")
+
+        context_folding_cfg = getattr(generator_cfg, "context_folding", None)
+        if context_folding_cfg is not None and context_folding_cfg.get("enabled", False):
+            if not self.generator_cfg.step_wise_trajectories:
+                raise ValueError("`context_folding.enabled` requires `step_wise_trajectories=True`")
+            if self.custom_chat_template is not None:
+                raise ValueError("`context_folding.enabled` doesn't support custom chat templates")
 
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
@@ -268,13 +286,15 @@ class SkyRLGymGenerator(GeneratorInterface):
             response_end_idx=None,
             done=False,
         )
+        context_folder = self.context_folder
+        fold_count = 0
 
         while not agent_loop_state.done:
-
+         
             if len(agent_loop_state.input_ids) > max_input_length:
                 stop_reason = "length"
                 break
-
+            
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
@@ -383,6 +403,54 @@ class SkyRLGymGenerator(GeneratorInterface):
                 )
 
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
+
+            if context_folder is not None and not agent_loop_state.done:
+                fold_result = await context_folder.fold(
+                    chat_history=agent_loop_state.chat_history,
+                    current_input_length=len(agent_loop_state.input_ids),
+                    max_input_length=max_input_length,
+                    initial_chat_history_length=initial_chat_history_length,
+                    session_id=session_id,
+                    fold_count=fold_count,
+                )
+                if fold_result.folded:
+                    fold_count += 1
+                    if is_step_wise and context_folder.include_summary_in_training:
+                        if fold_result.summary_prompt_ids is None or fold_result.summary_output_ids is None:
+                            raise ValueError("Context folding summary output is missing prompt or response IDs")
+                        summary_turn_output = TurnOutput(
+                            output=fold_result.summary_text,
+                            output_ids=fold_result.summary_output_ids,
+                            output_logprobs=fold_result.summary_logprobs,
+                            new_obs=[],
+                            reward=0.0,
+                            obs_ids=[],
+                        )
+                        if not summary_turn_output.output_ids:
+                            logger.warning("Context folding summary produced empty output IDs; skipping summary step")
+                        else:
+                            summary_loss_mask = summary_turn_output.get_turn_loss_mask()
+                            summary_rollout_logprobs = summary_turn_output.get_turn_rollout_logprobs()
+                            summary_step_output = TrajectoryOutput(
+                                response_ids=summary_turn_output.output_ids,
+                                reward=0.0,
+                                stop_reason=fold_result.summary_stop_reason or "summary",
+                                loss_mask=summary_loss_mask,
+                                prompt_ids=fold_result.summary_prompt_ids,
+                                rollout_logprobs=summary_rollout_logprobs,
+                                env_metrics={},
+                            )
+                            agent_loop_output.step_outputs.append(summary_step_output)
+                            per_step_rewards.append((0.0, len(summary_turn_output.output_ids) - 1))
+                    elif context_folder.include_summary_in_training:
+                        logger.warning(
+                            "Context folding summary steps require `step_wise_trajectories=True`; skipping summary output"
+                        )
+
+                    agent_loop_state.chat_history = fold_result.new_chat_history
+                    if fold_result.new_input_ids is not None:
+                        agent_loop_state.input_ids = fold_result.new_input_ids
+                    agent_loop_state.response_end_idx = None
 
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
