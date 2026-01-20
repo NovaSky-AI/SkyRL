@@ -364,7 +364,7 @@ class Qwen3Model(nnx.Module):
         else:
             hidden_states, updated_keys, updated_values = self._forward_layers(
                 hidden_states,
-                seq_lengths=seq_lengths,
+                attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
                 kv_cache=kv_cache,
@@ -387,7 +387,7 @@ class Qwen3Model(nnx.Module):
         self,
         hidden_states: jax.Array,
         *,
-        seq_lengths: jax.Array,
+        attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None,
     ) -> jax.Array:
@@ -413,7 +413,7 @@ class Qwen3Model(nnx.Module):
             layer_weights = jax.tree.map(lambda x: x[i], stacked_weights)
             layer = nnx.merge(layer_graphdef, layer_weights)
             hs, _ = layer(
-                hs, seq_lengths=seq_lengths, positions=positions, adapter_indices=adapter_indices, kv_cache=None
+                hs, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices, kv_cache=None
             )
             return hs
 
@@ -424,7 +424,7 @@ class Qwen3Model(nnx.Module):
         self,
         hidden_states: jax.Array,
         *,
-        seq_lengths: jax.Array,
+        attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None,
         kv_cache: KVCache | None,
@@ -444,7 +444,7 @@ class Qwen3Model(nnx.Module):
             layer_kv = kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position)
             hidden_states, (k, v) = layer(
                 hidden_states,
-                seq_lengths=seq_lengths,
+                attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
                 kv_cache=layer_kv,
