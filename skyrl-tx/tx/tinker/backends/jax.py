@@ -239,6 +239,7 @@ class JaxBackendImpl(AbstractBackend):
         """Compile and cache the loss function to avoid re-jitting on every call."""
         use_chunked = self._use_chunked_loss
         loss_chunk_size = self.config.loss_chunk_size
+        gradient_checkpointing = self.config.gradient_checkpointing
 
         def _model_forward(
             graphdef: nnx.GraphDef,
@@ -315,6 +316,9 @@ class JaxBackendImpl(AbstractBackend):
                     log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
                     target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
                     return (target_logits - log_sum_exp).squeeze(-1)
+
+                if gradient_checkpointing:
+                    compute_chunk_logprobs = jax.checkpoint(compute_chunk_logprobs, policy=None)
 
                 # Process chunks sequentially using lax.map (not vmap) to reduce memory
                 all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_hidden, chunked_targets))
