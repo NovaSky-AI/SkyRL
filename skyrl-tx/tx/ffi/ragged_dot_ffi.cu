@@ -119,7 +119,8 @@ struct GroupedGemmData {
   ProblemShapeType* problem_sizes;
 
   static std::optional<GroupedGemmData> Allocate(ffi::ScratchAllocator& scratch, size_t g) {
-    size_t bytes = 7 * 16 +
+    // 128-byte alignment per array for TMA requirements on SM90
+    size_t bytes = 7 * 128 +
                    sizeof(const DtypeA*) * g + sizeof(const DtypeB*) * g + sizeof(DtypeOutput*) * g +
                    sizeof(StrideA) * g + sizeof(StrideB) * g + sizeof(StrideOutput) * g +
                    sizeof(ProblemShapeType) * g;
@@ -225,7 +226,7 @@ ffi::Error ExecuteGroupedGemm(
 
 ffi::Error RaggedDotCudaImpl(
     cudaStream_t stream,
-    ffi::ScratchAllocator& scratch,
+    ffi::ScratchAllocator scratch,
     ffi::Buffer<ffi::BF16> lhs,
     ffi::Buffer<ffi::BF16> rhs,
     ffi::Buffer<ffi::S32> group_offset,
@@ -273,7 +274,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 // Backward pass for d_rhs: computes lhs.T @ grad per group -> d_rhs[G, K, N]
 ffi::Error RaggedDotBwdCudaImpl(
     cudaStream_t stream,
-    ffi::ScratchAllocator& scratch,
+    ffi::ScratchAllocator scratch,
     ffi::Buffer<ffi::BF16> lhs,
     ffi::Buffer<ffi::BF16> grad,
     ffi::Buffer<ffi::S32> group_offset,
