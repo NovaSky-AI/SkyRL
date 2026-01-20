@@ -37,6 +37,22 @@ class TestRayPrometheusStatLoggers:
             assert len(result) == 1
             assert result[0] == mock_stat_logger
 
+    def test_create_ray_prometheus_stat_loggers_v1_unavailable(self):
+        """Test that None is returned when vLLM v1 API is not available."""
+        # By setting the module to None in sys.modules, the import will fail.
+        with patch.dict(sys.modules, {"vllm.v1.metrics.ray_wrappers": None}):
+            from skyrl_train.inference_engines.vllm.vllm_engine import AsyncVLLMInferenceEngine
+
+            # Create a minimal instance without actually initializing the engine
+            engine = object.__new__(AsyncVLLMInferenceEngine)
+
+            with patch("skyrl_train.inference_engines.vllm.vllm_engine.logger") as mock_logger:
+                result = engine._create_ray_prometheus_stat_loggers()
+
+                assert result is None
+                mock_logger.warning.assert_called_once()
+                assert "not available in this vLLM version" in mock_logger.warning.call_args[0][0]
+
 
 class TestConfigIntegration:
     """Test that configuration flows correctly through the stack."""
