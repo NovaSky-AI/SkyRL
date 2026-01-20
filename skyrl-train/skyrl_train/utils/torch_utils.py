@@ -175,3 +175,35 @@ def logprobs_from_logits_v2(
             logprobs_labels.append(row_logprobs_labels)
         logprobs_labels = torch.stack(logprobs_labels)
     return logprobs_labels
+
+
+# def compute_sampling_mask(
+#     logits: Float[torch.Tensor, "batch_size seqlen vocab_size"],
+#     top_k: int = None,
+#     top_p: float = None,
+#     min_p: float = None,
+# ) -> Float[torch.Tensor, "batch_size seqlen vocab_size"]:
+#     pass
+
+
+def apply_sampling_mask(
+    logits: Float[torch.Tensor, "batch_size seqlen top_tokens"],
+    sampling_mask: Integer[torch.Tensor, "batch_size seqlen mask_size"],
+) -> Float[torch.Tensor, "batch_size seqlen top_tokens"]:
+
+    if sampling_mask is None:
+        return logits
+
+    batch_size, seqlen, vocab_size = logits.shape
+    device = logits.device
+
+    # TODO(devpatel) if we sort the tokens, then indices might be wrong
+    valid_token_mask = torch.zeros((batch_size, seqlen, vocab_size), dtype=torch.bool, device=device)
+    valid = sampling_mask >= 0
+    idx = sampling_mask.clamp(min=0)
+    valid_token_mask.scatter_(dim=2, index=idx, src=valid)
+
+    masked_logits = logits.clone()
+    masked_logits[~valid_token_mask] = float("-inf")
+
+    return masked_logits

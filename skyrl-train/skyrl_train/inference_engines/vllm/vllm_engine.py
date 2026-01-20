@@ -1,5 +1,6 @@
 import os
 from typing import List, Any, Dict, Optional, TYPE_CHECKING
+import threading
 
 if TYPE_CHECKING:
     from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
@@ -35,6 +36,55 @@ from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
 import time
 from packaging import version
+
+
+# TODO(devpatel): This is a hack to get the sampling masks. We should find a better way to do this... fast
+_sampling_masks = threading.local()
+_sampler_patched = False
+
+
+def _reset_sampling_masks() -> None:
+    _sampling_masks.items = []
+
+
+def _append_sampling_mask(mask: torch.Tensor) -> None:
+    if not hasattr(_sampling_masks, "items"):
+        _sampling_masks.items = []
+    _sampling_masks.items.append(mask)
+
+
+def _consume_sampling_masks() -> Optional[List[torch.Tensor]]:
+    masks = getattr(_sampling_masks, "items", None)
+    _sampling_masks.items = []
+    return masks
+
+
+def _patch_vllm_sampler() -> None:
+    global _sampler_patched
+    if _sampler_patched:
+        return
+    try:
+        from vllm.v1.sample.ops import topk_topp_sampler as sampler
+    except Exception as exc:
+        logger.warning(f"Could not import vLLM topk_topp_sampler op and/or Sampler class: {exc}")
+        return
+
+    original_top_k_top_p = sampler.apply_top_k_top_p
+    original_top_k_only = sampler.apply_top_k_only
+
+    def _wrapped_top_k_top_p(logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None) -> torch.Tensor:
+        output = original_top_k_top_p(logits, k, p)
+        _append_sampling_mask(torch.isfinite(output).to(dtype=torch.bool).cpu())
+        return output
+
+    def _wrapped_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
+        output = original_top_k_only(logits, k)
+        _append_sampling_mask(torch.isfinite(output).to(dtype=torch.bool).cpu())
+        return output
+
+    sampler.apply_top_k_top_p = _wrapped_top_k_top_p
+    sampler.apply_top_k_only = _wrapped_top_k_only
+    _sampler_patched = True
 
 
 @dataclass
@@ -137,6 +187,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
         setup_envvars_for_vllm(kwargs, bundle_indices)
+        _patch_vllm_sampler()
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
             # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
@@ -169,6 +220,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
     def _preprocess_prompts(self, input_batch: InferenceEngineInput):
         """Common prompt preprocessing logic."""
+        _reset_sampling_masks()
         prompts = input_batch.get("prompts")
         prompt_token_ids = input_batch.get("prompt_token_ids")
         request_sampling_params = input_batch.get("sampling_params")
@@ -213,11 +265,24 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
 
+        sampling_masks = None
+        masks = _consume_sampling_masks()
+        if masks:
+            sampling_masks = []
+            # TODO(devpatel): We don't have the request_ids in the sampling metadata, so order by index.
+            for output_idx in range(len(outputs)):
+                per_request = []
+                for step_mask in masks:
+                    if output_idx < step_mask.shape[0]:
+                        per_request.append(step_mask[output_idx].nonzero(as_tuple=False).squeeze(-1).tolist())
+                sampling_masks.append(per_request)
+
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
+            sampling_masks=sampling_masks,
         )
 
     def _get_engine(self):

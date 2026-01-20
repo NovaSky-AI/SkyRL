@@ -333,6 +333,9 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    sampling_mask: Optional[
+        Integer[torch.Tensor, "batch_size seq_len mask_size"]
+    ]  ## logits mask for sampling truncation, see https://arxiv.org/pdf/2512.02556 (3.1)
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):

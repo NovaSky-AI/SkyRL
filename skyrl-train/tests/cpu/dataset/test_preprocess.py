@@ -69,14 +69,17 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
 
     loss_masks = [[1, 1, 0], [1, 1, 1, 0, 0]]
     rewards = [torch.tensor([0, 1, 0]), torch.tensor([1, 0, 0, 0, 0])]
+    sampling_masks = [[[1, 2, 3], [4, 5, 6]], [[1, 2, 3], [4, 5, 6], [7, 8, 9]]]
 
-    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs = (
+    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, ret_sampling_masks = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer,
             prompts,
             outputs,
             rewards,
             loss_masks,
+            logprobs=None,
+            sampling_masks=sampling_masks,
         )
     )
 
@@ -98,7 +101,7 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, token
     rewards = [torch.tensor([1.0, 0.5, 0.3]), torch.tensor([0.8])]
     loss_masks = [[1, 1, 1], [1]]
 
-    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs = (
+    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, ret_sampling_masks = (
         convert_prompts_responses_to_batch_tensors(
             tokenizer,
             prompts,
@@ -159,3 +162,124 @@ def test_convert_prompts_responses_to_batch_tensors_mismatched_lengths(cfg, toke
             rewards,
             loss_masks,
         )
+
+
+def test_convert_prompts_responses_to_batch_tensors_sampling_masks(tokenizer, cfg):
+    prompts = ["abc", "12"]
+    outputs = ["def", "3456"]  # different response lengths: 3 and 4
+    prompts = tokenizer(prompts)["input_ids"]
+    outputs = tokenizer(outputs)["input_ids"]
+
+    loss_masks = [[1, 1, 1], [1, 1, 1, 1]]
+    rewards = [torch.tensor([1.0, 1.0, 1.0]), torch.tensor([1.0, 1.0, 1.0, 1.0])]
+
+    sampling_masks = [
+        [
+            [10, 20],
+            [30, 40, 50],
+            [60],
+        ],
+        [
+            [100, 200, 300],
+            [400, 500],
+            [600, 700, 800, 900],
+            [1000, 1100],
+        ],
+    ]
+
+    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, ret_sampling_masks = (
+        convert_prompts_responses_to_batch_tensors(
+            tokenizer,
+            prompts,
+            outputs,
+            rewards,
+            loss_masks,
+            logprobs=None,
+            sampling_masks=sampling_masks,
+        )
+    )
+
+    assert ret_sampling_masks is not None
+
+    batch_size = len(prompts)
+    max_response_len = max(len(o) for o in outputs)
+    max_k = 4
+
+    assert ret_sampling_masks.shape == (batch_size, max_response_len, max_k)
+    assert ret_sampling_masks.dtype == torch.int64
+
+    assert torch.equal(
+        ret_sampling_masks,
+        torch.tensor(
+            [
+                [[10, 20, -1, -1], [30, 40, 50, -1], [60, -1, -1, -1], [-1, -1, -1, -1]],
+                [[100, 200, 300, -1], [400, 500, -1, -1], [600, 700, 800, 900], [1000, 1100, -1, -1]],
+            ]
+        ),
+    )
+
+
+def test_convert_prompts_responses_to_batch_tensors_no_sampling_masks(tokenizer, cfg):
+    """Test that when sampling_masks is None, the return value is also None."""
+    prompts = ["abc"]
+    outputs = ["def"]
+    prompts = tokenizer(prompts)["input_ids"]
+    outputs = tokenizer(outputs)["input_ids"]
+
+    loss_masks = [[1, 1, 1]]
+    rewards = [torch.tensor([1.0, 1.0, 1.0])]
+
+    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, ret_sampling_masks = (
+        convert_prompts_responses_to_batch_tensors(
+            tokenizer,
+            prompts,
+            outputs,
+            rewards,
+            loss_masks,
+            logprobs=None,
+            sampling_masks=None,
+        )
+    )
+
+    # when sampling_masks is None, ret_sampling_masks should also be None
+    assert ret_sampling_masks is None
+
+
+def test_convert_prompts_responses_to_batch_tensors_empty_sampling_masks(tokenizer, cfg):
+    """Test that when sampling_masks contains empty lists, it's handled correctly."""
+    prompts = ["abc", "de"]
+    outputs = ["fgh", "ij"]
+    prompts = tokenizer(prompts)["input_ids"]
+    outputs = tokenizer(outputs)["input_ids"]
+
+    loss_masks = [[1, 1, 1], [1, 1]]
+    rewards = [torch.tensor([1.0, 1.0, 1.0]), torch.tensor([1.0, 1.0])]
+
+    # sampling masks with some empty lists (all tokens were filtered out at that step)
+    sampling_masks = [
+        [
+            [10, 20],
+            [],
+            [30],
+        ],
+        [
+            [],
+            [40, 50],
+        ],
+    ]
+
+    sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, ret_log_probs, ret_sampling_masks = (
+        convert_prompts_responses_to_batch_tensors(
+            tokenizer,
+            prompts,
+            outputs,
+            rewards,
+            loss_masks,
+            logprobs=None,
+            sampling_masks=sampling_masks,
+        )
+    )
+
+    assert torch.equal(
+        ret_sampling_masks, torch.tensor([[[10, 20], [-1, -1], [30, -1]], [[-1, -1], [40, 50], [-1, -1]]])
+    )

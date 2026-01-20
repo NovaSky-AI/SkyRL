@@ -588,6 +588,8 @@ class RayPPOTrainer:
         rewards: List[List[float]] = generator_output["rewards"]
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
+        # TODO(devpatel): test if handoff is working correctly for batching.
+        sampling_masks: Optional[List[List[List[int]]]] = generator_output.get("sampling_masks", None)
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
 
         (
@@ -597,6 +599,7 @@ class RayPPOTrainer:
             rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
+            sampling_masks_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
@@ -604,6 +607,7 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
+            sampling_masks,
         )
         # sanity check for tis
         if self.cfg.trainer.algorithm.use_tis:
@@ -611,6 +615,7 @@ class RayPPOTrainer:
                 rollout_logprobs_tensor is not None
             ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -624,6 +629,7 @@ class RayPPOTrainer:
                     if generator_output.get("is_last_step", None) is not None
                     else None
                 ),
+                "sampling_mask": sampling_masks_tensor,
             },
         )
         training_input.metadata = {"uids": uids}
@@ -875,6 +881,10 @@ class RayPPOTrainer:
                 elif key == "loss_mask":
                     # ensures that padding tensors don't count towards the loss
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                elif key == "sampling_mask":
+                    padding_tensor = torch.full(
+                        (pad_size, *additional_dims), fill_value=-1, dtype=tensor.dtype, device=tensor.device
+                    )
                 else:
                     # ensures all padding tensors are in a valid format by cloning `pad_size` from the original input
                     # `pad_size` is guaranteed to be smaller than batch_size

@@ -1,7 +1,7 @@
 from typing import List, Tuple, Optional
 import torch
 from transformers import AutoTokenizer
-from jaxtyping import Float
+from jaxtyping import Float, Integer
 
 
 def _verify_inputs(
@@ -32,6 +32,7 @@ def convert_prompts_responses_to_batch_tensors(
     rewards: List[List[float]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
+    sampling_masks: Optional[List[List[List[int]]]] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -39,6 +40,7 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
+    Optional[Integer[torch.Tensor, "batch response_len mask_size"]],
 ]:
     """
     Convert prompts and responses to batch tensors for training.
@@ -59,6 +61,7 @@ def convert_prompts_responses_to_batch_tensors(
         rewards: List of rewards for each response
         loss_masks: List of loss masks for each response
         logprobs: List of rollout log probs for each response
+        sampling_masks: Optional list of sampling masks (top-k/top-p valid token indices) for each response
 
     Returns:
         sequences: Full trajectories (padded and concatenated prompts and responses). Size: (batch, seq_len).
@@ -66,6 +69,7 @@ def convert_prompts_responses_to_batch_tensors(
         action_mask: Response mask for the model. Size: (batch, response_len)
         rewards: Rewards for each output. Size: (batch, response_len)
         loss_masks: Loss masks for each output. Size: (batch, response_len)
+        sampling_masks_tensor: Sampling masks tensor. Size: (batch, response_len, max_k) with -1 padding
     """
     _verify_inputs(prompts, responses, rewards, loss_masks)
 
@@ -129,4 +133,29 @@ def convert_prompts_responses_to_batch_tensors(
         ]
         logprobs_tensor = torch.tensor(padded_logprobs, dtype=torch.float)
 
-    return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor
+    sampling_masks_tensor = None
+    if sampling_masks:
+        batch_size = len(sampling_masks)
+        max_seq_len = action_mask.size(1)
+
+        max_k = 0
+        for sample_masks in sampling_masks:
+            for step_mask in sample_masks:
+                max_k = max(max_k, len(step_mask))
+
+        if max_k > 0:
+            # shape: (batch_size, seq_len, max_k)
+            sampling_masks_tensor = torch.full(
+                (batch_size, max_seq_len, max_k),
+                fill_value=-1,
+                dtype=torch.int64,
+            )
+
+            for i, sample_masks in enumerate(sampling_masks):
+                for j, step_mask in enumerate(sample_masks):
+                    if j < max_seq_len:
+                        num_valid = len(step_mask)
+                        if num_valid > 0:
+                            sampling_masks_tensor[i, j, :num_valid] = torch.tensor(step_mask, dtype=torch.int64)
+
+    return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor, sampling_masks_tensor

@@ -137,6 +137,8 @@ class InferenceEngineClient(InferenceEngineInterface):
         # a bit hacky for now
         add_resp_logprobs = False
 
+        sampling_masks: List[List[List[int]]] = [[] for _ in range(n)]
+
         for indices, result in zip(indices_list, results):
             for local_idx, original_idx in enumerate(indices):
                 responses[original_idx] = result["responses"][local_idx]
@@ -145,12 +147,16 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
+                # TODO(devpatel): see patch in vllm_engine.py for more details.
+                if result.get("sampling_masks", None):
+                    sampling_masks[original_idx] = result["sampling_masks"][local_idx]
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
+            sampling_masks=sampling_masks,
         )
 
     async def _generate_single_with_retry(

@@ -62,6 +62,9 @@ class BatchIterator:
             action_mask=batch["response_mask"],
             num_actions=batch.metadata["response_length"],  # int
             rollout_logprobs=batch["rollout_logprobs"] if "rollout_logprobs" in batch else None,
+            sampling_mask=(
+                batch["sampling_mask"] if "sampling_mask" in batch else None
+            ),  # shape: (batch_size, seq_len, top_tokens)
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},
