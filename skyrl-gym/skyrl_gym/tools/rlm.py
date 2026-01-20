@@ -758,6 +758,6 @@ class RLMExecutorToolGroup(ToolGroup):
                 "final_answer": final_answer_value,
                 "has_final_answer": bool(has_final_answer),
                 "metadata": metadata,
-                "tail_messages": messages[-3:] if len(messages) >= 3 else messages,
+                "tail_messages": messages[-3:],
             }
         )
