@@ -53,12 +53,15 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
+from dataclasses import asdict
+
 
 import aiohttp
 
+from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
+
 if TYPE_CHECKING:
-    from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
     from skyrl_train.weight_sync import BroadcastInitInfo, BroadcastWeightUpdateRequest
 
 logger = logging.getLogger(__name__)
@@ -79,15 +82,10 @@ class PauseMode(Enum):
         FINISH: Wait for in-flight requests to complete before pausing.
             New requests are blocked. No retry needed.
             Maps to: wait_for_inflight_request=True
-
-        KEEP: (Future - vLLM RFC #32103) Preserve KV cache and scheduler state.
-            Requests resume seamlessly after unpause. Zero client changes needed.
-            NOT YET SUPPORTED - raises NotImplementedError.
     """
 
     ABORT = "abort"
     FINISH = "finish"
-    KEEP = "keep"
 
 
 @dataclass
@@ -142,8 +140,8 @@ class RemoteInferenceClient:
 
     async def generate(
         self,
-        input_batch: "InferenceEngineInput",
-    ) -> "InferenceEngineOutput":
+        input_batch: InferenceEngineInput,
+    ) -> InferenceEngineOutput:
         """
         Generate completions via /v1/completions.
 
@@ -158,12 +156,7 @@ class RemoteInferenceClient:
 
         Returns:
             InferenceEngineOutput with responses, response_ids, and stop_reasons.
-
-        Note:
-            If retry_on_abort=True and a request is aborted (due to pause),
-            the client will retry with accumulated tokens until completion.
         """
-        from skyrl_train.inference_engines.base import InferenceEngineOutput
 
         prompt_token_ids = input_batch.get("prompt_token_ids")
         if prompt_token_ids is None:
@@ -235,9 +228,6 @@ class RemoteInferenceClient:
         stop_reason = "abort"
 
         while stop_reason == "abort":
-            # Wait if generation is paused
-            await self._wait_for_resume()
-
             # Build payload with accumulated context
             cur_params = sampling_params.copy()
             if original_max_tokens is not None and max_key:
@@ -269,7 +259,10 @@ class RemoteInferenceClient:
             accum_text += new_text
             # Tokenize the new text to get token IDs for next iteration
             if stop_reason == "abort" and new_text:
-                new_token_ids = (await self.tokenize([new_text], add_special_tokens=False))[0]
+                new_token_ids = (
+                    await self.tokenize(
+                        [new_text], add_special_tokens=False)
+                )[0]
                 accum_token_ids.extend(new_token_ids)
 
         # Final response
@@ -281,43 +274,6 @@ class RemoteInferenceClient:
             "stop_reason": stop_reason,
             "response_ids": final_token_ids,
         }
-
-    async def _wait_for_resume(self, poll_interval: float = 0.1) -> None:
-        """
-        Wait until ALL servers return is_paused=False.
-
-        Sampling can only continue when every server has resumed.
-
-        Args:
-            poll_interval: Seconds between polling attempts.
-        """
-        session = await self._get_session()
-
-        while True:
-            # ALL servers must return is_paused=False for sampling to continue
-            all_resumed = True
-            for url in self.server_urls:
-                try:
-                    async with session.get(f"{url}/is_paused") as resp:
-                        if resp.status == 200:
-                            result = await resp.json()
-                            # Default to paused=True for safety if key missing
-                            if result.get("is_paused", True):
-                                all_resumed = False
-                                break
-                        else:
-                            # Non-200 response, assume still paused
-                            all_resumed = False
-                            break
-                except Exception:
-                    # If we can't reach the server, assume it's still paused
-                    all_resumed = False
-                    break
-
-            if all_resumed:
-                return
-
-            await asyncio.sleep(poll_interval)
 
     async def chat_completion(
         self,
@@ -479,33 +435,31 @@ class RemoteInferenceClient:
         results = await asyncio.gather(*[call_server(url) for url in self.server_urls])
         return {url: resp for url, resp in results}
 
-    async def pause(self, mode: PauseMode = PauseMode.ABORT) -> Dict[str, Any]:
+    async def pause(self, mode: Union[PauseMode, str] = PauseMode.ABORT) -> Dict[str, Any]:
         """
         Pause generation on all backends.
 
         Args:
             mode: Pause mode determining how in-flight requests are handled.
-                - ABORT: Abort in-flight requests immediately. Clients receive
-                    partial tokens and must retry with accumulated context.
-                - FINISH: Wait for in-flight requests to complete before pausing.
-                    New requests are blocked. No retry needed.
-                - KEEP: (Future) Preserve KV cache and scheduler state.
-                    NOT YET SUPPORTED.
+                Can be a PauseMode enum or string ("abort", "finish").
+                - ABORT / "abort": Abort in-flight requests immediately. Clients
+                    receive partial tokens and must retry with accumulated context.
+                    New requests are blocked.
+                - FINISH / "finish": Wait for in-flight requests to complete before
+                    pausing. New requests are blocked. No retry needed.
 
         Returns:
             Dict mapping server_url to response.
 
-        Note:
+        TODO:
             When vLLM RFC #32103 lands, we'll use the native mode parameter.
             For now, we map modes to wait_for_inflight_request:
             - ABORT → wait_for_inflight_request=False
             - FINISH → wait_for_inflight_request=True
         """
-        if mode == PauseMode.KEEP:
-            raise NotImplementedError(
-                "PauseMode.KEEP is not yet supported. "
-                "Waiting for vLLM RFC #32103 to land."
-            )
+        # Convert string to PauseMode if needed
+        if isinstance(mode, str):
+            mode = PauseMode(mode.lower())
 
         wait_for_inflight_request = mode == PauseMode.FINISH
 
@@ -567,7 +521,6 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        from dataclasses import asdict
         return await self._call_all_servers("/init_weight_transfer", asdict(init_info))
 
     async def update_weights(
@@ -583,7 +536,6 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        from dataclasses import asdict
         return await self._call_all_servers("/update_weights", asdict(request))
 
     async def finalize_weight_update(self) -> Dict[str, Any]:
@@ -615,19 +567,18 @@ class RemoteInferenceClient:
         if self._world_size is not None:
             return self._world_size
 
-        session = await self._get_session()
-        total_world_size = 0
+        results = await self._call_all_servers("/get_server_info", {}, method="GET")
 
-        for server_url in self.server_urls:
-            try:
-                url = f"{server_url}/get_server_info"
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    resp.raise_for_status()
-                    info = await resp.json()
-                    total_world_size += info.get("world_size", 1)
-            except Exception as e:
-                logger.warning(f"Failed to fetch server info from {server_url}: {e}")
-                raise
+        total_world_size = 0
+        for server_url, resp in results.items():
+            if resp.get("status") != 200:
+                error = resp.get("error", resp.get("body"))
+                raise RuntimeError(f"Failed to fetch server info from {server_url}: {error}")
+            body = resp.get("body", {})
+            world_size = body.get("world_size")
+            if world_size is None:
+                raise RuntimeError(f"Failed to fetch server info from {server_url}: world_size is missing")
+            total_world_size += world_size
 
         self._world_size = total_world_size
         return self._world_size

@@ -101,7 +101,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 def start_server(port: int, server_id: int) -> uvicorn.Server:
     """Start a mock server, return the server instance."""
     app = create_mock_vllm_server(server_id)
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="error")
     server = uvicorn.Server(config)
 
     def run():
@@ -125,18 +125,19 @@ def wait_ready(url: str, timeout: float = 5.0) -> bool:
 
 @pytest.fixture(scope="module")
 def mock_servers():
-    """Start mock vLLM servers."""
+    """Start mock vLLM servers, return proxy_url and server_urls."""
     servers: List[uvicorn.Server] = []
     ports = [get_open_port(), get_open_port()]
-    urls = [f"http://127.0.0.1:{p}" for p in ports]
+    server_urls = [f"http://127.0.0.1:{p}" for p in ports]
 
     for i, port in enumerate(ports):
         servers.append(start_server(port, server_id=i))
 
-    for url in urls:
+    for url in server_urls:
         assert wait_ready(url), f"Server {url} failed to start"
 
-    yield urls
+    # proxy_url defaults to first server; can be replaced with router URL later
+    yield {"proxy_url": server_urls[0], "server_urls": server_urls}
 
     # Cleanup
     for server in servers:
@@ -147,20 +148,11 @@ def mock_servers():
 class TestRemoteInferenceClientInit:
     """Test client initialization and serialization."""
 
-    def test_init(self, mock_servers):
-        """Client initializes with proxy_url and server_urls."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
-        )
-        assert client.proxy_url == mock_servers[0]
-        assert client.server_urls == mock_servers
-
     def test_serialization(self, mock_servers):
         """Client can be pickled and unpickled."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
             model_name="test-model",
         )
 
@@ -177,26 +169,16 @@ class TestRemoteInferenceClientInit:
     def test_from_server_group(self, mock_servers):
         """Test factory method from_server_group."""
         client = RemoteInferenceClient.from_server_group(
-            server_urls=mock_servers,
+            server_urls=mock_servers["server_urls"],
+            router_url=mock_servers["proxy_url"],
             model_name="test-model",
         )
-        assert client.proxy_url == mock_servers[0]  # Defaults to first server
-        assert client.server_urls == mock_servers
-
-    def test_from_server_group_with_router(self, mock_servers):
-        """Test factory method from_server_group with router URL."""
-        router_url = "http://router:8080"
-        client = RemoteInferenceClient.from_server_group(
-            server_urls=mock_servers,
-            router_url=router_url,
-            model_name="test-model",
-        )
-        assert client.proxy_url == router_url
-        assert client.server_urls == mock_servers
+        assert client.proxy_url == mock_servers["proxy_url"]
+        assert client.server_urls == mock_servers["server_urls"]
 
     def test_from_router(self, mock_servers):
         """Test factory method from_router."""
-        router_url = mock_servers[0]
+        router_url = mock_servers["proxy_url"]
         client = RemoteInferenceClient.from_router(
             router_url=router_url,
             model_name="test-model",
@@ -212,8 +194,8 @@ class TestDataPlane:
     async def test_generate(self, mock_servers):
         """Test generate method."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -236,8 +218,8 @@ class TestDataPlane:
     async def test_generate_with_session_id(self, mock_servers):
         """Test generate with session ID for consistent routing."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -254,8 +236,8 @@ class TestDataPlane:
     async def test_chat_completion(self, mock_servers):
         """Test chat completion method."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -275,8 +257,8 @@ class TestDataPlane:
     async def test_completion(self, mock_servers):
         """Test completion method."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -293,8 +275,8 @@ class TestDataPlane:
     async def test_tokenize(self, mock_servers):
         """Test tokenize method."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -308,8 +290,8 @@ class TestDataPlane:
     async def test_detokenize(self, mock_servers):
         """Test detokenize method."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -327,8 +309,8 @@ class TestControlPlane:
     async def test_pause_abort_mode(self, mock_servers):
         """Test pause with ABORT mode (default) fans out to all servers."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -344,8 +326,8 @@ class TestControlPlane:
     async def test_pause_finish_mode(self, mock_servers):
         """Test pause with FINISH mode fans out to all servers."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -360,8 +342,8 @@ class TestControlPlane:
     async def test_pause_keep_mode_not_supported(self, mock_servers):
         """Test pause with KEEP mode raises NotImplementedError."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -374,8 +356,8 @@ class TestControlPlane:
     async def test_resume(self, mock_servers):
         """Test resume fans out to all servers."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -394,8 +376,8 @@ class TestControlPlane:
     async def test_sleep(self, mock_servers):
         """Test sleep fans out to all servers."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -408,8 +390,8 @@ class TestControlPlane:
     async def test_wake_up(self, mock_servers):
         """Test wake_up fans out to all servers."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -422,8 +404,8 @@ class TestControlPlane:
     async def test_reset_prefix_cache(self, mock_servers):
         """Test reset_prefix_cache fans out to all servers."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -442,8 +424,8 @@ class TestWeightSync:
         from skyrl_train.weight_sync import BroadcastInitInfo
 
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -467,8 +449,8 @@ class TestWeightSync:
         from skyrl_train.weight_sync import BroadcastWeightUpdateRequest
 
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -486,8 +468,8 @@ class TestWeightSync:
     async def test_finalize_weight_update(self, mock_servers):
         """Test finalize_weight_update fans out to all servers."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -504,8 +486,8 @@ class TestServerInfo:
     async def test_get_world_size(self, mock_servers):
         """Test world_size fetching and caching."""
         client = RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         )
 
         try:
@@ -528,8 +510,8 @@ class TestContextManager:
     async def test_async_context_manager(self, mock_servers):
         """Test using client as async context manager."""
         async with RemoteInferenceClient(
-            proxy_url=mock_servers[0],
-            server_urls=mock_servers,
+            proxy_url=mock_servers["proxy_url"],
+            server_urls=mock_servers["server_urls"],
         ) as client:
             result = await client.resume()
             assert len(result) == 2
@@ -590,7 +572,7 @@ class TestRetryOnAbort:
 
         # Start server in background thread
         port = get_open_port()
-        config = uvicorn.Config(app=app, host="127.0.0.1", port=port, log_level="warning")
+        config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="warning")
         server = uvicorn.Server(config)
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()

@@ -119,6 +119,11 @@ class InferenceRouter:
             openapi_url=None,
         )
 
+        @app.get("/health")
+        async def health():
+            """Router health check (doesn't proxy to backends)."""
+            return {"status": "healthy"}
+
         @app.get("/servers")
         async def list_servers():
             """Return list of server URLs."""
