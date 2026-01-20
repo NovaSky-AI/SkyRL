@@ -1,8 +1,10 @@
+import os
 import pytest
 import ray
 from loguru import logger
 from functools import lru_cache
 from skyrl_train.utils.utils import peer_access_supported
+from skyrl_train.env_vars import SKYRL_INCLUDE_PYTHONPATH_IN_RUNTIME_ENV
 
 
 @lru_cache(5)
@@ -11,7 +13,7 @@ def log_once(msg):
     return None
 
 
-@pytest.fixture
+@pytest.fixture(scope="class")
 def ray_init_fixture():
     if ray.is_initialized():
         ray.shutdown()
@@ -31,6 +33,9 @@ def ray_init_fixture():
     # needed for megatron tests
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
+    
+    if SKYRL_INCLUDE_PYTHONPATH_IN_RUNTIME_ENV:
+        env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
 
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
     ray.init(runtime_env={"env_vars": env_vars})

@@ -66,6 +66,7 @@ class VLLMServerActor(ServerActorProtocol):
         vllm_cli_args: Namespace,
         start_port: int = 8000,
         server_idx: int = 0,
+        start_bundle_idx: int = 0,
         dp_size: int = -1,
         dp_master_address: Optional[str] = None,
         dp_rpc_port: Optional[int] = None,
@@ -82,6 +83,7 @@ class VLLMServerActor(ServerActorProtocol):
                 Optional: uvicorn_log_level, ssl_*, disable_uvicorn_access_log, kv_transfer_config.
             start_port: Base port to start searching for free port
             server_idx: Index of this server in the group
+            start_bundle_idx: Starting bundle index in the placement group for this server's workers
             dp_size: Data parallel size (-1 to disable)
             dp_master_address: DP master address (for non-rank-0 servers)
             dp_rpc_port: DP RPC port (for non-rank-0 servers)
@@ -96,6 +98,9 @@ class VLLMServerActor(ServerActorProtocol):
         
         # Ensure SkyRL's custom worker extension is used for weight sync
         self._ensure_worker_extension()
+
+        # Ensure Ray executor is used (required for GPU inheritance in placement groups)
+        self._ensure_ray_executor()
 
         # Update args with our assigned host/port
         self._cli_args.host = "0.0.0.0"
@@ -126,10 +131,8 @@ class VLLMServerActor(ServerActorProtocol):
                 f"dp_master_address={dp_master_address}, dp_rpc_port={dp_rpc_port}"
             )
 
-        # Compute bundle indices for this server's TP/PP workers
-        # Each server uses a contiguous slice of bundles in the placement group
-        start_bundle = server_idx * self._num_gpus_per_server
-        bundle_indices = list(range(start_bundle, start_bundle + self._num_gpus_per_server))
+        # Set bundle indices for this server's TP/PP workers in the placement group
+        bundle_indices = list(range(start_bundle_idx, start_bundle_idx + self._num_gpus_per_server))
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
 
@@ -149,6 +152,17 @@ class VLLMServerActor(ServerActorProtocol):
             logger.info(f"Using default worker extension: {VLLM_WORKER_EXTENSION_CLS}")
         else:
             logger.info(f"Using provided worker extension: {self._cli_args.worker_extension_cls}")
+
+    def _ensure_ray_executor(self) -> None:
+        """
+        Ensure Ray is used as the distributed executor backend.
+        
+        When running inside a Ray actor, we must use the Ray executor so that
+        workers are spawned and properly inherit GPU allocation from the 
+        placement group.
+        """
+        if not hasattr(self._cli_args, "distributed_executor_backend") or self._cli_args.distributed_executor_backend != "ray":
+            self._cli_args.distributed_executor_backend = "ray"
 
     def _setup_nixl_side_channel(self, base_port: int) -> None:
         """
@@ -248,7 +262,7 @@ class VLLMServerActor(ServerActorProtocol):
 
         # Initialize the engine (this loads the model - takes time)
         engine_args = AsyncEngineArgs.from_cli_args(self._cli_args)
-        self._engine = AsyncLLMEngine.from_cli_args(
+        self._engine = AsyncLLMEngine.from_engine_args(
             engine_args=engine_args,
             usage_context=UsageContext.OPENAI_API_SERVER,
         )

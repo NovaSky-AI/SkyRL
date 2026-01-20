@@ -51,6 +51,7 @@ class ServerActorProtocol(Protocol):
         cli_args: Namespace,
         start_port: int,
         server_idx: int,
+        start_bundle_idx: int,
         dp_size: int,
         dp_master_address: Optional[str],
         dp_rpc_port: Optional[int],
@@ -64,6 +65,7 @@ class ServerActorProtocol(Protocol):
             cli_args: Engine-specific CLI arguments.
             start_port: Base port to search for available port.
             server_idx: Index of this server in the group (0-indexed).
+            start_bundle_idx: Starting bundle index in placement group for this server's workers.
             dp_size: Data parallel size (-1 to disable DP).
             dp_master_address: DP master address (for non-rank-0 servers).
             dp_rpc_port: DP RPC port (for non-rank-0 servers).

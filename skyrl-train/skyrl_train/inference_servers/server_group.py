@@ -135,6 +135,7 @@ class ServerGroup:
                 self._cli_args,
                 self._start_port + server_idx,
                 server_idx=server_idx,
+                start_bundle_idx=start_bundle_idx,
                 dp_size=self._num_servers if self._enable_dp else -1,
                 dp_master_address=dp_address,
                 dp_rpc_port=dp_rpc_port,

@@ -17,18 +17,8 @@ from skyrl_train.inference_servers.common import ServerInfo, get_node_ip
 logger = logging.getLogger(__name__)
 
 
-# Routes that are loaded balanced (data plane)
-DATA_PLANE_ROUTES = [
-    "/v1/completions",
-    "/v1/chat/completions",
-    "/tokenize",
-    "/detokenize",
-    "/health",
-    "/models",
-    "/version",
-]
-
-# Routes that go to ALL backends via a broadcast (control plane)
+# Control plane routes are broadcast to ALL servers.
+# Everything else (data plane) is load-balanced to ONE server.
 CONTROL_PLANE_ROUTES = [
     # BUILT-IN ROUTES
     "/pause",
@@ -132,13 +122,8 @@ class InferenceRouter:
 
         @app.get("/get_server_info")
         async def get_server_info():
-            """Fetch server info from first server (all should return same)."""
-            server_url = self._server_urls[0]
-            try:
-                resp = await self._client.get(f"{server_url}/get_server_info", timeout=10.0)
-                return resp.json()
-            except Exception as e:
-                return {"error": str(e)}
+            """Fetch server info from all servers, return mapping."""
+            return await self._fan_out_get("/get_server_info")
 
         # Catch-all: proxy everything else to backends
         @app.api_route(
@@ -170,6 +155,18 @@ class InferenceRouter:
             if k.lower() not in ("host", "content-length", "transfer-encoding")
         }
 
+    async def _fan_out_get(self, path: str) -> dict:
+        """Fan out a GET request to all servers, return mapping of server_url -> response."""
+        async def call_server(server_url: str):
+            try:
+                resp = await self._client.get(f"{server_url}{path}", timeout=30.0)
+                return server_url, resp.json() if resp.content else None
+            except Exception as e:
+                return server_url, {"error": str(e)}
+
+        results = await asyncio.gather(*[call_server(url) for url in self._server_urls])
+        return {url: response for url, response in results}
+
     async def _proxy_to_one(self, request: Request, path: str) -> Response:
         """Proxy request to one server (data plane)."""
         server_url = self._get_server_for_request(request)
@@ -192,7 +189,9 @@ class InferenceRouter:
         )
 
     async def _proxy_to_all(self, request: Request, path: str) -> Response:
-        """Proxy request to all servers (control plane), aggregate responses."""
+        """Proxy request to all servers (control plane), return mapping of responses."""
+        import json
+
         method = request.method
         body = await request.body()
 
@@ -209,14 +208,12 @@ class InferenceRouter:
                     headers=headers,
                     content=body,
                 )
-                return {
-                    "url": server_url,
+                return server_url, {
                     "status": response.status_code,
                     "body": response.json() if response.content else None,
                 }
             except Exception as e:
-                return {
-                    "url": server_url,
+                return server_url, {
                     "status": 500,
                     "error": str(e),
                 }
@@ -225,23 +222,18 @@ class InferenceRouter:
             *[call_server(url) for url in self._server_urls]
         )
 
+        # Build mapping from server_url to response
+        response_map = {url: resp for url, resp in results}
+
         # Check if all succeeded
-        all_ok = all(r.get("status") == 200 for r in results)
+        all_ok = all(r.get("status") == 200 for r in response_map.values())
+        status_code = 200 if all_ok else 207  # Multi-Status on partial failure
 
-        if all_ok:
-            return Response(
-                content='{"status": "ok"}',
-                status_code=200,
-                media_type="application/json",
-            )
-        else:
-            import json
-
-            return Response(
-                content=json.dumps({"status": "partial_failure", "results": results}),
-                status_code=207,  # Multi-Status
-                media_type="application/json",
-            )
+        return Response(
+            content=json.dumps(response_map),
+            status_code=status_code,
+            media_type="application/json",
+        )
 
     def start(self) -> str:
         """
