@@ -348,16 +348,17 @@ class Qwen3Model(nnx.Module):
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
 
-        # Checkpointing: use fori_loop so XLA compiles ONE loop body and reuses
+        # Checkpointing: use scan so XLA compiles ONE loop body and reuses
         # buffers during recomputation. Without checkpointing, activations are
-        # stored anyway, so fori_loop's buffer reuse doesn't help and its weight
+        # stored anyway, so scan's buffer reuse doesn't help and its weight
         # stacking overhead makes it worse.
         if is_training and self.config.gradient_checkpointing:
-            hidden_states = self._forward_layers_checkpointed(
+            hidden_states, all_hidden_states = self._forward_layers_checkpointed(
                 hidden_states,
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
+                output_hidden_states=output_hidden_states,
             )
             updated_keys, updated_values = [], []
             new_cache_position = input_ids.shape[1]
@@ -390,10 +391,11 @@ class Qwen3Model(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None,
-    ) -> jax.Array:
-        """Forward pass with gradient checkpointing using fori_loop.
+        output_hidden_states: bool,
+    ) -> tuple[jax.Array, list[jax.Array]]:
+        """Forward pass with gradient checkpointing using scan.
 
-        Uses fori_loop so XLA compiles ONE loop body and reuses buffers during
+        Uses scan so XLA compiles ONE loop body and reuses buffers during
         backward recomputation. With a Python loop, XLA unrolls N separate
         checkpoint regions and can't optimize buffer reuse across them.
 
@@ -405,20 +407,28 @@ class Qwen3Model(nnx.Module):
         """
         num_layers = len(self.layers)
 
-        # Stack layer weights for dynamic indexing in fori_loop
+        # Stack layer weights for dynamic indexing in scan
         layer_graphdef, _ = nnx.split(self.layers[0])
         stacked_weights = jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *[nnx.state(layer) for layer in self.layers])
 
-        def body_fn(i, hs):
+        def body_fn(hs, i):
             layer_weights = jax.tree.map(lambda x: x[i], stacked_weights)
             layer = nnx.merge(layer_graphdef, layer_weights)
             hs, _ = layer(
                 hs, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices, kv_cache=None
             )
-            return hs
+            return hs, hs  # carry, output (collected if output_hidden_states)
 
         body_fn = jax.checkpoint(body_fn)
-        return jax.lax.fori_loop(0, num_layers, body_fn, hidden_states)
+        final_hs, all_hs = jax.lax.scan(body_fn, hidden_states, jnp.arange(num_layers))
+
+        if output_hidden_states:
+            # all_hs is [num_layers, batch, seq, hidden], convert to list and prepend input
+            all_hidden_states = [hidden_states] + [all_hs[i] for i in range(num_layers)]
+        else:
+            all_hidden_states = []
+
+        return final_hs, all_hidden_states
 
     def _forward_layers(
         self,
