@@ -29,7 +29,7 @@ PRESETS = {
     "lora-moe": {
         "description": "LoRA on MoE experts (combined groups)",
         "num_tokens": 8192,
-        "num_groups": 4096, # num_experts * max_lora_adapters (128 * 32)
+        "num_groups": 1024, # num_experts * max_lora_adapters (128 * 8, capped at kernel limit)
         "k_dim": 8,         # lora_rank
         "n_dim": 768,       # intermediate_size
     },
