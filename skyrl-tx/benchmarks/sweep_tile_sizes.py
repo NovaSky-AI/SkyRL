@@ -116,7 +116,6 @@ def rebuild_kernel() -> bool:
     )
 
     if result.returncode != 0:
-        print(f"Build failed: {result.stderr}")
         return False
 
     return SO_FILE.exists()
