@@ -11,12 +11,23 @@ SO_FILE = Path(__file__).parent.parent / "tx/ffi/libragged_dot_ffi.so"
 
 # Tile configurations to test: (M, N, K)
 # Constraints: dimensions should be powers of 2 or multiples that work with SM90
+# Note: Cooperative schedule requires M >= 128
 TILE_CONFIGS = [
     (64, 256, 64),    # best from previous sweep
     (128, 128, 64),
     (64, 128, 64),
     (128, 256, 64),
     (128, 128, 128),
+]
+
+# Smaller tile configs that may work better for LoRA (small K dimension)
+TILE_CONFIGS_LORA = [
+    (128, 128, 32),   # smaller K tile
+    (128, 256, 32),
+    (128, 64, 32),
+    (64, 128, 32),
+    (64, 64, 32),
+    (128, 128, 64),   # reference
 ]
 
 # Cluster shapes to test: (M, N, K)
@@ -173,6 +184,7 @@ def main():
     parser.add_argument("--sweep-clusters", action="store_true", help="Sweep cluster shapes")
     parser.add_argument("--sweep-schedules", action="store_true", help="Sweep kernel schedules")
     parser.add_argument("--sweep-all", action="store_true", help="Sweep all parameters")
+    parser.add_argument("--lora-tiles", action="store_true", help="Use LoRA-optimized tile configs (smaller K)")
     parser.add_argument("--dry-run", action="store_true", help="Only show configs, don't run")
     args = parser.parse_args()
 
@@ -189,7 +201,8 @@ def main():
     workloads = list(WORKLOAD_PRESETS.keys()) if args.all_workloads else [args.workload]
 
     # Build parameter combinations
-    tiles = TILE_CONFIGS if args.sweep_tiles else [TILE_CONFIGS[0]]
+    base_tiles = TILE_CONFIGS_LORA if args.lora_tiles else TILE_CONFIGS
+    tiles = base_tiles if args.sweep_tiles else [base_tiles[0]]
     clusters = CLUSTER_CONFIGS if args.sweep_clusters else [CLUSTER_CONFIGS[0]]
     schedules = SCHEDULE_CONFIGS if args.sweep_schedules else [SCHEDULE_CONFIGS[0]]
 
