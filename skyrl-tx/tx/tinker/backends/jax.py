@@ -239,7 +239,7 @@ class JaxBackendImpl(AbstractBackend):
             adapter_indices: jax.Array,
         ) -> jax.Array:
             model = nnx.merge(graphdef, lora_params, non_lora_params)
-            output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
+            output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices, is_training=True)
             return output.logits
 
         def loss_for_lora(
