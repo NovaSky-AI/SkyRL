@@ -1,9 +1,10 @@
-"""Sweep tile sizes for ragged_dot CUTLASS kernel optimization."""
+"""Sweep tile sizes and kernel parameters for ragged_dot CUTLASS kernel optimization."""
 
 import subprocess
 import sys
 import re
 from pathlib import Path
+from itertools import product
 
 CUDA_FILE = Path(__file__).parent.parent / "tx/ffi/ragged_dot_ffi.cu"
 SO_FILE = Path(__file__).parent.parent / "tx/ffi/libragged_dot_ffi.so"
@@ -11,14 +12,25 @@ SO_FILE = Path(__file__).parent.parent / "tx/ffi/libragged_dot_ffi.so"
 # Tile configurations to test: (M, N, K)
 # Constraints: dimensions should be powers of 2 or multiples that work with SM90
 TILE_CONFIGS = [
-    (128, 256, 64),   # current
+    (64, 256, 64),    # best from previous sweep
     (128, 128, 64),
     (64, 128, 64),
-    (64, 256, 64),
-    (256, 128, 64),
-    (128, 64, 128),
-    (64, 64, 128),
+    (128, 256, 64),
     (128, 128, 128),
+]
+
+# Cluster shapes to test: (M, N, K)
+CLUSTER_CONFIGS = [
+    (1, 1, 1),        # current
+    (2, 1, 1),
+    (1, 2, 1),
+    (2, 2, 1),
+]
+
+# Kernel schedules to test
+SCHEDULE_CONFIGS = [
+    ("KernelPtrArrayTmaWarpSpecializedPingpong", "PtrArrayTmaWarpSpecializedPingpong"),      # current
+    ("KernelPtrArrayTmaWarpSpecializedCooperative", "PtrArrayTmaWarpSpecializedCooperative"),
 ]
 
 # Workload presets for benchmarking
@@ -48,7 +60,44 @@ def set_tile_shape(m: int, n: int, k: int) -> None:
 
     new_content = re.sub(pattern, replacement, content)
     CUDA_FILE.write_text(new_content)
-    print(f"Set TileShape to ({m}, {n}, {k})")
+
+
+def set_cluster_shape(m: int, n: int, k: int) -> None:
+    """Update the ClusterShape in the CUDA file."""
+    content = CUDA_FILE.read_text()
+
+    pattern = r'using ClusterShape = cute::Shape<cute::_\d+, cute::_\d+, cute::_\d+>;'
+    replacement = f'using ClusterShape = cute::Shape<cute::_{m}, cute::_{n}, cute::_{k}>;'
+
+    new_content = re.sub(pattern, replacement, content)
+    CUDA_FILE.write_text(new_content)
+
+
+def set_schedule(kernel_schedule: str, epilogue_schedule: str) -> None:
+    """Update the KernelSchedule and EpilogueSchedule in the CUDA file."""
+    content = CUDA_FILE.read_text()
+
+    # Replace KernelSchedule
+    pattern = r'using KernelSchedule = cutlass::gemm::\w+;'
+    replacement = f'using KernelSchedule = cutlass::gemm::{kernel_schedule};'
+    content = re.sub(pattern, replacement, content)
+
+    # Replace EpilogueSchedule
+    pattern = r'using EpilogueSchedule = cutlass::epilogue::\w+;'
+    replacement = f'using EpilogueSchedule = cutlass::epilogue::{epilogue_schedule};'
+    content = re.sub(pattern, replacement, content)
+
+    CUDA_FILE.write_text(content)
+
+
+def set_kernel_config(tile: tuple, cluster: tuple, schedule: tuple) -> str:
+    """Set all kernel configuration parameters. Returns a config description string."""
+    set_tile_shape(*tile)
+    set_cluster_shape(*cluster)
+    set_schedule(*schedule)
+
+    schedule_name = schedule[0].replace("KernelPtrArrayTmaWarpSpecialized", "")
+    return f"Tile{tile} Cluster{cluster} {schedule_name}"
 
 
 def rebuild_kernel() -> bool:
@@ -117,43 +166,62 @@ def run_benchmark(workload: str = "moe", num_tokens: int = 8192) -> dict | None:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Sweep tile sizes for CUTLASS kernel")
+    parser = argparse.ArgumentParser(description="Sweep kernel parameters for CUTLASS ragged_dot")
     parser.add_argument("--workload", choices=list(WORKLOAD_PRESETS.keys()), default="moe",
                         help="Workload preset to benchmark (moe, lora, lora-moe)")
     parser.add_argument("--all-workloads", action="store_true", help="Sweep all workloads")
-    parser.add_argument("--num-tokens", type=int, default=8192, help="Number of tokens (for custom workload)")
+    parser.add_argument("--sweep-tiles", action="store_true", help="Sweep tile shapes")
+    parser.add_argument("--sweep-clusters", action="store_true", help="Sweep cluster shapes")
+    parser.add_argument("--sweep-schedules", action="store_true", help="Sweep kernel schedules")
+    parser.add_argument("--sweep-all", action="store_true", help="Sweep all parameters")
     parser.add_argument("--dry-run", action="store_true", help="Only show configs, don't run")
     args = parser.parse_args()
 
-    print("CUTLASS Tile Size Sweep")
-    print("=" * 70)
+    # Default to sweeping tiles only if nothing specified
+    if not (args.sweep_tiles or args.sweep_clusters or args.sweep_schedules or args.sweep_all):
+        args.sweep_tiles = True
+
+    if args.sweep_all:
+        args.sweep_tiles = args.sweep_clusters = args.sweep_schedules = True
+
+    print("CUTLASS Kernel Parameter Sweep")
+    print("=" * 80)
 
     workloads = list(WORKLOAD_PRESETS.keys()) if args.all_workloads else [args.workload]
 
+    # Build parameter combinations
+    tiles = TILE_CONFIGS if args.sweep_tiles else [TILE_CONFIGS[0]]
+    clusters = CLUSTER_CONFIGS if args.sweep_clusters else [CLUSTER_CONFIGS[0]]
+    schedules = SCHEDULE_CONFIGS if args.sweep_schedules else [SCHEDULE_CONFIGS[0]]
+
+    configs = list(product(tiles, clusters, schedules))
+    print(f"Testing {len(configs)} configurations across {len(workloads)} workload(s)")
+    print()
+
     if args.dry_run:
-        print("Tile configurations to test:")
-        for m, n, k in TILE_CONFIGS:
-            print(f"  ({m}, {n}, {k})")
+        print("Configurations to test:")
+        for tile, cluster, schedule in configs:
+            schedule_name = schedule[0].replace("KernelPtrArrayTmaWarpSpecialized", "")
+            print(f"  Tile{tile} Cluster{cluster} {schedule_name}")
         print()
         print("Workloads to test:")
         for w in workloads:
             print(f"  {w}: {WORKLOAD_PRESETS[w]['description']}")
         return
 
-    # Store results per workload
+    # Store results: {workload: [(config_str, bench_results), ...]}
     all_results: dict[str, list] = {w: [] for w in workloads}
 
-    for m, n, k in TILE_CONFIGS:
-        print(f"\n{'='*70}")
-        print(f"Testing TileShape({m}, {n}, {k})")
-        print("-" * 70)
-
-        set_tile_shape(m, n, k)
+    for tile, cluster, schedule in configs:
+        print(f"\n{'='*80}")
+        config_str = set_kernel_config(tile, cluster, schedule)
+        print(f"Testing: {config_str}")
+        print("-" * 80)
 
         if not rebuild_kernel():
             print("  FAILED to build")
             for w in workloads:
-                all_results[w].append((m, n, k, None))
+                all_results[w].append((config_str, None))
             continue
 
         for workload in workloads:
@@ -162,39 +230,38 @@ def main():
             if bench_results:
                 print(f"    Forward:  {bench_results.get('fwd_ms', 'N/A'):>8.3f} ms  {bench_results.get('fwd_tflops', 'N/A'):>8.2f} TFLOPS")
                 print(f"    Backward: {bench_results.get('bwd_ms', 'N/A'):>8.3f} ms  {bench_results.get('bwd_tflops', 'N/A'):>8.2f} TFLOPS")
-                all_results[workload].append((m, n, k, bench_results))
+                all_results[workload].append((config_str, bench_results))
             else:
                 print("    FAILED to benchmark")
-                all_results[workload].append((m, n, k, None))
+                all_results[workload].append((config_str, None))
 
     # Summary per workload
     for workload in workloads:
         results = all_results[workload]
-        print(f"\n{'='*70}")
+        print(f"\n{'='*80}")
         print(f"SUMMARY: {workload} ({WORKLOAD_PRESETS[workload]['description']})")
-        print("=" * 70)
-        print(f"{'TileShape':<20} {'Fwd (ms)':>10} {'Fwd TFLOPS':>12} {'Bwd (ms)':>10} {'Bwd TFLOPS':>12}")
-        print("-" * 70)
+        print("=" * 80)
+        print(f"{'Configuration':<50} {'Fwd (ms)':>10} {'Fwd TF':>8} {'Bwd (ms)':>10} {'Bwd TF':>8}")
+        print("-" * 80)
 
-        for m, n, k, res in results:
-            tile_str = f"({m}, {n}, {k})"
+        for config_str, res in results:
             if res:
                 fwd_ms = f"{res.get('fwd_ms', 0):.3f}"
-                fwd_tf = f"{res.get('fwd_tflops', 0):.2f}"
+                fwd_tf = f"{res.get('fwd_tflops', 0):.1f}"
                 bwd_ms = f"{res.get('bwd_ms', 0):.3f}"
-                bwd_tf = f"{res.get('bwd_tflops', 0):.2f}"
-                print(f"{tile_str:<20} {fwd_ms:>10} {fwd_tf:>12} {bwd_ms:>10} {bwd_tf:>12}")
+                bwd_tf = f"{res.get('bwd_tflops', 0):.1f}"
+                print(f"{config_str:<50} {fwd_ms:>10} {fwd_tf:>8} {bwd_ms:>10} {bwd_tf:>8}")
             else:
-                print(f"{tile_str:<20} {'FAILED':>10}")
+                print(f"{config_str:<50} {'FAILED':>10}")
 
         # Find best
-        valid_results = [(m, n, k, r) for m, n, k, r in results if r and 'fwd_tflops' in r]
+        valid_results = [(cfg, r) for cfg, r in results if r and 'fwd_tflops' in r]
         if valid_results:
-            best_fwd = max(valid_results, key=lambda x: x[3]['fwd_tflops'])
-            best_bwd = max(valid_results, key=lambda x: x[3].get('bwd_tflops', 0))
+            best_fwd = max(valid_results, key=lambda x: x[1]['fwd_tflops'])
+            best_bwd = max(valid_results, key=lambda x: x[1].get('bwd_tflops', 0))
             print()
-            print(f"Best forward:  ({best_fwd[0]}, {best_fwd[1]}, {best_fwd[2]}) - {best_fwd[3]['fwd_tflops']:.2f} TFLOPS")
-            print(f"Best backward: ({best_bwd[0]}, {best_bwd[1]}, {best_bwd[2]}) - {best_bwd[3].get('bwd_tflops', 0):.2f} TFLOPS")
+            print(f"Best forward:  {best_fwd[0]} - {best_fwd[1]['fwd_tflops']:.2f} TFLOPS")
+            print(f"Best backward: {best_bwd[0]} - {best_bwd[1].get('bwd_tflops', 0):.2f} TFLOPS")
 
 
 if __name__ == "__main__":
