@@ -8,7 +8,7 @@ import pytest
 import hydra
 from omegaconf import DictConfig
 
-from tests.gpu.utils import init_worker_with_type, make_dummy_experience, validate_cfg
+from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, validate_cfg
 from skyrl_train.utils.utils import print_mem
 from skyrl_train.entrypoints.main_base import config_dir
 
@@ -61,9 +61,11 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
             cfg=cfg,
         )
 
-        dummy_experience = make_dummy_experience()
+        # Create TrainingInputBatch - worker's forward_backward handles micro-batching internally
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        dummy_batch = make_dummy_training_batch(batch_size=dp_size)
 
-        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience, 1))
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
@@ -109,9 +111,11 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
             cfg=cfg,
         )
 
-        dummy_experience = make_dummy_experience()
+        # Create TrainingInputBatch - worker's forward_backward handles micro-batching internally
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        dummy_batch = make_dummy_training_batch(batch_size=dp_size)
 
-        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience, 1))
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for result in results:

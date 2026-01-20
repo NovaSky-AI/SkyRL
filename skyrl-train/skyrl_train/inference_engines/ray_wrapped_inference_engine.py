@@ -99,7 +99,7 @@ def create_ray_wrapped_inference_engines(
     instances.
     """
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
-    from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+    from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 
     if backend == "vllm":
         import vllm

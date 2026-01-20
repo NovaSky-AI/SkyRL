@@ -27,7 +27,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.utils.constants import SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -358,6 +358,7 @@ def init_inference_engines(
     sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
     enable_lora=False,
     max_num_seqs=1024,
+    engine_init_kwargs={},
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
@@ -390,6 +391,7 @@ def init_inference_engines(
         backend=backend,
         sleep_level=sleep_level,
         enable_lora=enable_lora,
+        engine_init_kwargs=engine_init_kwargs,
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:
