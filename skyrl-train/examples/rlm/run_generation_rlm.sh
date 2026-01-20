@@ -17,10 +17,10 @@ LOGGER="console"  # change to "console" to print to stdout
 
 INFERENCE_BACKEND="vllm"  # or "sglang"
 
-uv run --isolated --extra $INFERENCE_BACKEND --extra openai \
+uv run --isolated --extra $INFERENCE_BACKEND \
   -m skyrl_train.entrypoints.main_generate \
   data.val_data="['$DATA_DIR/validation_rlm.parquet']" \
-  trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
+  trainer.policy.model.path="Qwen/Qwen2.5-7B-Instruct" \
   trainer.logger="$LOGGER" \
   trainer.placement.colocate_all=false \
   trainer.eval_batch_size=1 \
