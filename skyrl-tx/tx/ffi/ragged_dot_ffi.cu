@@ -28,15 +28,18 @@
 namespace ffi = xla::ffi;
 
 static int get_sm_count() {
-  static std::once_flag flag;
-  static cudaDeviceProp props;
-  std::call_once(flag, [] {
-    int device = 0;
-    if (cudaGetDevice(&device) == cudaSuccess && device >= 0) {
-      cudaGetDeviceProperties(&props, device);
-    }
+  constexpr int kMaxDevices = 16;
+  static std::once_flag flags[kMaxDevices];
+  static cudaDeviceProp props[kMaxDevices];
+
+  int device = 0;
+  if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= kMaxDevices) {
+    return 0;
+  }
+  std::call_once(flags[device], [device] {
+    cudaGetDeviceProperties(&props[device], device);
   });
-  return props.multiProcessorCount;
+  return props[device].multiProcessorCount;
 }
 
 using DtypeA = cutlass::bfloat16_t;
