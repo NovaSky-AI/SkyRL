@@ -164,9 +164,7 @@ class RemoteInferenceClient:
 
         sampling_params = input_batch.get("sampling_params") or {}
         if sampling_params.get("n", 1) > 1:
-            raise ValueError(
-                "n > 1 is not supported. Use `config.generator.n_samples_per_prompt` instead."
-            )
+            raise ValueError("n > 1 is not supported. Use `config.generator.n_samples_per_prompt` instead.")
 
         session_ids = input_batch.get("session_ids")
 
@@ -259,10 +257,7 @@ class RemoteInferenceClient:
             accum_text += new_text
             # Tokenize the new text to get token IDs for next iteration
             if stop_reason == "abort" and new_text:
-                new_token_ids = (
-                    await self.tokenize(
-                        [new_text], add_special_tokens=False)
-                )[0]
+                new_token_ids = (await self.tokenize([new_text], add_special_tokens=False))[0]
                 accum_token_ids.extend(new_token_ids)
 
         # Final response
@@ -463,9 +458,7 @@ class RemoteInferenceClient:
 
         wait_for_inflight_request = mode == PauseMode.FINISH
 
-        return await self._call_all_servers("/pause", {
-            "wait_for_inflight_request": wait_for_inflight_request
-        })
+        return await self._call_all_servers("/pause", {"wait_for_inflight_request": wait_for_inflight_request})
 
     async def resume(self) -> Dict[str, Any]:
         """Resume generation on all backends."""
@@ -500,9 +493,7 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/reset_prefix_cache", {
-            "reset_running_requests": reset_running_requests
-        })
+        return await self._call_all_servers("/reset_prefix_cache", {"reset_running_requests": reset_running_requests})
 
     # ---------------------------
     # Weight Sync (control plane - fan-out)

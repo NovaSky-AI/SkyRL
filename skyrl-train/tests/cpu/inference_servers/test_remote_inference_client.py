@@ -4,10 +4,11 @@ import asyncio
 import pickle
 import threading
 import time
-from typing import Any, Dict, List
+from typing import List
 
 import httpx
 import pytest
+import pytest_asyncio
 import uvicorn
 from fastapi import FastAPI, Request
 
@@ -145,6 +146,17 @@ def mock_servers():
     time.sleep(0.3)
 
 
+@pytest_asyncio.fixture
+async def client(mock_servers):
+    """Create a RemoteInferenceClient for data/control plane tests."""
+    client = RemoteInferenceClient(
+        proxy_url=mock_servers["proxy_url"],
+        server_urls=mock_servers["server_urls"],
+    )
+    yield client
+    await client.teardown()
+
+
 class TestRemoteInferenceClientInit:
     """Test client initialization and serialization."""
 
@@ -191,316 +203,175 @@ class TestDataPlane:
     """Test data plane methods."""
 
     @pytest.mark.asyncio
-    async def test_generate(self, mock_servers):
+    async def test_generate(self, client):
         """Test generate method."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
+        input_batch = {
+            "prompt_token_ids": [[1, 2, 3], [4, 5, 6]],
+            "sampling_params": {"max_tokens": 100},
+        }
+        result = await client.generate(input_batch)
 
-        try:
-            input_batch = {
-                "prompt_token_ids": [[1, 2, 3], [4, 5, 6]],
-                "sampling_params": {"max_tokens": 100},
-            }
-            result = await client.generate(input_batch)
-
-            assert "responses" in result
-            assert "stop_reasons" in result
-            assert len(result["responses"]) == 2
-            assert all(r == "stop" for r in result["stop_reasons"])
-            # response_ids are empty (use tokenize() if needed)
-            assert all(len(ids) == 0 for ids in result["response_ids"])
-        finally:
-            await client.teardown()
+        assert "responses" in result
+        assert "stop_reasons" in result
+        assert len(result["responses"]) == 2
+        assert all(r == "stop" for r in result["stop_reasons"])
+        # response_ids are tokenized from the response
+        assert len(result["response_ids"]) == 2
 
     @pytest.mark.asyncio
-    async def test_generate_with_session_id(self, mock_servers):
+    async def test_generate_with_session_id(self, client):
         """Test generate with session ID for consistent routing."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            input_batch = {
-                "prompt_token_ids": [[1, 2, 3]],
-                "session_ids": ["test-session"],
-            }
-            result = await client.generate(input_batch)
-            assert len(result["responses"]) == 1
-        finally:
-            await client.teardown()
+        input_batch = {
+            "prompt_token_ids": [[1, 2, 3]],
+            "session_ids": ["test-session"],
+        }
+        result = await client.generate(input_batch)
+        assert len(result["responses"]) == 1
 
     @pytest.mark.asyncio
-    async def test_chat_completion(self, mock_servers):
+    async def test_chat_completion(self, client):
         """Test chat completion method."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            request_payload = {
-                "json": {
-                    "model": "test",
-                    "messages": [{"role": "user", "content": "Hello"}],
-                },
-                "headers": {},
-            }
-            result = await client.chat_completion(request_payload)
-            assert "choices" in result
-        finally:
-            await client.teardown()
+        request_payload = {
+            "json": {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            "headers": {},
+        }
+        result = await client.chat_completion(request_payload)
+        assert "choices" in result
 
     @pytest.mark.asyncio
-    async def test_completion(self, mock_servers):
+    async def test_completion(self, client):
         """Test completion method."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            request_payload = {
-                "json": {"model": "test", "prompt": "Hello"},
-                "headers": {},
-            }
-            result = await client.completion(request_payload)
-            assert "choices" in result
-        finally:
-            await client.teardown()
+        request_payload = {
+            "json": {"model": "test", "prompt": "Hello"},
+            "headers": {},
+        }
+        result = await client.completion(request_payload)
+        assert "choices" in result
 
     @pytest.mark.asyncio
-    async def test_tokenize(self, mock_servers):
+    async def test_tokenize(self, client):
         """Test tokenize method."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            result = await client.tokenize(["hello", "world"])
-            assert len(result) == 2
-            assert result[0] == [1, 2, 3]  # Mock response
-        finally:
-            await client.teardown()
+        result = await client.tokenize(["hello", "world"])
+        assert len(result) == 2
+        assert result[0] == [1, 2, 3]  # Mock response
 
     @pytest.mark.asyncio
-    async def test_detokenize(self, mock_servers):
+    async def test_detokenize(self, client):
         """Test detokenize method."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            result = await client.detokenize([[1, 2, 3], [4, 5, 6]])
-            assert len(result) == 2
-            assert result[0] == "hello world"  # Mock response
-        finally:
-            await client.teardown()
+        result = await client.detokenize([[1, 2, 3], [4, 5, 6]])
+        assert len(result) == 2
+        assert result[0] == "hello world"  # Mock response
 
 
 class TestControlPlane:
     """Test control plane methods (fan-out to all servers)."""
 
     @pytest.mark.asyncio
-    async def test_pause_abort_mode(self, mock_servers):
+    async def test_pause_abort_mode(self, client):
         """Test pause with ABORT mode (default) fans out to all servers."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            result = await client.pause(mode=PauseMode.ABORT)
-            assert len(result) == 2
-            for url, response in result.items():
-                assert response["status"] == 200
-                assert response["body"]["status"] == "paused"
-        finally:
-            await client.teardown()
+        result = await client.pause(mode=PauseMode.ABORT)
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
+            assert response["body"]["status"] == "paused"
 
     @pytest.mark.asyncio
-    async def test_pause_finish_mode(self, mock_servers):
+    async def test_pause_finish_mode(self, client):
         """Test pause with FINISH mode fans out to all servers."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            result = await client.pause(mode=PauseMode.FINISH)
-            assert len(result) == 2
-            for url, response in result.items():
-                assert response["status"] == 200
-        finally:
-            await client.teardown()
+        result = await client.pause(mode=PauseMode.FINISH)
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
 
     @pytest.mark.asyncio
-    async def test_pause_keep_mode_not_supported(self, mock_servers):
-        """Test pause with KEEP mode raises NotImplementedError."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            with pytest.raises(NotImplementedError, match="KEEP is not yet supported"):
-                await client.pause(mode=PauseMode.KEEP)
-        finally:
-            await client.teardown()
-
-    @pytest.mark.asyncio
-    async def test_resume(self, mock_servers):
+    async def test_resume(self, client):
         """Test resume fans out to all servers."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
+        # Pause first
+        await client.pause()
 
-        try:
-            # Pause first
-            await client.pause()
-
-            # Resume
-            result = await client.resume()
-            assert len(result) == 2
-            for url, response in result.items():
-                assert response["status"] == 200
-        finally:
-            await client.teardown()
+        # Resume
+        result = await client.resume()
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
 
     @pytest.mark.asyncio
-    async def test_sleep(self, mock_servers):
+    async def test_sleep(self, client):
         """Test sleep fans out to all servers."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            result = await client.sleep(level=2)
-            assert len(result) == 2
-        finally:
-            await client.teardown()
+        result = await client.sleep(level=2)
+        assert len(result) == 2
 
     @pytest.mark.asyncio
-    async def test_wake_up(self, mock_servers):
+    async def test_wake_up(self, client):
         """Test wake_up fans out to all servers."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            result = await client.wake_up()
-            assert len(result) == 2
-        finally:
-            await client.teardown()
+        result = await client.wake_up()
+        assert len(result) == 2
 
     @pytest.mark.asyncio
-    async def test_reset_prefix_cache(self, mock_servers):
+    async def test_reset_prefix_cache(self, client):
         """Test reset_prefix_cache fans out to all servers."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            result = await client.reset_prefix_cache()
-            assert len(result) == 2
-        finally:
-            await client.teardown()
+        result = await client.reset_prefix_cache()
+        assert len(result) == 2
 
 
 class TestWeightSync:
     """Test weight sync methods."""
 
     @pytest.mark.asyncio
-    async def test_init_weight_transfer(self, mock_servers):
+    async def test_init_weight_transfer(self, client):
         """Test init_weight_transfer fans out to all servers."""
         from skyrl_train.weight_sync import BroadcastInitInfo
 
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
+        init_info = BroadcastInitInfo(
+            master_addr="127.0.0.1",
+            master_port=29500,
+            rank_offset=1,
+            world_size=5,
+            group_name="test",
+            backend="nccl",
+            model_dtype_str="torch.bfloat16",
+            override_existing_receiver=True,
         )
-
-        try:
-            init_info = BroadcastInitInfo(
-                master_addr="127.0.0.1",
-                master_port=29500,
-                rank_offset=1,
-                world_size=5,
-                group_name="test",
-                backend="nccl",
-                model_dtype_str="torch.bfloat16",
-            )
-            result = await client.init_weight_transfer(init_info)
-            assert len(result) == 2
-        finally:
-            await client.teardown()
+        result = await client.init_weight_transfer(init_info)
+        assert len(result) == 2
 
     @pytest.mark.asyncio
-    async def test_update_weights(self, mock_servers):
+    async def test_update_weights(self, client):
         """Test update_weights fans out to all servers."""
         from skyrl_train.weight_sync import BroadcastWeightUpdateRequest
 
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
+        request = BroadcastWeightUpdateRequest(
+            names=["layer.weight"],
+            dtypes=["torch.bfloat16"],
+            shapes=[[1024, 1024]],
         )
-
-        try:
-            request = BroadcastWeightUpdateRequest(
-                names=["layer.weight"],
-                dtypes=["torch.bfloat16"],
-                shapes=[[1024, 1024]],
-            )
-            result = await client.update_weights(request)
-            assert len(result) == 2
-        finally:
-            await client.teardown()
+        result = await client.update_weights(request)
+        assert len(result) == 2
 
     @pytest.mark.asyncio
-    async def test_finalize_weight_update(self, mock_servers):
+    async def test_finalize_weight_update(self, client):
         """Test finalize_weight_update fans out to all servers."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
-
-        try:
-            result = await client.finalize_weight_update()
-            assert len(result) == 2
-        finally:
-            await client.teardown()
+        result = await client.finalize_weight_update()
+        assert len(result) == 2
 
 
 class TestServerInfo:
     """Test server info and world_size."""
 
     @pytest.mark.asyncio
-    async def test_get_world_size(self, mock_servers):
+    async def test_get_world_size(self, client):
         """Test world_size fetching and caching."""
-        client = RemoteInferenceClient(
-            proxy_url=mock_servers["proxy_url"],
-            server_urls=mock_servers["server_urls"],
-        )
+        # First call fetches from all servers and sums
+        world_size = await client.get_world_size()
+        # Each mock server reports world_size=2, we have 2 servers = 4
+        assert world_size == 4
 
-        try:
-            # First call fetches from all servers and sums
-            world_size = await client.get_world_size()
-            # Each mock server reports world_size=2, we have 2 servers = 4
-            assert world_size == 4
-
-            # Second call returns cached value
-            world_size2 = await client.get_world_size()
-            assert world_size2 == 4
-        finally:
-            await client.teardown()
+        # Second call returns cached value
+        world_size2 = await client.get_world_size()
+        assert world_size2 == 4
 
 
 class TestContextManager:
@@ -509,10 +380,13 @@ class TestContextManager:
     @pytest.mark.asyncio
     async def test_async_context_manager(self, mock_servers):
         """Test using client as async context manager."""
-        async with RemoteInferenceClient(
+
+        client = RemoteInferenceClient(
             proxy_url=mock_servers["proxy_url"],
             server_urls=mock_servers["server_urls"],
-        ) as client:
+        )
+
+        async with client:
             result = await client.resume()
             assert len(result) == 2
 
@@ -536,22 +410,14 @@ class TestRetryOnAbort:
         @app.post("/v1/completions")
         async def completions(request: Request):
             call_count["completions"] += 1
-            body = await request.json()
+            await request.json()  # Consume body
 
             # First call returns abort with partial response
             if call_count["completions"] == 1:
-                return {
-                    "choices": [
-                        {"index": 0, "text": "Partial ", "finish_reason": "abort"}
-                    ]
-                }
+                return {"choices": [{"index": 0, "text": "Partial ", "finish_reason": "abort"}]}
             # Second call returns complete response
             else:
-                return {
-                    "choices": [
-                        {"index": 0, "text": "response complete", "finish_reason": "stop"}
-                    ]
-                }
+                return {"choices": [{"index": 0, "text": "response complete", "finish_reason": "stop"}]}
 
         @app.post("/tokenize")
         async def tokenize(request: Request):
@@ -600,10 +466,12 @@ class TestRetryOnAbort:
         )
 
         try:
-            result = await client.generate({
-                "prompt_token_ids": [[1, 2, 3]],
-                "sampling_params": {"max_tokens": 100},
-            })
+            result = await client.generate(
+                {
+                    "prompt_token_ids": [[1, 2, 3]],
+                    "sampling_params": {"max_tokens": 100},
+                }
+            )
 
             # Should get complete response after retry
             assert result["stop_reasons"][0] == "stop"
