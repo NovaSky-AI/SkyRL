@@ -173,16 +173,17 @@ __global__ void prepare_grouped_gemm(
     data.B_ptrs[tid] = B + static_cast<int64_t>(tid) * n * k;
     data.out_ptrs[tid] = out + static_cast<int64_t>(start) * n;
     data.problem_sizes[tid] = ProblemShapeType(m, n, k);
-    data.stride_A[tid] = cutlass::make_cute_packed_stride(typename Data::StrideA{}, {k, k, 1});
+    data.stride_A[tid] = cutlass::make_cute_packed_stride(typename Data::StrideA{}, {m, k, 1});
+    data.stride_B[tid] = cutlass::make_cute_packed_stride(typename Data::StrideB{}, {k, n, 1});
     data.stride_output[tid] = cutlass::make_cute_packed_stride(typename Data::StrideOutput{}, {m, n, 1});
   } else {
     data.B_ptrs[tid] = B + static_cast<int64_t>(start) * n;
     data.out_ptrs[tid] = out + static_cast<int64_t>(tid) * k * n;
     data.problem_sizes[tid] = ProblemShapeType(k, n, m);
-    data.stride_A[tid] = cutlass::make_cute_packed_stride(typename Data::StrideA{}, {m, m, 1});
+    data.stride_A[tid] = cutlass::make_cute_packed_stride(typename Data::StrideA{}, {k, m, 1});
+    data.stride_B[tid] = cutlass::make_cute_packed_stride(typename Data::StrideB{}, {m, n, 1});
     data.stride_output[tid] = cutlass::make_cute_packed_stride(typename Data::StrideOutput{}, {k, n, 1});
   }
-  data.stride_B[tid] = cutlass::make_cute_packed_stride(typename Data::StrideB{}, {n, n, 1});
 }
 
 template <typename GemmT, GemmDir Dir>
