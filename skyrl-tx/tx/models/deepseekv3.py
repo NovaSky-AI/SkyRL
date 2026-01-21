@@ -175,7 +175,7 @@ class DeepseekV3Attention(nnx.Module):
             k_cache, v_cache, cache_position = kv_cache
             k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
             v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
-        
+
         updated_cache = (k, v)
 
         # Jax attention expects v to have the same shape as k
@@ -190,7 +190,7 @@ class DeepseekV3Attention(nnx.Module):
             is_causal=kv_cache is None,
         )
 
-        attn_output = attn_output[:, :, :, :self.v_head_dim].reshape(B, T, self.num_heads * self.v_head_dim)
+        attn_output = attn_output[:, :, :, : self.v_head_dim].reshape(B, T, self.num_heads * self.v_head_dim)
         return self.o_proj(attn_output, adapter_indices=adapter_indices), updated_cache
 
 
@@ -360,8 +360,7 @@ class DeepseekV3MoE(nnx.Module):
         self.experts = DeepseekV3NaiveMoe(config, dtype=dtype, rngs=rngs)
 
         inter_dim = config.moe_intermediate_size * config.n_shared_experts
-        self.shared_experts = DeepseekV3MLP(
-            config.hidden_size, inter_dim, config=config, dtype=dtype, rngs=rngs)
+        self.shared_experts = DeepseekV3MLP(config.hidden_size, inter_dim, config=config, dtype=dtype, rngs=rngs)
 
     def _compute_routing(self, router_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
         num_tokens = router_logits.shape[0]
@@ -417,8 +416,7 @@ class DeepseekV3MoE(nnx.Module):
 
         expert_output = self.experts(hidden_states_flat, top_k_index, top_k_weights, adapter_indices_flat)
         shared_output = self.shared_experts(
-            hidden_states_flat.reshape(batch_size, seq_len, hidden_size),
-            adapter_indices
+            hidden_states_flat.reshape(batch_size, seq_len, hidden_size), adapter_indices
         ).reshape(-1, hidden_size)
         expert_output = expert_output + shared_output
 
@@ -427,9 +425,7 @@ class DeepseekV3MoE(nnx.Module):
 
 class DeepseekV3DecoderLayer(nnx.Module):
 
-    def __init__(
-        self, config: DeepseekV3Config, layer_idx: int, *, dtype: jnp.dtype, rngs: nnx.Rngs
-    ) -> None:
+    def __init__(self, config: DeepseekV3Config, layer_idx: int, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.self_attn = DeepseekV3Attention(config, dtype=dtype, rngs=rngs)
@@ -439,7 +435,8 @@ class DeepseekV3DecoderLayer(nnx.Module):
             self.mlp = DeepseekV3MoE(config, dtype=dtype, rngs=rngs)
         else:
             self.mlp = DeepseekV3MLP(
-                config.hidden_size, config.intermediate_size, config=config, dtype=dtype, rngs=rngs)
+                config.hidden_size, config.intermediate_size, config=config, dtype=dtype, rngs=rngs
+            )
 
     def __call__(
         self,
@@ -485,7 +482,10 @@ class DeepseekV3Model(nnx.Module):
             rngs=rngs,
         )
         self.layers = nnx.List(
-            [DeepseekV3DecoderLayer(config, layer_idx=i, dtype=dtype, rngs=rngs) for i in range(config.num_hidden_layers)]
+            [
+                DeepseekV3DecoderLayer(config, layer_idx=i, dtype=dtype, rngs=rngs)
+                for i in range(config.num_hidden_layers)
+            ]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
