@@ -479,35 +479,35 @@ async def test_megatron_train(
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
 
-    # actor_group = init_worker_with_type(
-    #     "policy",
-    #     shared_pg=None,
-    #     colocate_all=False,
-    #     num_nodes=cfg.trainer.placement.policy_num_nodes,
-    #     num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
-    #     cfg=cfg,
-    # )
+    actor_group = init_worker_with_type(
+        "policy",
+        shared_pg=None,
+        colocate_all=False,
+        num_nodes=cfg.trainer.placement.policy_num_nodes,
+        num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+        cfg=cfg,
+    )
 
-    # with Timer(f"megatron training step tp{tp} pp{pp} cp{cp} ep{ep} etp{etp}"):
-    #     batch.metadata["global_step"] = 0
-    #     results_megatron = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
-    # results_megatron = [results_megatron[i].metadata["train_status"] for i in range(len(results_megatron))]
+    with Timer(f"megatron training step tp{tp} pp{pp} cp{cp} ep{ep} etp{etp}"):
+        batch.metadata["global_step"] = 0
+        results_megatron = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
+    results_megatron = [results_megatron[i].metadata["train_status"] for i in range(len(results_megatron))]
 
-    # memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
-    # memory = memory[0]
-    # print_mem("memory after training step", memory)
+    memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
+    memory = memory[0]
+    print_mem("memory after training step", memory)
 
-    # for result in results_megatron:
-    #     assert isinstance(result, dict), "Result should be a dictionary of training stats"
-    #     assert "policy_loss" in result
-    #     assert "policy_lr" in result
-    #     assert "ppo_clip_ratio" in result
-    #     assert "policy_entropy" in result
-    #     for k, v in result.items():
-    #         assert isinstance(v, (int, float)), f"{k} should be an int or float"
+    for result in results_megatron:
+        assert isinstance(result, dict), "Result should be a dictionary of training stats"
+        assert "policy_loss" in result
+        assert "policy_lr" in result
+        assert "ppo_clip_ratio" in result
+        assert "policy_entropy" in result
+        for k, v in result.items():
+            assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
-    # ray.shutdown()
-    # ray_init_for_tests()
+    ray.shutdown()
+    ray_init_for_tests()
 
     cfg.trainer.strategy = "fsdp2"
     # NOTE (erictang000): need to set sample packing to false here due to metric calculation differences
@@ -532,7 +532,7 @@ async def test_megatron_train(
 
     # FSDP uses forward_backward + optim_step instead of ppo_train
     batch.metadata["global_step"] = 0
-    results_fsdp = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+    results_fsdp = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", batch))
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
     # Get learning rate from worker
     lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))

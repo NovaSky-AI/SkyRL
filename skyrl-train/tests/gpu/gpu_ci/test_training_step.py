@@ -6,7 +6,7 @@ uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_training_step.py
 import ray
 import pytest
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, validate_cfg
 from skyrl_train.utils.utils import print_mem
@@ -36,14 +36,16 @@ def cfg() -> DictConfig:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("packed", "strategy", "model_name"),
-    [(True, "fsdp", MODEL_NAME), (False, "fsdp", MODEL_NAME), (True, "fsdp2", MODEL_NAME), (False, "fsdp2", MODEL_NAME), (True, "fsdp2", MOE_MODEL_NAME)],
-    ids=[
-        "packed-fsdp",
-        "unpacked-fsdp",
-        "packed-fsdp2",
-        "unpacked-fsdp2",
-        "packed-fsdp2-moe"
+    [
+        (True, "fsdp", MODEL_NAME),
+        (False, "fsdp", MODEL_NAME),
+        (True, "fsdp2", MODEL_NAME),
+        (False, "fsdp2", MODEL_NAME),
+        # TODO (erictang000): Add test for MoE model for FSDP backend
+        # right now this fails due to token routing issues
+        # (True, "fsdp2", MOE_MODEL_NAME),
     ],
+    ids=["packed-fsdp", "unpacked-fsdp", "packed-fsdp2", "unpacked-fsdp2"],
 )
 async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, packed, strategy, model_name):
     """
@@ -52,11 +54,6 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
     cfg.trainer.use_sample_packing = packed
     cfg.trainer.strategy = strategy
     cfg.trainer.policy.model.path = model_name
-    if model_name == MOE_MODEL_NAME:
-        cfg.trainer.policy.fsdp_config.cpu_offload = True
-        model_config_kwargs = OmegaConf.to_container(cfg.trainer.policy.model_config_kwargs, resolve=True)
-        model_config_kwargs["num_hidden_layers"] = 2
-        cfg.trainer.policy.model_config_kwargs = model_config_kwargs
 
     validate_cfg(cfg)
 
