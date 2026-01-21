@@ -506,23 +506,12 @@ def test_forward_backward_batch_calculations():
     # Initialize _micro_batches_accumulated (normally done in _normalize_mini_batch_size)
     policy_worker._micro_batches_accumulated = 0
 
-<<<<<<< HEAD
-    def mock_policy_forward_backward(experience, microbatch_weight):
-        policy_forward_backward_calls.append({"microbatch_weight": microbatch_weight})
-        return {
-            "policy_loss": 0.5,
-            "loss_metrics/clip_ratio": 0.1,
-            "policy_entropy": 2.0,
-            "response_length": response_length,
-        }
-=======
     # Mock _forward_backward_micro to track calls
     policy_forward_backward_micro_calls = []
 
     def mock_policy_forward_backward_micro(experience):
         policy_forward_backward_micro_calls.append(experience)
         return {"policy_loss": 0.5, "ppo_clip_ratio": 0.1, "policy_entropy": 2.0, "response_length": response_length}
->>>>>>> 6a9ab82c006e6c85a313b60120a8282a5ca4ed5a
 
     policy_worker._forward_backward_micro = mock_policy_forward_backward_micro
     policy_worker.record_memory = False
