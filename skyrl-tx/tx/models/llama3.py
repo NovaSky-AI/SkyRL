@@ -291,6 +291,8 @@ class Llama3Model(nnx.Module):
         Currently we have both self.layers (original) and stacked copy during forward.
         """
         num_layers = len(self.layers)
+        if num_layers == 0:
+            return hidden_states, []
 
         # Stack layer weights for dynamic indexing in scan
         layer_graphdef, _ = nnx.split(self.layers[0])
