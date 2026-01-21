@@ -6,7 +6,7 @@ from jax.sharding import get_abstract_mesh
 from transformers import DeepseekV3Config
 
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
-from tx.layers.rotary_embedding import apply_rope, apply_rope_interleave
+from tx.layers.rotary_embedding import apply_rope_interleave
 from tx.layers.util import Param, prepare_routing
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
