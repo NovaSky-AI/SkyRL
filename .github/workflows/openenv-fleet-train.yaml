@@ -89,8 +89,8 @@ jobs:
           echo "name=$JOB_NAME" >> $GITHUB_OUTPUT
           echo "Generated job name: $JOB_NAME"
 
-      - name: Launch Training Job
-        id: launch
+      - name: Submit Training Job
+        id: submit
         run: |
           MODALITY="${{ inputs.modality }}"
           ENV_KEY="${{ inputs.env_key }}"
@@ -115,6 +115,7 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
           LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
           LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
+          LAUNCH_CMD="$LAUNCH_CMD --env PR_NUMBER=${{ github.event.pull_request.number || '0' }}"
 
           if [ -n "$ENV_KEY" ]; then
             LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=$ENV_KEY"
@@ -126,7 +127,8 @@ jobs:
 
           LAUNCH_CMD="$LAUNCH_CMD -y"
 
-          # Launch job (this submits to SkyPilot managed jobs)
+          # Submit job (returns after job is queued, doesn't wait for completion)
+          echo "Submitting job..."
           eval "$LAUNCH_CMD" 2>&1 | tee /tmp/launch_output.txt
           LAUNCH_EXIT_CODE=${PIPESTATUS[0]}
 
@@ -140,14 +142,17 @@ jobs:
           fi
           JOB_ID=${JOB_ID:-"unknown"}
           echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+          echo "Job ID: $JOB_ID"
 
-          # Check if launch succeeded
+          # Check if submission succeeded
           if [ $LAUNCH_EXIT_CODE -ne 0 ]; then
-            echo "Job launch failed with exit code $LAUNCH_EXIT_CODE"
+            echo "Job submission failed with exit code $LAUNCH_EXIT_CODE"
             exit $LAUNCH_EXIT_CODE
           fi
 
-      - name: Notify Slack - Success
+          echo "Job submitted successfully!"
+
+      - name: Notify Slack - Job Submitted
         if: success()
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -156,28 +161,24 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "🚀 Fleet Training Job Launched",
+              "text": "🚀 Fleet Training Job Submitted",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "🚀 Fleet Training Job Launched" }
+                  "text": { "type": "plain_text", "text": "🚀 Fleet Training Job Submitted" }
                 },
                 {
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Job Name:*\n`${{ steps.job_name.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.launch.outputs.job_id }}`" },
+                    { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.submit.outputs.job_id }}`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" }
                   ]
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Monitor:*\n```sky jobs logs ${{ steps.launch.outputs.job_id }}```" }
-                },
-                {
-                  "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/fleet-ai/fleet-task-grpo|View Training Dashboard>" }
+                  "text": { "type": "mrkdwn", "text": "*Status:* Provisioning GPU instance and starting training...\n*WandB:* <https://wandb.ai/fleet-ai/fleet-task-grpo|View Dashboard>" }
                 },
                 {
                   "type": "context",
@@ -188,7 +189,82 @@ jobs:
               ]
             }
 
-      - name: Notify Slack - Failure
+      - name: Stream Training Logs
+        id: stream
+        run: |
+          JOB_ID="${{ steps.submit.outputs.job_id }}"
+
+          if [ "$JOB_ID" == "unknown" ]; then
+            echo "ERROR: Could not determine job ID"
+            exit 1
+          fi
+
+          echo "Streaming logs for job $JOB_ID..."
+          echo "This step will run until the job completes or fails."
+          echo ""
+
+          # Stream logs until job completes (this blocks)
+          sky jobs logs --follow "$JOB_ID" || true
+
+          # Get final job status
+          echo ""
+          echo "=== Final Job Status ==="
+          sky jobs queue | grep -E "^$JOB_ID|ID" || true
+
+          # Check if job succeeded
+          JOB_STATUS=$(sky jobs queue 2>/dev/null | grep "^$JOB_ID" | awk '{print $2}' || echo "UNKNOWN")
+          echo "job_status=$JOB_STATUS" >> $GITHUB_OUTPUT
+          echo "Final status: $JOB_STATUS"
+
+          if [ "$JOB_STATUS" == "SUCCEEDED" ]; then
+            echo "Job completed successfully!"
+            exit 0
+          elif [ "$JOB_STATUS" == "RUNNING" ]; then
+            echo "Job is still running (log streaming ended)"
+            exit 0
+          else
+            echo "Job ended with status: $JOB_STATUS"
+            exit 1
+          fi
+
+      - name: Notify Slack - Job Completed
+        if: success()
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "text": "✅ Fleet Training Job Completed",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "✅ Fleet Training Job Completed" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Job Name:*\n`${{ steps.job_name.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.submit.outputs.job_id }}`" },
+                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
+                    { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.job_status }}`" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/fleet-ai/fleet-task-grpo|View Training Results>" }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>" }
+                  ]
+                }
+              ]
+            }
+
+      - name: Notify Slack - Job Failed
         if: failure()
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -197,17 +273,19 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "❌ Fleet Training Job Launch Failed",
+              "text": "❌ Fleet Training Job Failed",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "❌ Job Launch Failed" }
+                  "text": { "type": "plain_text", "text": "❌ Fleet Training Job Failed" }
                 },
                 {
                   "type": "section",
                   "fields": [
+                    { "type": "mrkdwn", "text": "*Job Name:*\n`${{ steps.job_name.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.submit.outputs.job_id }}`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
-                    { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" }
+                    { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.job_status || 'FAILED' }}`" }
                   ]
                 },
                 {
@@ -226,12 +304,16 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Fleet Training Job Launch - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "## Fleet Training Job - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Job Name | \`${{ steps.job_name.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Job ID | \`${{ steps.launch.outputs.job_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Job ID | \`${{ steps.submit.outputs.job_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Final Status | \`${{ steps.stream.outputs.job_status || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Modality | \`${{ inputs.modality }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Env Filter | \`${{ inputs.env_key || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Max Tasks | \`${{ inputs.max_tasks || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Links" >> $GITHUB_STEP_SUMMARY
+          echo "- [WandB Dashboard](https://wandb.ai/fleet-ai/fleet-task-grpo)" >> $GITHUB_STEP_SUMMARY
