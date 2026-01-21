@@ -1,0 +1,197 @@
+name: "OpenEnv Fleet Training (SkyPilot)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      modality:
+        description: "Task modality"
+        type: choice
+        options:
+          - tool_use
+          - computer_use
+        default: tool_use
+      env_name:
+        description: "OpenEnv environment name"
+        type: string
+        default: "echo_env"
+      cloud:
+        description: "Preferred cloud (any = auto-select cheapest)"
+        type: choice
+        options:
+          - any
+          - lambda
+          - runpod
+          - vast
+        default: any
+
+permissions:
+  contents: read
+
+env:
+  RUN_NAME_PREFIX: "openenv-fleet"
+
+jobs:
+  launch-training:
+    runs-on: ubuntu-latest
+    env:
+      # Make both keys available as env vars for bash selection
+      WANDB_KEY_TOOL_USE: ${{ secrets.WANDB_API_KEY_TOOL_USE }}
+      WANDB_KEY_COMPUTER_USE: ${{ secrets.WANDB_API_KEY_COMPUTER_USE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install SkyPilot
+        run: pip install "skypilot[lambda,runpod,vast]"
+
+      - name: Configure Cloud Credentials
+        run: |
+          # Lambda
+          mkdir -p ~/.lambda_cloud
+          echo "api_key = ${{ secrets.LAMBDA_API_KEY }}" > ~/.lambda_cloud/lambda_keys
+
+          # RunPod
+          pip install runpod
+          runpod config "${{ secrets.RUNPOD_API_KEY }}"
+
+          # Vast.ai
+          mkdir -p ~/.config/vastai
+          echo "${{ secrets.VAST_API_KEY }}" > ~/.config/vastai/vast_api_key
+
+      - name: Verify Cloud Credentials
+        run: sky check lambda runpod vast
+
+      - name: Generate Job Name
+        id: job_name
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          JOB_NAME="${{ env.RUN_NAME_PREFIX }}-${{ inputs.modality }}-${SHORT_SHA}-${TIMESTAMP}"
+          echo "name=$JOB_NAME" >> $GITHUB_OUTPUT
+          echo "Generated job name: $JOB_NAME"
+
+      - name: Launch Training Job
+        id: launch
+        run: |
+          MODALITY="${{ inputs.modality }}"
+          ENV_NAME="${{ inputs.env_name }}"
+
+          # Select WandB key based on modality
+          if [ "$MODALITY" == "tool_use" ]; then
+            WANDB_KEY="$WANDB_KEY_TOOL_USE"
+          else
+            WANDB_KEY="$WANDB_KEY_COMPUTER_USE"
+          fi
+
+          # Validate key is set
+          if [ -z "$WANDB_KEY" ]; then
+            echo "ERROR: WANDB_API_KEY_${MODALITY^^} secret is not set!"
+            exit 1
+          fi
+
+          # Launch synchronously - waits for job completion
+          sky jobs launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
+            --name "${{ steps.job_name.outputs.name }}" \
+            --env WANDB_API_KEY="$WANDB_KEY" \
+            --env FLEET_API_KEY="${{ secrets.FLEET_API_KEY }}" \
+            --env MODALITY="$MODALITY" \
+            --env ENV_NAME="$ENV_NAME" \
+            -y 2>&1 | tee /tmp/launch_output.txt
+
+          # Extract job ID from output
+          JOB_ID=$(grep -oP 'Job ID: \K\d+' /tmp/launch_output.txt || grep -oP 'Job submitted, ID: \K\d+' /tmp/launch_output.txt || echo "unknown")
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+
+      - name: Notify Slack - Success
+        if: success()
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "text": "✅ OpenEnv Training Completed Successfully",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "✅ OpenEnv Training Completed" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Job Name:*\n`${{ steps.job_name.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.launch.outputs.job_id }}`" },
+                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
+                    { "type": "mrkdwn", "text": "*Environment:*\n`${{ inputs.env_name }}`" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*Monitor:*\n```sky jobs logs ${{ steps.launch.outputs.job_id }}```" }
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/fleet-ai/openenv-fleet|View Training Dashboard>" }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>" }
+                  ]
+                }
+              ]
+            }
+
+      - name: Notify Slack - Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "text": "❌ OpenEnv Training Job Failed",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "❌ Training Launch Failed" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
+                    { "type": "mrkdwn", "text": "*Environment:*\n`${{ inputs.env_name }}`" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*Check logs:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Logs>" }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }}" }
+                  ]
+                }
+              ]
+            }
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Training Job ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Job Name | \`${{ steps.job_name.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Job ID | \`${{ steps.launch.outputs.job_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Modality | \`${{ inputs.modality }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ inputs.env_name }}\` |" >> $GITHUB_STEP_SUMMARY

@@ -33,6 +33,7 @@ docs/_spelling/
 
 /skyrl_train/.venv
 /skyrl-gym/.venv
+/.venv-skypilot
 
 # build
 /skyrl-gym/build
