@@ -148,6 +148,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
     @property
     def T(self):
         """Return a callable that projects hidden states back to vocabulary space."""
+        # TODO: Apply lora adapters here as well
         return lambda hidden_states, adapter_indices=None: hidden_states @ self.embedding.value.T
 
 
