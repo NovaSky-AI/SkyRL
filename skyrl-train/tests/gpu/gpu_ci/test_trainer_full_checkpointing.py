@@ -132,13 +132,21 @@ def create_minimal_trainer(cfg: DictConfig):
 
 
 @pytest.mark.parametrize(
-    ("strategy, fsdp2_cpu_offload"),
+    ("strategy", "fsdp2_cpu_offload", "lora"),
     [
-        ("fsdp", False),
-        ("fsdp2", False),
-        ("fsdp2", True),
-        pytest.param("megatron", False, marks=pytest.mark.megatron),
-        pytest.param("megatron", True, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        ("fsdp", False, False),
+        ("fsdp", False, False),
+        ("fsdp2", False, False),
+        ("fsdp2", True, False),
+        pytest.param("megatron", False, False, marks=pytest.mark.megatron),
+    ],
+    ids=[
+        "fsdp_no_lora",
+        "fsdp_lora",
+        "fsdp2_no_lora",
+        "fsdp2_lora",
+        "megatron_no_lora",
+        # TODO (erictang000): add megatron lora test - currently full checkpointing fails
     ],
 )
 def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload, lora):

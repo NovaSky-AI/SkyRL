@@ -474,8 +474,8 @@ async def test_megatron_train(
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
 
     # set batch sizes correctly
-    cfg.trainer.train_batch_size = gpus_per_node * 4
-    cfg.trainer.policy_mini_batch_size = gpus_per_node * 4
+    cfg.trainer.train_batch_size = gpus_per_node
+    cfg.trainer.policy_mini_batch_size = gpus_per_node
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
 

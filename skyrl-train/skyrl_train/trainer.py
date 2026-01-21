@@ -125,7 +125,7 @@ class RayPPOTrainer:
     @property
     def has_critic(self) -> bool:
         """Check if critic model is configured."""
-        return self.cfg.trainer.critic.model.path is not None
+        return bool(self.cfg.trainer.critic.model.path)
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
