@@ -7,8 +7,7 @@
 name: fleet-task-grpo
 
 resources:
-  accelerators: A100:4
-  memory: 64+
+  accelerators: H100:2
   disk_size: 40
   ports: 6479
   any_of:
