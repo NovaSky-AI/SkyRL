@@ -22,8 +22,8 @@ from tx.utils.models import get_dtype, load_safetensors
     ],
     ids=["llama3", "qwen3"],
 )
-def test_last_token_logits_only(model_name, config_cls, model_cls, mesh_axes):
-    """Test that last_token_logits_only returns correct shape and values."""
+def test_skip_prompt_logits(model_name, config_cls, model_cls, mesh_axes):
+    """Test that skip_prompt_logits returns correct shape and values."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
@@ -47,7 +47,7 @@ def test_last_token_logits_only(model_name, config_cls, model_cls, mesh_axes):
 
         # Get last token logits only
         outputs_last = model(
-            batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), last_token_logits_only=True
+            batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), skip_prompt_logits=True
         )
         assert outputs_last.logits.shape == (
             batch_size,

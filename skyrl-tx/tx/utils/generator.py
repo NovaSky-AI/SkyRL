@@ -151,13 +151,13 @@ class GeneratorMixin:
         positions = compute_positions(attention_mask)
 
         # Prefill: process full prompt
-        # Use last_token_logits_only=True when we don't need prompt_logprobs to save memory
+        # Use skip_prompt_logits=True when we don't need prompt_logprobs to save memory
         outputs = model(
             input_ids,
             attention_mask=attention_mask,
             positions=positions,
             adapter_indices=adapter_indices,
-            last_token_logits_only=not prompt_logprobs,
+            skip_prompt_logits=not prompt_logprobs,
         )
 
         # Compute prompt logprobs if requested

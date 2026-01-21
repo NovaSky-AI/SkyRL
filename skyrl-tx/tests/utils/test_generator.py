@@ -16,7 +16,7 @@ class DummyModel(GeneratorMixin, nnx.Module):
         positions=None,
         kv_cache=None,
         adapter_indices=None,
-        last_token_logits_only=False,
+        skip_prompt_logits=False,
     ):
         """Simple dummy model for testing generator behavior."""
         batch_size, seq_len = input_ids.shape
@@ -26,7 +26,7 @@ class DummyModel(GeneratorMixin, nnx.Module):
             # Prefill: deterministic logits
             logits = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
             # Only return last token logits if requested (saves memory during prefill)
-            if last_token_logits_only:
+            if skip_prompt_logits:
                 logits = logits[:, -1:, :]
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
