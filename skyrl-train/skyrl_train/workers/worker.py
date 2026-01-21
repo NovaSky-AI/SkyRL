@@ -657,6 +657,7 @@ class PolicyWorkerBase(Worker):
 
         # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
+        self._total_tokens_accumulated = 0
 
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
         """
@@ -677,6 +678,10 @@ class PolicyWorkerBase(Worker):
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
             metrics = self._forward_backward_micro(micro_batch)
             self._micro_batches_accumulated += 1
+
+            # Track total tokens accumulated to compute average loss per token during optim_step
+            self._total_tokens_accumulated += micro_batch.attention_mask.sum().item()
+
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
@@ -783,9 +788,28 @@ class PolicyWorkerBase(Worker):
         Returns:
             The gradient norm (before scaling, after clipping)
         """
-        # Scale accumulated gradients by 1/N to get correct average
         if self._micro_batches_accumulated > 0:
-            scale = 1.0 / self._micro_batches_accumulated
+            if self.cfg.trainer.algorithm.loss_reduction == "token_sum":
+                # Scale by the total number of tokens accumulated across all workers.
+                total_tokens_accumulated_tensor = torch.tensor(
+                    self._total_tokens_accumulated,
+                    dtype=torch.long,
+                    device=torch.cuda.current_device(),
+                )
+                global_tokens_accumulated = self.strategy.all_reduce(total_tokens_accumulated_tensor, op="sum").item()
+
+                # When loss_reduction="token_sum", each worker computes the
+                # sum of token losses across microbatches.
+                # FSDP all-reduce averages this local sum across workers,
+                # which divides the global sum by the number of workers.
+                # To counteract this, we multiply by the number of workers
+                # to recover the global token loss sum, and divide by the number of tokens
+                # to get the average token loss.
+                scale = self.strategy.world_size / global_tokens_accumulated
+            else:
+                # Scale accumulated gradients by 1/N to get correct average
+                scale = 1.0 / self._micro_batches_accumulated
+
             for param in self.model.parameters():
                 if param.grad is not None:
                     param.grad.mul_(scale)
@@ -795,6 +819,7 @@ class PolicyWorkerBase(Worker):
 
         # Reset counter for next accumulation cycle
         self._micro_batches_accumulated = 0
+        self._total_tokens_accumulated = 0
 
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
