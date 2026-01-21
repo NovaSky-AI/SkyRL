@@ -2,18 +2,18 @@ import asyncio
 import logging
 import os
 import socket
-from datetime import timedelta
-from typing import Dict, Optional, Type, List, Any, Callable
-from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
-from tqdm import tqdm
 from collections import defaultdict
+from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
+from datetime import timedelta
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Type
 
 import ray
 import torch
-import torch.nn as nn
-from torch.optim.lr_scheduler import LRScheduler
-from torch.optim import Optimizer
 import torch.distributed
+import torch.nn as nn
+from loguru import logger
+from omegaconf import DictConfig
 from ray import ObjectRef
 from ray.util.placement_group import (
     PlacementGroup,
@@ -21,24 +21,41 @@ from ray.util.placement_group import (
     placement_group,
     placement_group_table,
 )
-
-from skyrl_train.utils import ray_noset_visible_devices, get_ray_pg_ready_with_timeout, get_reordered_bundle_indices
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
-from skyrl_train.utils.io import io
-from skyrl_train.utils.ppo_utils import masked_mean
-from skyrl_train.distributed.dispatch import MeshRank, ActorInfo, DispatchRegistry, Dispatch
-from skyrl_train.distributed.strategy import DistributedStrategy
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
-from loguru import logger
-from skyrl_train.distributed.ulysses import set_ulysses_sequence_parallel_group, apply_monkey_patch
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, ppo_critic_loss, compute_approx_kl
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.dataset.replay_buffer import Experience
-from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.distributed.dispatch import (
+    ActorInfo,
+    Dispatch,
+    DispatchRegistry,
+    MeshRank,
+)
+from skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl_train.distributed.ulysses import (
+    apply_monkey_patch,
+    set_ulysses_sequence_parallel_group,
+)
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.utils import (
+    get_ray_pg_ready_with_timeout,
+    get_reordered_bundle_indices,
+    ray_noset_visible_devices,
+)
+from skyrl_train.utils.constants import (
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+)
+from skyrl_train.utils.io import io
+from skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+    compute_approx_kl,
+    masked_mean,
+    ppo_critic_loss,
+)
 from skyrl_train.utils.utils import configure_ray_worker_logging
-from omegaconf import DictConfig
-from pathlib import Path
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 
 _SET_AFFINITY = False
 
@@ -234,21 +251,33 @@ class Worker(DistributedTorchRayActor):
             "total": total,
         }
 
-    def save_memory_snapshot(self, global_step=None, local_step=None):
+    def save_memory_snapshot(self, tag: str = ""):
         """Save a snapshot of memory usage on the Worker's CUDA device.
+
+        No-ops if record_memory is False.
+
+        Args:
+            tag: Label for the snapshot (e.g., "forward_backward", "optim_step")
 
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
+        if not self.record_memory:
+            return
+
+        # Track snapshot count for unique filenames
+        if not hasattr(self, "_snapshot_count"):
+            self._snapshot_count = 0
+        self._snapshot_count += 1
+
         rank = torch.distributed.get_rank()
         save_path = os.path.join(self.cfg.trainer.ckpt_path, "memory_snapshots")
         if self._local_rank == 0 and not io.exists(save_path):
             io.makedirs(save_path, exist_ok=True)
         torch.distributed.barrier()
-        if global_step is None or local_step is None:
-            file_name = f"policy_rank_{rank}.pickle"
-        else:
-            file_name = f"policy_rank_{rank}_training_step_{global_step}_{local_step}.pickle"
+
+        tag_str = f"_{tag}" if tag else ""
+        file_name = f"rank_{rank}{tag_str}_{self._snapshot_count}.pickle"
         record_memory_path = os.path.join(save_path, file_name)
         if io.exists(record_memory_path):
             # seeing issues if we don't remove the file first
@@ -612,30 +641,60 @@ class PolicyWorkerBase(Worker):
 
     def _normalize_mini_batch_size(self):
         """
-        Normalize mini batch sizes to per-gpu mini batch sizes..
+        Initialize micro batch tracking for gradient accumulation.
+
+        The worker no longer needs to know mini batch size - it processes whatever
+        batch it receives, breaking it into micro batches. Gradient scaling happens
+        at optim_step time based on how many micro batches were accumulated.
+
+        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
+        requires mini-batch normalization in its override. The name is kept for
+        backwards compatibility with Megatron which still does actual normalization.
         """
         if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
             raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
 
-        dp_size = self.mesh_rank.dp_size
-        self.policy_mini_batch_size_per_gpu = (
-            self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
-        )
+        # Track micro batches for gradient scaling at optim_step
+        self._micro_batches_accumulated = 0
 
-    def forward_backward(self, experience: Experience, microbatch_weight: float) -> Dict[str, float]:
-        """Perform the forward and backward pass for one micro-batch.
+    def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
+        """
+        Perform forward and backward passes for a batch, handling micro-batching internally.
+
+        The batch is split into micro batches based on micro_train_batch_size_per_gpu.
+        Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
 
         Args:
-            experience: The microbatch data to run the forward and backward pass on.
-            microbatch_weight: Weight of the microbatch, used to scale the loss contribution
-                for the microbatch. For example, if you accumulate gradients over 2 microbatches,
-                then each microbatch should have a weight of 1/2.
+            data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
 
         Returns:
-            Dict containing the status (including loss and some other metrics)
-            for the microbatch.
+            Aggregated metrics dict across all micro batches
+        """
+        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+        all_metrics = defaultdict(list)
+
+        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
+            metrics = self._forward_backward_micro(micro_batch)
+            self._micro_batches_accumulated += 1
+            for k, v in metrics.items():
+                all_metrics[k].append(v)
+
+        return reduce_metrics(dict(all_metrics))
+
+    def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
+        """
+        Perform forward and backward pass for one micro batch.
+
+        Loss is not scaled here - gradient scaling happens at optim_step time.
+
+        Args:
+            experience: Experience object for one micro batch
+
+        Returns:
+            All-reduced metrics dict for this micro batch
         """
         self.model.train()
+
         experience.to_device(torch.cuda.current_device())
 
         sequences = experience.sequences
@@ -698,7 +757,6 @@ class PolicyWorkerBase(Worker):
         kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
         loss = policy_loss + kl_loss_term - entropy_loss_term
-        loss = loss * microbatch_weight
         self.strategy.backward(loss, self.model, self.optimizer)
 
         status = {
@@ -706,125 +764,59 @@ class PolicyWorkerBase(Worker):
             "policy_loss": policy_loss.item(),
             "policy_entropy": entropy.item(),
             "response_length": num_actions,
+            "policy_lr": self.scheduler.get_last_lr()[0],
         }
         for k, v in loss_metrics.items():
             status["loss_metrics/" + k] = v
         if self.cfg.trainer.algorithm.use_kl_loss:
             status["policy_kl"] = kl_loss.item()
 
+        # All-reduce metrics across DP workers
+        status = self.strategy.all_reduce(status)
+
         return status
 
     def optim_step(self) -> float:
         """
-        Perform optimizer step and return the gradient norm.
+        Scale gradients by 1/micro_batches_accumulated, perform optimizer step, and reset counter.
+
+        Returns:
+            The gradient norm (before scaling, after clipping)
         """
+        # Scale accumulated gradients by 1/N to get correct average
+        if self._micro_batches_accumulated > 0:
+            scale = 1.0 / self._micro_batches_accumulated
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(scale)
+
+        # Perform optimizer step (includes gradient clipping)
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+
+        # Reset counter for next accumulation cycle
+        self._micro_batches_accumulated = 0
+
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
 
-    def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
-        global_step = train_data.metadata["global_step"]
-        minibatch_iterator = BatchIterator(
-            train_data, sample_batch_size=self.policy_mini_batch_size_per_gpu, drop_last=False
-        )
+    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
+        """
+        All-reduce metrics across data parallel workers.
+        """
+        return self.strategy.all_reduce(status)
 
-        status_list = []
-        all_metrics = defaultdict(list)
-        num_minibatches = len(minibatch_iterator)
-        local_step = 0
+    def get_lr(self) -> float:
+        """
+        Get current learning rate from scheduler.
+        """
+        return self.scheduler.get_last_lr()[0]
 
-        def record_status(status: Dict[str, float]):
-            """Record the aggregated (all-reduced) training status for the latest microbatch.
-            Also, update the progress bar with the latest status."""
-            status["policy_lr"] = self.scheduler.get_last_lr()[0]
-
-            # for DP
-            # TODO (sumanthrh): this assumes all workers are data parallel.
-            # We assume that outputs are replicated within tp or sp group, otherwise this is not correct.
-            status = all_reduce_metrics(status, self.strategy)
-
-            # weighted mean for kl
-            # TODO (sumanthrh): this weighted mean is no longer correct since we use the max response length in the batch.
-            # we can log this in the driver
-            # if "kl" in status:
-            #     status["kl"] *= status["response_length"]
-            #     status["kl"] /= status["response_length"]
-
-            short_status = {}
-
-            if "policy_loss" in status:
-                short_status = {
-                    "pg": status["policy_loss"],
-                    "glen": status["response_length"],
-                    "policy_lr": status["policy_lr"],
-                    "ent": status["policy_entropy"],
-                }
-                if "raw_grad_norm" in status:
-                    short_status["grad_norm"] = status["raw_grad_norm"]
-                if "reward" in status:
-                    short_status["rm"] = status["reward"]
-
-            if "critic_loss" in status:
-                short_status["cri"] = status["critic_loss"]
-                short_status["vals"] = status["values"]
-                short_status["cri_lr"] = status["critic_lr"]
-
-            if "ptx_loss" in status:
-                short_status["ptx"] = status["ptx_loss"]
-
-            status_list.append(status)
-            for k, v in status.items():
-                all_metrics[k].append(v)
-            minibatch_pbar.set_postfix(short_status)
-
-        for epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            minibatch_pbar = tqdm(
-                minibatch_iterator,
-                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
-                disable=not self.strategy.is_rank_0(),
-            )
-            for minibatch in minibatch_pbar:
-                microbatch_iterator = BatchIterator(
-                    minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-                )
-                num_microbatches = len(microbatch_iterator)
-                microbatch_weight = 1.0 / num_microbatches
-
-                for microbatch_idx, microbatch in enumerate(microbatch_iterator):
-                    microbatch_experience = BatchIterator.batch_to_experience(microbatch)
-                    status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
-
-                    # Record status for all but the last microbatch in the minibatch.
-                    # The last microbatch should be recorded after the optimizer step.
-                    if microbatch_idx < num_microbatches - 1:
-                        if self.record_memory:
-                            self.save_memory_snapshot(global_step, local_step)
-                        record_status(status)
-
-                    # Local step counts the number of processed microbatches.
-                    local_step += 1
-
-                grad_norm = self.optim_step()
-                if grad_norm is not None:
-                    status["raw_grad_norm"] = grad_norm
-
-                if self.record_memory:
-                    self.save_memory_snapshot(global_step, local_step)
-
-                # Record status for the last microbatch in the minibatch.
-                record_status(status)
-
+    def barrier(self) -> None:
+        """
+        Synchronization barrier across all workers.
+        """
         torch.distributed.barrier()
-        # not needed beyond status logging
-        all_metrics.pop("response_length", None)
-        status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = num_minibatches * self.cfg.trainer.update_epochs_per_batch
-
-        # should return an `TrainingOutputBatch`
-        output = TrainingOutputBatch()
-        output.metadata = {"train_status": status_mean}
-        return output
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
         self.strategy.save_checkpoint(
@@ -897,21 +889,60 @@ class CriticWorkerBase(Worker):
 
     def _normalize_mini_batch_size(self):
         """
-        Normalize batch sizes based on device mesh and generation parameters.
+        Initialize micro batch tracking for gradient accumulation.
+
+        The worker no longer needs to know mini batch size - it processes whatever
+        batch it receives, breaking it into micro batches. Gradient scaling happens
+        at optim_step time based on how many micro batches were accumulated.
+
+        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
+        requires mini-batch normalization in its override. The name is kept for
+        backwards compatibility with Megatron which still does actual normalization.
         """
         if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
             raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
 
-        dp_size = self.mesh_rank.dp_size
-        self.critic_mini_batch_size_per_gpu = (
-            self.cfg.trainer.critic_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
-        )
+        # Track micro batches for gradient scaling at optim_step
+        self._micro_batches_accumulated = 0
 
-    def forward_backward(self, experience: Experience, microbatch_weight: float) -> Dict[str, float]:
+    def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
         """
-        Perform the forward and backward pass for one micro-batch.
+        Perform forward and backward passes for a batch, handling micro-batching internally.
+
+        The batch is split into micro batches based on micro_train_batch_size_per_gpu.
+        Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
+
+        Args:
+            data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
+
+        Returns:
+            Aggregated metrics dict across all micro batches
+        """
+        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+        all_metrics = defaultdict(list)
+
+        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
+            metrics = self._forward_backward_micro(micro_batch)
+            self._micro_batches_accumulated += 1
+            for k, v in metrics.items():
+                all_metrics[k].append(v)
+
+        return reduce_metrics(dict(all_metrics))
+
+    def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
+        """
+        Perform forward and backward pass for one micro batch.
+
+        Loss is NOT scaled here - gradient scaling happens at optim_step time.
+
+        Args:
+            experience: Experience object for one micro batch
+
+        Returns:
+            All-reduced metrics dict for this micro batch
         """
         self.model.train()
+
         experience.to_device(torch.cuda.current_device())
 
         sequences = experience.sequences
@@ -923,7 +954,7 @@ class CriticWorkerBase(Worker):
 
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # critic loss
-            values, output = self.model(
+            values, _ = self.model(
                 sequences,
                 num_actions=num_actions,
                 attention_mask=attention_mask,
@@ -937,24 +968,62 @@ class CriticWorkerBase(Worker):
                 config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
             )
-        loss = loss * microbatch_weight
+        # NO loss scaling here - gradient scaling happens at optim_step
         self.strategy.backward(loss, self.model, self.optimizer)
 
         status = {
             "critic_loss": loss.item(),
             "values_mean": masked_mean(values, loss_mask).item(),
             "values_clipfrac": clipfrac,
+            "critic_lr": self.scheduler.get_last_lr()[0],
         }
+
+        # All-reduce metrics across DP workers
+        status = self.strategy.all_reduce(status)
+
         return status
 
     def optim_step(self) -> float:
         """
-        Perform optimizer step and return the gradient norm.
+        Scale gradients by 1/micro_batches_accumulated, perform optimizer step, and reset counter.
+
+        Returns:
+            The gradient norm (before scaling, after clipping)
         """
+        # Scale accumulated gradients by 1/N to get correct average
+        if self._micro_batches_accumulated > 0:
+            scale = 1.0 / self._micro_batches_accumulated
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(scale)
+
+        # Perform optimizer step (includes gradient clipping)
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="critic")
+
+        # Reset counter for next accumulation cycle
+        self._micro_batches_accumulated = 0
+
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
+
+    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
+        """
+        All-reduce metrics across data parallel workers.
+        """
+        return self.strategy.all_reduce(status)
+
+    def get_lr(self) -> float:
+        """
+        Get current learning rate from scheduler.
+        """
+        return self.scheduler.get_last_lr()[0]
+
+    def barrier(self) -> None:
+        """
+        Synchronization barrier across all workers.
+        """
+        torch.distributed.barrier()
 
     def _forward_micro_batch(
         self,
@@ -988,70 +1057,6 @@ class CriticWorkerBase(Worker):
             export_dir,
             tokenizer=tokenizer,
         )
-
-    def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
-        global_step = train_data.metadata["global_step"]
-        minibatch_iterator = BatchIterator(
-            train_data, sample_batch_size=self.critic_mini_batch_size_per_gpu, drop_last=False
-        )
-
-        all_metrics = defaultdict(list)
-        num_minibatches = len(minibatch_iterator)
-        local_step = 0
-
-        def record_status(status: Dict[str, float]):
-            status["critic_lr"] = self.scheduler.get_last_lr()[0]
-
-            # for DP
-            # TODO (sumanthrh): this assumes all workers are data parallel.
-            # We should get more accurate metrics with seq parallel or TP.
-            # There are metrics like entropy where we get average over local data size
-            status = self.strategy.all_reduce(status)
-
-            for k, v in status.items():
-                all_metrics[k].append(v)
-            minibatch_pbar.set_postfix(status)
-
-        for epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            minibatch_pbar = tqdm(
-                minibatch_iterator,
-                desc=f"Critic Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
-                disable=not self.strategy.is_rank_0(),
-            )
-            for minibatch in minibatch_pbar:
-                microbatch_iterator = BatchIterator(
-                    minibatch, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-                )
-                num_microbatches = len(microbatch_iterator)
-                microbatch_weight = 1.0 / num_microbatches
-
-                for microbatch_idx, microbatch in enumerate(microbatch_iterator):
-                    microbatch_experience = BatchIterator.batch_to_experience(microbatch)
-                    status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
-
-                    if microbatch_idx < num_microbatches - 1:
-                        if self.record_memory:
-                            self.save_memory_snapshot(global_step, local_step)
-                        record_status(status)
-
-                    local_step += 1
-
-                grad_norm = self.optim_step()
-                if grad_norm is not None:
-                    status["raw_grad_norm"] = grad_norm
-
-                if self.record_memory:
-                    self.save_memory_snapshot(global_step, local_step)
-                record_status(status)
-
-        torch.distributed.barrier()
-
-        status_mean = reduce_metrics(all_metrics)
-        status_mean["critic_update_steps"] = num_minibatches * self.cfg.trainer.update_epochs_per_batch
-
-        output = TrainingOutputBatch()
-        output.metadata = {"train_status": status_mean}
-        return output
 
     def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
         self.strategy.save_checkpoint(

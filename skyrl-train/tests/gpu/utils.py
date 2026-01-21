@@ -359,6 +359,7 @@ def init_inference_engines(
     sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
     enable_lora=False,
     max_num_seqs=1024,
+    engine_init_kwargs={},
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
@@ -391,6 +392,7 @@ def init_inference_engines(
         backend=backend,
         sleep_level=sleep_level,
         enable_lora=enable_lora,
+        engine_init_kwargs=engine_init_kwargs,
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:
@@ -442,10 +444,13 @@ def init_remote_inference_servers(
             "0.8",
             "--tensor-parallel-size",
             str(tp_size),
-            # NOTE (sumanthrh): Currently, there's an issue with distributed executor backend ray for vllm 0.9.2.
-            # For standalone server, we use mp for now.
+            # TODO (erictang000): for 0.13+ vllm, the MP backend runs into issues with CUDA_VISIBLE_DEVICES
+            # when we refactor the inference backend to use remote inference engines as a default, revisit this
             "--distributed-executor-backend",
-            "mp",
+            "ray",
+            # vLLM 0.13+ V1 engine spawns worker processes that can't inherit CUDA context
+            # when CUDA_VISIBLE_DEVICES is set. Disable frontend multiprocessing to fix this.
+            "--disable-frontend-multiprocessing",
             "--dtype",
             "bfloat16",
             "--host",
