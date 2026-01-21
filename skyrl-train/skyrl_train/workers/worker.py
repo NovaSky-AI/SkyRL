@@ -43,7 +43,7 @@ from skyrl_train.utils import (
     get_reordered_bundle_indices,
     ray_noset_visible_devices,
 )
-from skyrl_train.utils.constants import (
+from skyrl_train.env_vars import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )

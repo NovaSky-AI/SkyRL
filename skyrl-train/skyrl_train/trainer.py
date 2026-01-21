@@ -44,7 +44,7 @@ from skyrl_train.utils import (
     ppo_utils,
     trainer_utils,
 )
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.utils.ppo_utils import (
@@ -125,7 +125,7 @@ class RayPPOTrainer:
     @property
     def has_critic(self) -> bool:
         """Check if critic model is configured."""
-        return self.cfg.trainer.critic.model.path is not None
+        return bool(self.cfg.trainer.critic.model.path)
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
@@ -958,14 +958,14 @@ class RayPPOTrainer:
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
-            )
-            prob_diff = logprobs_diff.exp().abs()
-            prob_diff_mean = prob_diff.mean().item()
-            prob_diff_std = prob_diff.std().item()
+            ).abs()
+
+            logprobs_diff_mean = logprobs_diff.mean().item()
+            logprobs_diff_std = logprobs_diff.std().item()
             self.all_metrics.update(
                 {
-                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
-                    "policy/rollout_train_prob_diff_std": prob_diff_std,
+                    "policy/rollout_train_logprobs_abs_diff_mean": logprobs_diff_mean,
+                    "policy/rollout_train_logprobs_abs_diff_std": logprobs_diff_std,
                 }
             )
         return training_input

@@ -17,7 +17,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
 
 
 class Timer:

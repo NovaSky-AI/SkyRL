@@ -94,7 +94,7 @@ SkyRL is a full-stack RL library designed for modularity and extensibility.
    api/env
    api/registry
    api/tools
-   api/constants
+   api/env_vars
 
 .. toctree::
    :maxdepth: 2

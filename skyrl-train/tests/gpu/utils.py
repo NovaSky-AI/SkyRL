@@ -27,7 +27,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.utils.constants import SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
