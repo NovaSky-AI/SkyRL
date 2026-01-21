@@ -62,9 +62,9 @@ def dot_product_attention(
     """
     scale = 1.0 / head_dim**0.5
 
-    assert (attention_mask.sum(axis=1) > 0).all(), (
-        "Each batch element must have at least one valid token in attention_mask"
-    )
+    assert (
+        attention_mask.sum(axis=1) > 0
+    ).all(), "Each batch element must have at least one valid token in attention_mask"
 
     # Decode: use mask-based attention (flash attention provides minimal benefit
     # for single-token queries since attention is already O(seq_len) not O(seq_len^2))
