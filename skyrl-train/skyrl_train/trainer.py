@@ -954,7 +954,7 @@ class RayPPOTrainer:
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]
             )
-            prob_diff = logprobs_diff.exp().abs()
+            prob_diff = logprobs_diff.abs().exp()
             prob_diff_mean = prob_diff.mean().item()
             prob_diff_std = prob_diff.std().item()
             self.all_metrics.update(
