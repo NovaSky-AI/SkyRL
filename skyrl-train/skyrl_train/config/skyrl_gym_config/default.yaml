@@ -14,3 +14,8 @@ search:
   search_url: "http://127.0.0.1:8000/retrieve"
   topk: 3
   timeout: 30
+
+fleet_task:
+  tasks_file: null  # Path to exported Fleet tasks JSON file
+  api_key: null  # Fleet API key (defaults to FLEET_API_KEY env var)
+  ttl_seconds: 600  # TTL for Fleet environment instances
