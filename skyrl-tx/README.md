@@ -83,7 +83,7 @@ import numpy as np
 from tinker import types
 
 # Connect to the local server
-service_client = tinker.ServiceClient(base_url="http://localhost:8000", api_key="dummy")
+service_client = tinker.ServiceClient(base_url="http://localhost:8000", api_key="tml-dummy")
 training_client = service_client.create_lora_training_client(base_model="Qwen/Qwen3-0.6B")
 tokenizer = training_client.get_tokenizer()
 
@@ -98,10 +98,10 @@ def process_example(example, tokenizer):
     prompt = f"English: {example['input']}\nPig Latin:"
     prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
     completion_tokens = tokenizer.encode(f" {example['output']}\n\n", add_special_tokens=False)
-    
+
     tokens = prompt_tokens + completion_tokens
     weights = [0] * len(prompt_tokens) + [1] * len(completion_tokens)
-    
+
     return types.Datum(
         model_input=types.ModelInput.from_ints(tokens=tokens[:-1]),
         loss_fn_inputs=dict(weights=weights[1:], target_tokens=tokens[1:])
@@ -113,7 +113,7 @@ processed = [process_example(ex, tokenizer) for ex in examples]
 for _ in range(6):
     fwdbwd = training_client.forward_backward(processed, "cross_entropy").result()
     training_client.optim_step(types.AdamParams(learning_rate=1e-4)).result()
-    
+
     logprobs = np.concatenate([o['logprobs'].tolist() for o in fwdbwd.loss_fn_outputs])
     weights = np.concatenate([e.loss_fn_inputs['weights'].tolist() for e in processed])
     print(f"Loss: {-np.dot(logprobs, weights) / weights.sum():.4f}")
@@ -145,7 +145,7 @@ uv run --extra gpu --extra tinker -m tx.tinker.api \
     --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 1}'
 
 # Run training (using tinker-cookbook)
-export TINKER_API_KEY="dummy"
+export TINKER_API_KEY="tml-dummy"
 uv run --with wandb --with tinker sl_loop.py \
     base_url=http://localhost:8000 \
     model_name=Qwen/Qwen3-8B lora_rank=1
@@ -160,7 +160,7 @@ uv run --extra gpu --extra tinker -m tx.tinker.api \
     --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 1, "shard_attention_heads": false}'
 
 # Run training (using tinker-cookbook)
-export TINKER_API_KEY="dummy"
+export TINKER_API_KEY="tml-dummy"
 uv run --with wandb --with tinker sl_loop.py \
     base_url=http://localhost:8000 \
     model_name=Qwen/Qwen3-30B-A3B lora_rank=1 max_length=512

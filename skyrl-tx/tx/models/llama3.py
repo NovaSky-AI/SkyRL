@@ -5,6 +5,7 @@ from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
 from tx.layers.lora import LoRAEmbed, LoRALinear
+from tx.layers.logits_processor import LogitsProcessor
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
@@ -267,7 +268,9 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         self.config = config
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
-        if not self.config.tie_word_embeddings:
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.model.embed_tokens.T
+        else:
             self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
@@ -279,6 +282,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
+        self.logits_processor = LogitsProcessor(config)
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
@@ -294,6 +298,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        skip_prompt_logits: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -306,11 +311,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = outputs.last_hidden_state
-        if self.config.tie_word_embeddings:
-            logits = hidden_states @ self.model.embed_tokens.embedding.value.T
-        else:
-            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
+        logits = self.logits_processor(outputs.last_hidden_state, self.lm_head, adapter_indices, skip_prompt_logits)
 
         return CausalLMOutput(
             logits=logits,

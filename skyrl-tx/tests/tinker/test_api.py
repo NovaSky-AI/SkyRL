@@ -26,6 +26,8 @@ TEST_SERVER_PORT_FAST_CLEANUP = 8001
 FAST_CLEANUP_INTERVAL_SEC = 1  # How often to check for stale sessions
 FAST_CLEANUP_TIMEOUT_SEC = 3  # Seconds without heartbeat before session is stale
 
+TINKER_API_KEY = "tml-dummy"
+
 
 def verify_training_client(training_client: tinker.TrainingClient):
     """Verify a training client works with a forward pass."""
@@ -37,7 +39,7 @@ def verify_training_client(training_client: tinker.TrainingClient):
 
 def create_service_and_training_client(base_url: str, skip_verify: bool = False):
     """Create a service client and a training client, verifying it works."""
-    service_client = tinker.ServiceClient(base_url=base_url, api_key="dummy")
+    service_client = tinker.ServiceClient(base_url=base_url, api_key=TINKER_API_KEY)
     training_client = service_client.create_lora_training_client(base_model=BASE_MODEL)
     if not skip_verify:
         verify_training_client(training_client)
@@ -87,7 +89,7 @@ def api_server():
 @pytest.fixture
 def service_client(api_server):
     """Create a service client connected to the test server."""
-    return tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", api_key="dummy")
+    return tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/", api_key=TINKER_API_KEY)
 
 
 def make_datum(tokenizer, prompt: str, completion: str, weight: tuple[float, float] | None = (0.0, 1.0)):
@@ -355,7 +357,7 @@ def test_unload_model(api_server):
 
     async def unload_model():
         async with tinker._client.AsyncTinker(
-            api_key="dummy", base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/"
+            api_key=TINKER_API_KEY, base_url=f"http://0.0.0.0:{TEST_SERVER_PORT}/"
         ) as client:
             future = await client.models.unload(request=types.UnloadModelRequest(model_id=training_client.model_id))
             while True:

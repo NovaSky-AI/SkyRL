@@ -145,6 +145,12 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
         base_out = super().__call__(x)
         return self.apply_lora(x, base_out, adapter_indices)
 
+    @property
+    def T(self):
+        """Return a callable that projects hidden states back to vocabulary space."""
+        # TODO: Apply lora adapters here as well
+        return lambda hidden_states, adapter_indices=None: hidden_states @ self.embedding.value.T
+
 
 class LoRALinear(LoRAMixin, nnx.Linear):
     """An nnx.Linear layer with multi-adapter LoRA support."""
