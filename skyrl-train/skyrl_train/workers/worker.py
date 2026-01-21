@@ -55,7 +55,7 @@ from skyrl_train.utils.ppo_utils import (
     ppo_critic_loss,
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 
 _SET_AFFINITY = False
 
@@ -772,7 +772,7 @@ class PolicyWorkerBase(Worker):
             status["policy_kl"] = kl_loss.item()
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
@@ -799,12 +799,6 @@ class PolicyWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """
@@ -979,7 +973,7 @@ class CriticWorkerBase(Worker):
         }
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
@@ -1006,12 +1000,6 @@ class CriticWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """
