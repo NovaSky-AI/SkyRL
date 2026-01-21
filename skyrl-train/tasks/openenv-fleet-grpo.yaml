@@ -1,5 +1,5 @@
 # Fleet Task GRPO Training via SkyPilot
-# Usage: sky jobs launch tasks/openenv-fleet-grpo.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+# Usage: sky launch tasks/openenv-fleet-grpo.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
 #
 # This task trains GRPO on Fleet-hosted environments using OpenEnv's FleetTaskEnv.
 # It loads tasks from the Fleet API and runs training with verifier-based rewards.
@@ -45,16 +45,8 @@ setup: |
   uv sync --extra vllm
   uv pip install wandb
 
-  # Clone OpenEnv for namespace package access (envs directory)
-  # The envs/ directory is a namespace package without __init__.py,
-  # so we need to add it to PYTHONPATH rather than pip install
-  OPENENV_DIR="$HOME/OpenEnv"
-  if [ ! -d "$OPENENV_DIR" ]; then
-    git clone https://github.com/anthropics/OpenEnv.git "$OPENENV_DIR"
-  fi
-
-  # Install OpenEnv dependencies (fleet extras)
-  uv pip install "openenv[fleet]@git+https://github.com/anthropics/OpenEnv.git"
+  # Install OpenEnv for Fleet environment access
+  uv pip install openenv fleet-python
 
   # Export tasks from Fleet API to JSON
   EXPORT_ARGS="--output $HOME/data/fleet/tasks_${MODALITY}.json --modality $MODALITY"
@@ -86,9 +78,6 @@ run: |
   mkdir -p "$TMP_DIR"
   export TMPDIR="$TMP_DIR"
 
-  # Add OpenEnv's src directory to PYTHONPATH for namespace package access
-  export PYTHONPATH="$HOME/OpenEnv/src:${PYTHONPATH:-}"
-
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
 
@@ -112,9 +101,10 @@ run: |
   TOTAL_GPUS=$SKYPILOT_NUM_GPUS_PER_NODE
 
   # Run GRPO training with Fleet task integration
-  PYTHONPATH="$HOME/OpenEnv/src:${PYTHONPATH:-}" \
   uv run --isolated --extra "$INFERENCE_BACKEND" \
     --with "litellm>=1.75.5" \
+    --with "openenv" \
+    --with "fleet-python" \
     -m integrations.fleet.entrypoints.main_fleet \
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/validation.parquet']" \
