@@ -38,6 +38,7 @@ from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
 from tx.layers.lora import clear_lora_adapter, init_lora_adapter
+from tx.layers.logits_processor import LogitsProcessor
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
@@ -285,46 +286,11 @@ class JaxBackendImpl(AbstractBackend):
             )
 
             if use_chunked:
-                # Chunked cross-entropy: compute lm_head inside the chunk loop
-                # This avoids materializing the full [B*T, V] logits tensor
+                # Chunked cross-entropy using LogitsProcessor
                 hidden_states = forward_out  # [B, T, H]
-                B, T, H = hidden_states.shape
-
-                # Flatten batch and sequence dimensions
-                flat_hidden = hidden_states.reshape(-1, H)  # [B*T, H]
-                flat_target_ids = target_ids.reshape(-1)  # [B*T]
-                total_tokens = B * T
-
-                # Pad to multiple of chunk_size for clean slicing
-                num_chunks = (total_tokens + loss_chunk_size - 1) // loss_chunk_size
-                padded_size = num_chunks * loss_chunk_size
-                pad_amount = padded_size - total_tokens
-
-                if pad_amount > 0:
-                    flat_hidden = jnp.pad(flat_hidden, ((0, pad_amount), (0, 0)))
-                    flat_target_ids = jnp.pad(flat_target_ids, (0, pad_amount))
-
-                # Reshape into chunks: [num_chunks, chunk_size, H] and [num_chunks, chunk_size]
-                chunked_hidden = flat_hidden.reshape(num_chunks, loss_chunk_size, H)
-                chunked_targets = flat_target_ids.reshape(num_chunks, loss_chunk_size)
-
-                def compute_chunk_logprobs(args):
-                    """Compute lm_head and log probabilities for a chunk of tokens."""
-                    chunk_hidden, chunk_targets = args
-                    # Compute logits for this chunk only: [chunk_size, H] @ [H, V] = [chunk_size, V]
-                    chunk_logits = chunk_hidden @ lm_head_weight
-                    # Compute log probabilities
-                    log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
-                    target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
-                    return (target_logits - log_sum_exp).squeeze(-1)
-
-                if gradient_checkpointing:
-                    compute_chunk_logprobs = jax.checkpoint(compute_chunk_logprobs, policy=None)
-
-                # Process chunks sequentially using lax.map (not vmap) to reduce memory
-                all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_hidden, chunked_targets))
-                # Flatten and slice to original size, then reshape to [B, T]
-                target_logprobs = all_logprobs.reshape(-1)[:total_tokens].reshape(B, T)
+                target_logprobs = LogitsProcessor.compute_chunked_logprobs(
+                    hidden_states, lm_head_weight, target_ids, loss_chunk_size, gradient_checkpointing
+                )
             else:
                 # Non-chunked: use pre-computed logits (with LoRA applied to lm_head)
                 logits = forward_out  # [B, T, V]
