@@ -265,10 +265,9 @@ class ServerManager:
         # Clean up old database
         Path(self.config.db_path).unlink(missing_ok=True)
 
-        # Open log file
-        self.log_file = open(self.log_path, "w")
-
         try:
+            # Open log file
+            self.log_file = open(self.log_path, "w")
             # Set environment variables
             env = os.environ.copy()
             env["XLA_PYTHON_CLIENT_PREALLOCATE"] = str(self.config.xla_preallocate).lower()
@@ -292,8 +291,9 @@ class ServerManager:
                 preexec_fn=os.setsid,  # Create new process group for cleanup
             )
         except Exception:
-            self.log_file.close()
-            self.log_file = None
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
             raise
 
     def is_alive(self) -> bool:
