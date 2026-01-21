@@ -9,12 +9,12 @@ name: fleet-task-grpo
 resources:
   accelerators: A100:4
   memory: 64+
+  disk_size: 40  # RunPod limit is 40GB
   ports: 6479
   any_of:
     - cloud: lambda
     - cloud: runpod
     - cloud: vast
-    - cloud: aws  # fallback
 
 num_nodes: 1
 
