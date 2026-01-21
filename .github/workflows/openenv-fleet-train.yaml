@@ -117,12 +117,26 @@ jobs:
 
           LAUNCH_CMD="$LAUNCH_CMD -y"
 
-          # Launch synchronously - waits for job completion
+          # Launch job (this submits to SkyPilot managed jobs)
           eval "$LAUNCH_CMD" 2>&1 | tee /tmp/launch_output.txt
+          LAUNCH_EXIT_CODE=${PIPESTATUS[0]}
 
-          # Extract job ID from output
-          JOB_ID=$(grep -oP 'Job ID: \K\d+' /tmp/launch_output.txt || grep -oP 'Job submitted, ID: \K\d+' /tmp/launch_output.txt || echo "unknown")
+          # Extract job ID from output (try multiple patterns)
+          JOB_ID=$(grep -E "Job ID: [0-9]+" /tmp/launch_output.txt | grep -oE "[0-9]+" | head -1 || true)
+          if [ -z "$JOB_ID" ]; then
+            JOB_ID=$(grep -E "Job submitted.*ID: [0-9]+" /tmp/launch_output.txt | grep -oE "[0-9]+" | head -1 || true)
+          fi
+          if [ -z "$JOB_ID" ]; then
+            JOB_ID=$(grep -E "Managed job launched" /tmp/launch_output.txt | grep -oE "[0-9]+" | head -1 || true)
+          fi
+          JOB_ID=${JOB_ID:-"unknown"}
           echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+
+          # Check if launch succeeded
+          if [ $LAUNCH_EXIT_CODE -ne 0 ]; then
+            echo "Job launch failed with exit code $LAUNCH_EXIT_CODE"
+            exit $LAUNCH_EXIT_CODE
+          fi
 
       - name: Notify Slack - Success
         if: success()
@@ -133,11 +147,11 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "✅ Fleet Task Training Completed Successfully",
+              "text": "🚀 Fleet Training Job Launched",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "✅ Fleet Task Training Completed" }
+                  "text": { "type": "plain_text", "text": "🚀 Fleet Training Job Launched" }
                 },
                 {
                   "type": "section",
@@ -174,11 +188,11 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "❌ Fleet Task Training Failed",
+              "text": "❌ Fleet Training Job Launch Failed",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "❌ Fleet Task Training Failed" }
+                  "text": { "type": "plain_text", "text": "❌ Job Launch Failed" }
                 },
                 {
                   "type": "section",
@@ -203,7 +217,7 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Fleet Task Training - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "## Fleet Training Job Launch - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
