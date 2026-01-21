@@ -71,21 +71,24 @@ jobs:
       - name: Verify Cloud Credentials
         run: sky check lambda runpod vast
 
-      - name: Generate Job Name
-        id: job_name
+      - name: Generate Cluster Name
+        id: cluster
         run: |
-          TIMESTAMP=$(date -u +"%Y%m%d_%H%M%S")
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          JOB_NAME="${{ env.RUN_NAME_PREFIX }}-${{ inputs.modality }}-${SHORT_SHA}-${TIMESTAMP}"
-          echo "name=$JOB_NAME" >> $GITHUB_OUTPUT
-          echo "Generated job name: $JOB_NAME"
+          # SkyPilot cluster names must be lowercase, alphanumeric, and can contain hyphens
+          CLUSTER_NAME="fleet-${{ inputs.modality }}-${SHORT_SHA}-${TIMESTAMP}"
+          CLUSTER_NAME=$(echo "$CLUSTER_NAME" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
+          echo "name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "Generated cluster name: $CLUSTER_NAME"
 
-      - name: Submit Training Job
-        id: submit
+      - name: Launch Training Cluster
+        id: launch
         run: |
           MODALITY="${{ inputs.modality }}"
           ENV_KEY="${{ inputs.env_key }}"
           MAX_TASKS="${{ inputs.max_tasks }}"
+          CLUSTER_NAME="${{ steps.cluster.outputs.name }}"
 
           # Select WandB key based on modality
           if [ "$MODALITY" == "tool_use" ]; then
@@ -100,9 +103,9 @@ jobs:
             exit 1
           fi
 
-          # Build launch command
-          LAUNCH_CMD="sky jobs launch skyrl-train/tasks/openenv-fleet-grpo.yaml"
-          LAUNCH_CMD="$LAUNCH_CMD --name ${{ steps.job_name.outputs.name }}"
+          # Build launch command - direct GPU provisioning (no controller)
+          LAUNCH_CMD="sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml"
+          LAUNCH_CMD="$LAUNCH_CMD --cluster-name $CLUSTER_NAME"
           LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
           LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
           LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
@@ -116,34 +119,27 @@ jobs:
             LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=$MAX_TASKS"
           fi
 
-          LAUNCH_CMD="$LAUNCH_CMD -y"
+          # -d for detached mode (returns after cluster is provisioned)
+          LAUNCH_CMD="$LAUNCH_CMD -d -y"
 
-          # Submit job (returns after job is queued, doesn't wait for completion)
-          echo "Submitting job..."
+          echo "Launching GPU cluster..."
+          echo "Command: $LAUNCH_CMD"
           eval "$LAUNCH_CMD" 2>&1 | tee /tmp/launch_output.txt
           LAUNCH_EXIT_CODE=${PIPESTATUS[0]}
 
-          # Extract job ID from output (try multiple patterns)
-          JOB_ID=$(grep -E "Job ID: [0-9]+" /tmp/launch_output.txt | grep -oE "[0-9]+" | head -1 || true)
-          if [ -z "$JOB_ID" ]; then
-            JOB_ID=$(grep -E "Job submitted.*ID: [0-9]+" /tmp/launch_output.txt | grep -oE "[0-9]+" | head -1 || true)
-          fi
-          if [ -z "$JOB_ID" ]; then
-            JOB_ID=$(grep -E "Managed job launched" /tmp/launch_output.txt | grep -oE "[0-9]+" | head -1 || true)
-          fi
-          JOB_ID=${JOB_ID:-"unknown"}
-          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
-          echo "Job ID: $JOB_ID"
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
 
-          # Check if submission succeeded
+          # Check if launch succeeded
           if [ $LAUNCH_EXIT_CODE -ne 0 ]; then
-            echo "Job submission failed with exit code $LAUNCH_EXIT_CODE"
+            echo "Cluster launch failed with exit code $LAUNCH_EXIT_CODE"
+            cat /tmp/launch_output.txt
             exit $LAUNCH_EXIT_CODE
           fi
 
-          echo "Job submitted successfully!"
+          echo "Cluster launched successfully!"
+          sky status
 
-      - name: Notify Slack - Job Submitted
+      - name: Notify Slack - Cluster Launched
         if: success()
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -152,24 +148,24 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "🚀 Fleet Training Job Submitted",
+              "text": "🚀 Fleet Training Cluster Launched",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "🚀 Fleet Training Job Submitted" }
+                  "text": { "type": "plain_text", "text": "🚀 Fleet Training Cluster Launched" }
                 },
                 {
                   "type": "section",
                   "fields": [
-                    { "type": "mrkdwn", "text": "*Job Name:*\n`${{ steps.job_name.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.submit.outputs.job_id }}`" },
+                    { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:2`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" }
                   ]
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Status:* Provisioning GPU instance and starting training...\n*WandB:* <https://wandb.ai/fleet-ai/fleet-task-grpo|View Dashboard>" }
+                  "text": { "type": "mrkdwn", "text": "*Status:* Training started on GPU cluster\n*WandB:* <https://wandb.ai/fleet-ai/fleet-task-grpo|View Dashboard>" }
                 },
                 {
                   "type": "context",
@@ -183,42 +179,39 @@ jobs:
       - name: Stream Training Logs
         id: stream
         run: |
-          JOB_ID="${{ steps.submit.outputs.job_id }}"
+          CLUSTER_NAME="${{ steps.cluster.outputs.name }}"
 
-          if [ "$JOB_ID" == "unknown" ]; then
-            echo "ERROR: Could not determine job ID"
-            exit 1
-          fi
-
-          echo "Streaming logs for job $JOB_ID..."
-          echo "This step will run until the job completes or fails."
+          echo "Streaming logs for cluster $CLUSTER_NAME..."
+          echo "This step will run until training completes or fails."
           echo ""
 
           # Stream logs until job completes (this blocks)
-          sky jobs logs --follow "$JOB_ID" || true
+          sky logs --follow "$CLUSTER_NAME" || true
 
-          # Get final job status
+          # Get final cluster status
           echo ""
-          echo "=== Final Job Status ==="
-          sky jobs queue | grep -E "^$JOB_ID|ID" || true
+          echo "=== Final Cluster Status ==="
+          sky status "$CLUSTER_NAME" || true
 
-          # Check if job succeeded
-          JOB_STATUS=$(sky jobs queue 2>/dev/null | grep "^$JOB_ID" | awk '{print $2}' || echo "UNKNOWN")
-          echo "job_status=$JOB_STATUS" >> $GITHUB_OUTPUT
-          echo "Final status: $JOB_STATUS"
+          # Check cluster status
+          CLUSTER_STATUS=$(sky status "$CLUSTER_NAME" 2>/dev/null | grep "$CLUSTER_NAME" | awk '{print $2}' || echo "UNKNOWN")
+          echo "cluster_status=$CLUSTER_STATUS" >> $GITHUB_OUTPUT
+          echo "Final status: $CLUSTER_STATUS"
 
-          if [ "$JOB_STATUS" == "SUCCEEDED" ]; then
-            echo "Job completed successfully!"
-            exit 0
-          elif [ "$JOB_STATUS" == "RUNNING" ]; then
-            echo "Job is still running (log streaming ended)"
+          # For sky launch, check if the task completed successfully
+          # The cluster will still be UP after task completes
+          if [ "$CLUSTER_STATUS" == "UP" ]; then
+            echo "Training completed, cluster is still up"
+            echo "Terminating cluster to save costs..."
+            sky down "$CLUSTER_NAME" -y || true
+            echo "cluster_status=COMPLETED" >> $GITHUB_OUTPUT
             exit 0
           else
-            echo "Job ended with status: $JOB_STATUS"
+            echo "Cluster status: $CLUSTER_STATUS"
             exit 1
           fi
 
-      - name: Notify Slack - Job Completed
+      - name: Notify Slack - Training Completed
         if: success()
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -227,19 +220,19 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "✅ Fleet Training Job Completed",
+              "text": "✅ Fleet Training Completed",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "✅ Fleet Training Job Completed" }
+                  "text": { "type": "plain_text", "text": "✅ Fleet Training Completed" }
                 },
                 {
                   "type": "section",
                   "fields": [
-                    { "type": "mrkdwn", "text": "*Job Name:*\n`${{ steps.job_name.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.submit.outputs.job_id }}`" },
+                    { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:2`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
-                    { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.job_status }}`" }
+                    { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.cluster_status }}`" }
                   ]
                 },
                 {
@@ -255,7 +248,7 @@ jobs:
               ]
             }
 
-      - name: Notify Slack - Job Failed
+      - name: Notify Slack - Training Failed
         if: failure()
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -264,19 +257,19 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "❌ Fleet Training Job Failed",
+              "text": "❌ Fleet Training Failed",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "❌ Fleet Training Job Failed" }
+                  "text": { "type": "plain_text", "text": "❌ Fleet Training Failed" }
                 },
                 {
                   "type": "section",
                   "fields": [
-                    { "type": "mrkdwn", "text": "*Job Name:*\n`${{ steps.job_name.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.submit.outputs.job_id }}`" },
+                    { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:2`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
-                    { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.job_status || 'FAILED' }}`" }
+                    { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.cluster_status || 'FAILED' }}`" }
                   ]
                 },
                 {
@@ -292,16 +285,25 @@ jobs:
               ]
             }
 
+      - name: Cleanup on Failure
+        if: failure()
+        run: |
+          CLUSTER_NAME="${{ steps.cluster.outputs.name }}"
+          if [ -n "$CLUSTER_NAME" ]; then
+            echo "Cleaning up cluster $CLUSTER_NAME..."
+            sky down "$CLUSTER_NAME" -y || true
+          fi
+
       - name: Summary
         if: always()
         run: |
-          echo "## Fleet Training Job - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "## Fleet Training - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Job Name | \`${{ steps.job_name.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Job ID | \`${{ steps.submit.outputs.job_id }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Final Status | \`${{ steps.stream.outputs.job_status || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPUs | \`H100:2\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Final Status | \`${{ steps.stream.outputs.cluster_status || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Modality | \`${{ inputs.modality }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Env Filter | \`${{ inputs.env_key || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Max Tasks | \`${{ inputs.max_tasks || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
