@@ -422,6 +422,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         skip_logits: bool = False,
+        skip_prompt_logits: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -439,7 +440,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             # Skip logits computation for chunked cross-entropy (uses lm_head weight directly)
             logits = None
         else:
-            logits = self.logits_processor(outputs.last_hidden_state, self.lm_head, adapter_indices)
+            logits = self.logits_processor(outputs.last_hidden_state, self.lm_head, adapter_indices, skip_prompt_logits)
 
         return CausalLMOutput(
             logits=logits,
