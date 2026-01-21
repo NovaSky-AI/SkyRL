@@ -1,11 +1,11 @@
-"""LogitsProcessor for computing logits from hidden states."""
+"""LogitsProcessor for computing logits and logprobs from hidden states."""
 
 import jax
 import jax.numpy as jnp
 
 
 class LogitsProcessor:
-    """Computes logits from hidden states using lm_head."""
+    """Handles logits and log probability computation from hidden states."""
 
     def __init__(self, config) -> None:
         self.config = config
@@ -17,7 +17,7 @@ class LogitsProcessor:
         adapter_indices: jax.Array | None = None,
         skip_prompt_logits: bool = False,
     ) -> jax.Array:
-        """Compute logits from hidden states.
+        """Compute logits from hidden states (for sampling).
 
         Args:
             hidden_states: Hidden states from the model backbone.
@@ -30,27 +30,57 @@ class LogitsProcessor:
         return lm_head(hidden_states, adapter_indices)
 
     @staticmethod
-    def compute_chunked_logprobs(
+    def compute_logprobs(
+        forward_output: jax.Array,
+        target_ids: jax.Array,
+        lm_head_weight: jax.Array | None = None,
+        chunk_size: int = 0,
+        gradient_checkpointing: bool = False,
+    ) -> jax.Array:
+        """Compute log probabilities from model forward output.
+
+        Supports two modes:
+        - Chunked: forward_output is hidden_states [B, T, H], requires lm_head_weight
+        - Non-chunked: forward_output is logits [B, T, V]
+
+        Args:
+            forward_output: Either hidden_states [B, T, H] (chunked) or logits [B, T, V].
+            target_ids: Target token IDs [B, T].
+            lm_head_weight: LM head weight matrix [H, V] for chunked mode (None for non-chunked).
+            chunk_size: Chunk size for chunked computation (0 or negative = non-chunked).
+            gradient_checkpointing: Whether to checkpoint each chunk (chunked mode only).
+
+        Returns:
+            Log probabilities for target tokens [B, T].
+        """
+        use_chunked = lm_head_weight is not None and chunk_size > 0
+
+        if use_chunked:
+            return LogitsProcessor._compute_chunked_logprobs(
+                forward_output, lm_head_weight, target_ids, chunk_size, gradient_checkpointing
+            )
+        else:
+            return LogitsProcessor._logits_to_logprobs(forward_output, target_ids)
+
+    @staticmethod
+    def _logits_to_logprobs(logits: jax.Array, target_ids: jax.Array) -> jax.Array:
+        """Convert logits to log probabilities for target tokens."""
+        log_sum_exp = jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+        target_logits = jnp.take_along_axis(logits, target_ids[..., None], axis=-1)
+        return (target_logits - log_sum_exp).squeeze(-1)
+
+    @staticmethod
+    def _compute_chunked_logprobs(
         hidden_states: jax.Array,
         lm_head_weight: jax.Array,
         target_ids: jax.Array,
         chunk_size: int,
-        gradient_checkpointing: bool = False,
+        gradient_checkpointing: bool,
     ) -> jax.Array:
         """Compute log probabilities using chunked lm_head computation.
 
         This avoids materializing the full [B*T, V] logits tensor by computing
         lm_head and log probabilities for each chunk sequentially.
-
-        Args:
-            hidden_states: Hidden states from the model backbone [B, T, H].
-            lm_head_weight: Language model head weight matrix [H, V].
-            target_ids: Target token IDs [B, T].
-            chunk_size: Number of tokens to process per chunk.
-            gradient_checkpointing: Whether to checkpoint each chunk for memory savings.
-
-        Returns:
-            Log probabilities for target tokens [B, T].
         """
         B, T, H = hidden_states.shape
         total_tokens = B * T

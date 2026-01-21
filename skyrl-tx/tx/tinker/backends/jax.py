@@ -285,18 +285,13 @@ class JaxBackendImpl(AbstractBackend):
                 self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
             )
 
-            if use_chunked:
-                # Chunked cross-entropy using LogitsProcessor
-                hidden_states = forward_out  # [B, T, H]
-                target_logprobs = LogitsProcessor.compute_chunked_logprobs(
-                    hidden_states, lm_head_weight, target_ids, loss_chunk_size, gradient_checkpointing
-                )
-            else:
-                # Non-chunked: use pre-computed logits (with LoRA applied to lm_head)
-                logits = forward_out  # [B, T, V]
-                log_sum_exp = jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-                target_logits = jnp.take_along_axis(logits, target_ids[..., None], axis=-1)
-                target_logprobs = (target_logits - log_sum_exp).squeeze(-1)
+            target_logprobs = LogitsProcessor.compute_logprobs(
+                forward_out,
+                target_ids,
+                lm_head_weight if use_chunked else None,
+                loss_chunk_size if use_chunked else 0,
+                gradient_checkpointing,
+            )
 
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
                 return jax.lax.switch(
