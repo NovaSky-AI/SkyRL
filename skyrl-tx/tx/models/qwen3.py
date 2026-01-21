@@ -7,7 +7,7 @@ from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.util import prepare_routing, shard_map_ep
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
-from tx.models.attention import dot_product_attention
+from tx.layers.attention import dot_product_attention
 from tx.models.configs import Qwen3Config
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions

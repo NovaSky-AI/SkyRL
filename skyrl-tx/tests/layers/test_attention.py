@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from tx.models.attention import _shift_sequences
+from tx.layers.attention import _shift_sequences
 
 
 class TestShiftSequences:

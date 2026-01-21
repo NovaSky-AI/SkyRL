@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from tx.models.attention import dot_product_attention
+from tx.layers.attention import dot_product_attention
 
 # Skip all tests if not on GPU
 pytestmark = pytest.mark.skipif(jax.default_backend() != "gpu", reason="GPU tests require CUDA")

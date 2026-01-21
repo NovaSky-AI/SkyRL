@@ -7,7 +7,7 @@ from transformers import LlamaConfig
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
-from tx.models.attention import dot_product_attention
+from tx.layers.attention import dot_product_attention
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
