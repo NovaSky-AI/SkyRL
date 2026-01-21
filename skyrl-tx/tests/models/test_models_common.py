@@ -66,21 +66,15 @@ class TestGradientCheckpointing:
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
         config.gradient_checkpointing = False
-        out_no_ckpt = model(
-            input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True
-        )
+        out_no_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True)
 
         config.gradient_checkpointing = True
-        out_ckpt = model(
-            input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True
-        )
+        out_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True)
 
         assert len(out_no_ckpt.hidden_states) == len(out_ckpt.hidden_states)
         assert len(out_ckpt.hidden_states) == config.num_hidden_layers + 1
 
-        for i, (hs_no_ckpt, hs_ckpt) in enumerate(
-            zip(out_no_ckpt.hidden_states, out_ckpt.hidden_states)
-        ):
+        for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(out_no_ckpt.hidden_states, out_ckpt.hidden_states)):
             np.testing.assert_allclose(
                 hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
             )
