@@ -71,6 +71,15 @@ jobs:
       - name: Verify Cloud Credentials
         run: sky check lambda runpod vast
 
+      - name: Configure SkyPilot
+        run: |
+          mkdir -p ~/.sky
+          echo "jobs:" > ~/.sky/config.yaml
+          echo "  controller:" >> ~/.sky/config.yaml
+          echo "    resources:" >> ~/.sky/config.yaml
+          echo "      disk_size: 30" >> ~/.sky/config.yaml
+          cat ~/.sky/config.yaml
+
       - name: Generate Job Name
         id: job_name
         run: |
