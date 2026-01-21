@@ -1,7 +1,10 @@
-# OpenEnv Fleet GRPO Training via SkyPilot
+# Fleet Task GRPO Training via SkyPilot
 # Usage: sky jobs launch tasks/openenv-fleet-grpo.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#
+# This task trains GRPO on Fleet-hosted environments using OpenEnv's FleetTaskEnv.
+# It loads tasks from the Fleet API and runs training with verifier-based rewards.
 
-name: openenv-fleet-grpo
+name: fleet-task-grpo
 
 resources:
   accelerators: A100:4
@@ -16,7 +19,7 @@ resources:
 num_nodes: 1
 
 workdir:
-  url: https://github.com/NovaSky-AI/SkyRL.git
+  url: https://github.com/fleet-ai/SkyRL.git
   ref: main
 
 secrets:
@@ -26,11 +29,16 @@ secrets:
 envs:
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
-  ENV_NAME: "echo_env"
+  # Task selection: env_key to filter (e.g., "github", "booking", "reddit")
+  ENV_KEY: ""
+  # Modality: "tool_use" or "computer_use"
   MODALITY: "tool_use"
-  MAX_TURNS: 1
+  # Training parameters
+  MAX_TURNS: 50
   NUM_EPOCHS: 20
   PR_NUMBER: "0"
+  # Optional: limit number of tasks for testing
+  MAX_TASKS: ""
 
 setup: |
   cd skyrl-train
@@ -38,13 +46,73 @@ setup: |
   source .venv/bin/activate
   uv sync --extra vllm
   uv pip install wandb
-  # Install OpenEnv with Fleet support
-  uv pip install "openenv[fleet]@git+https://github.com/meta-pytorch/OpenEnv.git"
 
-  # Prepare dataset (using Fleet-compatible data prep)
-  uv run integrations/openenv/prepare_dummy_dataset.py \
-    --output_dir ~/data/openenv/${ENV_NAME} \
-    --env_name ${ENV_NAME}
+  # Clone OpenEnv for namespace package access (envs directory)
+  # The envs/ directory is a namespace package without __init__.py,
+  # so we need to add it to PYTHONPATH rather than pip install
+  OPENENV_DIR="$HOME/OpenEnv"
+  if [ ! -d "$OPENENV_DIR" ]; then
+    git clone https://github.com/anthropics/OpenEnv.git "$OPENENV_DIR"
+  fi
+
+  # Install OpenEnv dependencies (fleet extras)
+  uv pip install "openenv[fleet]@git+https://github.com/anthropics/OpenEnv.git"
+
+  # Export tasks from Fleet API to JSON
+  echo "Exporting tasks from Fleet API..."
+  mkdir -p ~/data/fleet
+  python3 << 'EOF'
+import os
+import json
+
+# Try using Fleet SDK first
+try:
+    from fleet import Fleet
+    fleet = Fleet(api_key=os.environ['FLEET_API_KEY'])
+    env_key = os.environ.get('ENV_KEY') or None
+    modality = os.environ.get('MODALITY', 'tool_use')
+
+    print(f'Loading tasks from Fleet API (env_key={env_key})...')
+    tasks = fleet.load_tasks(env_key=env_key)
+    print(f'Loaded {len(tasks)} tasks')
+
+    # Convert to JSON format
+    task_dicts = []
+    for task in tasks:
+        task_dicts.append({
+            "key": task.key,
+            "prompt": task.prompt,
+            "env_id": task.env_id,
+            "version": task.version,
+            "data_id": task.data_id,
+            "data_version": task.data_version,
+            "verifier_func": task.verifier_func,
+            "task_modality": modality,
+        })
+
+    output_file = os.path.expanduser(f'~/data/fleet/tasks_{modality}.json')
+    with open(output_file, 'w') as f:
+        json.dump(task_dicts, f, indent=2)
+    print(f'Exported {len(task_dicts)} tasks to {output_file}')
+
+except ImportError:
+    print("Fleet SDK not available, tasks JSON must be provided separately")
+    exit(1)
+EOF
+
+  # Prepare dataset from exported tasks
+  TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
+  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+
+  PREPARE_ARGS="--tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
+  if [ -n "$ENV_KEY" ]; then
+    PREPARE_ARGS="$PREPARE_ARGS --env-filter $ENV_KEY"
+  fi
+  if [ -n "$MAX_TASKS" ]; then
+    PREPARE_ARGS="$PREPARE_ARGS --max-tasks $MAX_TASKS"
+  fi
+
+  uv run python -m integrations.fleet.prepare_dataset $PREPARE_ARGS
 
 run: |
   set -euo pipefail
@@ -55,7 +123,11 @@ run: |
   mkdir -p "$TMP_DIR"
   export TMPDIR="$TMP_DIR"
 
-  DATA_DIR="$HOME/data/openenv/${ENV_NAME}"
+  # Add OpenEnv's src directory to PYTHONPATH for namespace package access
+  export PYTHONPATH="$HOME/OpenEnv/src:${PYTHONPATH:-}"
+
+  TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
+  DATA_DIR="$HOME/data/fleet/${MODALITY}"
 
   # Login to Weights & Biases
   uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
@@ -76,13 +148,15 @@ run: |
 
   TOTAL_GPUS=$SKYPILOT_NUM_GPUS_PER_NODE
 
-  # Run GRPO training with OpenEnv Fleet integration
+  # Run GRPO training with Fleet task integration
+  PYTHONPATH="$HOME/OpenEnv/src:${PYTHONPATH:-}" \
   uv run --isolated --extra "$INFERENCE_BACKEND" \
-    --with "openenv[fleet]@git+https://github.com/meta-pytorch/OpenEnv.git" \
     --with "litellm>=1.75.5" \
-    -m integrations.openenv.entrypoints.main_openenv \
+    -m integrations.fleet.entrypoints.main_fleet \
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/validation.parquet']" \
+    environment.env_class=fleet_task \
+    environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
     trainer.placement.colocate_all=true \
@@ -102,11 +176,11 @@ run: |
     trainer.micro_train_batch_size_per_gpu=4 \
     trainer.ckpt_interval=10 \
     trainer.max_prompt_length=512 \
-    generator.sampling_params.max_generate_length=1024 \
+    generator.sampling_params.max_generate_length=2048 \
     generator.sampling_params.temperature=0.6 \
     generator.sampling_params.top_p=0.95 \
-    generator.sampling_params.stop='["</action>"]' \
-    generator.eval_sampling_params.stop='["</action>"]' \
+    generator.sampling_params.stop='["</tool_call>", "<done>"]' \
+    generator.eval_sampling_params.stop='["</tool_call>", "<done>"]' \
     trainer.policy.optimizer_config.lr=1.0e-6 \
     trainer.algorithm.use_kl_loss=true \
     generator.max_turns=$MAX_TURNS \
@@ -115,13 +189,12 @@ run: |
     generator.weight_sync_backend=nccl \
     generator.async_engine=true \
     generator.batched=false \
-    environment.env_class=openenv \
-    generator.use_conversation_multi_turn=false \
+    generator.use_conversation_multi_turn=true \
     generator.n_samples_per_prompt=4 \
     generator.gpu_memory_utilization=0.8 \
     trainer.logger="$LOGGER" \
-    trainer.project_name="openenv-fleet" \
-    trainer.run_name="openenv_${MODALITY}_${ENV_NAME}_pr${PR_NUMBER}" \
+    trainer.project_name="fleet-task-grpo" \
+    trainer.run_name="fleet_${MODALITY}_${ENV_KEY:-all}_pr${PR_NUMBER}" \
     trainer.resume_mode=latest \
-    trainer.ckpt_path="$HOME/ckpts/openenv_${ENV_NAME}" \
+    trainer.ckpt_path="$HOME/ckpts/fleet_${MODALITY}" \
     trainer.dump_data_batch=true

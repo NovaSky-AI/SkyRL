@@ -1,4 +1,4 @@
-name: "OpenEnv Fleet Training (SkyPilot)"
+name: "Fleet Task Training (SkyPilot)"
 
 on:
   workflow_dispatch:
@@ -10,10 +10,14 @@ on:
           - tool_use
           - computer_use
         default: tool_use
-      env_name:
-        description: "OpenEnv environment name"
+      env_key:
+        description: "Fleet environment filter (empty=all, or: github, booking, reddit, etc.)"
         type: string
-        default: "echo_env"
+        default: ""
+      max_tasks:
+        description: "Max tasks (empty=all, or number for testing)"
+        type: string
+        default: ""
       cloud:
         description: "Preferred cloud (any = auto-select cheapest)"
         type: choice
@@ -28,7 +32,7 @@ permissions:
   contents: read
 
 env:
-  RUN_NAME_PREFIX: "openenv-fleet"
+  RUN_NAME_PREFIX: "fleet-task"
 
 jobs:
   launch-training:
@@ -80,7 +84,8 @@ jobs:
         id: launch
         run: |
           MODALITY="${{ inputs.modality }}"
-          ENV_NAME="${{ inputs.env_name }}"
+          ENV_KEY="${{ inputs.env_key }}"
+          MAX_TASKS="${{ inputs.max_tasks }}"
 
           # Select WandB key based on modality
           if [ "$MODALITY" == "tool_use" ]; then
@@ -95,14 +100,25 @@ jobs:
             exit 1
           fi
 
+          # Build launch command
+          LAUNCH_CMD="sky jobs launch skyrl-train/tasks/openenv-fleet-grpo.yaml"
+          LAUNCH_CMD="$LAUNCH_CMD --name ${{ steps.job_name.outputs.name }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
+          LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
+
+          if [ -n "$ENV_KEY" ]; then
+            LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=$ENV_KEY"
+          fi
+
+          if [ -n "$MAX_TASKS" ]; then
+            LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=$MAX_TASKS"
+          fi
+
+          LAUNCH_CMD="$LAUNCH_CMD -y"
+
           # Launch synchronously - waits for job completion
-          sky jobs launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
-            --name "${{ steps.job_name.outputs.name }}" \
-            --env WANDB_API_KEY="$WANDB_KEY" \
-            --env FLEET_API_KEY="${{ secrets.FLEET_API_KEY }}" \
-            --env MODALITY="$MODALITY" \
-            --env ENV_NAME="$ENV_NAME" \
-            -y 2>&1 | tee /tmp/launch_output.txt
+          eval "$LAUNCH_CMD" 2>&1 | tee /tmp/launch_output.txt
 
           # Extract job ID from output
           JOB_ID=$(grep -oP 'Job ID: \K\d+' /tmp/launch_output.txt || grep -oP 'Job submitted, ID: \K\d+' /tmp/launch_output.txt || echo "unknown")
@@ -117,11 +133,11 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "✅ OpenEnv Training Completed Successfully",
+              "text": "✅ Fleet Task Training Completed Successfully",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "✅ OpenEnv Training Completed" }
+                  "text": { "type": "plain_text", "text": "✅ Fleet Task Training Completed" }
                 },
                 {
                   "type": "section",
@@ -129,7 +145,7 @@ jobs:
                     { "type": "mrkdwn", "text": "*Job Name:*\n`${{ steps.job_name.outputs.name }}`" },
                     { "type": "mrkdwn", "text": "*Job ID:*\n`${{ steps.launch.outputs.job_id }}`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
-                    { "type": "mrkdwn", "text": "*Environment:*\n`${{ inputs.env_name }}`" }
+                    { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" }
                   ]
                 },
                 {
@@ -138,7 +154,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/fleet-ai/openenv-fleet|View Training Dashboard>" }
+                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/fleet-ai/fleet-task-grpo|View Training Dashboard>" }
                 },
                 {
                   "type": "context",
@@ -158,17 +174,17 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "❌ OpenEnv Training Job Failed",
+              "text": "❌ Fleet Task Training Failed",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "❌ Training Launch Failed" }
+                  "text": { "type": "plain_text", "text": "❌ Fleet Task Training Failed" }
                 },
                 {
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
-                    { "type": "mrkdwn", "text": "*Environment:*\n`${{ inputs.env_name }}`" }
+                    { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" }
                   ]
                 },
                 {
@@ -187,11 +203,12 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "## Training Job ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "## Fleet Task Training - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Job Name | \`${{ steps.job_name.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Job ID | \`${{ steps.launch.outputs.job_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Modality | \`${{ inputs.modality }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | \`${{ inputs.env_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Env Filter | \`${{ inputs.env_key || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Max Tasks | \`${{ inputs.max_tasks || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
