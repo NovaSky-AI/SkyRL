@@ -26,6 +26,7 @@
 
 namespace ffi = xla::ffi;
 
+// Cache device properties because cudaGetDeviceProperties is slow.
 static std::optional<int> get_sm_count() {
   static std::vector<cudaDeviceProp> device_props = [] {
     int num_gpus = 0;
