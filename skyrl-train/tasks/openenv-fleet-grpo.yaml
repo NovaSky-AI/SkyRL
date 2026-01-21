@@ -22,11 +22,10 @@ workdir:
   url: https://github.com/fleet-ai/SkyRL.git
   ref: main
 
-secrets:
-  WANDB_API_KEY: null
-  FLEET_API_KEY: null
-
 envs:
+  # These are passed via --env from GHA workflow
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
   # Task selection: env_key to filter (e.g., "github", "booking", "reddit")
