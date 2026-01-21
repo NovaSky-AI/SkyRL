@@ -566,9 +566,10 @@ def ppo_policy_loss(
     loss_reduction = config.loss_reduction
     assert loss_reduction in [
         "token_mean",
+        "token_sum",
         "sequence_mean",
         "seq_mean_token_sum_norm",
-    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
+    ], "loss_reduction must be one of 'token_mean', 'token_sum', 'sequence_mean', or 'seq_mean_token_sum_norm'"
 
     ratio = _safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     surr1 = ratio * advantages
@@ -881,12 +882,18 @@ def compute_policy_loss_kl_cov(
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm"],
+    loss_reduction: Literal["token_mean", "token_sum", "sequence_mean", "seq_mean_token_sum_norm"],
     max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
         # sum over *all* valid tokens, divide by total valid-token count
         loss = masked_mean(loss, loss_mask)
+    elif loss_reduction == "token_sum":
+        # sum over *all* valid tokens without averaging
+        if loss_mask is not None:
+            loss = (loss * loss_mask).sum()
+        else:
+            loss = loss.sum()
     elif loss_reduction == "sequence_mean":
         # per-sequence token-mean (dim=-1), then batch-mean
         loss = masked_mean(loss, loss_mask, dim=-1).mean()
