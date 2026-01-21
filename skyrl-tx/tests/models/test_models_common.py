@@ -11,7 +11,7 @@ from tx.models.configs import Llama3Config, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.tinker.types import SamplingParams
-from tx.utils.models import load_safetensors
+from tx.utils.models import get_dtype, load_safetensors
 
 
 @pytest.mark.parametrize(
@@ -38,7 +38,7 @@ def test_last_token_logits_only(model_name, config_cls, model_cls, mesh_axes):
         config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
         mesh = jax.make_mesh((1, 1), mesh_axes)
         with jax.set_mesh(mesh):
-            model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+            model = model_cls(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
         # Get full logits
