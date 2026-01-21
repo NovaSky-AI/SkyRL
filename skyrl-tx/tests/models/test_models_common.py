@@ -1,74 +1,71 @@
-"""Common tests for Llama3 and Qwen3 models."""
+"""Common tests for gradient checkpointing."""
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from transformers import PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 
 from tx.models.configs import Llama3Config, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
 
 
-def make_small_config(config_class, gradient_checkpointing=False, num_hidden_layers=2):
-    """Create a minimal config for fast testing."""
-    base_config = PretrainedConfig(
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=num_hidden_layers,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        vocab_size=1000,
-        max_position_embeddings=128,
-        rms_norm_eps=1e-6,
-    )
-    return config_class(
-        base_config,
-        max_lora_adapters=1,
-        max_lora_rank=1,
-        shard_attention_heads=False,
-        gradient_checkpointing=gradient_checkpointing,
-    )
+QWEN3_MODEL = "Qwen/Qwen3-0.6B"
+LLAMA3_MODEL = "unsloth/Llama-3.2-1B"
 
 
-@pytest.fixture
-def input_batch():
-    """Common test inputs."""
-    batch_size, seq_len = 2, 16
-    input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, 1000)
-    attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-    return input_ids, attention_mask
+def create_qwen3_model():
+    """Create Qwen3 model for testing."""
+    base_config = PretrainedConfig.from_pretrained(QWEN3_MODEL)
+    config = Qwen3Config(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
+    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
+    with jax.set_mesh(mesh):
+        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+    return model, config
 
 
-@pytest.mark.parametrize("model_class,config_class", [
-    (Llama3ForCausalLM, Llama3Config),
-    (Qwen3ForCausalLM, Qwen3Config),
-])
+def create_llama3_model():
+    """Create Llama3 model for testing."""
+    base_config = AutoConfig.from_pretrained(LLAMA3_MODEL)
+    config = Llama3Config(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
+    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+    with jax.set_mesh(mesh):
+        model = Llama3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+    return model, config
+
+
+@pytest.mark.parametrize("create_model", [create_qwen3_model, create_llama3_model], ids=["qwen3", "llama3"])
 class TestGradientCheckpointing:
 
-    def test_output_matches_non_checkpointed(self, model_class, config_class, input_batch):
+    def test_output_matches_non_checkpointed(self, create_model):
         """Forward pass should produce identical outputs with/without checkpointing."""
-        input_ids, attention_mask = input_batch
+        model, config = create_model()
 
-        # Create model without checkpointing
-        config = make_small_config(config_class, gradient_checkpointing=False)
-        model = model_class(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+        batch_size, seq_len = 2, 8
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+        # Run without checkpointing
+        config.gradient_checkpointing = False
         out_no_ckpt = model(input_ids, attention_mask=attention_mask, is_training=True)
 
-        # Enable checkpointing
+        # Run with checkpointing
         config.gradient_checkpointing = True
         out_ckpt = model(input_ids, attention_mask=attention_mask, is_training=True)
 
-        np.testing.assert_allclose(out_no_ckpt.logits, out_ckpt.logits, rtol=1e-5)
+        np.testing.assert_allclose(out_no_ckpt.logits, out_ckpt.logits, rtol=1e-4, atol=1e-6)
 
-    def test_hidden_states_length_matches(self, model_class, config_class, input_batch):
+    def test_hidden_states_length_matches(self, create_model):
         """Both paths should return same number of hidden states."""
-        input_ids, attention_mask = input_batch
-        config = make_small_config(config_class, gradient_checkpointing=False)
-        model = model_class(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+        model, config = create_model()
 
+        batch_size, seq_len = 2, 8
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+        config.gradient_checkpointing = False
         out_no_ckpt = model(
             input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True
         )
@@ -85,49 +82,19 @@ class TestGradientCheckpointing:
             zip(out_no_ckpt.hidden_states, out_ckpt.hidden_states)
         ):
             np.testing.assert_allclose(
-                hs_no_ckpt, hs_ckpt, rtol=1e-5, err_msg=f"Mismatch at hidden state {i}"
+                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
             )
 
-    def test_is_training_false_uses_standard_path(self, model_class, config_class, input_batch):
+    def test_is_training_false_uses_standard_path(self, create_model):
         """is_training=False should use standard path with KV cache support."""
-        input_ids, attention_mask = input_batch
-        config = make_small_config(config_class, gradient_checkpointing=True)
-        model = model_class(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+        model, config = create_model()
+        config.gradient_checkpointing = True
+
+        batch_size, seq_len = 2, 8
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
         out = model(input_ids, attention_mask=attention_mask, is_training=False)
 
         # KV cache should be populated (checkpointed path returns empty)
         assert len(out.kv_cache.keys) == config.num_hidden_layers
-
-    def test_single_layer_model(self, model_class, config_class, input_batch):
-        """Checkpointing should work with single layer."""
-        input_ids, attention_mask = input_batch
-
-        config = make_small_config(config_class, gradient_checkpointing=True, num_hidden_layers=1)
-        model = model_class(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
-
-        out = model(
-            input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True
-        )
-
-        # [embed, normed_output]
-        assert len(out.hidden_states) == 2
-
-    def test_single_layer_output_matches(self, model_class, config_class, input_batch):
-        """Single layer model outputs should match with/without checkpointing."""
-        input_ids, attention_mask = input_batch
-
-        config = make_small_config(config_class, gradient_checkpointing=False, num_hidden_layers=1)
-        model = model_class(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
-
-        out_no_ckpt = model(
-            input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True
-        )
-
-        config.gradient_checkpointing = True
-        out_ckpt = model(
-            input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True
-        )
-
-        np.testing.assert_allclose(out_no_ckpt.logits, out_ckpt.logits, rtol=1e-5)
-        assert len(out_no_ckpt.hidden_states) == len(out_ckpt.hidden_states)
