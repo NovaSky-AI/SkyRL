@@ -481,7 +481,9 @@ class BenchmarkRunner:
 
         return len(result.sequences) == batch_size, elapsed
 
-    def _test_forward_backward(self, service_client, server: ServerManager, batch_size: int, seq_len: int) -> tuple[bool, float]:
+    def _test_forward_backward(
+        self, service_client, server: ServerManager, batch_size: int, seq_len: int
+    ) -> tuple[bool, float]:
         """Execute forward-backward test."""
         training_client = service_client.create_lora_training_client(base_model=self.config.base_model)
 
@@ -630,14 +632,16 @@ class ResultsWriter:
         """Append a single result to the CSV file."""
         with open(self.output_path, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                result.mode,
-                result.batch_size,
-                result.seq_len,
-                result.status,
-                result.peak_gpu_mem_mib,
-                f"{result.client_e2e_sec:.2f}" if result.client_e2e_sec else "",
-            ])
+            writer.writerow(
+                [
+                    result.mode,
+                    result.batch_size,
+                    result.seq_len,
+                    result.status,
+                    result.peak_gpu_mem_mib,
+                    f"{result.client_e2e_sec:.2f}" if result.client_e2e_sec else "",
+                ]
+            )
 
 
 class ResultsReporter:
