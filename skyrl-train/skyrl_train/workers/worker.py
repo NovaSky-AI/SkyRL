@@ -789,7 +789,7 @@ class PolicyWorkerBase(Worker):
             The gradient norm (before scaling, after clipping)
         """
         if self._micro_batches_accumulated > 0:
-            if self.cfg.trainer.algorithm.loss_reduction == "token_sum":
+            if self.cfg.trainer.algorithm.loss_reduction in ["token_sum", "token_mean_v2"]:
                 # Scale by the total number of tokens accumulated across all workers.
                 total_tokens_accumulated_tensor = torch.tensor(
                     self._total_tokens_accumulated,
@@ -805,7 +805,10 @@ class PolicyWorkerBase(Worker):
                 # To counteract this, we multiply by the number of workers
                 # to recover the global token loss sum, and divide by the number of tokens
                 # to get the average token loss.
-                scale = self.strategy.world_size / global_tokens_accumulated
+                scale = self.strategy.world_size
+
+                if self.cfg.trainer.algorithm.loss_reduction == "token_mean_v2":
+                    scale /= global_tokens_accumulated
             else:
                 # Scale accumulated gradients by 1/N to get correct average
                 scale = 1.0 / self._micro_batches_accumulated

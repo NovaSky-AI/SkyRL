@@ -566,15 +566,17 @@ def ppo_policy_loss(
     loss_reduction = config.loss_reduction
     assert loss_reduction in [
         "token_mean",
+        "token_mean_v2",
         "token_sum",
         "sequence_mean",
         "seq_mean_token_sum_norm",
-    ], "loss_reduction must be one of 'token_mean', 'token_sum', 'sequence_mean', or 'seq_mean_token_sum_norm'"
+    ], "loss_reduction must be one of 'token_mean', 'token_mean_v2', 'token_sum', 'sequence_mean', or 'seq_mean_token_sum_norm'"
 
     ratio = _safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     surr1 = ratio * advantages
     surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
     loss = -torch.min(surr1, surr2)
+
     clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
     clip_pg_losses1 = loss
     if config.policy_loss_type == "dual_clip":
@@ -882,14 +884,15 @@ def compute_policy_loss_kl_cov(
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "token_sum", "sequence_mean", "seq_mean_token_sum_norm"],
+    loss_reduction: Literal["token_mean", "token_mean_v2", "token_sum", "sequence_mean", "seq_mean_token_sum_norm"],
     max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
         # sum over *all* valid tokens, divide by total valid-token count
         loss = masked_mean(loss, loss_mask)
-    elif loss_reduction == "token_sum":
+    elif loss_reduction == "token_sum" or loss_reduction == "token_mean_v2":
         # sum over *all* valid tokens without averaging
+        # token_mean_v2 will divide the gradient by total number of tokens before optim_step
         if loss_mask is not None:
             loss = (loss * loss_mask).sum()
         else:
