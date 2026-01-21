@@ -321,17 +321,6 @@ class ServerManager:
 
         return False
 
-    @staticmethod
-    def kill_existing_servers() -> None:
-        """Kill any existing server processes."""
-        # Check if any servers are running
-        result = subprocess.run(["pgrep", "-f", "tx.tinker.api"], capture_output=True)
-        if result.returncode == 0:
-            pids = result.stdout.decode().strip().split("\n")
-            print(f"  WARNING: Found existing server(s) (PIDs: {', '.join(pids)}), killing...", file=sys.stderr)
-        subprocess.run(["pkill", "-f", "tx.tinker.api"], capture_output=True)
-        time.sleep(2)
-
     def start_and_wait_ready(self, timeout: float = 120.0, stream_logs: bool = False) -> bool:
         """Start server and wait for it to become ready.
 
@@ -342,7 +331,6 @@ class ServerManager:
         Returns:
             True if server is ready, False if timeout
         """
-        self.kill_existing_servers()
         self.start()
 
         if not stream_logs:
