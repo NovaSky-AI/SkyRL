@@ -581,13 +581,29 @@ class TestChunkedCrossEntropyLoss:
         loss_fn_types = jnp.zeros((batch_size,), dtype=jnp.int32)
         sampling_logprobs = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
         advantages = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
-        return (input_ids, attention_mask, adapter_indices, target_ids,
-                loss_mask, loss_fn_types, sampling_logprobs, advantages)
+        return (
+            input_ids,
+            attention_mask,
+            adapter_indices,
+            target_ids,
+            loss_mask,
+            loss_fn_types,
+            sampling_logprobs,
+            advantages,
+        )
 
     def _run_forward(self, backend: JaxBackend, inputs: tuple):
         """Run forward pass and return losses and logprobs."""
-        (input_ids, attention_mask, adapter_indices, target_ids,
-         loss_mask, loss_fn_types, sampling_logprobs, advantages) = inputs
+        (
+            input_ids,
+            attention_mask,
+            adapter_indices,
+            target_ids,
+            loss_mask,
+            loss_fn_types,
+            sampling_logprobs,
+            advantages,
+        ) = inputs
         _, losses, logprobs = backend._forward(
             backend.accumulated_grads,
             backend.lora_params,
@@ -613,25 +629,31 @@ class TestChunkedCrossEntropyLoss:
 
         assert backend._use_chunked_loss is False
 
-    @pytest.mark.parametrize("chunk_size,expected", [
-        (0, False),    # Disabled
-        (-1, False),   # Disabled
-        (1024, True),  # Enabled
-    ])
+    @pytest.mark.parametrize(
+        "chunk_size,expected",
+        [
+            (0, False),  # Disabled
+            (-1, False),  # Disabled
+            (1024, True),  # Enabled
+        ],
+    )
     def test_use_chunked_loss_config(self, chunk_size, expected):
         """Verify _use_chunked_loss is set correctly based on loss_chunk_size."""
         backend = self._create_backend(loss_chunk_size=chunk_size)
         assert backend._use_chunked_loss is expected
 
-    @pytest.mark.parametrize("batch_size,seq_len,chunk_size", [
-        (2, 16, 8),   # Multiple batches
-        (1, 16, 16),  # Exact multiple (1 chunk)
-        (1, 17, 16),  # One extra token (worst case padding)
-        (1, 8, 16),   # Fewer tokens than chunk size
-        (1, 32, 16),  # Exact 2 chunks
-        (1, 1, 16),   # Single token
-        (1, 31, 16),  # Almost 2 chunks
-    ])
+    @pytest.mark.parametrize(
+        "batch_size,seq_len,chunk_size",
+        [
+            (2, 16, 8),  # Multiple batches
+            (1, 16, 16),  # Exact multiple (1 chunk)
+            (1, 17, 16),  # One extra token (worst case padding)
+            (1, 8, 16),  # Fewer tokens than chunk size
+            (1, 32, 16),  # Exact 2 chunks
+            (1, 1, 16),  # Single token
+            (1, 31, 16),  # Almost 2 chunks
+        ],
+    )
     def test_chunked_vs_nonchunked_logprobs(self, batch_size, seq_len, chunk_size):
         """Verify chunked and non-chunked loss produce identical logprobs."""
         backend_chunked = self._create_backend(loss_chunk_size=chunk_size)

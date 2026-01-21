@@ -209,6 +209,7 @@ class JaxBackendImpl(AbstractBackend):
         # - loss_chunk_size <= 0 (disabled via config)
         # - any model uses train_unembed=True (chunked path doesn't apply LoRA to lm_head)
         self._use_chunked_loss = config.loss_chunk_size > 0
+        logger.info(f"Chunked cross-entropy loss: {self._use_chunked_loss} (chunk_size={config.loss_chunk_size})")
         self._create_loss_and_grad_fn()
 
     def _micro_batch_size(self, total: int) -> int:
@@ -291,7 +292,7 @@ class JaxBackendImpl(AbstractBackend):
 
                 # Flatten batch and sequence dimensions
                 flat_hidden = hidden_states.reshape(-1, H)  # [B*T, H]
-                flat_target_ids = target_ids.reshape(-1)    # [B*T]
+                flat_target_ids = target_ids.reshape(-1)  # [B*T]
                 total_tokens = B * T
 
                 # Pad to multiple of chunk_size for clean slicing
