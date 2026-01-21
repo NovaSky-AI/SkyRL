@@ -79,11 +79,20 @@ class TestFlashAttention:
         expected = mask_based_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
         assert jnp.allclose(result, expected, atol=1e-5)
 
-    def test_mixed_seq_lengths(self):
-        """Batch with varying sequence lengths [128, 96, 64, 32]."""
+    @pytest.mark.parametrize(
+        "seq_lengths",
+        [
+            [128, 96, 64, 32],  # decreasing lengths
+            [32, 64, 96, 128],  # increasing lengths
+            [128, 128, 128, 128],  # all full (no padding)
+            [1, 1, 1, 1],  # minimal valid sequences
+        ],
+    )
+    def test_mixed_seq_lengths(self, seq_lengths):
+        """Batch with varying sequence lengths."""
         batch, seq_len, num_heads, head_dim = 4, 128, 4, 64
         q, k, v = make_qkv(batch, seq_len, num_heads, head_dim)
-        mask, padding = make_left_padded_mask(batch, seq_len, [128, 96, 64, 32])
+        mask, padding = make_left_padded_mask(batch, seq_len, seq_lengths)
 
         result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
         expected = mask_based_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)

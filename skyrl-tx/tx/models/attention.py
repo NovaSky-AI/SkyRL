@@ -5,11 +5,18 @@ import jax.numpy as jnp
 
 
 def _shift_sequences(x: jax.Array, shift_amounts: jax.Array) -> jax.Array:
-    """Shift sequences along axis 1 by per-batch amounts.
+    """Shift sequences along axis 1 by per-batch amounts using cyclic rotation.
+
+    Uses modular arithmetic for index computation, so shifts wrap around:
+    - Positive shift moves content left (elements that fall off the left appear on the right)
+    - Negative shift moves content right (elements that fall off the right appear on the left)
+
+    For converting left-padded [0,0,A,B,C] to right-padded [A,B,C,0,0], use shift=2.
+    The zeros that were padding will cycle to the end.
 
     Args:
         x: Tensor of shape [batch, seq_len, ...]
-        shift_amounts: Per-batch shift amounts [batch]. Positive shifts left (for left -> right pad conversion).
+        shift_amounts: Per-batch shift amounts [batch]. Positive shifts left.
 
     Returns:
         Shifted tensor with same shape as x.
@@ -44,7 +51,9 @@ def dot_product_attention(
         k: Key tensor of shape [batch, kv_len, num_kv_heads, head_dim]
         v: Value tensor of shape [batch, kv_len, num_kv_heads, head_dim]
         attention_mask: Mask of shape [batch, kv_len] where 1 = valid, 0 = masked.
-            Each batch element must have at least one valid token.
+            IMPORTANT: Each batch element must have at least one valid token (non-zero).
+            An all-zero mask row will cause incorrect behavior since argmax returns 0
+            for all-zeros, which would be misinterpreted as "first token is valid".
         is_causal: Whether this is causal (training/prefill) or non-causal (decode)
         head_dim: Dimension of each attention head (for scaling)
 
@@ -52,6 +61,10 @@ def dot_product_attention(
         Attention output of shape [batch, q_len, num_heads, head_dim]
     """
     scale = 1.0 / head_dim**0.5
+
+    assert (attention_mask.sum(axis=1) > 0).all(), (
+        "Each batch element must have at least one valid token in attention_mask"
+    )
 
     # Decode: use mask-based attention (flash attention provides minimal benefit
     # for single-token queries since attention is already O(seq_len) not O(seq_len^2))
