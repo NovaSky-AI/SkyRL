@@ -64,6 +64,7 @@ def dot_product_attention(
 
     # Decode: use mask-based attention (flash attention provides minimal benefit
     # for single-token queries since attention is already O(seq_len) not O(seq_len^2))
+    # TODO(haochen): enable flash attention for TPUs.
     if not is_causal or jax.default_backend() != "gpu":
         return jax.nn.dot_product_attention(
             q, k, v, scale=scale, mask=attention_mask[:, None, None, :].astype(bool), is_causal=is_causal
