@@ -619,15 +619,15 @@ class TestChunkedCrossEntropyLoss:
         )
         return losses, logprobs
 
-    def test_fallback_on_train_unembed(self):
-        """Verify backend switches to non-chunked when train_unembed=True."""
+    def test_train_unembed_enables_lora_on_lm_head(self):
+        """Verify backend enables LoRA on lm_head when train_unembed=True."""
         backend = self._create_backend(loss_chunk_size=1024)
-        assert backend._use_chunked_loss is True
+        assert backend._has_train_unembed is False
 
         lora_config = LoraConfig(rank=8, alpha=16, seed=0, train_unembed=True)
         backend.create_model("model_with_unembed", lora_config)
 
-        assert backend._use_chunked_loss is False
+        assert backend._has_train_unembed is True
 
     @pytest.mark.parametrize(
         "chunk_size,expected",

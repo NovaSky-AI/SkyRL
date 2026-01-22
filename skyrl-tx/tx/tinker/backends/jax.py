@@ -205,10 +205,9 @@ class JaxBackendImpl(AbstractBackend):
         )
 
         # Use chunked cross-entropy by default for memory efficiency.
-        # Falls back to non-chunked when:
-        # - loss_chunk_size <= 0 (disabled via config)
-        # - any model uses train_unembed=True (chunked path doesn't apply LoRA to lm_head)
         self._use_chunked_loss = config.loss_chunk_size > 0
+        # Track if any model uses train_unembed=True (requires LoRA on lm_head)
+        self._has_train_unembed = False
         logger.info(f"Chunked cross-entropy loss: {self._use_chunked_loss} (chunk_size={config.loss_chunk_size})")
         self._create_loss_and_grad_fn()
 
@@ -240,6 +239,7 @@ class JaxBackendImpl(AbstractBackend):
         """Compile and cache the loss function to avoid re-jitting on every call."""
         loss_chunk_size = self.config.loss_chunk_size if self._use_chunked_loss else 0
         gradient_checkpointing = self.config.gradient_checkpointing
+        has_train_unembed = self._has_train_unembed
 
         def _forward_and_logprobs(
             graphdef: nnx.GraphDef,
@@ -257,8 +257,10 @@ class JaxBackendImpl(AbstractBackend):
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
             )
+            # Pass adapter_indices when train_unembed=True to apply LoRA on lm_head
+            lm_head_adapter_indices = adapter_indices if has_train_unembed else None
             return model.compute_logprobs(
-                output.last_hidden_state, target_ids, loss_chunk_size, gradient_checkpointing
+                output.last_hidden_state, target_ids, lm_head_adapter_indices, loss_chunk_size, gradient_checkpointing
             )
 
         if self.config.gradient_checkpointing:
@@ -451,10 +453,10 @@ class JaxBackendImpl(AbstractBackend):
         if not (0 < lora_config.rank <= self.config.max_lora_rank):
             raise ValueError(f"LoRA rank {lora_config.rank} must be between 1 and {self.config.max_lora_rank}")
 
-        # Switch to non-chunked loss if train_unembed=True (chunked doesn't apply LoRA to lm_head)
-        if lora_config.train_unembed and self._use_chunked_loss:
-            logger.info("Switching to non-chunked loss mode (train_unembed=True requires LoRA on lm_head)")
-            self._use_chunked_loss = False
+        # Enable LoRA on lm_head path when train_unembed=True
+        if lora_config.train_unembed and not self._has_train_unembed:
+            logger.info("Enabling LoRA on lm_head (train_unembed=True)")
+            self._has_train_unembed = True
             self._create_loss_and_grad_fn()
 
         # Store model metadata

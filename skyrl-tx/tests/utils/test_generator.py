@@ -15,6 +15,17 @@ class DummyModel(GeneratorMixin, CausalLMBase, nnx.Module):
 
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
+        self._lm_head_weight = jnp.eye(vocab_size, dtype=jnp.float32)
+
+    @property
+    def lm_head(self):
+        """Identity lm_head - hidden_states are already logits."""
+        return lambda hidden_states, adapter_indices=None: hidden_states
+
+    @property
+    def lm_head_weight(self) -> jax.Array:
+        """Identity matrix for dummy model."""
+        return self._lm_head_weight
 
     def __call__(
         self,
@@ -39,14 +50,6 @@ class DummyModel(GeneratorMixin, CausalLMBase, nnx.Module):
             kv_cache = KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1)
 
         return CausalLMOutput(last_hidden_state=hidden_states, kv_cache=kv_cache)
-
-    def compute_logits(self, hidden_states, adapter_indices=None):
-        """In dummy model, hidden_states are already logits."""
-        return hidden_states
-
-    def compute_logprobs(self, hidden_states, target_ids, chunk_size=0, gradient_checkpointing=False):
-        """Compute logprobs from hidden_states (which are already logits in dummy model)."""
-        return self.logits_to_logprobs(hidden_states, target_ids)
 
 
 def make_inputs(batch_size: int, prompt_length: int):

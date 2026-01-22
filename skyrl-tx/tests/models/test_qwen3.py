@@ -272,7 +272,6 @@ def test_qwen3_lora():
             adapter_indices=adapter_indices,
         )
 
-        # Compute logits using model.compute_logits
         logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
 
         # Compare outputs with corresponding adapters
