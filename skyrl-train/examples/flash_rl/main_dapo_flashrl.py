@@ -3,7 +3,6 @@ Main entrypoint for DAPO training with FlashRL.
 """
 
 import ray
-import os
 import hydra
 import torch
 from typing import List
@@ -16,9 +15,8 @@ from skyrl_train.entrypoints.main_base import (
     validate_cfg,
     create_remote_inference_engines_from_config,
 )
+from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.generators.base import GeneratorInterface
-from loguru import logger
 from skyrl_train.generators.base import GeneratorOutput
 
 
@@ -104,53 +102,20 @@ class DAPOExp(BasePPOExp):
     def get_trainer(self, *args, **kwargs):
         return DAPOTrainer(*args, **kwargs)
 
-    def _setup_trainer(self):
-        """Setup and return the trainer.
-
-        Instantiates the trainer and all the associated models for training.
+    def get_inference_client(self) -> InferenceEngineInterface:
+        """Setup and return the inference engine client using FlashRL engines.
 
         Returns:
-            RayPPOTrainer: The trainer.
+            InferenceEngineInterface: The inference engine client.
         """
-        logger.info(self.get_cfg_as_str(self.cfg))
-        os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
-        os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
-
-        if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
-        else:
-            raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
-
-        # NOTE (sumanthrh): Instantiate tracker before trainer init.
-        # We have custom validation before this step to give better error messages.
-        tracker = self.get_tracker()
-
-        tokenizer = self.tokenizer
         if self.cfg.generator.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config_flashrl(
-                self.cfg, self.colocate_pg, tokenizer
+                self.cfg, self.colocate_pg, self.tokenizer
             )
         else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg)
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
 
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
-
-        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
-
-        trainer = self.get_trainer(
-            cfg=self.cfg,
-            tracker=tracker,
-            tokenizer=tokenizer,
-            train_dataset=self.train_dataset,
-            eval_dataset=self.eval_dataset,
-            inference_engine_client=inference_engine_client,
-            generator=generator,
-            colocate_pg=self.colocate_pg,
-        )
-
-        # Build the models
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
-        return trainer
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
 
 @ray.remote(num_cpus=1)
@@ -167,6 +132,9 @@ def main(cfg: DictConfig) -> None:
 
     if not cfg.generator.run_engines_locally:
         raise ValueError("FlashRL only supports colocated training.")
+
+    if cfg.trainer.strategy not in ("fsdp", "fsdp2"):
+        raise ValueError(f"FlashRL only supports fsdp/fsdp2 strategy, got: {cfg.trainer.strategy}")
 
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
