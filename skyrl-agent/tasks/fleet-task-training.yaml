@@ -1,0 +1,168 @@
+# SkyPilot Task for Fleet Task Training with SkyRL-Agent
+#
+# Usage:
+#   sky launch skyrl-agent/tasks/fleet-task-training.yaml \
+#       --env FLEET_API_KEY=<key> \
+#       --env WANDB_API_KEY=<key> \
+#       --env MODALITY=tool_use \
+#       -d -y
+#
+# Environment Variables:
+#   FLEET_API_KEY     - Required: Fleet API key
+#   WANDB_API_KEY     - Required: Weights & Biases API key
+#   MODALITY          - Task modality: tool_use or computer_use (default: tool_use)
+#   ENV_KEY           - Filter tasks by env_key (default: all)
+#   MAX_TASKS         - Limit number of tasks (default: all)
+#   MAX_ITERATIONS    - Max agent iterations per episode (default: 50)
+#   NUM_EPOCHS        - Training epochs (default: 20)
+
+name: fleet-task-training
+
+resources:
+  accelerators: H100:1
+  disk_size: 50
+  cloud: ${CLOUD:-any}
+
+envs:
+  MODALITY: tool_use
+  MAX_ITERATIONS: "50"
+  NUM_EPOCHS: "20"
+
+file_mounts:
+  /workspace:
+    source: .
+    mode: COPY
+
+setup: |
+  set -euxo pipefail
+
+  cd /workspace/skyrl-agent
+
+  # Install uv
+  if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
+
+  # Create virtual environment and install dependencies
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+
+  uv sync
+  uv pip install wandb
+  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
+
+  echo "Setup complete!"
+
+run: |
+  set -euxo pipefail
+
+  cd /workspace/skyrl-agent
+  source .venv/bin/activate
+  export PATH="$HOME/.local/bin:$PATH"
+
+  # Validate required env vars
+  if [ -z "${FLEET_API_KEY:-}" ]; then
+    echo "ERROR: FLEET_API_KEY is required"
+    exit 1
+  fi
+
+  if [ -z "${WANDB_API_KEY:-}" ]; then
+    echo "ERROR: WANDB_API_KEY is required"
+    exit 1
+  fi
+
+  # Configuration
+  MODALITY="${MODALITY:-tool_use}"
+  MAX_ITERATIONS="${MAX_ITERATIONS:-50}"
+  NUM_EPOCHS="${NUM_EPOCHS:-20}"
+  MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
+  TASKS_FILE="${TASKS_FILE:-/workspace/skyrl-agent/data/fleet_booking_sample.json}"
+
+  echo "=== Fleet Task Training ==="
+  echo "Modality: $MODALITY"
+  echo "Model: $MODEL_PATH"
+  echo "Max iterations: $MAX_ITERATIONS"
+  echo "Epochs: $NUM_EPOCHS"
+  echo "Tasks file: $TASKS_FILE"
+  echo ""
+
+  # Login to WandB
+  python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
+
+  # Prepare dataset
+  echo "Preparing dataset..."
+  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+  mkdir -p "$DATA_DIR"
+
+  python3 -c "
+import json
+import pandas as pd
+from pathlib import Path
+
+tasks_file = '$TASKS_FILE'
+output_dir = Path('$DATA_DIR')
+
+with open(tasks_file) as f:
+    tasks = json.load(f)
+
+if isinstance(tasks, dict) and 'tasks' in tasks:
+    tasks = tasks['tasks']
+
+# Convert to dataframe format expected by skyrl-agent
+records = []
+for task in tasks:
+    records.append({
+        'instance': task,
+        'data_source': 'fleet',
+    })
+
+df = pd.DataFrame(records)
+
+# Split 90/10
+train_size = int(len(df) * 0.9)
+train_df = df[:train_size]
+val_df = df[train_size:]
+
+train_df.to_parquet(output_dir / 'train.parquet')
+val_df.to_parquet(output_dir / 'validation.parquet')
+
+print(f'Created {len(train_df)} train and {len(val_df)} validation samples')
+"
+
+  # Start Ray
+  export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+  if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+    ray start --head --disable-usage-stats --port 6479
+  fi
+
+  # Wait for Ray
+  for i in $(seq 1 24); do
+    if ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
+
+  # Run training
+  echo "Starting training..."
+  export TASKS_FILE
+  export FLEET_API_KEY
+  export ENV_KEY="${ENV_KEY:-}"
+  export MAX_TASKS="${MAX_TASKS:-}"
+
+  python -m skyrl_agent.auto \
+    --config examples/run_skyrl/skyrl_fleet.yaml \
+    data.train_data="['${DATA_DIR}/train.parquet']" \
+    data.val_data="['${DATA_DIR}/validation.parquet']" \
+    generator.max_iterations=$MAX_ITERATIONS \
+    trainer.epochs=$NUM_EPOCHS \
+    trainer.policy.model.path="$MODEL_PATH" \
+    trainer.placement.policy_num_gpus_per_node=1 \
+    trainer.placement.ref_num_gpus_per_node=1 \
+    generator.num_inference_engines=1 \
+    trainer.logger=wandb \
+    trainer.project_name=fleet-task-grpo \
+    trainer.run_name="fleet_${MODALITY}_$(date +%Y%m%d_%H%M%S)"
+
+  echo "Training complete!"
