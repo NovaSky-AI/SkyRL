@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 from flax import nnx
 import jax.numpy as jnp
 from tx.models.base import CausalLMBase
@@ -15,7 +17,7 @@ class DummyModel(GeneratorMixin, CausalLMBase, nnx.Module):
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
         # Identity lm_head - hidden_states are already logits
-        CausalLMBase.__init__(self, None, lambda hidden_states, adapter_indices=None: hidden_states)
+        CausalLMBase.__init__(self, MagicMock(), lambda hidden_states, adapter_indices=None: hidden_states)
 
     def __call__(
         self,
