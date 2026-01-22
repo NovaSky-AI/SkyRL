@@ -403,14 +403,6 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
         """Return True if a parameter path corresponds to LoRA weights."""
         return any(name in path for name in ("lora_A", "lora_B"))
 
-    @property
-    def lm_head_weight(self) -> jax.Array:
-        """Returns lm_head weight [H, V] for external matmul (e.g., chunked cross-entropy)."""
-        if self.config.tie_word_embeddings:
-            return self.model.embed_tokens.embedding[...].T
-        else:
-            return self.lm_head.kernel[...]
-
     def __call__(
         self,
         input_ids: jax.Array,
