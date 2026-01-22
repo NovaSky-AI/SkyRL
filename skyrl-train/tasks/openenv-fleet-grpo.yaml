@@ -45,8 +45,8 @@ setup: |
   uv sync --extra vllm
   uv pip install wandb
 
-  # Install OpenEnv for Fleet environment access
-  uv pip install openenv fleet-python
+  # Install OpenEnv for Fleet environment access (from branch with FleetTaskEnv)
+  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
 
   # Use sample dataset (100 booking tasks) committed to repo
   mkdir -p $HOME/data/fleet
