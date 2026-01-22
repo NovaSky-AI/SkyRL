@@ -6,7 +6,7 @@ from jax.sharding import get_abstract_mesh
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.util import prepare_routing, shard_map_ep
 from tx.layers.rotary_embedding import apply_rope
-from tx.models.base import CausalLMBase
+from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.configs import Qwen3Config
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
@@ -377,15 +377,16 @@ class Qwen3Model(nnx.Module):
         )
 
 
-class Qwen3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
+class Qwen3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.config = config
         self.model = Qwen3Model(config, dtype=dtype, rngs=rngs)
 
         if config.tie_word_embeddings:
-            lm_head = self.model.embed_tokens.T
+            self.lm_head = self.model.embed_tokens.T
         else:
-            lm_head = LoRALinear(
+            self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
                 use_bias=False,
@@ -396,7 +397,10 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
-        CausalLMBase.__init__(self, config, lm_head)
+
+    def get_lm_head(self) -> LMHead:
+        """Return the lm_head callable for logits computation."""
+        return self.lm_head
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:

@@ -1,15 +1,11 @@
-from typing import TYPE_CHECKING
-
 from flax import nnx
 import jax
 from jax import numpy as jnp
 
 from tx.utils.models import filter_lora
 from tx.layers.util import Param, prepare_routing, ragged_dot
+from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
-
-if TYPE_CHECKING:
-    from tx.models.base import CausalLMBase
 
 
 class LoRAMixin:
@@ -290,7 +286,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         return base_out + lora_output
 
 
-def init_lora_adapter(model: "CausalLMBase", adapter_index: int, lora_config: LoraConfig):
+def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: LoraConfig):
     """Initialize a LoRA adapter for training.
 
     Initializes the adapter: lora_A with he_uniform, lora_B with zeros,
@@ -344,7 +340,7 @@ def init_lora_adapter(model: "CausalLMBase", adapter_index: int, lora_config: Lo
     nnx.update(model, updated_state)
 
 
-def clear_lora_adapter(model: "CausalLMBase", adapter_index: int):
+def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     """Clear/reset a LoRA adapter, freeing it for reuse.
 
     Sets rank=0, scaling=0, and zeros out lora_A and lora_B for the adapter.

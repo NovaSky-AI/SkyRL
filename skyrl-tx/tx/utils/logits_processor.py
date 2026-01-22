@@ -1,22 +1,23 @@
-"""Base class for causal language models."""
+"""Mixin for logits computation in causal language models."""
 
+from abc import abstractmethod
 from typing import Callable
 
 import jax
 import jax.numpy as jnp
-from transformers import PretrainedConfig
 
 
 # lm_head: (hidden_states, adapter_indices) -> logits
 LMHead = Callable[[jax.Array, jax.Array | None], jax.Array]
 
 
-class CausalLMBase:
-    """Base class providing logits/logprobs computation for causal language models."""
+class LogitsProcessorMixin:
+    """Mixin providing logits/logprobs computation for causal language models."""
 
-    def __init__(self, config: PretrainedConfig, lm_head: LMHead):
-        self.config = config
-        self.lm_head = lm_head
+    @abstractmethod
+    def get_lm_head(self) -> LMHead:
+        """Return the lm_head callable for logits computation."""
+        ...
 
     def compute_logits(
         self,
@@ -32,7 +33,7 @@ class CausalLMBase:
         Returns:
             Logits [B, T, V].
         """
-        return self.lm_head(hidden_states, adapter_indices)
+        return self.get_lm_head()(hidden_states, adapter_indices)
 
     def compute_logprobs(
         self,

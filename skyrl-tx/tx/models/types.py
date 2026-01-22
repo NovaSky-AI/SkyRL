@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Protocol
 
 import jax
+from transformers import PretrainedConfig
 
 from tx.utils.generator import KVCache
+
+
+class ModelForCausalLM(Protocol):
+    config: PretrainedConfig
 
 
 @jax.tree_util.register_dataclass

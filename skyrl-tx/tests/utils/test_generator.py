@@ -1,18 +1,16 @@
-from unittest.mock import MagicMock
-
 from flax import nnx
 import jax.numpy as jnp
-from tx.models.base import CausalLMBase
 from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
 from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch, apply_top_p_batch
+from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
 
-class DummyModel(GeneratorMixin, CausalLMBase, nnx.Module):
+class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
     """Dummy model for testing generator behavior.
 
     In this dummy model, hidden_states directly equal logits (identity transformation).
-    When adapter_indices is provided, it adds the adapter index to logits.
+    When adapter_indices is provided, it scales logits by (1 + adapter_index).
     """
 
     def __init__(self, vocab_size: int = 16):
@@ -25,7 +23,11 @@ class DummyModel(GeneratorMixin, CausalLMBase, nnx.Module):
                 return hidden_states * scale
             return hidden_states
 
-        CausalLMBase.__init__(self, MagicMock(), lm_head)
+        self.lm_head = lm_head
+
+    def get_lm_head(self) -> LMHead:
+        """Return the lm_head callable for logits computation."""
+        return self.lm_head
 
     def __call__(
         self,
