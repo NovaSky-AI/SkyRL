@@ -97,15 +97,15 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
             cfg=cfg,
         )
 
-        # Initialize weight sync state
-        ray.get(policy_group.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-
         # Create WorkerDispatch with handle to inference_engine_client
         dispatch = WorkerDispatch(
             cfg=cfg,
             policy_actor_group=policy_group,
             inference_engine_client=client,
         )
+
+        # Initialize weight sync state
+        dispatch.init_weight_sync_state(client)
 
         # If colocate_all, sleep inference engine to free GPU memory for training
         if colocate_all:
@@ -175,15 +175,15 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, back
             cfg=cfg,
         )
 
-        # Initialize weight sync state
-        ray.get(policy_group.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-
         # Create WorkerDispatch
         dispatch = WorkerDispatch(
             cfg=cfg,
             policy_actor_group=policy_group,
             inference_engine_client=client,
         )
+
+        # Initialize weight sync state
+        dispatch.init_weight_sync_state(client)
 
         # Do multiple training steps WITHOUT syncing
         dp_size = policy_group.actor_infos[0].rank.dp_size
