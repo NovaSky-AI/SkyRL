@@ -31,9 +31,8 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
         """Return the lm_head callable for logits computation."""
         return self.lm_head
 
-    @property
-    def lm_head_weight(self) -> jax.Array:
-        """Identity matrix for dummy model."""
+    def get_lm_head_weight(self) -> jax.Array:
+        """Return identity matrix for dummy model."""
         return self._lm_head_weight
 
     def __call__(

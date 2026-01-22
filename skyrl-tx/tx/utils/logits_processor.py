@@ -6,12 +6,13 @@ from typing import Callable
 import jax
 import jax.numpy as jnp
 
+from tx.models.types import ModelForCausalLM
 
 # lm_head: (hidden_states, adapter_indices) -> logits
 LMHead = Callable[[jax.Array, jax.Array | None], jax.Array]
 
 
-class LogitsProcessorMixin:
+class LogitsProcessorMixin(ModelForCausalLM):
     """Mixin providing logits/logprobs computation for causal language models."""
 
     @abstractmethod
@@ -19,10 +20,9 @@ class LogitsProcessorMixin:
         """Return the lm_head callable for logits computation."""
         ...
 
-    @property
     @abstractmethod
-    def lm_head_weight(self) -> jax.Array:
-        """LM head weight matrix [H, V] for efficient chunked computation."""
+    def get_lm_head_weight(self) -> jax.Array:
+        """Return the lm_head weight matrix [H, V] for efficient chunked computation."""
         ...
 
     def compute_logits(
@@ -46,8 +46,6 @@ class LogitsProcessorMixin:
         hidden_states: jax.Array,
         target_ids: jax.Array,
         adapter_indices: jax.Array | None = None,
-        chunk_size: int = 0,
-        gradient_checkpointing: bool = False,
     ) -> jax.Array:
         """Compute logprobs from hidden states. For training and prompt logprobs.
 
@@ -56,17 +54,16 @@ class LogitsProcessorMixin:
             target_ids: Target token IDs [B, T].
             adapter_indices: Adapter indices for LoRA on lm_head.
                 Pass when train_unembed=True. Forces non-chunked path.
-            chunk_size: Chunk size for chunked computation (0 = non-chunked).
-            gradient_checkpointing: Whether to checkpoint each chunk.
 
         Returns:
             Log probabilities for target tokens [B, T].
         """
+        chunk_size = self.config.loss_chunk_size
         # Chunked path doesn't support LoRA on lm_head
         use_chunk = chunk_size > 0 and adapter_indices is None
         if use_chunk:
             return self._compute_chunked_logprobs(
-                hidden_states, target_ids, chunk_size, gradient_checkpointing
+                hidden_states, target_ids, chunk_size
             )
         else:
             logits = self.compute_logits(hidden_states, adapter_indices)
@@ -92,7 +89,6 @@ class LogitsProcessorMixin:
         hidden_states: jax.Array,
         target_ids: jax.Array,
         chunk_size: int,
-        gradient_checkpointing: bool,
     ) -> jax.Array:
         """Compute log probabilities using chunked lm_head computation.
 
@@ -101,7 +97,7 @@ class LogitsProcessorMixin:
         """
         B, T, H = hidden_states.shape
         total_tokens = B * T
-        lm_head_weight = self.lm_head_weight
+        lm_head_weight = self.get_lm_head_weight()
 
         # Flatten batch and sequence dimensions
         flat_hidden = hidden_states.reshape(-1, H)  # [B*T, H]
@@ -130,7 +126,7 @@ class LogitsProcessorMixin:
             target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
             return (target_logits - log_sum_exp).squeeze(-1)
 
-        if gradient_checkpointing:
+        if self.config.gradient_checkpointing:
             compute_chunk_logprobs = jax.checkpoint(compute_chunk_logprobs, policy=None)
 
         # Process chunks sequentially using lax.map (not vmap) to reduce memory

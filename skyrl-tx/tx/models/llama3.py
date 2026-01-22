@@ -287,18 +287,17 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
         """Return the lm_head callable for logits computation."""
         return self.lm_head
 
-    @staticmethod
-    def is_lora_param(path: tuple, _value) -> bool:
-        """Return True if a parameter path corresponds to LoRA weights."""
-        return any(name in path for name in ("lora_A", "lora_B"))
-
-    @property
-    def lm_head_weight(self) -> jax.Array:
-        """Returns lm_head weight [H, V] for external matmul (e.g., chunked cross-entropy)."""
+    def get_lm_head_weight(self) -> jax.Array:
+        """Return the lm_head weight [H, V] for chunked cross-entropy."""
         if self.config.tie_word_embeddings:
             return self.model.embed_tokens.embedding[...].T
         else:
             return self.lm_head.kernel[...]
+
+    @staticmethod
+    def is_lora_param(path: tuple, _value) -> bool:
+        """Return True if a parameter path corresponds to LoRA weights."""
+        return any(name in path for name in ("lora_A", "lora_B"))
 
     def __call__(
         self,
