@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -15,6 +17,7 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
     """
 
     def __init__(self, vocab_size: int = 16):
+        self.config = MagicMock(loss_chunk_size=0, gradient_checkpointing=False)
         self.vocab_size = vocab_size
         self._lm_head_weight = jnp.eye(vocab_size, dtype=jnp.float32)
 

@@ -167,6 +167,8 @@ class JaxBackendImpl(AbstractBackend):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             shard_attention_heads=config.shard_attention_heads,
+            loss_chunk_size=config.loss_chunk_size,
+            gradient_checkpointing=config.gradient_checkpointing,
         )
 
         model_class = get_model_class(self.model_config)
@@ -234,9 +236,6 @@ class JaxBackendImpl(AbstractBackend):
 
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
-        loss_chunk_size = self.config.loss_chunk_size
-        gradient_checkpointing = self.config.gradient_checkpointing
-
         def _forward_and_logprobs(
             graphdef: nnx.GraphDef,
             lora_params: nnx.State,
@@ -257,9 +256,7 @@ class JaxBackendImpl(AbstractBackend):
             # Check at runtime if any adapter in batch needs LoRA on lm_head
             needs_lm_head_lora = train_unembed_mask[adapter_indices].any()
             def logprobs(lm_head_adapter_indices):
-                return model.compute_logprobs(
-                    output.last_hidden_state, target_ids, lm_head_adapter_indices, loss_chunk_size, gradient_checkpointing
-                )
+                return model.compute_logprobs(output.last_hidden_state, target_ids, lm_head_adapter_indices)
             return jax.lax.cond(needs_lm_head_lora, lambda: logprobs(adapter_indices), lambda: logprobs(None))
 
         if self.config.gradient_checkpointing:
