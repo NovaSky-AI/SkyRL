@@ -265,7 +265,13 @@ class JaxBackendImpl(AbstractBackend):
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             target_logprobs = _forward_and_logprobs(
-                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids,
+                self.graphdef,
+                lora_params,
+                non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
             )
 
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
