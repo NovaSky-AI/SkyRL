@@ -214,12 +214,17 @@ class GeneratorMixin:
             )
             return next_state, (next_token, sampled_logprob)
 
+        # For left-aligned sequences, find the last real token position for each sequence
+        last_token_idx = attention_mask.sum(axis=1) - 1  # Shape: [B]
+        batch_idx = jnp.arange(input_ids.shape[0])
+        last_logits = outputs.logits[batch_idx, last_token_idx, :]  # Shape: [B, vocab_size]
+
         initial_state = DecodeState(
             kv_cache=kv_cache,
             rngs=rngs,
             attention_mask=decode_attention_mask,
-            last_positions=positions[:, -1:],
-            logits=outputs.logits[:, -1, :],
+            last_positions=last_token_idx[:, None],
+            logits=last_logits,
             stop_pos=jnp.full((input_ids.shape[0],), -1),
         )
 
