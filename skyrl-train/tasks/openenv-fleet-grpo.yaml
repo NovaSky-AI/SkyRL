@@ -48,26 +48,18 @@ setup: |
   # Install OpenEnv for Fleet environment access
   uv pip install openenv fleet-python
 
-  # Export tasks from Fleet API to JSON
-  EXPORT_ARGS="--output $HOME/data/fleet/tasks_${MODALITY}.json --modality $MODALITY"
-  if [ -n "$ENV_KEY" ]; then
-    EXPORT_ARGS="$EXPORT_ARGS --env-key $ENV_KEY"
-  fi
-  uv run python -m integrations.fleet.export_tasks $EXPORT_ARGS
-
-  # Prepare dataset from exported tasks
+  # Use sample dataset (100 booking tasks) committed to repo
+  mkdir -p $HOME/data/fleet
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
+  cp data/fleet_booking_sample.json "$TASKS_FILE"
+  echo "Using sample dataset: 100 booking tasks"
+
+  # Prepare dataset from sample tasks
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
-
-  PREPARE_ARGS="--tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
-  if [ -n "$ENV_KEY" ]; then
-    PREPARE_ARGS="$PREPARE_ARGS --env-filter $ENV_KEY"
-  fi
-  if [ -n "$MAX_TASKS" ]; then
-    PREPARE_ARGS="$PREPARE_ARGS --max-tasks $MAX_TASKS"
-  fi
-
-  uv run python -m integrations.fleet.prepare_dataset $PREPARE_ARGS
+  uv run python -m integrations.fleet.prepare_dataset \
+    --tasks-json "$TASKS_FILE" \
+    --output-dir "$DATA_DIR" \
+    --modality "$MODALITY"
 
 run: |
   set -euo pipefail
