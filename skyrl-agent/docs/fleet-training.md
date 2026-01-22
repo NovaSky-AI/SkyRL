@@ -72,7 +72,7 @@ mkdir -p ~/.lambda_cloud
 echo "api_key = YOUR_LAMBDA_KEY" > ~/.lambda_cloud/lambda_keys
 
 # Launch training
-sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
+sky launch skyrl-agent/tasks/fleet-task-training.yaml \
     --env FLEET_API_KEY=$FLEET_API_KEY \
     --env WANDB_API_KEY=$WANDB_API_KEY \
     --env MODALITY=tool_use \
@@ -83,7 +83,7 @@ sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
 
 ### SkyPilot Task YAML
 
-The main configuration is in `skyrl-train/tasks/openenv-fleet-grpo.yaml`:
+The main configuration is in `skyrl-agent/tasks/fleet-task-training.yaml`:
 
 ```yaml
 resources:
@@ -192,7 +192,7 @@ sky down <cluster-name> -y
                       │ runs
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              skyrl-train/tasks/openenv-fleet-grpo.yaml     │
+│              skyrl-agent/tasks/fleet-task-training.yaml    │
 │                                                             │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    │
 │  │   Setup     │───▶│  Prepare    │───▶│    Train    │    │
@@ -220,6 +220,7 @@ sky down <cluster-name> -y
 | File | Purpose |
 |------|---------|
 | `.github/workflows/openenv-fleet-train.yaml` | GitHub Actions workflow |
+| `skyrl-agent/tasks/fleet-task-training.yaml` | SkyPilot task for GPU provisioning |
 | `skyrl-agent/examples/run_skyrl/skyrl_fleet.yaml` | Training configuration |
 | `skyrl-agent/examples/run_skyrl/run_fleet.sh` | Training launch script |
 | `skyrl-agent/skyrl_agent/tasks/fleet/fleet_task.py` | Fleet task implementation |
