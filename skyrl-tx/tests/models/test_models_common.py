@@ -22,8 +22,8 @@ from tx.utils.models import get_dtype, load_safetensors
     ],
     ids=["llama3", "qwen3"],
 )
-def test_logits_processor(model_name, config_cls, model_cls, mesh_axes):
-    """Test that LogitsProcessor computes correct logits and logprobs."""
+def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
+    """Test that model.compute_logits computes correct logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
