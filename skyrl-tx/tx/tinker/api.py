@@ -101,7 +101,9 @@ async def lifespan(app: FastAPI):
     try:
         await asyncio.wait_for(app.state.background_engine.wait(), timeout=5)
     except asyncio.TimeoutError:
-        logger.warning(f"Background engine (PID {app.state.background_engine.pid}) did not terminate gracefully, killing")
+        logger.warning(
+            f"Background engine (PID {app.state.background_engine.pid}) did not terminate gracefully, killing"
+        )
         app.state.background_engine.kill()
         await app.state.background_engine.wait()
     logger.info("Background engine stopped")
