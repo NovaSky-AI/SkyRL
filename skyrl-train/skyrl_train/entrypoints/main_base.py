@@ -257,13 +257,14 @@ class BasePPOExp:
         Returns:
             InferenceEngineInterface: The inference engine client.
         """
-        tokenizer = self.tokenizer
         if self.cfg.generator.run_engines_locally:
-            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
+            inference_engines = create_ray_wrapped_inference_engines_from_config(
+                self.cfg, self.colocate_pg, self.tokenizer
+            )
         else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
 
-        return InferenceEngineClient(inference_engines, tokenizer, self.cfg)
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
     def _setup_trainer(self):
         """Setup and return the trainer.
