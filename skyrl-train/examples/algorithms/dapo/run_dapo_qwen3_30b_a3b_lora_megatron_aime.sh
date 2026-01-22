@@ -41,7 +41,7 @@ MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
-LR=3e-5
+LR=1e-5
 
 # megatron config
 MEGATRON_TP=4
