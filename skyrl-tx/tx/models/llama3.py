@@ -311,7 +311,9 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        logits = self.logits_processor(outputs.last_hidden_state, self.lm_head, adapter_indices, skip_prompt_logits)
+        logits = self.logits_processor(
+            outputs.last_hidden_state, self.lm_head, attention_mask, adapter_indices, skip_prompt_logits
+        )
 
         return CausalLMOutput(
             logits=logits,

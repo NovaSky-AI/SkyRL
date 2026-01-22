@@ -24,7 +24,7 @@ from tx.utils.models import get_dtype, load_safetensors
 )
 def test_skip_prompt_logits(model_name, config_cls, model_cls, mesh_axes):
     """Test that skip_prompt_logits returns correct shape and values."""
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="right")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
     inputs = ["The capital of France is", "Hello world"]
@@ -55,8 +55,10 @@ def test_skip_prompt_logits(model_name, config_cls, model_cls, mesh_axes):
             config.vocab_size,
         ), f"Expected shape ({batch_size}, 1, {config.vocab_size}), got {outputs_last.logits.shape}"
 
-        # Last token logits should match
-        assert np.allclose(outputs_full.logits[:, -1:, :], outputs_last.logits, rtol=1e-5, atol=1e-5)
+        # Last token logits should match (use attention_mask to find last real token per sequence)
+        last_idx = batch.attention_mask.numpy().sum(axis=1) - 1
+        expected = outputs_full.logits[np.arange(batch_size), last_idx]
+        assert np.allclose(expected[:, None, :], outputs_last.logits, rtol=1e-5, atol=1e-5)
 
         # Test generation equivalence with and without prompt_logprobs
         input_ids = jnp.array(batch.input_ids.numpy())
