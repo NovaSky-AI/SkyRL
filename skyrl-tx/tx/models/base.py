@@ -1,18 +1,21 @@
 """Base class for causal language models."""
 
 from abc import abstractmethod
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
 from transformers import PretrainedConfig
 
-from tx.layers.lora import LoRALinear
+
+# lm_head: (hidden_states, adapter_indices) -> logits
+LMHead = Callable[[jax.Array, jax.Array | None], jax.Array]
 
 
 class CausalLMBase:
     """Base class providing logits/logprobs computation for causal language models."""
 
-    def __init__(self, config: PretrainedConfig, lm_head: LoRALinear):
+    def __init__(self, config: PretrainedConfig, lm_head: LMHead):
         self.config = config
         self.lm_head = lm_head
 
