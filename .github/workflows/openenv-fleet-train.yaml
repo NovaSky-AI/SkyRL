@@ -104,7 +104,7 @@ jobs:
           fi
 
           # Build launch command - direct GPU provisioning (no controller)
-          LAUNCH_CMD="sky launch skyrl-agent/tasks/fleet-task-training.yaml"
+          LAUNCH_CMD="sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml"
           LAUNCH_CMD="$LAUNCH_CMD --cluster $CLUSTER_NAME"
           LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
           LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
