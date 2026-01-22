@@ -92,43 +92,11 @@ run: |
 
   # Prepare dataset
   echo "Preparing dataset..."
-  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+  export DATA_DIR="$HOME/data/fleet/${MODALITY}"
+  export TASKS_FILE
   mkdir -p "$DATA_DIR"
 
-  python3 -c "
-import json
-import pandas as pd
-from pathlib import Path
-
-tasks_file = '$TASKS_FILE'
-output_dir = Path('$DATA_DIR')
-
-with open(tasks_file) as f:
-    tasks = json.load(f)
-
-if isinstance(tasks, dict) and 'tasks' in tasks:
-    tasks = tasks['tasks']
-
-# Convert to dataframe format expected by skyrl-agent
-records = []
-for task in tasks:
-    records.append({
-        'instance': task,
-        'data_source': 'fleet',
-    })
-
-df = pd.DataFrame(records)
-
-# Split 90/10
-train_size = int(len(df) * 0.9)
-train_df = df[:train_size]
-val_df = df[train_size:]
-
-train_df.to_parquet(output_dir / 'train.parquet')
-val_df.to_parquet(output_dir / 'validation.parquet')
-
-print(f'Created {len(train_df)} train and {len(val_df)} validation samples')
-"
+  python3 /workspace/skyrl-agent/scripts/prepare_fleet_dataset.py
 
   # Start Ray
   export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook

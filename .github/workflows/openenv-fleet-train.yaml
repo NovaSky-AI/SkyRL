@@ -147,7 +147,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
+              "channel": "#fleet-training-runs-test",
               "text": "🚀 Fleet Training Run Started",
               "blocks": [
                 {
@@ -219,7 +219,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
+              "channel": "#fleet-training-runs-test",
               "text": "✅ Fleet Training Completed",
               "blocks": [
                 {
@@ -256,7 +256,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
+              "channel": "#fleet-training-runs-test",
               "text": "❌ Fleet Training Failed",
               "blocks": [
                 {

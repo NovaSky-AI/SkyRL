@@ -234,3 +234,36 @@ class TestFleetTaskInitializeRuntime:
         with patch.dict("sys.modules", {"envs.fleet_env": None}):
             # This should fail at import
             pass  # Can't easily test import errors with patch
+
+
+class TestYAMLValidation:
+    """Test that all YAML config files are valid."""
+
+    def test_skypilot_task_yaml_is_valid(self):
+        """Test that the SkyPilot task YAML is valid."""
+        import yaml
+        from pathlib import Path
+
+        yaml_path = Path(__file__).parent.parent / "tasks" / "fleet-task-training.yaml"
+        if yaml_path.exists():
+            with open(yaml_path) as f:
+                # This will raise if YAML is invalid
+                config = yaml.safe_load(f)
+
+            # Verify required fields exist
+            assert "name" in config
+            assert "resources" in config
+            assert "setup" in config or "run" in config
+
+    def test_skyrl_fleet_yaml_is_valid(self):
+        """Test that the SkyRL Fleet config YAML is valid."""
+        import yaml
+        from pathlib import Path
+
+        yaml_path = Path(__file__).parent.parent / "examples" / "run_skyrl" / "skyrl_fleet.yaml"
+        if yaml_path.exists():
+            with open(yaml_path) as f:
+                # This will raise if YAML is invalid
+                config = yaml.safe_load(f)
+
+            assert config is not None
