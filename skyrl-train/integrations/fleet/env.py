@@ -21,7 +21,7 @@ except ImportError as e:
 
 # Import OpenEnv's FleetTaskEnv
 try:
-    from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
+    from openenv import FleetTaskEnv as OpenEnvFleetTaskEnv
 except ImportError as e:
     raise ImportError(
         "OpenEnv is required for Fleet integration. Install with: pip install openenv\n"
