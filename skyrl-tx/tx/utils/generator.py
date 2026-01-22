@@ -148,15 +148,15 @@ class GeneratorMixin:
             adapter_indices=adapter_indices,
         )
 
-        # Compute logits for last position (needed for sampling first token)
-        last_logits = model.compute_logits(outputs.last_hidden_state[:, -1:, :], adapter_indices)[:, 0, :]
-
-        # Compute prompt logprobs if requested
+        # Compute logits for sampling and optionally for prompt logprobs
         if prompt_logprobs:
-            prompt_logprobs_array = model.compute_logprobs(
-                outputs.last_hidden_state[:, :-1, :], input_ids[:, 1:], adapter_indices
-            )
+            # Compute all logits for prompt logprobs and sampling the first token
+            all_logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
+            last_logits = all_logits[:, -1, :]
+            prompt_logprobs_array = model.logits_to_logprobs(all_logits[:, :-1, :], input_ids[:, 1:])
         else:
+            # Only compute logits for the last position for sampling
+            last_logits = model.compute_logits(outputs.last_hidden_state[:, -1:, :], adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
         # Pad KV cache and attention mask

@@ -229,7 +229,7 @@ class JaxBackendImpl(AbstractBackend):
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
 
-        def _forward_and_logprobs(
+        def _model_forward(
             graphdef: nnx.GraphDef,
             lora_params: nnx.State,
             non_lora_params: nnx.State,
@@ -248,9 +248,9 @@ class JaxBackendImpl(AbstractBackend):
             return model.compute_logprobs(output.last_hidden_state, target_ids, adapter_indices)
 
         if self.config.gradient_checkpointing:
-            # Wrap the forward + logprobs call to use jax.checkpoint for gradient checkpointing
+            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
             # policy=None corresponds to full activation recomputation
-            _forward_and_logprobs = jax.checkpoint(_forward_and_logprobs, policy=None)
+            _model_forward = jax.checkpoint(_model_forward, policy=None)
 
         def loss_for_lora(
             lora_params: nnx.State,
@@ -264,7 +264,7 @@ class JaxBackendImpl(AbstractBackend):
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            target_logprobs = _forward_and_logprobs(
+            target_logprobs = _model_forward(
                 self.graphdef,
                 lora_params,
                 non_lora_params,
