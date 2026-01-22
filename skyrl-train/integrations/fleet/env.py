@@ -19,13 +19,13 @@ try:
 except ImportError as e:
     raise ImportError("skyrl_gym is required. Make sure you're running within the SkyRL environment.") from e
 
-# Import OpenEnv's FleetTaskEnv
+# Import OpenEnv's FleetTaskEnv (from deniz/fleet_client branch)
 try:
-    from openenv import FleetTaskEnv as OpenEnvFleetTaskEnv
+    from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
 except ImportError as e:
     raise ImportError(
-        "OpenEnv is required for Fleet integration. Install with: pip install openenv\n"
-        "Or clone from: https://github.com/fleet-ai/OpenEnv"
+        "OpenEnv is required for Fleet integration. Install from git:\n"
+        "pip install git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
     ) from e
 
 
