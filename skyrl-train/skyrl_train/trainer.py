@@ -947,7 +947,7 @@ class RayPPOTrainer:
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
-        if self.cfg.generator.sampling_params.logprobs is not None:
+        if training_input.get("rollout_logprobs", None) is not None:
             # calculates the difference in probs between inference and trainer components
             # only consider response tokens
             logprobs_diff = (
