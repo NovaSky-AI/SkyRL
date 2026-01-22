@@ -619,29 +619,6 @@ class TestChunkedCrossEntropyLoss:
         )
         return losses, logprobs
 
-    def test_train_unembed_enables_lora_on_lm_head(self):
-        """Verify backend enables LoRA on lm_head when train_unembed=True."""
-        backend = self._create_backend(loss_chunk_size=1024)
-        assert backend._has_train_unembed is False
-
-        lora_config = LoraConfig(rank=8, alpha=16, seed=0, train_unembed=True)
-        backend.create_model("model_with_unembed", lora_config)
-
-        assert backend._has_train_unembed is True
-
-    @pytest.mark.parametrize(
-        "chunk_size,expected",
-        [
-            (0, False),  # Disabled
-            (-1, False),  # Disabled
-            (1024, True),  # Enabled
-        ],
-    )
-    def test_use_chunked_loss_config(self, chunk_size, expected):
-        """Verify _use_chunked_loss is set correctly based on loss_chunk_size."""
-        backend = self._create_backend(loss_chunk_size=chunk_size)
-        assert backend._use_chunked_loss is expected
-
     @pytest.mark.parametrize(
         "batch_size,seq_len,chunk_size",
         [
@@ -659,8 +636,8 @@ class TestChunkedCrossEntropyLoss:
         backend_chunked = self._create_backend(loss_chunk_size=chunk_size)
         backend_nonchunked = self._create_backend(loss_chunk_size=0)
 
-        assert backend_chunked._use_chunked_loss is True
-        assert backend_nonchunked._use_chunked_loss is False
+        assert backend_chunked.config.loss_chunk_size > 0
+        assert backend_nonchunked.config.loss_chunk_size == 0
 
         inputs = self._create_inputs(backend_chunked, batch_size, seq_len)
         losses_chunked, logprobs_chunked = self._run_forward(backend_chunked, inputs)
@@ -679,4 +656,63 @@ class TestChunkedCrossEntropyLoss:
             rtol=1e-4,
             atol=1e-4,
             err_msg=f"Losses mismatch for batch_size={batch_size}, seq_len={seq_len}, chunk_size={chunk_size}",
+        )
+
+    def test_mixed_train_unembed_adapters(self):
+        """Test that chunked and non-chunked paths produce same results with mixed adapters."""
+        backend_chunked = self._create_backend(loss_chunk_size=1024)
+        backend_nonchunked = self._create_backend(loss_chunk_size=0)
+
+        # Create same models on both backends
+        for backend in [backend_chunked, backend_nonchunked]:
+            backend.create_model("model_normal", LoraConfig(rank=8, alpha=16, seed=0, train_unembed=False))
+            backend.create_model("model_unembed", LoraConfig(rank=8, alpha=16, seed=1, train_unembed=True))
+
+        normal_idx = backend_chunked.models["model_normal"].adapter_index
+        unembed_idx = backend_chunked.models["model_unembed"].adapter_index
+
+        batch_size, seq_len = 2, 16
+        vocab = backend_chunked.model.config.vocab_size
+        input_ids = jnp.arange(batch_size * seq_len, dtype=jnp.int32).reshape(batch_size, seq_len) % vocab
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+        target_ids = (input_ids + 1) % vocab
+        loss_mask = jnp.ones((batch_size, seq_len), dtype=jnp.float32)
+        loss_fn_types = jnp.zeros((batch_size,), dtype=jnp.int32)
+        sampling_logprobs = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
+        advantages = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
+
+        def run_forward(backend, adapter_indices):
+            _, losses, logprobs = backend._forward(
+                backend.accumulated_grads,
+                backend.lora_params,
+                backend.non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+                loss_mask,
+                loss_fn_types,
+                sampling_logprobs,
+                advantages,
+            )
+            return losses, logprobs
+
+        # Test with mixed adapters: one normal, one unembed
+        adapter_indices = jnp.array([normal_idx, unembed_idx], dtype=jnp.int32)
+        losses_chunked, logprobs_chunked = run_forward(backend_chunked, adapter_indices)
+        losses_nonchunked, logprobs_nonchunked = run_forward(backend_nonchunked, adapter_indices)
+
+        np.testing.assert_allclose(
+            np.asarray(logprobs_chunked),
+            np.asarray(logprobs_nonchunked),
+            rtol=1e-4,
+            atol=1e-4,
+            err_msg="Chunked vs non-chunked logprobs mismatch with mixed train_unembed adapters",
+        )
+        np.testing.assert_allclose(
+            np.asarray(losses_chunked),
+            np.asarray(losses_nonchunked),
+            rtol=1e-4,
+            atol=1e-4,
+            err_msg="Chunked vs non-chunked losses mismatch with mixed train_unembed adapters",
         )

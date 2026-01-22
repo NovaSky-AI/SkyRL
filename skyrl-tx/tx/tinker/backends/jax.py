@@ -204,11 +204,8 @@ class JaxBackendImpl(AbstractBackend):
             f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
         )
 
-        # Use chunked cross-entropy by default for memory efficiency.
-        self._use_chunked_loss = config.loss_chunk_size > 0
-        # Track if any model uses train_unembed=True (requires LoRA on lm_head)
-        self._has_train_unembed = False
-        logger.info(f"Chunked cross-entropy loss: {self._use_chunked_loss} (chunk_size={config.loss_chunk_size})")
+        # Track which adapters use train_unembed=True (requires LoRA on lm_head)
+        self._train_unembed_mask = jnp.zeros(config.max_lora_adapters, dtype=jnp.bool_)
         self._create_loss_and_grad_fn()
 
     def _micro_batch_size(self, total: int) -> int:
@@ -237,9 +234,8 @@ class JaxBackendImpl(AbstractBackend):
 
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
-        loss_chunk_size = self.config.loss_chunk_size if self._use_chunked_loss else 0
+        loss_chunk_size = self.config.loss_chunk_size
         gradient_checkpointing = self.config.gradient_checkpointing
-        has_train_unembed = self._has_train_unembed
 
         def _forward_and_logprobs(
             graphdef: nnx.GraphDef,
@@ -249,6 +245,7 @@ class JaxBackendImpl(AbstractBackend):
             attention_mask: jax.Array,
             adapter_indices: jax.Array,
             target_ids: jax.Array,
+            train_unembed_mask: jax.Array,
         ) -> jax.Array:
             """Forward pass and logprobs computation."""
             model = nnx.merge(graphdef, lora_params, non_lora_params)
@@ -257,11 +254,13 @@ class JaxBackendImpl(AbstractBackend):
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
             )
-            # Pass adapter_indices when train_unembed=True to apply LoRA on lm_head
-            lm_head_adapter_indices = adapter_indices if has_train_unembed else None
-            return model.compute_logprobs(
-                output.last_hidden_state, target_ids, lm_head_adapter_indices, loss_chunk_size, gradient_checkpointing
-            )
+            # Check at runtime if any adapter in batch needs LoRA on lm_head
+            needs_lm_head_lora = train_unembed_mask[adapter_indices].any()
+            def logprobs(lm_head_adapter_indices):
+                return model.compute_logprobs(
+                    output.last_hidden_state, target_ids, lm_head_adapter_indices, loss_chunk_size, gradient_checkpointing
+                )
+            return jax.lax.cond(needs_lm_head_lora, lambda: logprobs(adapter_indices), lambda: logprobs(None))
 
         if self.config.gradient_checkpointing:
             # Wrap the forward + logprobs call to use jax.checkpoint for gradient checkpointing
@@ -281,7 +280,8 @@ class JaxBackendImpl(AbstractBackend):
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             target_logprobs = _forward_and_logprobs(
-                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids
+                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids,
+                self._train_unembed_mask,
             )
 
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
@@ -453,11 +453,8 @@ class JaxBackendImpl(AbstractBackend):
         if not (0 < lora_config.rank <= self.config.max_lora_rank):
             raise ValueError(f"LoRA rank {lora_config.rank} must be between 1 and {self.config.max_lora_rank}")
 
-        # Enable LoRA on lm_head path when train_unembed=True
-        if lora_config.train_unembed and not self._has_train_unembed:
-            logger.info("Enabling LoRA on lm_head (train_unembed=True)")
-            self._has_train_unembed = True
-            self._create_loss_and_grad_fn()
+        # Set train_unembed mask for this adapter
+        self._train_unembed_mask = self._train_unembed_mask.at[adapter_index].set(lora_config.train_unembed)
 
         # Store model metadata
         self.models[model_id] = types.ModelMetadata(
@@ -482,9 +479,10 @@ class JaxBackendImpl(AbstractBackend):
         # Get adapter index before deleting metadata
         adapter_index = self.models[model_id].adapter_index
 
-        # Clear LoRA adapter weights
+        # Clear LoRA adapter weights and reset train_unembed mask
         with jax.set_mesh(self.mesh):
             clear_lora_adapter(self.model, adapter_index)
+        self._train_unembed_mask = self._train_unembed_mask.at[adapter_index].set(False)
 
         # Delete optimizer
         del self.optimizers[model_id]
