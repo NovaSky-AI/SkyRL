@@ -139,7 +139,7 @@ jobs:
           echo "Cluster launched successfully!"
           sky status
 
-      - name: Notify Slack - Cluster Launched
+      - name: Notify Slack - Training Run Started
         if: success()
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -148,24 +148,24 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "🚀 Fleet Training Cluster Launched",
+              "text": "🚀 Fleet Training Run Started",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "🚀 Fleet Training Cluster Launched" }
+                  "text": { "type": "plain_text", "text": "🚀 Fleet Training Run Started" }
                 },
                 {
                   "type": "section",
                   "fields": [
-                    { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:2`" },
+                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:1`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" }
                   ]
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Status:* Training started on GPU cluster\n*WandB:* <https://wandb.ai/thefleet/fleet-task-grpo|View Dashboard>" }
+                  "text": { "type": "mrkdwn", "text": "*Status:* Training started\n*WandB:* <https://wandb.ai/thefleet/fleet-task-grpo|View Dashboard>" }
                 },
                 {
                   "type": "context",
@@ -229,8 +229,8 @@ jobs:
                 {
                   "type": "section",
                   "fields": [
-                    { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:2`" },
+                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:1`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.cluster_status }}`" }
                   ]
@@ -266,8 +266,8 @@ jobs:
                 {
                   "type": "section",
                   "fields": [
-                    { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:2`" },
+                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:1`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.cluster_status || 'FAILED' }}`" }
                   ]
@@ -301,8 +301,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Cluster | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| GPUs | \`H100:2\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| GPUs | \`H100:1\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Final Status | \`${{ steps.stream.outputs.cluster_status || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Modality | \`${{ inputs.modality }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Env Filter | \`${{ inputs.env_key || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
