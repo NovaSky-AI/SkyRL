@@ -1,26 +1,20 @@
 from flax import nnx
+import jax
 import jax.numpy as jnp
+from tx.models.base import CausalLMBase
 from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
 from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch, apply_top_p_batch
 
 
-class DummyLMHead:
-    """Dummy lm_head that acts as identity (hidden_states are already logits)."""
+class DummyModel(GeneratorMixin, CausalLMBase, nnx.Module):
+    """Dummy model for testing generator behavior.
 
-    def __call__(self, hidden_states, adapter_indices=None):
-        return hidden_states
+    In this dummy model, hidden_states directly equal logits (identity transformation).
+    """
 
-
-class DummyModel(GeneratorMixin, nnx.Module):
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
-        self.lm_head = DummyLMHead()
-        self._lm_head_weight = jnp.eye(vocab_size, dtype=jnp.float32)
-
-    @property
-    def lm_head_weight(self):
-        return self._lm_head_weight
 
     def __call__(
         self,
@@ -30,15 +24,11 @@ class DummyModel(GeneratorMixin, nnx.Module):
         kv_cache=None,
         adapter_indices=None,
     ):
-        """Simple dummy model for testing generator behavior.
-
-        In this dummy model, hidden_states directly equal logits (lm_head is identity).
-        """
         batch_size, seq_len = input_ids.shape
         base = jnp.arange(self.vocab_size, dtype=jnp.float32)
 
         if kv_cache is None:
-            # Prefill: deterministic hidden_states (which equal logits through identity lm_head)
+            # Prefill: deterministic hidden_states (which equal logits)
             hidden_states = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
@@ -49,6 +39,14 @@ class DummyModel(GeneratorMixin, nnx.Module):
             kv_cache = KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1)
 
         return CausalLMOutput(last_hidden_state=hidden_states, kv_cache=kv_cache)
+
+    def compute_logits(self, hidden_states, adapter_indices=None):
+        """In dummy model, hidden_states are already logits."""
+        return hidden_states
+
+    def compute_logprobs(self, hidden_states, target_ids, chunk_size=0, gradient_checkpointing=False):
+        """Compute logprobs from hidden_states (which are already logits in dummy model)."""
+        return self.logits_to_logprobs(hidden_states, target_ids)
 
 
 def make_inputs(batch_size: int, prompt_length: int):

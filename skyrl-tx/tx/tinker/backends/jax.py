@@ -38,7 +38,6 @@ from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
 from tx.layers.lora import clear_lora_adapter, init_lora_adapter
-from tx.layers.logits_processor import LogitsProcessor
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
@@ -242,27 +241,30 @@ class JaxBackendImpl(AbstractBackend):
         loss_chunk_size = self.config.loss_chunk_size if self._use_chunked_loss else 0
         gradient_checkpointing = self.config.gradient_checkpointing
 
-        def _model_forward(
+        def _forward_and_logprobs(
             graphdef: nnx.GraphDef,
             lora_params: nnx.State,
             non_lora_params: nnx.State,
             input_ids: jax.Array,
             attention_mask: jax.Array,
             adapter_indices: jax.Array,
-        ) -> tuple[jax.Array, jax.Array]:
-            """Forward pass returning (hidden_states, lm_head_weight)."""
+            target_ids: jax.Array,
+        ) -> jax.Array:
+            """Forward pass and logprobs computation."""
             model = nnx.merge(graphdef, lora_params, non_lora_params)
             output = model(
                 input_ids,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
             )
-            return output.last_hidden_state, model.lm_head_weight
+            return model.compute_logprobs(
+                output.last_hidden_state, target_ids, loss_chunk_size, gradient_checkpointing
+            )
 
         if self.config.gradient_checkpointing:
-            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
+            # Wrap the forward + logprobs call to use jax.checkpoint for gradient checkpointing
             # policy=None corresponds to full activation recomputation
-            _model_forward = jax.checkpoint(_model_forward, policy=None)
+            _forward_and_logprobs = jax.checkpoint(_forward_and_logprobs, policy=None)
 
         def loss_for_lora(
             lora_params: nnx.State,
@@ -276,16 +278,8 @@ class JaxBackendImpl(AbstractBackend):
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            hidden_states, lm_head_weight = _model_forward(
-                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
-            )
-
-            target_logprobs = LogitsProcessor.compute_logprobs(
-                hidden_states,
-                lm_head_weight,
-                target_ids,
-                loss_chunk_size,
-                gradient_checkpointing,
+            target_logprobs = _forward_and_logprobs(
+                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices, target_ids
             )
 
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):

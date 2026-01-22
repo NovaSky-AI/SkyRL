@@ -11,7 +11,6 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock
 
-from tx.layers.logits_processor import LogitsProcessor
 from tx.layers.lora import LoRAMixin
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
@@ -273,8 +272,8 @@ def test_qwen3_lora():
             adapter_indices=adapter_indices,
         )
 
-        # Compute logits using LogitsProcessor
-        logits = LogitsProcessor.compute_logits(outputs.last_hidden_state, model.lm_head, adapter_indices)
+        # Compute logits using model.compute_logits
+        logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
 
         # Compare outputs with corresponding adapters
         for idx in range(len(lora_adapters)):

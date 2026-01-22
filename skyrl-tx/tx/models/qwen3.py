@@ -6,6 +6,7 @@ from jax.sharding import get_abstract_mesh
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.util import prepare_routing, shard_map_ep
 from tx.layers.rotary_embedding import apply_rope
+from tx.models.base import CausalLMBase
 from tx.models.configs import Qwen3Config
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
@@ -376,7 +377,7 @@ class Qwen3Model(nnx.Module):
         )
 
 
-class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
+class Qwen3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config

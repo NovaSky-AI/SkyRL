@@ -7,6 +7,7 @@ from transformers import LlamaConfig
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
+from tx.models.base import CausalLMBase
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
@@ -261,7 +262,7 @@ class Llama3Model(nnx.Module):
         )
 
 
-class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
+class Llama3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config

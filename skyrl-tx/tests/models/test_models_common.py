@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from tx.layers.logits_processor import LogitsProcessor
 from tx.models.configs import Llama3Config, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
@@ -45,12 +44,12 @@ def test_logits_processor(model_name, config_cls, model_cls, mesh_axes):
         # Get hidden states from model
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
 
-        # Compute full logits using LogitsProcessor
-        full_logits = LogitsProcessor.compute_logits(outputs.last_hidden_state, model.lm_head)
+        # Compute full logits using model.compute_logits
+        full_logits = model.compute_logits(outputs.last_hidden_state)
         assert full_logits.shape == (batch_size, seq_len, config.vocab_size)
 
         # Compute last token logits only
-        last_logits = LogitsProcessor.compute_logits(outputs.last_hidden_state[:, -1:, :], model.lm_head)
+        last_logits = model.compute_logits(outputs.last_hidden_state[:, -1:, :])
         assert last_logits.shape == (batch_size, 1, config.vocab_size)
 
         # Last token logits should match

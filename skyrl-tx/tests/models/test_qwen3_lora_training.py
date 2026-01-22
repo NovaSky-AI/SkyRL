@@ -7,7 +7,6 @@ from transformers import PretrainedConfig
 
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM
-from tx.layers.logits_processor import LogitsProcessor
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import init_lora_adapter
 from tx.tinker.types import LoraConfig
@@ -39,7 +38,7 @@ def test_lora_training():
 
         def loss_fn(model, input_ids, target_ids, attention_mask):
             outputs = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
-            logits = LogitsProcessor.compute_logits(outputs.last_hidden_state, model.lm_head, adapter_indices)
+            logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
             return optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=target_ids).mean()
 
         # Compute gradients - we need to use nnx.split to separate parameters
