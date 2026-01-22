@@ -13,7 +13,6 @@ from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
 import os
 import signal
-import subprocess
 import random
 import threading
 import time
@@ -64,15 +63,14 @@ async def lifespan(app: FastAPI):
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
     cmd.extend(config_to_argv(app.state.engine_config))
 
-    background_engine = subprocess.Popen(cmd)
-    app.state.background_engine = background_engine
-    logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
+    app.state.background_engine = await asyncio.create_subprocess_exec(*cmd)
+    logger.info(f"Started background engine with PID {app.state.background_engine.pid}: {' '.join(cmd)}")
 
     shutting_down = False
 
     async def monitor_engine():
         """Monitor engine process and exit API server if it crashes."""
-        exit_code = await asyncio.to_thread(background_engine.wait)
+        exit_code = await app.state.background_engine.wait()
         if not shutting_down:
             logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
 
@@ -99,13 +97,13 @@ async def lifespan(app: FastAPI):
     monitor_task.cancel()
 
     logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
-    background_engine.terminate()
+    app.state.background_engine.terminate()
     try:
-        background_engine.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
-        background_engine.kill()
-        background_engine.wait()
+        await asyncio.wait_for(app.state.background_engine.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        logger.warning(f"Background engine (PID {app.state.background_engine.pid}) did not terminate gracefully, killing")
+        app.state.background_engine.kill()
+        await app.state.background_engine.wait()
     logger.info("Background engine stopped")
 
 
