@@ -165,7 +165,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Status:* Training started on GPU cluster\n*WandB:* <https://wandb.ai/fleet-ai/fleet-task-grpo|View Dashboard>" }
+                  "text": { "type": "mrkdwn", "text": "*Status:* Training started on GPU cluster\n*WandB:* <https://wandb.ai/thefleet/fleet-task-grpo|View Dashboard>" }
                 },
                 {
                   "type": "context",
@@ -237,7 +237,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/fleet-ai/fleet-task-grpo|View Training Results>" }
+                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/thefleet/fleet-task-grpo|View Training Results>" }
                 },
                 {
                   "type": "context",
@@ -309,4 +309,4 @@ jobs:
           echo "| Max Tasks | \`${{ inputs.max_tasks || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Links" >> $GITHUB_STEP_SUMMARY
-          echo "- [WandB Dashboard](https://wandb.ai/fleet-ai/fleet-task-grpo)" >> $GITHUB_STEP_SUMMARY
+          echo "- [WandB Dashboard](https://wandb.ai/thefleet/fleet-task-grpo)" >> $GITHUB_STEP_SUMMARY
