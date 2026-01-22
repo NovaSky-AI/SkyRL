@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+from tx.layers.logits_processor import LogitsProcessor
 from tx.models.configs import Llama3Config, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
@@ -22,8 +23,8 @@ from tx.utils.models import get_dtype, load_safetensors
     ],
     ids=["llama3", "qwen3"],
 )
-def test_skip_prompt_logits(model_name, config_cls, model_cls, mesh_axes):
-    """Test that skip_prompt_logits returns correct shape and values."""
+def test_logits_processor(model_name, config_cls, model_cls, mesh_axes):
+    """Test that LogitsProcessor computes correct logits and logprobs."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
@@ -41,22 +42,19 @@ def test_skip_prompt_logits(model_name, config_cls, model_cls, mesh_axes):
             model = model_cls(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-        # Get full logits
-        outputs_full = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
-        assert outputs_full.logits.shape == (batch_size, seq_len, config.vocab_size)
+        # Get hidden states from model
+        outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
 
-        # Get last token logits only
-        outputs_last = model(
-            batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), skip_prompt_logits=True
-        )
-        assert outputs_last.logits.shape == (
-            batch_size,
-            1,
-            config.vocab_size,
-        ), f"Expected shape ({batch_size}, 1, {config.vocab_size}), got {outputs_last.logits.shape}"
+        # Compute full logits using LogitsProcessor
+        full_logits = LogitsProcessor.compute_logits(outputs.last_hidden_state, model.lm_head)
+        assert full_logits.shape == (batch_size, seq_len, config.vocab_size)
+
+        # Compute last token logits only
+        last_logits = LogitsProcessor.compute_logits(outputs.last_hidden_state[:, -1:, :], model.lm_head)
+        assert last_logits.shape == (batch_size, 1, config.vocab_size)
 
         # Last token logits should match
-        assert np.allclose(outputs_full.logits[:, -1:, :], outputs_last.logits, rtol=1e-5, atol=1e-5)
+        assert np.allclose(full_logits[:, -1:, :], last_logits, rtol=1e-5, atol=1e-5)
 
         # Test generation equivalence with and without prompt_logprobs
         input_ids = jnp.array(batch.input_ids.numpy())

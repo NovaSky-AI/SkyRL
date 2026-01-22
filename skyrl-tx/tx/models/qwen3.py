@@ -4,7 +4,6 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
-from tx.layers.logits_processor import LogitsProcessor
 from tx.layers.util import prepare_routing, shard_map_ep
 from tx.layers.rotary_embedding import apply_rope
 from tx.models.configs import Qwen3Config
@@ -397,7 +396,6 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
-        self.logits_processor = LogitsProcessor(config)
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
@@ -421,8 +419,6 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-        skip_logits: bool = False,
-        skip_prompt_logits: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -436,18 +432,10 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             kv_cache=kv_cache,
         )
 
-        if skip_logits:
-            # Skip logits computation for chunked cross-entropy (uses lm_head weight directly)
-            logits = None
-        else:
-            logits = self.logits_processor(outputs.last_hidden_state, self.lm_head, adapter_indices, skip_prompt_logits)
-
         return CausalLMOutput(
-            logits=logits,
             last_hidden_state=outputs.last_hidden_state,
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
-            lm_head=self.lm_head_weight,
         )
 
 

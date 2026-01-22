@@ -239,8 +239,7 @@ class JaxBackendImpl(AbstractBackend):
 
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
-        use_chunked = self._use_chunked_loss
-        loss_chunk_size = self.config.loss_chunk_size
+        loss_chunk_size = self.config.loss_chunk_size if self._use_chunked_loss else 0
         gradient_checkpointing = self.config.gradient_checkpointing
 
         def _model_forward(
@@ -251,18 +250,14 @@ class JaxBackendImpl(AbstractBackend):
             attention_mask: jax.Array,
             adapter_indices: jax.Array,
         ) -> tuple[jax.Array, jax.Array]:
-            """Forward pass returning (hidden_states, lm_head) or (logits, None)."""
+            """Forward pass returning (hidden_states, lm_head_weight)."""
             model = nnx.merge(graphdef, lora_params, non_lora_params)
             output = model(
                 input_ids,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
-                skip_logits=use_chunked,
             )
-            if use_chunked:
-                return output.last_hidden_state, output.lm_head
-            else:
-                return output.logits, None
+            return output.last_hidden_state, model.lm_head_weight
 
         if self.config.gradient_checkpointing:
             # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
@@ -281,15 +276,15 @@ class JaxBackendImpl(AbstractBackend):
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            forward_out, lm_head_weight = _model_forward(
+            hidden_states, lm_head_weight = _model_forward(
                 self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
             )
 
             target_logprobs = LogitsProcessor.compute_logprobs(
-                forward_out,
+                hidden_states,
+                lm_head_weight,
                 target_ids,
-                lm_head_weight if use_chunked else None,
-                loss_chunk_size if use_chunked else 0,
+                loss_chunk_size,
                 gradient_checkpointing,
             )
 

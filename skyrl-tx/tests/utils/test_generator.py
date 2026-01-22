@@ -5,9 +5,22 @@ from tx.tinker.types import SamplingParams
 from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch, apply_top_p_batch
 
 
+class DummyLMHead:
+    """Dummy lm_head that acts as identity (hidden_states are already logits)."""
+
+    def __call__(self, hidden_states, adapter_indices=None):
+        return hidden_states
+
+
 class DummyModel(GeneratorMixin, nnx.Module):
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
+        self.lm_head = DummyLMHead()
+        self._lm_head_weight = jnp.eye(vocab_size, dtype=jnp.float32)
+
+    @property
+    def lm_head_weight(self):
+        return self._lm_head_weight
 
     def __call__(
         self,
@@ -16,27 +29,26 @@ class DummyModel(GeneratorMixin, nnx.Module):
         positions=None,
         kv_cache=None,
         adapter_indices=None,
-        skip_prompt_logits=False,
     ):
-        """Simple dummy model for testing generator behavior."""
+        """Simple dummy model for testing generator behavior.
+
+        In this dummy model, hidden_states directly equal logits (lm_head is identity).
+        """
         batch_size, seq_len = input_ids.shape
         base = jnp.arange(self.vocab_size, dtype=jnp.float32)
 
         if kv_cache is None:
-            # Prefill: deterministic logits
-            logits = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
-            # Only return last token logits if requested (saves memory during prefill)
-            if skip_prompt_logits:
-                logits = logits[:, -1:, :]
+            # Prefill: deterministic hidden_states (which equal logits through identity lm_head)
+            hidden_states = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             kv_cache = KVCache(keys=keys, values=values, cache_position=seq_len)
         else:
-            # Step: logits vary with cache_position
-            logits = jnp.tile(base[None, None, :] + kv_cache.cache_position, (batch_size, 1, 1))
+            # Step: hidden_states vary with cache_position
+            hidden_states = jnp.tile(base[None, None, :] + kv_cache.cache_position, (batch_size, 1, 1))
             kv_cache = KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1)
 
-        return CausalLMOutput(logits=logits, last_hidden_state=logits, kv_cache=kv_cache)
+        return CausalLMOutput(last_hidden_state=hidden_states, kv_cache=kv_cache)
 
 
 def make_inputs(batch_size: int, prompt_length: int):

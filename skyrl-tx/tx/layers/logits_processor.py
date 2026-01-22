@@ -5,66 +5,67 @@ import jax.numpy as jnp
 
 
 class LogitsProcessor:
-    """Handles logits and log probability computation from hidden states."""
+    """Utility for computing logits and logprobs from hidden states."""
 
-    def __init__(self, config) -> None:
-        self.config = config
-
-    def __call__(
-        self,
+    @staticmethod
+    def compute_logits(
         hidden_states: jax.Array,
         lm_head,
         adapter_indices: jax.Array | None = None,
-        skip_prompt_logits: bool = False,
     ) -> jax.Array:
-        """Compute logits from hidden states (for sampling).
+        """Compute logits from hidden states. For sampling.
 
         Args:
-            hidden_states: Hidden states from the model backbone.
-            lm_head: Language model head (LoRALinear or embed_tokens.T).
+            hidden_states: Hidden states from the model backbone [B, T, H].
+            lm_head: Language model head (LoRALinear or transposed embedding).
             adapter_indices: Optional adapter indices for LoRA.
-            skip_prompt_logits: If True, only compute logits for the last token (saves memory).
+
+        Returns:
+            Logits [B, T, V].
         """
-        if skip_prompt_logits:
-            hidden_states = hidden_states[:, -1:, :]
         return lm_head(hidden_states, adapter_indices)
 
     @staticmethod
     def compute_logprobs(
-        forward_output: jax.Array,
+        hidden_states: jax.Array,
+        lm_head_weight: jax.Array,
         target_ids: jax.Array,
-        lm_head_weight: jax.Array | None = None,
         chunk_size: int = 0,
         gradient_checkpointing: bool = False,
     ) -> jax.Array:
-        """Compute log probabilities from model forward output.
+        """Compute logprobs from hidden states. For training and prompt logprobs.
 
-        Supports two modes:
-        - Chunked: forward_output is hidden_states [B, T, H], requires lm_head_weight
-        - Non-chunked: forward_output is logits [B, T, V]
+        Supports chunked computation to avoid materializing full [B*T, V] logits.
 
         Args:
-            forward_output: Either hidden_states [B, T, H] (chunked) or logits [B, T, V].
+            hidden_states: Hidden states [B, T, H].
+            lm_head_weight: LM head weight matrix [H, V].
             target_ids: Target token IDs [B, T].
-            lm_head_weight: LM head weight matrix [H, V] for chunked mode (None for non-chunked).
-            chunk_size: Chunk size for chunked computation (0 or negative = non-chunked).
-            gradient_checkpointing: Whether to checkpoint each chunk (chunked mode only).
+            chunk_size: Chunk size for chunked computation (0 = non-chunked).
+            gradient_checkpointing: Whether to checkpoint each chunk.
 
         Returns:
             Log probabilities for target tokens [B, T].
         """
-        use_chunked = lm_head_weight is not None and chunk_size > 0
-
-        if use_chunked:
+        if chunk_size > 0:
             return LogitsProcessor._compute_chunked_logprobs(
-                forward_output, lm_head_weight, target_ids, chunk_size, gradient_checkpointing
+                hidden_states, lm_head_weight, target_ids, chunk_size, gradient_checkpointing
             )
         else:
-            return LogitsProcessor._logits_to_logprobs(forward_output, target_ids)
+            logits = hidden_states @ lm_head_weight
+            return LogitsProcessor.logits_to_logprobs(logits, target_ids)
 
     @staticmethod
-    def _logits_to_logprobs(logits: jax.Array, target_ids: jax.Array) -> jax.Array:
-        """Convert logits to log probabilities for target tokens."""
+    def logits_to_logprobs(logits: jax.Array, target_ids: jax.Array) -> jax.Array:
+        """Convert logits to logprobs. For decode logprobs when logits already computed.
+
+        Args:
+            logits: Logits [B, T, V] or [B, V].
+            target_ids: Target token IDs [B, T] or [B].
+
+        Returns:
+            Log probabilities for target tokens [B, T] or [B].
+        """
         log_sum_exp = jax.nn.logsumexp(logits, axis=-1, keepdims=True)
         target_logits = jnp.take_along_axis(logits, target_ids[..., None], axis=-1)
         return (target_logits - log_sum_exp).squeeze(-1)
