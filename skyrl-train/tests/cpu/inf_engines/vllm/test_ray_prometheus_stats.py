@@ -5,7 +5,6 @@ Run with:
 uv run --isolated --extra dev pytest tests/cpu/inf_engines/vllm/test_ray_prometheus_stats.py
 """
 
-import pytest
 from unittest.mock import patch, MagicMock
 import sys
 
