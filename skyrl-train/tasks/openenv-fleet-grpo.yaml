@@ -95,7 +95,7 @@ run: |
   # Run GRPO training with Fleet task integration
   uv run --isolated --extra "$INFERENCE_BACKEND" \
     --with "litellm>=1.75.5" \
-    --with "openenv" \
+    --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" \
     --with "fleet-python" \
     -m integrations.fleet.entrypoints.main_fleet \
     data.train_data="['${DATA_DIR}/train.parquet']" \
