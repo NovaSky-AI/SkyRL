@@ -3,12 +3,13 @@
 #
 # This task trains GRPO on Fleet-hosted environments using OpenEnv's FleetTaskEnv.
 # It loads tasks from the Fleet API and runs training with verifier-based rewards.
+# Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
 
 name: fleet-task-grpo
 
 resources:
   accelerators: H100:1
-  disk_size: 40
+  disk_size: 100  # Increased from 40GB to handle checkpoints before S3 upload
   ports: 6479
   any_of:
     - cloud: lambda
@@ -37,13 +38,19 @@ envs:
   PR_NUMBER: "0"
   # Optional: limit number of tasks for testing
   MAX_TASKS: ""
+  # S3 Checkpoint Upload (optional - passed via --env from GHA)
+  # If set, checkpoints are uploaded to S3 and local copies deleted to save disk
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
 
 setup: |
   cd skyrl-train
   uv venv --python 3.12 --seed
   source .venv/bin/activate
   uv sync --extra vllm
-  uv pip install wandb
+  uv pip install wandb boto3
 
   # Install OpenEnv for Fleet environment access (from branch with FleetTaskEnv)
   uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
