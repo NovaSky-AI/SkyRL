@@ -63,14 +63,15 @@ async def lifespan(app: FastAPI):
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
     cmd.extend(config_to_argv(app.state.engine_config))
 
-    app.state.background_engine = await asyncio.create_subprocess_exec(*cmd)
-    logger.info(f"Started background engine with PID {app.state.background_engine.pid}: {' '.join(cmd)}")
+    background_engine = await asyncio.create_subprocess_exec(*cmd)
+    app.state.background_engine = background_engine
+    logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
 
     shutting_down = False
 
     async def monitor_engine():
         """Monitor engine process and exit API server if it crashes."""
-        exit_code = await app.state.background_engine.wait()
+        exit_code = await background_engine.wait()
         if not shutting_down:
             logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
 
@@ -97,15 +98,13 @@ async def lifespan(app: FastAPI):
     monitor_task.cancel()
 
     logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
-    app.state.background_engine.terminate()
+    background_engine.terminate()
     try:
-        await asyncio.wait_for(app.state.background_engine.wait(), timeout=5)
+        await asyncio.wait_for(background_engine.wait(), timeout=5)
     except asyncio.TimeoutError:
-        logger.warning(
-            f"Background engine (PID {app.state.background_engine.pid}) did not terminate gracefully, killing"
-        )
-        app.state.background_engine.kill()
-        await app.state.background_engine.wait()
+        logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
+        background_engine.kill()
+        await background_engine.wait()
     logger.info("Background engine stopped")
 
 
