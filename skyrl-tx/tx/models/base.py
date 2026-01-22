@@ -4,6 +4,7 @@ from abc import abstractmethod
 
 import jax
 import jax.numpy as jnp
+from transformers import PretrainedConfig
 
 from tx.layers.lora import LoRALinear
 
@@ -11,7 +12,8 @@ from tx.layers.lora import LoRALinear
 class CausalLMBase:
     """Base class providing logits/logprobs computation for causal language models."""
 
-    def __init__(self, lm_head: LoRALinear):
+    def __init__(self, config: PretrainedConfig, lm_head: LoRALinear):
+        self.config = config
         self.lm_head = lm_head
 
     @property

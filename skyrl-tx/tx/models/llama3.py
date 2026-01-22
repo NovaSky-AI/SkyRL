@@ -265,7 +265,6 @@ class Llama3Model(nnx.Module):
 class Llama3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.config = config
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
         if config.tie_word_embeddings:
@@ -282,7 +281,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
-        CausalLMBase.__init__(self, lm_head)
+        CausalLMBase.__init__(self, config, lm_head)
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:

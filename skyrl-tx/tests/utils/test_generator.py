@@ -17,7 +17,7 @@ class DummyModel(GeneratorMixin, CausalLMBase, nnx.Module):
         self.vocab_size = vocab_size
         self._lm_head_weight = jnp.eye(vocab_size, dtype=jnp.float32)
         # Identity lm_head - hidden_states are already logits
-        CausalLMBase.__init__(self, lambda hidden_states, adapter_indices=None: hidden_states)
+        CausalLMBase.__init__(self, None, lambda hidden_states, adapter_indices=None: hidden_states)
 
     @property
     def lm_head_weight(self) -> jax.Array:
