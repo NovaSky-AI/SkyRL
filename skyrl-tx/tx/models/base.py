@@ -11,11 +11,8 @@ from tx.layers.lora import LoRALinear
 class CausalLMBase:
     """Base class providing logits/logprobs computation for causal language models."""
 
-    @property
-    @abstractmethod
-    def lm_head(self) -> LoRALinear:
-        """Language model head. LoRALinear or transposed LoRAEmbed."""
-        ...
+    def __init__(self, lm_head: LoRALinear):
+        self.lm_head = lm_head
 
     @property
     @abstractmethod

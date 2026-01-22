@@ -561,10 +561,10 @@ def test_adapter_reuse_initializes_lora_adapter():
 class TestChunkedCrossEntropyLoss:
     """Tests for chunked cross-entropy loss computation."""
 
-    def _create_backend(self, loss_chunk_size: int) -> JaxBackend:
+    def _create_backend(self, loss_chunk_size: int, max_lora_adapters: int = 2) -> JaxBackend:
         """Create a backend with specified chunk size."""
         config = JaxBackendConfig(
-            max_lora_adapters=2,
+            max_lora_adapters=max_lora_adapters,
             max_lora_rank=32,
             loss_chunk_size=loss_chunk_size,
         )
@@ -660,8 +660,8 @@ class TestChunkedCrossEntropyLoss:
 
     def test_mixed_train_unembed_adapters(self):
         """Test that chunked and non-chunked paths produce same results with mixed adapters."""
-        backend_chunked = self._create_backend(loss_chunk_size=1024)
-        backend_nonchunked = self._create_backend(loss_chunk_size=0)
+        backend_chunked = self._create_backend(loss_chunk_size=1024, max_lora_adapters=3)
+        backend_nonchunked = self._create_backend(loss_chunk_size=0, max_lora_adapters=3)
 
         # Create same models on both backends
         for backend in [backend_chunked, backend_nonchunked]:

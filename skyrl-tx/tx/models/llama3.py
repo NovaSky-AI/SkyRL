@@ -268,10 +268,10 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
         self.config = config
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens.T
+        if config.tie_word_embeddings:
+            lm_head = self.model.embed_tokens.T
         else:
-            self.lm_head = LoRALinear(
+            lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
                 use_bias=False,
@@ -282,6 +282,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin, CausalLMBase):
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
+        CausalLMBase.__init__(self, lm_head)
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
