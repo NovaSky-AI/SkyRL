@@ -382,7 +382,7 @@ class DeepseekV3MoE(nnx.Module):
         mask = mask.at[batch_indices, top_group_indices].set(False)
         mask = jnp.broadcast_to(mask[:, :, None], scores_grouped.shape)
 
-        scores_with_bias = jnp.where(mask, -jnp.inf, scores_grouped)
+        scores_with_bias = jnp.where(mask, 0.0, scores_grouped)
         scores_with_bias = scores_with_bias.reshape(num_tokens, num_experts)
 
         _, top_k_index = jax.lax.top_k(scores_with_bias, self.num_experts_per_tok)
