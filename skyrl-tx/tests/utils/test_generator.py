@@ -12,12 +12,20 @@ class DummyModel(GeneratorMixin, CausalLMBase, nnx.Module):
     """Dummy model for testing generator behavior.
 
     In this dummy model, hidden_states directly equal logits (identity transformation).
+    When adapter_indices is provided, it adds the adapter index to logits.
     """
 
     def __init__(self, vocab_size: int = 16):
         self.vocab_size = vocab_size
-        # Identity lm_head - hidden_states are already logits
-        CausalLMBase.__init__(self, MagicMock(), lambda hidden_states, adapter_indices=None: hidden_states)
+
+        def lm_head(hidden_states, adapter_indices=None):
+            # Scale logits by (1 + adapter_index) so different adapters give different log-softmax results
+            if adapter_indices is not None:
+                scale = (1 + adapter_indices[:, None, None]).astype(jnp.float32)
+                return hidden_states * scale
+            return hidden_states
+
+        CausalLMBase.__init__(self, MagicMock(), lm_head)
 
     def __call__(
         self,
@@ -140,6 +148,19 @@ def test_prompt_logprobs():
         assert (
             len(result_batch.prompt_logprobs[i]) == expected_length
         ), f"Sequence {i}: expected prompt_logprobs length {expected_length}"
+
+    # Test that adapter_indices affects prompt_logprobs (verifies adapter_indices is passed to compute_logprobs)
+    adapter_0 = jnp.array([0], dtype=jnp.int32)
+    adapter_1 = jnp.array([1], dtype=jnp.int32)
+    result_adapter_0 = model.generate(
+        input_ids, attention_mask, sampling_params=[sampling], adapter_indices=adapter_0, prompt_logprobs=True
+    )
+    result_adapter_1 = model.generate(
+        input_ids, attention_mask, sampling_params=[sampling], adapter_indices=adapter_1, prompt_logprobs=True
+    )
+    assert not jnp.allclose(
+        jnp.array(result_adapter_0.prompt_logprobs[0]), jnp.array(result_adapter_1.prompt_logprobs[0])
+    ), "prompt_logprobs should differ when adapter_indices differ"
 
 
 def test_top_k_filtering():

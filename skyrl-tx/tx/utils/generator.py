@@ -153,7 +153,9 @@ class GeneratorMixin:
 
         # Compute prompt logprobs if requested
         if prompt_logprobs:
-            prompt_logprobs_array = model.compute_logprobs(outputs.last_hidden_state[:, :-1, :], input_ids[:, 1:])
+            prompt_logprobs_array = model.compute_logprobs(
+                outputs.last_hidden_state[:, :-1, :], input_ids[:, 1:], adapter_indices
+            )
         else:
             prompt_logprobs_array = None
 
