@@ -111,6 +111,15 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
           LAUNCH_CMD="$LAUNCH_CMD --env PR_NUMBER=${{ github.event.pull_request.number || '0' }}"
 
+          # S3 checkpoint upload credentials (optional - training continues without these)
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            LAUNCH_CMD="$LAUNCH_CMD --env AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
+            LAUNCH_CMD="$LAUNCH_CMD --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            echo "S3 checkpoint upload enabled"
+          else
+            echo "AWS credentials not configured - S3 checkpoint upload disabled"
+          fi
+
           if [ -n "$ENV_KEY" ]; then
             LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=$ENV_KEY"
           fi
