@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 import ray
 from omegaconf import DictConfig
 
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -40,10 +41,14 @@ class WorkerDispatch:
         policy_actor_group: PPORayActorGroup,
         critic_actor_group: Optional[PPORayActorGroup] = None,
         ref_actor_group: Optional[PPORayActorGroup] = None,
+        inference_engine_client: Optional[InferenceEngineClient] = None,
     ):
         self.cfg = cfg
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.colocate_policy_ref = cfg.trainer.placement.colocate_policy_ref
+
+        # Inference engine client for weight sync (optional)
+        self._inference_engine_client = inference_engine_client
 
         # Actor groups by name.
         # TODO: Remove these role-specific identifiers. We will move to using model IDs and add support for generic models beyond these.
@@ -271,6 +276,35 @@ class WorkerDispatch:
         if not self.colocate_all:
             return
         self._offload("policy", offload_optimizer=False, offload_model=True)
+
+    async def save_weights_for_sampler(self) -> None:
+        """
+        Tinker API method to prepare updated parameters for sampling.
+
+        Syncs weights to inference engine for sampling.
+        Call this after training (optim_step) and before generating samples.
+        """
+        if self._inference_engine_client is None:
+            raise RuntimeError(
+                "Cannot save_weights_for_sampler: no inference_engine_client configured. "
+                "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
+            )
+
+        # Sync weights to inference engine
+        self.prepare_for_weight_sync()
+        if self.colocate_all:
+            await self._inference_engine_client.wake_up(tags=["weights"])
+        self.broadcast_to_inference_engines(self._inference_engine_client)
+        self.finish_weight_sync()
+        if self.colocate_all:
+            await self._inference_engine_client.wake_up(tags=["kv_cache"])
+
+    def set_inference_engine_client(self, inference_engine_client: InferenceEngineClient) -> None:
+        """Set the inference engine client for weight sync.
+
+        This can be called after construction if the client isn't available at init time.
+        """
+        self._inference_engine_client = inference_engine_client
 
     def empty_cache(self, model: Optional[str] = None) -> None:
         """Empty GPU cache for model(s)."""
