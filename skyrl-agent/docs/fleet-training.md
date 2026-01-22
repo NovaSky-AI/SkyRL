@@ -52,7 +52,16 @@ export WANDB_API_KEY="..."
 
 5. Click **"Run workflow"**
 
-### Via CLI (Manual)
+### Via CLI (Local)
+
+```bash
+cd skyrl-agent
+
+# Run training locally
+FLEET_API_KEY=<key> WANDB_API_KEY=<key> ./examples/run_skyrl/run_fleet.sh
+```
+
+### Via SkyPilot (Remote GPU)
 
 ```bash
 # Install SkyPilot
@@ -211,8 +220,8 @@ sky down <cluster-name> -y
 | File | Purpose |
 |------|---------|
 | `.github/workflows/openenv-fleet-train.yaml` | GitHub Actions workflow |
-| `skyrl-train/tasks/openenv-fleet-grpo.yaml` | SkyPilot task definition |
-| `skyrl-train/integrations/fleet/env.py` | SkyRL environment wrapper |
-| `skyrl-train/integrations/fleet/prepare_dataset.py` | Dataset preparation |
-| `skyrl-train/integrations/fleet/entrypoints/main_fleet.py` | Training entrypoint |
-| `skyrl-train/data/fleet_booking_sample.json` | Sample task dataset |
+| `skyrl-agent/examples/run_skyrl/skyrl_fleet.yaml` | Training configuration |
+| `skyrl-agent/examples/run_skyrl/run_fleet.sh` | Training launch script |
+| `skyrl-agent/skyrl_agent/tasks/fleet/fleet_task.py` | Fleet task implementation |
+| `skyrl-agent/data/fleet_booking_sample.json` | Sample task dataset |
+| `skyrl-agent/tests/test_fleet_task.py` | Fleet task tests |
