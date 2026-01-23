@@ -219,17 +219,6 @@ class FleetTaskEnv(BaseTextEnv):
         Parses the action for tool calls, executes via OpenEnv's FleetTaskEnv,
         and returns observation. Reward is computed by the verifier on completion.
         """
-        # If init failed, return immediately with done=True and reward=0
-        if getattr(self, "_init_failed", False):
-            self.chat_history.append({"role": "assistant", "content": action})
-            self.chat_history.append({"role": "user", "content": "Environment initialization failed. Task skipped."})
-            return BaseTextEnvStepOutput(
-                conversation=self.chat_history,
-                reward=0.0,
-                done=True,
-                metadata={"error": "init_failed", "task_key": self.task_key},
-            )
-
         self.turns += 1
         self.chat_history.append({"role": "assistant", "content": action})
 
