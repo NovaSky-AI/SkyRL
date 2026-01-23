@@ -59,7 +59,6 @@ def test_qwen3_generate():
             types.SamplingParams(max_tokens=2, temperature=0.0, seed=42, stop_tokens=[6149]),
         ]
 
-        # Batch with right-padding for our implementation
         batch = tokenizer(inputs, return_tensors="pt", padding=True)
         result = model.generate(
             batch.input_ids.numpy(),
