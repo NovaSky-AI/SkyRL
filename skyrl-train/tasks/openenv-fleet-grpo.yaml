@@ -181,6 +181,7 @@ run: |
     generator.batched=false \
     generator.use_conversation_multi_turn=true \
     generator.n_samples_per_prompt=4 \
+    generator.eval_n_samples_per_prompt=3 \
     generator.gpu_memory_utilization=0.8 \
     trainer.logger="$LOGGER" \
     trainer.project_name="fleet-task-grpo" \

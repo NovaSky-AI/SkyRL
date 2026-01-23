@@ -158,8 +158,8 @@ class TestHeldOutEnvs:
         assert "instacart" in HELD_OUT_ENVS["computer_use"]
 
     def test_min_eval_samples_threshold(self):
-        """MIN_EVAL_SAMPLES is set to 10."""
-        assert MIN_EVAL_SAMPLES == 10
+        """MIN_EVAL_SAMPLES is set to 5."""
+        assert MIN_EVAL_SAMPLES == 5
 
 
 class TestPrepareFleetDataset:
@@ -183,7 +183,7 @@ class TestPrepareFleetDataset:
     def test_held_out_env_goes_to_eval(self):
         """Held-out environments go entirely to eval split."""
         tasks = self._create_test_tasks(
-            {"github": 100, "outlook": 24},  # outlook is held out for tool_use
+            {"github": 500, "outlook": 24},  # outlook is held out for tool_use
             modality="tool_use",
         )
 
@@ -205,14 +205,14 @@ class TestPrepareFleetDataset:
             import pyarrow.parquet as pq
 
             val_df = pq.read_table(val_path).to_pandas()
-            # Should have outlook (24) + github eval (~12)
+            # Should have outlook (24) + github eval (~10 with 2%)
             outlook_tasks = [k for k in val_df["task_key"] if "outlook" in k]
             assert len(outlook_tasks) == 24
 
     def test_small_env_all_to_train(self):
         """Environments with < MIN_EVAL_SAMPLES go entirely to train."""
-        # 5 tasks = less than MIN_EVAL_SAMPLES (10) expected in eval
-        tasks = self._create_test_tasks({"small_env": 5}, modality="tool_use")
+        # 50 tasks with 2% eval = 1 expected, less than MIN_EVAL_SAMPLES (5)
+        tasks = self._create_test_tasks({"small_env": 50}, modality="tool_use")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             json_path = os.path.join(tmpdir, "tasks.json")
@@ -231,15 +231,15 @@ class TestPrepareFleetDataset:
             import pyarrow.parquet as pq
 
             train_df = pq.read_table(train_path).to_pandas()
-            assert len(train_df) == 5
+            assert len(train_df) == 50
 
             # validation.parquet should not exist or be empty
             assert not os.path.exists(val_path)
 
     def test_stratified_split(self):
         """Large environments get stratified train/eval split."""
-        # 200 tasks = ~20 expected in eval (above MIN_EVAL_SAMPLES)
-        tasks = self._create_test_tasks({"github": 200}, modality="tool_use")
+        # 500 tasks with 2% eval = ~10 expected in eval (above MIN_EVAL_SAMPLES=5)
+        tasks = self._create_test_tasks({"github": 500}, modality="tool_use")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             json_path = os.path.join(tmpdir, "tasks.json")
@@ -259,7 +259,7 @@ class TestPrepareFleetDataset:
             val_df = pq.read_table(os.path.join(tmpdir, "validation.parquet")).to_pandas()
 
             total = len(train_df) + len(val_df)
-            assert total == 200
+            assert total == 500
 
             # Check roughly 10% in eval (allow some variance due to hash)
             eval_ratio = len(val_df) / total
@@ -291,7 +291,7 @@ class TestPrepareFleetDataset:
     def test_env_filter(self):
         """env_filter limits to specific environment."""
         tasks = self._create_test_tasks(
-            {"github": 100, "booking": 100},
+            {"github": 500, "booking": 500},
             modality="tool_use",
         )
 
@@ -315,7 +315,7 @@ class TestPrepareFleetDataset:
 
     def test_deterministic_split_across_runs(self):
         """Same tasks produce same split across multiple runs."""
-        tasks = self._create_test_tasks({"github": 200}, modality="tool_use")
+        tasks = self._create_test_tasks({"github": 500}, modality="tool_use")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             json_path = os.path.join(tmpdir, "tasks.json")
@@ -360,6 +360,6 @@ class TestPrepareFleetDataset:
             import pyarrow.parquet as pq
 
             val_df = pq.read_table(os.path.join(tmpdir, "validation.parquet")).to_pandas()
-            # Should have instacart (32) + amazon eval (~14)
+            # Should have instacart (32) - amazon (100 tasks at 2% = 2 expected) goes all to train
             instacart_tasks = [k for k in val_df["task_key"] if "instacart" in k]
             assert len(instacart_tasks) == 32
