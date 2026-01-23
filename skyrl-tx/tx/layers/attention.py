@@ -3,6 +3,10 @@
 import jax
 import jax.numpy as jnp
 
+# cuDNN flash attention supported dtypes
+# https://github.com/jax-ml/jax/blob/8b1f782540f71fbe230a2dccd331975faafc6c83/jax/_src/cudnn/fused_attention_stablehlo.py#L290
+_CUDNN_SUPPORTED_DTYPES = (jnp.float16, jnp.bfloat16, jnp.float8_e4m3fn, jnp.float8_e5m2)
+
 
 def dot_product_attention(
     q: jax.Array,
@@ -30,7 +34,7 @@ def dot_product_attention(
     """
     scale = 1.0 / head_dim**0.5
 
-    if jax.default_backend() == "gpu":
+    if jax.default_backend() == "gpu" and q.dtype in _CUDNN_SUPPORTED_DTYPES:
         seq_lengths = attention_mask.sum(axis=1).astype(jnp.int32)
         return jax.nn.dot_product_attention(
             q,
