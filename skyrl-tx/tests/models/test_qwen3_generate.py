@@ -106,6 +106,21 @@ def test_qwen3_generate():
                     f"Ours: {our_logprob}, HF: {expected_logprob}, diff: {abs(our_logprob - expected_logprob)}"
                 )
 
+        # Compare prompt_logprobs against HuggingFace forward pass
+        result_with_prompt_logprobs = model.generate(
+            batch.input_ids.numpy(),
+            batch.attention_mask.numpy(),
+            sampling_params=sampling_params,
+            prompt_logprobs=True,
+        )
+        for i, text in enumerate(inputs):
+            tokens = tokenizer(text, return_tensors="pt")
+            with torch.no_grad():
+                hf_logits = hf_model(tokens.input_ids).logits[0, :-1]
+                hf_logprobs = torch.nn.functional.log_softmax(hf_logits, dim=-1)
+                expected = hf_logprobs[torch.arange(len(hf_logprobs)), tokens.input_ids[0, 1:]].numpy()
+            assert np.allclose(result_with_prompt_logprobs.prompt_logprobs[i], expected, rtol=1e-3, atol=1e-3)
+
 
 @pytest.mark.skipif(os.environ.get("CI") is not None, reason="Skip speed test in CI due to memory limits")
 def test_qwen3_generate_speed():
