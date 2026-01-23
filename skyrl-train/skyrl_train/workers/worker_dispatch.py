@@ -14,8 +14,8 @@ from typing import Dict, List, Optional
 import ray
 from omegaconf import DictConfig
 
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.workers.worker import PPORayActorGroup
 
@@ -282,7 +282,6 @@ class WorkerDispatch:
         Tinker API method to prepare updated parameters for sampling.
 
         Syncs weights to inference engine for sampling.
-        Call this after training (optim_step) and before generating samples.
         """
         if self._inference_engine_client is None:
             raise RuntimeError(

@@ -25,6 +25,7 @@ from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
 )
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.generators.base import (
     GeneratorInput,
@@ -44,7 +45,6 @@ from skyrl_train.utils import (
     ppo_utils,
     trainer_utils,
 )
-from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.utils.ppo_utils import (
@@ -573,6 +573,7 @@ class RayPPOTrainer:
         Note: For new code, prefer using dispatch.save_weights_for_sampler() which
         handles the full weight sync protocol including offload/backload.
         This method is kept for backward compatibility with subclasses.
+        TODO(tgriggs): Remove this method when migration is compelte.
         """
         return self.policy_model.async_run_ray_method(
             "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
@@ -1017,6 +1018,7 @@ class RayPPOTrainer:
         )
 
         return data
+
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Execute training step for FSDP strategy using forward_backward + optim_step.
