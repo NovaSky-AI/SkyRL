@@ -12,8 +12,8 @@ Usage:
 Split Strategy:
     - Stratified by environment (each env maintains train/eval ratio)
     - Hash-based deterministic assignment (same task always goes to same split)
-    - Minimum 10 eval samples per env (otherwise all go to train)
-    - Held-out test envs: instacart (computer_use), outlook (tool_use)
+    - Minimum 5 eval samples per env (otherwise all go to train)
+    - Held-out eval envs: instacart (computer_use), outlook (tool_use)
 """
 
 import argparse
@@ -32,7 +32,7 @@ HELD_OUT_ENVS = {
 }
 
 # Minimum number of samples required to create an eval split for an env
-MIN_EVAL_SAMPLES = 10
+MIN_EVAL_SAMPLES = 5
 
 
 def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
@@ -49,7 +49,7 @@ def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
         raise ValueError("Invalid JSON format: expected array or object with 'tasks' key")
 
 
-def hash_to_split(task_key: str, eval_ratio: float = 0.1) -> str:
+def hash_to_split(task_key: str, eval_ratio: float = 0.02) -> str:
     """Deterministically assign task to train or eval based on hash.
 
     Uses MD5 hash of task_key to get a deterministic float in [0, 1).
@@ -65,7 +65,7 @@ def prepare_fleet_dataset(
     tasks_json: str,
     output_dir: str,
     modality: Optional[str] = "tool_use",
-    eval_ratio: float = 0.1,
+    eval_ratio: float = 0.02,
     env_filter: Optional[str] = None,
     max_tasks: Optional[int] = None,
 ):
@@ -76,7 +76,7 @@ def prepare_fleet_dataset(
         tasks_json: Path to Fleet tasks JSON file
         output_dir: Output directory for parquet files
         modality: Task modality filter ("tool_use" or "computer_use"), None for all
-        eval_ratio: Fraction of data for evaluation (default: 0.1)
+        eval_ratio: Fraction of data for evaluation (default: 0.02)
         env_filter: Optional env_key filter (e.g., "github", "booking")
         max_tasks: Optional maximum number of tasks to include
     """
@@ -253,8 +253,8 @@ def main():
     parser.add_argument(
         "--eval-ratio",
         type=float,
-        default=0.1,
-        help="Fraction of data for evaluation (default: 0.1)",
+        default=0.02,
+        help="Fraction of data for evaluation (default: 0.02)",
     )
     parser.add_argument(
         "--env-filter",
