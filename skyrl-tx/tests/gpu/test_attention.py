@@ -43,11 +43,15 @@ def assert_attention_match(q, k, v, mask, is_causal, head_dim, seq_lengths=None)
         q, k, v, scale=scale, mask=mask[:, None, None, :].astype(bool), is_causal=is_causal
     )
 
+    # bfloat16 has ~7 bits of mantissa (epsilon ≈ 2^-7 = 0.0078)
+    # Attention chains multiple ops, so errors compound to ~2^-6 = 0.0156
+    atol = 0.02
+
     if seq_lengths is None:
-        assert jnp.allclose(result, expected, atol=1e-5)
+        assert jnp.allclose(result, expected, atol=atol)
     else:
         for b, length in enumerate(seq_lengths):
-            assert jnp.allclose(result[b, :length], expected[b, :length], atol=1e-5), f"Mismatch at batch {b}"
+            assert jnp.allclose(result[b, :length], expected[b, :length], atol=atol), f"Mismatch at batch {b}"
 
 
 class TestFlashAttention:
