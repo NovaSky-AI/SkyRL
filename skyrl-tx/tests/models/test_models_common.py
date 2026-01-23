@@ -23,9 +23,7 @@ def make_model(model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=
     """Create a model with the given config."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # Load HF model in float32 for the comparison (our model will also use float32)
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True
-    )
+    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
@@ -71,12 +69,8 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
 @pytest.mark.parametrize("chunk_size", [8, 16, 32])
 def test_chunked_logprobs(model_name, config_cls, model_cls, mesh_axes, chunk_size):
     """Test that chunked and non-chunked compute_logprobs produce identical results."""
-    model_chunked, tokenizer, _ = make_model(
-        model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size
-    )
-    model_nonchunked, _, _ = make_model(
-        model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0
-    )
+    model_chunked, tokenizer, _ = make_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size)
+    model_nonchunked, _, _ = make_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0)
 
     inputs = ["The capital of France is", "Hello world"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)

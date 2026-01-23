@@ -62,9 +62,7 @@ class LogitsProcessorMixin(ModelForCausalLM):
         # Chunked path doesn't support LoRA on lm_head
         use_chunk = chunk_size > 0 and adapter_indices is None
         if use_chunk:
-            return self._compute_chunked_logprobs(
-                hidden_states, target_ids, chunk_size
-            )
+            return self._compute_chunked_logprobs(hidden_states, target_ids, chunk_size)
         else:
             logits = self.compute_logits(hidden_states, adapter_indices)
             return self.logits_to_logprobs(logits, target_ids)

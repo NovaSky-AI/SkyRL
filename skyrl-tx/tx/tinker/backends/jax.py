@@ -236,6 +236,7 @@ class JaxBackendImpl(AbstractBackend):
 
     def _create_loss_and_grad_fn(self):
         """Compile and cache the loss function to avoid re-jitting on every call."""
+
         def _model_forward(
             graphdef: nnx.GraphDef,
             lora_params: nnx.State,
@@ -255,8 +256,10 @@ class JaxBackendImpl(AbstractBackend):
             )
             # Check at runtime if any adapter in batch needs LoRA on lm_head
             needs_lm_head_lora = train_unembed_mask[adapter_indices].any()
+
             def logprobs(lm_head_adapter_indices):
                 return model.compute_logprobs(output.last_hidden_state, target_ids, lm_head_adapter_indices)
+
             return jax.lax.cond(needs_lm_head_lora, lambda: logprobs(adapter_indices), lambda: logprobs(None))
 
         if self.config.gradient_checkpointing:
