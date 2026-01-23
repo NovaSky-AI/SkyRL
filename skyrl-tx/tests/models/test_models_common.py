@@ -2,6 +2,7 @@ import tempfile
 
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
@@ -23,28 +24,27 @@ from tx.utils.models import load_safetensors
 def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # Load HF model in float32 for the comparison (our model will also use float32)
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
     inputs = ["The capital of France is", "Hello world"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     with tempfile.TemporaryDirectory() as tmp:
+        # Load HF model, get logits, save weights, then delete to free memory
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            model_name, attn_implementation="eager", use_safetensors=True
+        )
+        hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
+        hf_logits = hf_outputs.logits.detach().numpy()
         hf_model.save_pretrained(tmp, safe_serialization=True)
+        del hf_model, hf_outputs
 
+        # Load our model from saved weights
         base_config = AutoConfig.from_pretrained(model_name)
         config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
         mesh = jax.make_mesh((1, 1), mesh_axes)
         with jax.set_mesh(mesh):
-            import jax.numpy as jnp
-
-            # Use float32 to match HF model for accurate comparison
             model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
-
-        # Get HF logits
-        hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
-        hf_logits = hf_outputs.logits.detach().numpy()
 
         # Get our logits via compute_logits
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
