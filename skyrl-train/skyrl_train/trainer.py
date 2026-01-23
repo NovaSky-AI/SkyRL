@@ -573,7 +573,7 @@ class RayPPOTrainer:
         Note: For new code, prefer using dispatch.save_weights_for_sampler() which
         handles the full weight sync protocol including offload/backload.
         This method is kept for backward compatibility with subclasses.
-        TODO(tgriggs): Remove this method when migration is compelte.
+        TODO(tgriggs): Remove this method when migration is complete.
         """
         return self.policy_model.async_run_ray_method(
             "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
