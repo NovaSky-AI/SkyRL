@@ -4,12 +4,18 @@
 
 1. **NEVER push to main** - Always create a branch and open a PR for review.
 
-2. **DO NOT use Fleet SDK directly** - Use OpenEnv as the abstraction layer. The integration should go through OpenEnv, not call Fleet SDK APIs directly.
+2. **Always run pre-commit before creating a PR** - Format code before committing:
+   ```bash
+   uv pip install pre-commit
+   pre-commit run --all-files --config .pre-commit-config.yaml
+   ```
+
+3. **DO NOT use Fleet SDK directly** - Use OpenEnv as the abstraction layer. The integration should go through OpenEnv, not call Fleet SDK APIs directly.
    - Fleet SDK repo: `/Users/deniz/repos/fleet-sdk`
    - OpenEnv repo: `/Users/deniz/repos/OpenEnv`
    - Use OpenEnv's `FleetTaskEnv` from `envs.fleet_env.task_env` for Fleet task integration
 
-3. **Always look at API documentation** - Do not guess flags or API parameters. Read the actual documentation first.
+4. **Always look at API documentation** - Do not guess flags or API parameters. Read the actual documentation first.
    - Check the local fleet-sdk and OpenEnv repos for documentation
    - Look at existing examples in those repos
 

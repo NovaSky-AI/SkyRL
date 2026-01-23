@@ -234,6 +234,47 @@ def calculate_per_dataset_metrics(
     return eval_metrics
 
 
+def calculate_per_source_reward_metrics(
+    generator_outputs: GeneratorOutput,
+    uids: List[str],
+    data_sources: List[str],
+    n_samples_per_prompt: int,
+) -> Dict[str, float]:
+    """Calculate reward metrics per data source for training.
+
+    Similar to calculate_per_dataset_metrics but outputs reward/ prefix instead of eval/.
+    """
+    reward_metrics = {}
+
+    # Group indices by data source
+    data_source_indices = {}
+    for i, data_source in enumerate(data_sources):
+        if data_source is None:
+            data_source = "unknown"
+        if data_source not in data_source_indices:
+            data_source_indices[data_source] = []
+        data_source_indices[data_source].append(i)
+
+    # Calculate metrics for each data source
+    for data_source, indices in data_source_indices.items():
+        # Extract subset for this data source
+        subset_generator_output = {
+            key: [value[i] for i in indices] for key, value in generator_outputs.items() if isinstance(value, list)
+        }
+        subset_uids = [uids[i] for i in indices]
+
+        # Calculate metrics for this subset
+        overall_metrics = get_metrics_from_generator_output(subset_generator_output, subset_uids)
+
+        # Add to reward metrics with proper naming
+        sanitized_data_source = sanitize_data_source(data_source)
+        reward_metrics[f"reward/{sanitized_data_source}/avg_score"] = overall_metrics["avg_score"]
+        reward_metrics[f"reward/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = overall_metrics["pass_at_n"]
+        reward_metrics[f"reward/{sanitized_data_source}/mean_positive_reward"] = overall_metrics["mean_positive_reward"]
+
+    return reward_metrics
+
+
 def dump_per_dataset_eval_results(
     dump_dir_path: Path,
     tokenizer: AutoTokenizer,

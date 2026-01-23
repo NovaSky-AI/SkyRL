@@ -79,6 +79,7 @@ def prepare_fleet_dataset(
     for task in tasks:
         task_key = task.get("key") or task.get("task_key")
         prompt = task.get("prompt", "")
+        env_key = task.get("env_key") or task.get("env_id") or "unknown"
 
         if not task_key or not prompt:
             print(f"Skipping task with missing key or prompt: {task.get('key', 'unknown')}")
@@ -91,6 +92,8 @@ def prepare_fleet_dataset(
                 "env_class": "fleet_task",  # This tells SkyRL to use FleetTaskEnv
                 # Task identification (passed as env_extras)
                 "task_key": task_key,
+                # Data source for per-environment metrics in WandB
+                "data_source": env_key,
             }
         )
 
