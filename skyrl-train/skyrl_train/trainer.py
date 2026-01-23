@@ -44,6 +44,7 @@ from skyrl_train.utils import (
     ppo_utils,
     trainer_utils,
 )
+from skyrl_train.utils.trainer_utils import calculate_per_source_reward_metrics
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.logging_utils import log_example
@@ -241,7 +242,11 @@ class RayPPOTrainer:
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output = self.postprocess_generator_output(generator_output, uids)
+                        # Extract data_sources for per-environment metrics
+                        data_sources = [
+                            env_extra.get("data_source") for env_extra in generator_input.get("env_extras", [])
+                        ]
+                        generator_output = self.postprocess_generator_output(generator_output, uids, data_sources)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -678,7 +683,9 @@ class RayPPOTrainer:
         return generator_output
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(
+        self, generator_output: GeneratorOutput, uids: List[str], data_sources: Optional[List[str]] = None
+    ) -> GeneratorOutput:
         """
         Converts to per token rewards and computes pass@N.
 
@@ -686,6 +693,7 @@ class RayPPOTrainer:
         """
         generator_output_for_metrics = generator_output
         uids_for_metrics = uids
+        data_sources_for_metrics = data_sources
         if self.cfg.generator.step_wise_trajectories:
             generator_output_for_metrics = defaultdict(list)
             for key in generator_output:
@@ -698,6 +706,10 @@ class RayPPOTrainer:
             uids_for_metrics = [
                 uid for uid, is_last_step in zip(uids, generator_output["is_last_step"]) if is_last_step
             ]
+            if data_sources:
+                data_sources_for_metrics = [
+                    ds for ds, is_last_step in zip(data_sources, generator_output["is_last_step"]) if is_last_step
+                ]
 
         # only use `generator_output_for_metrics` for metrics calculation
         # For step-wise training, we only calculate metrics for the last step of each trajectory
@@ -735,6 +747,17 @@ class RayPPOTrainer:
             "reward/avg_raw_reward": overall_metrics["avg_score"],
             "reward/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
+
+        # Calculate per-data-source metrics if data_sources provided
+        if data_sources_for_metrics:
+            per_source_metrics = calculate_per_source_reward_metrics(
+                generator_output_for_metrics,
+                uids_for_metrics,
+                data_sources_for_metrics,
+                n_samples_per_prompt,
+            )
+            reward_metrics.update(per_source_metrics)
+
         self.all_metrics.update(reward_metrics)
         logger.info(
             f"reward/avg_pass_at_{n_samples_per_prompt}: {overall_metrics['pass_at_n']}, reward/avg_raw_reward: {overall_metrics['avg_score']}, reward/mean_positive_reward: {overall_metrics['mean_positive_reward']}"

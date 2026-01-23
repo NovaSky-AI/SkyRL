@@ -46,11 +46,14 @@ class GeneratedOutputGroup:
 
         global_step_when_scheduled (int): The global step when the group was scheduled for generation,
             used for validating the staleness control.
+
+        data_source (str): Optional data source identifier for per-environment metrics tracking.
     """
 
     generator_output: GeneratorOutput
     uid: str
     global_step_when_scheduled: int
+    data_source: str = None
 
 
 @dataclass
@@ -567,12 +570,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
+                # Extract data_source for per-environment metrics
+                env_extras = generator_input.get("env_extras", [])
+                data_source = env_extras[0].get("data_source") if env_extras else None
                 try:
                     generation_output_group_buffer.put_nowait(
                         GeneratedOutputGroup(
                             generator_output=cur_generator_output,
                             uid=uids[0],
                             global_step_when_scheduled=global_step_at_start,
+                            data_source=data_source,
                         )
                     )
                 except asyncio.QueueFull:
@@ -603,6 +610,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Given a mini-batch of generated groups, concatenate them into a single GeneratorOutput, then convert to a TrainingInputBatch."""
         generator_outputs = []
         uids = []
+        data_sources = []
         stalenesses = []
         staleness_violation_count = 0
         group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
@@ -611,6 +619,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
             uids.extend([cur_generated_output_group.uid] * group_size)
+            data_sources.extend([cur_generated_output_group.data_source] * group_size)
 
             # Check staleness violation.
             if cur_staleness > self.max_staleness_steps:
@@ -640,7 +649,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
         # Convert rewards to per-token form and compute reward metrics before training conversion
-        generator_output = self.postprocess_generator_output(generator_output, uids)
+        generator_output = self.postprocess_generator_output(generator_output, uids, data_sources)
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])
