@@ -14,13 +14,13 @@ from tx.layers.attention import dot_product_attention
 pytestmark = pytest.mark.skipif(jax.default_backend() != "gpu", reason="GPU tests require CUDA")
 
 
-def make_qkv(batch, seq_len, num_heads, head_dim, num_kv_heads=None):
+def make_qkv(batch, seq_len, num_heads, head_dim, num_kv_heads=None, dtype=jnp.bfloat16):
     """Create random Q, K, V tensors."""
     if num_kv_heads is None:
         num_kv_heads = num_heads
-    q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim))
-    k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_kv_heads, head_dim))
-    v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_kv_heads, head_dim))
+    q = jax.random.normal(jax.random.key(0), (batch, seq_len, num_heads, head_dim), dtype=dtype)
+    k = jax.random.normal(jax.random.key(1), (batch, seq_len, num_kv_heads, head_dim), dtype=dtype)
+    v = jax.random.normal(jax.random.key(2), (batch, seq_len, num_kv_heads, head_dim), dtype=dtype)
     return q, k, v
 
 
@@ -102,9 +102,9 @@ class TestFlashAttention:
     def test_decode(self):
         """Decode mode (is_causal=False, single query token)."""
         batch, kv_len, num_heads, head_dim = 2, 128, 4, 64
-        q = jax.random.normal(jax.random.key(0), (batch, 1, num_heads, head_dim))
-        k = jax.random.normal(jax.random.key(1), (batch, kv_len, num_heads, head_dim))
-        v = jax.random.normal(jax.random.key(2), (batch, kv_len, num_heads, head_dim))
+        q = jax.random.normal(jax.random.key(0), (batch, 1, num_heads, head_dim), dtype=jnp.bfloat16)
+        k = jax.random.normal(jax.random.key(1), (batch, kv_len, num_heads, head_dim), dtype=jnp.bfloat16)
+        v = jax.random.normal(jax.random.key(2), (batch, kv_len, num_heads, head_dim), dtype=jnp.bfloat16)
         mask = make_right_padded_mask(batch, kv_len, [100, 80])
 
         result = dot_product_attention(q, k, v, mask, is_causal=False, head_dim=head_dim)
