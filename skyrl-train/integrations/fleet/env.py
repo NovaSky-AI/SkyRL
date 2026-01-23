@@ -7,27 +7,17 @@ It uses OpenEnv's FleetTaskEnv as the abstraction layer for Fleet environments.
 
 import asyncio
 import json
+import logging
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from omegaconf import DictConfig
 
-# Import SkyRL base classes
-try:
-    from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-except ImportError as e:
-    raise ImportError("skyrl_gym is required. Make sure you're running within the SkyRL environment.") from e
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
+from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
 
-# Import OpenEnv's FleetTaskEnv (from deniz/fleet_client branch)
-try:
-    from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
-except ImportError as e:
-    raise ImportError(
-        "OpenEnv is required for Fleet integration. Install from git:\n"
-        "pip install git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
-    ) from e
-
+logger = logging.getLogger(__name__)
 
 # Global task cache to avoid reloading JSON for each env instance
 _TASK_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -183,14 +173,17 @@ class FleetTaskEnv(BaseTextEnv):
         # Reset the OpenEnv environment
         try:
             obs = self.openenv_task_env.reset()
+            self._init_failed = False
         except Exception as e:
-            raise RuntimeError(f"Failed to reset Fleet environment: {e}") from e
+            logger.error(f"Failed to reset Fleet environment for task {self.task_key}: {e}")
+            self._init_failed = True
+            obs = {}
 
         # Reset state
         self.turns = 0
 
         # Get tools from observation (if available)
-        self.tools = obs.get("tools", [])
+        self.tools = obs.get("tools", []) if not self._init_failed else []
 
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
@@ -226,6 +219,17 @@ class FleetTaskEnv(BaseTextEnv):
         Parses the action for tool calls, executes via OpenEnv's FleetTaskEnv,
         and returns observation. Reward is computed by the verifier on completion.
         """
+        # If init failed, return immediately with done=True and reward=0
+        if getattr(self, "_init_failed", False):
+            self.chat_history.append({"role": "assistant", "content": action})
+            self.chat_history.append({"role": "user", "content": "Environment initialization failed. Task skipped."})
+            return BaseTextEnvStepOutput(
+                conversation=self.chat_history,
+                reward=0.0,
+                done=True,
+                metadata={"error": "init_failed", "task_key": self.task_key},
+            )
+
         self.turns += 1
         self.chat_history.append({"role": "assistant", "content": action})
 
