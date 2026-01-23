@@ -104,3 +104,10 @@ class TestFlashAttention:
         v = jax.random.normal(jax.random.key(2), (batch, kv_len, num_heads, head_dim), dtype=jnp.bfloat16)
         mask = make_right_padded_mask(batch, kv_len, [100, 80])
         assert_attention_match(q, k, v, mask, is_causal=False, head_dim=head_dim)
+
+    def test_float32_fallback(self):
+        """float32 (unsupported by cuDNN) uses mask-based fallback."""
+        batch, seq_len, num_heads, head_dim = 2, 64, 4, 64
+        q, k, v = make_qkv(batch, seq_len, num_heads, head_dim, dtype=jnp.float32)
+        mask = jnp.ones((batch, seq_len))
+        assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim)
