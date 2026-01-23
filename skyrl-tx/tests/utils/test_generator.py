@@ -1,7 +1,6 @@
 from unittest.mock import MagicMock
 
 from flax import nnx
-import jax
 import jax.numpy as jnp
 from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
@@ -19,7 +18,6 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
     def __init__(self, vocab_size: int = 16):
         self.config = MagicMock(loss_chunk_size=0, gradient_checkpointing=False)
         self.vocab_size = vocab_size
-        self._lm_head_weight = jnp.eye(vocab_size, dtype=jnp.float32)
 
         def lm_head(hidden_states, adapter_indices=None):
             # Scale logits by (1 + adapter_index) so different adapters give different log-softmax results
@@ -33,10 +31,6 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
         return self.lm_head
-
-    def get_lm_head_weight(self) -> jax.Array:
-        """Return identity matrix for dummy model."""
-        return self._lm_head_weight
 
     def __call__(
         self,

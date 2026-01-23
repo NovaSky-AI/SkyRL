@@ -20,10 +20,6 @@ class LogitsProcessorMixin(ModelForCausalLM):
         """Return the lm_head callable for logits computation."""
         ...
 
-    @abstractmethod
-    def get_lm_head_weight(self) -> jax.Array:
-        """Return the lm_head weight matrix [H, V] for efficient chunked computation."""
-        ...
 
     def compute_logits(
         self,
@@ -53,16 +49,13 @@ class LogitsProcessorMixin(ModelForCausalLM):
             hidden_states: Hidden states [B, T, H].
             target_ids: Target token IDs [B, T].
             adapter_indices: Adapter indices for LoRA on lm_head.
-                Pass when train_unembed=True. Forces non-chunked path.
 
         Returns:
             Log probabilities for target tokens [B, T].
         """
         chunk_size = self.config.loss_chunk_size
-        # Chunked path doesn't support LoRA on lm_head
-        use_chunk = chunk_size > 0 and adapter_indices is None
-        if use_chunk:
-            return self._compute_chunked_logprobs(hidden_states, target_ids, chunk_size)
+        if chunk_size > 0:
+            return self._compute_chunked_logprobs(hidden_states, target_ids, chunk_size, adapter_indices)
         else:
             logits = self.compute_logits(hidden_states, adapter_indices)
             return self.logits_to_logprobs(logits, target_ids)
@@ -87,6 +80,7 @@ class LogitsProcessorMixin(ModelForCausalLM):
         hidden_states: jax.Array,
         target_ids: jax.Array,
         chunk_size: int,
+        adapter_indices: jax.Array | None,
     ) -> jax.Array:
         """Compute log probabilities using chunked lm_head computation.
 
@@ -95,11 +89,17 @@ class LogitsProcessorMixin(ModelForCausalLM):
         """
         B, T, H = hidden_states.shape
         total_tokens = B * T
-        lm_head_weight = self.get_lm_head_weight()
+        lm_head = self.get_lm_head()
 
         # Flatten batch and sequence dimensions
         flat_hidden = hidden_states.reshape(-1, H)  # [B*T, H]
         flat_target_ids = target_ids.reshape(-1)  # [B*T]
+
+        # Expand adapter_indices from [B] to [B*T] by repeating each T times
+        if adapter_indices is not None:
+            flat_adapter_indices = jnp.repeat(adapter_indices, T)  # [B*T]
+        else:
+            flat_adapter_indices = None
 
         # Pad to multiple of chunk_size for clean slicing
         num_chunks = (total_tokens + chunk_size - 1) // chunk_size
@@ -109,16 +109,22 @@ class LogitsProcessorMixin(ModelForCausalLM):
         if pad_amount > 0:
             flat_hidden = jnp.pad(flat_hidden, ((0, pad_amount), (0, 0)))
             flat_target_ids = jnp.pad(flat_target_ids, (0, pad_amount))
+            if flat_adapter_indices is not None:
+                flat_adapter_indices = jnp.pad(flat_adapter_indices, (0, pad_amount))
 
         # Reshape into chunks: [num_chunks, chunk_size, H] and [num_chunks, chunk_size]
         chunked_hidden = flat_hidden.reshape(num_chunks, chunk_size, H)
         chunked_targets = flat_target_ids.reshape(num_chunks, chunk_size)
+        if flat_adapter_indices is not None:
+            chunked_adapter_indices = flat_adapter_indices.reshape(num_chunks, chunk_size)
+        else:
+            chunked_adapter_indices = None
 
         def compute_chunk_logprobs(args):
             """Compute lm_head and log probabilities for a chunk of tokens."""
-            chunk_hidden, chunk_targets = args
-            # Compute logits for this chunk only: [chunk_size, H] @ [H, V] = [chunk_size, V]
-            chunk_logits = chunk_hidden @ lm_head_weight
+            chunk_hidden, chunk_targets, chunk_adapters = args
+            # Compute logits for this chunk: [chunk_size, H] -> [chunk_size, V]
+            chunk_logits = lm_head(chunk_hidden, chunk_adapters)
             # Compute log probabilities
             log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
             target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
@@ -128,6 +134,20 @@ class LogitsProcessorMixin(ModelForCausalLM):
             compute_chunk_logprobs = jax.checkpoint(compute_chunk_logprobs, policy=None)
 
         # Process chunks sequentially using lax.map (not vmap) to reduce memory
-        all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_hidden, chunked_targets))
+        if chunked_adapter_indices is not None:
+            all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_hidden, chunked_targets, chunked_adapter_indices))
+        else:
+            # Create dummy array for lax.map (needs consistent structure)
+            dummy_adapters = jnp.zeros((num_chunks, chunk_size), dtype=jnp.int32)
+            def compute_chunk_logprobs_no_adapter(args):
+                chunk_hidden, chunk_targets, _ = args
+                chunk_logits = lm_head(chunk_hidden, None)
+                log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
+                target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
+                return (target_logits - log_sum_exp).squeeze(-1)
+            if self.config.gradient_checkpointing:
+                compute_chunk_logprobs_no_adapter = jax.checkpoint(compute_chunk_logprobs_no_adapter, policy=None)
+            all_logprobs = jax.lax.map(compute_chunk_logprobs_no_adapter, (chunked_hidden, chunked_targets, dummy_adapters))
+
         # Flatten and slice to original size, then reshape to [B, T]
         return all_logprobs.reshape(-1)[:total_tokens].reshape(B, T)
