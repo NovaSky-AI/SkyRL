@@ -49,8 +49,8 @@ sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
 | `LAMBDA_API_KEY` | Yes | Lambda Labs GPU |
 | `RUNPOD_API_KEY` | Yes | RunPod GPU |
 | `VAST_API_KEY` | Yes | Vast.ai GPU |
-| `AWS_ACCESS_KEY_ID` | No | S3 checkpoint upload |
-| `AWS_SECRET_ACCESS_KEY` | No | S3 checkpoint upload |
+| `AWS_ACCESS_KEY_ID` | Yes | S3 dataset download & checkpoint upload |
+| `AWS_SECRET_ACCESS_KEY` | Yes | S3 dataset download & checkpoint upload |
 
 ## Key Configuration
 
@@ -91,18 +91,3 @@ Local checkpoints deleted after upload to save disk.
 | `skyrl-train/integrations/fleet/entrypoints/main_fleet.py` | Training entrypoint |
 | `skyrl-train/integrations/fleet/s3_checkpoints.py` | S3 upload module |
 | `skyrl-train/integrations/fleet/prepare_dataset.py` | Dataset prep |
-| `skyrl-train/data/fleet_booking_sample.json` | Sample dataset (100 tasks) |
-
-## Troubleshooting
-
-| Error | Solution |
-|-------|----------|
-| `No space left on device` | Add AWS credentials for S3 upload |
-| `ModuleNotFoundError: envs` | Check OpenEnv install from `deniz/fleet_client` branch |
-| Cluster won't start | Run `sky check lambda runpod vast` |
-
-## Creating PRs
-
-1. Never push to main - create a branch (`feat/`, `fix/`, `docs/`)
-2. Training runs triggered manually via Actions tab
-3. Checkpoints stored at `s3://skyrl-checkpoints/{project}/{model}/{run}/`
