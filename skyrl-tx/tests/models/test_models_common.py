@@ -19,15 +19,10 @@ QWEN3_MODEL = "Qwen/Qwen3-0.6B"
 LLAMA3_MODEL = "unsloth/Llama-3.2-1B"
 
 MODEL_PARAMS = [
-    ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
-    ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
+    (LLAMA3_MODEL, Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
+    (QWEN3_MODEL, Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
 ]
 MODEL_IDS = ["llama3", "qwen3"]
-
-
-# =============================================================================
-# Gradient Checkpointing Tests
-# =============================================================================
 
 
 def create_qwen3_model():
@@ -106,11 +101,6 @@ class TestGradientCheckpointing:
 
         # KV cache should be populated (checkpointed path returns empty)
         assert len(out.kv_cache.keys) == config.num_hidden_layers
-
-
-# =============================================================================
-# Chunked Logprobs Tests
-# =============================================================================
 
 
 @pytest.mark.parametrize(
