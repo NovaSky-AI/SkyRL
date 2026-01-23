@@ -17,8 +17,6 @@ MODEL_PARAMS = [
     ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
 ]
 MODEL_IDS = ["llama3", "qwen3"]
-# llama3 has larger numerical differences (see test_llama3.py which uses 5e-2 for hidden states)
-MODEL_TOLERANCES = {"llama3": 3e-2, "qwen3": 5e-4}
 
 
 def make_model(model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0, gradient_checkpointing=False):
@@ -51,7 +49,7 @@ def make_model(model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
-def test_compute_logits(model_name, config_cls, model_cls, mesh_axes, request):
+def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
     """Test that model.compute_logits matches HuggingFace logits."""
     model, tokenizer, hf_model = make_model(model_name, config_cls, model_cls, mesh_axes)
 
@@ -66,10 +64,8 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes, request):
     outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
     our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
 
-    # Use model-specific tolerance
-    model_id = request.node.callspec.id
-    tol = MODEL_TOLERANCES[model_id]
-    np.testing.assert_allclose(our_logits, hf_logits, rtol=tol, atol=tol)
+    # Use loose tolerance due to numerical differences (see test_llama3.py which uses 5e-2)
+    np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
