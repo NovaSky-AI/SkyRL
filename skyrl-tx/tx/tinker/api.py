@@ -75,15 +75,16 @@ async def lifespan(app: FastAPI):
         if not shutting_down:
             logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
 
-            # Start a background thread that force-exits after timeout.
+            # Start a background timer that force-exits after timeout.
             # Using a thread instead of asyncio task because SIGTERM handling
             # may wait for pending asyncio tasks to complete before exiting.
             def force_exit():
-                time.sleep(SHUTDOWN_TIMEOUT_SECONDS)
                 logger.warning("Graceful shutdown timed out, forcing exit")
                 os._exit(1)
 
-            threading.Thread(target=force_exit, daemon=True).start()
+            timer = threading.Timer(SHUTDOWN_TIMEOUT_SECONDS, force_exit)
+            timer.daemon = True
+            timer.start()
 
             # Request graceful shutdown. Uvicorn will stop accepting new
             # connections and wait for active requests to complete.
