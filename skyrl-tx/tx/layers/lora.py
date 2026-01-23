@@ -145,6 +145,12 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
         base_out = super().__call__(x)
         return self.apply_lora(x, base_out, adapter_indices)
 
+    @property
+    def T(self):
+        """Return a callable that projects hidden states back to vocabulary space."""
+        # TODO: Apply lora adapters here as well
+        return lambda hidden_states, adapter_indices=None: hidden_states @ self.embedding.value.T
+
 
 class LoRALinear(LoRAMixin, nnx.Linear):
     """An nnx.Linear layer with multi-adapter LoRA support."""
@@ -292,6 +298,11 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         adapter_index: Index of the adapter to initialize
         lora_config: LoraConfig object containing rank, alpha, seed, and training flags
     """
+    if lora_config.train_unembed and getattr(model.config, "tie_word_embeddings", False):
+        raise ValueError(
+            "train_unembed=True is incompatible with tie_word_embeddings=True. "
+            "Tied embeddings use embed_tokens.T which does not support LoRA."
+        )
     rngs = nnx.Rngs(lora_config.seed)
     state = nnx.state(model)
 

@@ -38,7 +38,7 @@ def test_lora_training():
 
         def loss_fn(model, input_ids, target_ids, attention_mask):
             outputs = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
-            logits = outputs.logits
+            logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
             return optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=target_ids).mean()
 
         # Compute gradients - we need to use nnx.split to separate parameters

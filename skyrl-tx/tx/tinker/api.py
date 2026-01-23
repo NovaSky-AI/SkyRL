@@ -5,14 +5,16 @@ from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Any, AsyncGenerator
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from sqlmodel import SQLModel, select, func
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
-import subprocess
+import os
+import signal
 import random
+import threading
 import time
 
 from tx.tinker import types
@@ -34,6 +36,9 @@ from tx.utils.log import logger
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 ID_MAX_LENGTH = 255
+
+# Timeout for graceful shutdown when engine crashes
+SHUTDOWN_TIMEOUT_SECONDS = 10
 
 
 @asynccontextmanager
@@ -58,19 +63,50 @@ async def lifespan(app: FastAPI):
     cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
     cmd.extend(config_to_argv(app.state.engine_config))
 
-    background_engine = subprocess.Popen(cmd)
+    background_engine = await asyncio.create_subprocess_exec(*cmd)
+    app.state.background_engine = background_engine
     logger.info(f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}")
+
+    shutting_down = False
+
+    async def monitor_engine():
+        """Monitor engine process and exit API server if it crashes."""
+        exit_code = await background_engine.wait()
+        if not shutting_down:
+            logger.error(f"Background engine crashed with exit code {exit_code}, exiting API server")
+
+            # Start a background timer that force-exits after timeout.
+            # Using a thread instead of asyncio task because SIGTERM handling
+            # may wait for pending asyncio tasks to complete before exiting.
+            def force_exit():
+                logger.warning("Graceful shutdown timed out, forcing exit")
+                os._exit(1)
+
+            timer = threading.Timer(SHUTDOWN_TIMEOUT_SECONDS, force_exit)
+            timer.daemon = True
+            timer.start()
+
+            # Request graceful shutdown. Uvicorn will stop accepting new
+            # connections and wait for active requests to complete.
+            # If shutdown doesn't complete in time, force_exit() will terminate.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    monitor_task = asyncio.create_task(monitor_engine())
 
     yield
 
-    logger.info(f"Stopping background engine (PID {background_engine.pid})")
-    background_engine.terminate()
-    try:
-        background_engine.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
-        background_engine.kill()
-        background_engine.wait()
+    shutting_down = True
+    monitor_task.cancel()
+
+    logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
+    with suppress(ProcessLookupError):
+        background_engine.terminate()
+        try:
+            await asyncio.wait_for(background_engine.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
+            background_engine.kill()
+            await background_engine.wait()
     logger.info("Background engine stopped")
 
 

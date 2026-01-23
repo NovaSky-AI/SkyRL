@@ -19,8 +19,9 @@ app = typer.Typer()
 
 def loss_fn(model, batch):
     output = model(batch["text"], attention_mask=batch["attention_mask"])
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits=output.logits, labels=batch["target"])
-    return loss.mean(), output.logits
+    logits = model.compute_logits(output.last_hidden_state)
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=batch["target"])
+    return loss.mean(), logits
 
 
 @nnx.jit
