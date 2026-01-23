@@ -24,9 +24,7 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # Load HF model in float32 for the comparison (our model will also use float32)
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True
-    )
+    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
     inputs = ["The capital of France is", "Hello world"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
@@ -39,6 +37,7 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
         mesh = jax.make_mesh((1, 1), mesh_axes)
         with jax.set_mesh(mesh):
             import jax.numpy as jnp
+
             # Use float32 to match HF model for accurate comparison
             model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
