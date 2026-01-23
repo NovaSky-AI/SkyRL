@@ -79,7 +79,7 @@ jobs:
       - name: Verify Cloud Credentials
         run: sky check lambda runpod vast primeintellect
 
-      - name: Generate Cluster Name
+      - name: Generate Cluster Name and Run Name
         id: cluster
         run: |
           TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
@@ -89,6 +89,14 @@ jobs:
           CLUSTER_NAME=$(echo "$CLUSTER_NAME" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
           echo "name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
           echo "Generated cluster name: $CLUSTER_NAME"
+
+          # Generate WandB run name (matches trainer.run_name in YAML)
+          MODALITY="${{ inputs.modality }}"
+          RUN_ID=$(head -c 4 /dev/urandom | xxd -p)
+          WANDB_RUN_NAME="fleet_${MODALITY}_${RUN_ID}"
+          echo "wandb_run_name=$WANDB_RUN_NAME" >> $GITHUB_OUTPUT
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "Generated WandB run name: $WANDB_RUN_NAME"
 
       - name: Launch Training Cluster
         id: launch
@@ -117,7 +125,7 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
           LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
           LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
-          LAUNCH_CMD="$LAUNCH_CMD --env PR_NUMBER=${{ github.event.pull_request.number || '0' }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env RUN_ID=${{ steps.cluster.outputs.run_id }}"
 
           # AWS credentials (required for S3 dataset download and checkpoint upload)
           if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
@@ -183,7 +191,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Status:* Training started\n*WandB:* <https://wandb.ai/thefleet/fleet-task-grpo|View Dashboard>" }
+                  "text": { "type": "mrkdwn", "text": "*Status:* Training started\n*WandB:* <https://wandb.ai/thefleet/fleet-task-grpo/runs?nw=nwuserthefleet&search=${{ steps.cluster.outputs.wandb_run_name }}|View Run>" }
                 },
                 {
                   "type": "context",
@@ -256,7 +264,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/thefleet/fleet-task-grpo|View Training Results>" }
+                  "text": { "type": "mrkdwn", "text": "*WandB:*\n<https://wandb.ai/thefleet/fleet-task-grpo/runs?nw=nwuserthefleet&search=${{ steps.cluster.outputs.wandb_run_name }}|View Training Results>" }
                 },
                 {
                   "type": "context",
@@ -329,4 +337,4 @@ jobs:
           echo "| Max Tasks | \`${{ inputs.max_tasks || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Links" >> $GITHUB_STEP_SUMMARY
-          echo "- [WandB Dashboard](https://wandb.ai/thefleet/fleet-task-grpo)" >> $GITHUB_STEP_SUMMARY
+          echo "- [WandB Run](https://wandb.ai/thefleet/fleet-task-grpo/runs?nw=nwuserthefleet&search=${{ steps.cluster.outputs.wandb_run_name }})" >> $GITHUB_STEP_SUMMARY

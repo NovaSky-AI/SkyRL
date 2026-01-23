@@ -39,6 +39,24 @@ sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
 | hubspot | 12 | 0 | 12 |
 | dropbox | 2 | 0 | 2 |
 
+## Dataset Split Strategy
+
+The `prepare_dataset.py` script creates train/eval splits with the following strategy:
+
+**Stratified by Environment:** Each environment maintains the same train/eval ratio (default 90/10), ensuring balanced representation across all environments.
+
+**Hash-based Deterministic Assignment:** Tasks are assigned to splits using MD5 hash of task key, ensuring the same task always goes to the same split across runs.
+
+**Minimum Eval Threshold:** Environments with fewer than 10 expected eval samples have all tasks go to train (prevents statistically unreliable eval sets).
+
+**Held-out Eval Environments:**
+| Modality | Held-out Env |
+|----------|--------------|
+| tool_use | outlook |
+| computer_use | instacart |
+
+These environments go entirely to eval (not used in training).
+
 ## GitHub Secrets
 
 | Secret | Required | Description |

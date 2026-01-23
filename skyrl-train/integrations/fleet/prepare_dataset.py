@@ -8,14 +8,31 @@ Usage:
         --tasks-json /path/to/all_tool_use.json \
         --output-dir ./data/fleet \
         --modality tool_use
+
+Split Strategy:
+    - Stratified by environment (each env maintains train/eval ratio)
+    - Hash-based deterministic assignment (same task always goes to same split)
+    - Minimum 10 eval samples per env (otherwise all go to train)
+    - Held-out test envs: instacart (computer_use), outlook (tool_use)
 """
 
 import argparse
+import hashlib
 import json
 import os
-from typing import List, Dict, Any, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 from datasets import Dataset
+
+# Held-out environments for eval only (not used in train)
+HELD_OUT_ENVS = {
+    "tool_use": ["outlook"],
+    "computer_use": ["instacart"],
+}
+
+# Minimum number of samples required to create an eval split for an env
+MIN_EVAL_SAMPLES = 10
 
 
 def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
@@ -32,11 +49,23 @@ def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
         raise ValueError("Invalid JSON format: expected array or object with 'tasks' key")
 
 
+def hash_to_split(task_key: str, eval_ratio: float = 0.1) -> str:
+    """Deterministically assign task to train or eval based on hash.
+
+    Uses MD5 hash of task_key to get a deterministic float in [0, 1).
+    This ensures the same task always goes to the same split.
+    """
+    hash_bytes = hashlib.md5(task_key.encode()).digest()
+    hash_int = int.from_bytes(hash_bytes[:8], byteorder="big")
+    hash_float = hash_int / (2**64)
+    return "eval" if hash_float < eval_ratio else "train"
+
+
 def prepare_fleet_dataset(
     tasks_json: str,
     output_dir: str,
     modality: Optional[str] = "tool_use",
-    train_split: float = 0.9,
+    eval_ratio: float = 0.1,
     env_filter: Optional[str] = None,
     max_tasks: Optional[int] = None,
 ):
@@ -47,7 +76,7 @@ def prepare_fleet_dataset(
         tasks_json: Path to Fleet tasks JSON file
         output_dir: Output directory for parquet files
         modality: Task modality filter ("tool_use" or "computer_use"), None for all
-        train_split: Fraction of data for training (rest is validation)
+        eval_ratio: Fraction of data for evaluation (default: 0.1)
         env_filter: Optional env_key filter (e.g., "github", "booking")
         max_tasks: Optional maximum number of tasks to include
     """
@@ -74,71 +103,130 @@ def prepare_fleet_dataset(
         print("No tasks remaining after filtering. Exiting.")
         return
 
-    # Convert to SkyRL dataset format
-    records = []
-    for task in tasks:
-        task_key = task.get("key") or task.get("task_key")
-        prompt = task.get("prompt", "")
-        env_key = task.get("env_key") or task.get("env_id") or "unknown"
+    # Get held-out envs for this modality
+    held_out_envs = set(HELD_OUT_ENVS.get(modality, []))
+    if held_out_envs:
+        print(f"Held-out test environments: {held_out_envs}")
 
-        if not task_key or not prompt:
-            print(f"Skipping task with missing key or prompt: {task.get('key', 'unknown')}")
+    # Group tasks by environment
+    tasks_by_env: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for task in tasks:
+        env_key = task.get("env_key") or task.get("env_id") or "unknown"
+        tasks_by_env[env_key].append(task)
+
+    # Prepare records with stratified split
+    train_records = []
+    eval_records = []
+
+    # Track per-env counts for summary table
+    env_split_counts: Dict[str, Dict[str, int]] = {}
+
+    print("\n=== Per-Environment Split ===")
+    for env_key in sorted(tasks_by_env.keys()):
+        env_tasks = tasks_by_env[env_key]
+
+        # Check if this env is held out for eval only
+        if env_key in held_out_envs:
+            env_eval_count = 0
+            for task in env_tasks:
+                record = _task_to_record(task, env_key)
+                if record:
+                    eval_records.append(record)
+                    env_eval_count += 1
+            env_split_counts[env_key] = {"train": 0, "eval": env_eval_count}
+            print(f"  {env_key}: {len(env_tasks)} -> EVAL only (held-out)")
             continue
 
-        records.append(
-            {
-                # Required fields for SkyRL
-                "prompt": [{"role": "user", "content": prompt}],
-                "env_class": "fleet_task",  # This tells SkyRL to use FleetTaskEnv
-                # Task identification (passed as env_extras)
-                "task_key": task_key,
-                # Data source for per-environment metrics in WandB
-                "data_source": env_key,
-            }
-        )
+        # Calculate expected eval size
+        expected_eval_size = int(len(env_tasks) * eval_ratio)
 
-    print(f"Prepared {len(records)} records for dataset")
+        # If not enough samples for eval, put all in train
+        if expected_eval_size < MIN_EVAL_SAMPLES:
+            env_train_count = 0
+            for task in env_tasks:
+                record = _task_to_record(task, env_key)
+                if record:
+                    train_records.append(record)
+                    env_train_count += 1
+            env_split_counts[env_key] = {"train": env_train_count, "eval": 0}
+            print(f"  {env_key}: {len(env_tasks)} -> all TRAIN (< {MIN_EVAL_SAMPLES} eval samples)")
+            continue
 
-    # Shuffle records for better train/val split
-    import random
+        # Stratified split using hash
+        env_train = 0
+        env_eval = 0
+        for task in env_tasks:
+            task_key = task.get("key") or task.get("task_key")
+            record = _task_to_record(task, env_key)
+            if not record:
+                continue
 
-    random.seed(42)
-    random.shuffle(records)
+            split = hash_to_split(task_key, eval_ratio)
+            if split == "eval":
+                eval_records.append(record)
+                env_eval += 1
+            else:
+                train_records.append(record)
+                env_train += 1
 
-    # Split into train/validation
-    split_idx = int(len(records) * train_split)
-    train_records = records[:split_idx]
-    val_records = records[split_idx:]
+        env_split_counts[env_key] = {"train": env_train, "eval": env_eval}
+        print(f"  {env_key}: {len(env_tasks)} -> {env_train} train, {env_eval} eval")
 
-    print(f"Train: {len(train_records)}, Validation: {len(val_records)}")
+    print(f"\nTotal: {len(train_records)} train, {len(eval_records)} eval")
 
     # Create datasets
-    train_dataset = Dataset.from_list(train_records)
-    val_dataset = Dataset.from_list(val_records)
+    train_dataset = Dataset.from_list(train_records) if train_records else None
+    eval_dataset = Dataset.from_list(eval_records) if eval_records else None
 
     # Save to parquet
     os.makedirs(output_dir, exist_ok=True)
-    train_path = os.path.join(output_dir, "train.parquet")
-    val_path = os.path.join(output_dir, "validation.parquet")
 
-    train_dataset.to_parquet(train_path)
-    val_dataset.to_parquet(val_path)
+    if train_dataset:
+        train_path = os.path.join(output_dir, "train.parquet")
+        train_dataset.to_parquet(train_path)
+        print(f"Saved train dataset to {train_path}")
 
-    print(f"Saved train dataset to {train_path}")
-    print(f"Saved validation dataset to {val_path}")
+    if eval_dataset:
+        eval_path = os.path.join(output_dir, "validation.parquet")
+        eval_dataset.to_parquet(eval_path)
+        print(f"Saved validation dataset to {eval_path}")
 
     # Print summary statistics
     print("\n=== Dataset Summary ===")
+    print(f"Train: {len(train_records)}")
+    print(f"Eval:  {len(eval_records)} (includes held-out: {held_out_envs or 'none'})")
 
-    # Count tasks by env
-    env_counts = {}
-    for task in tasks:
-        env_key = task.get("env_key") or task.get("env_id") or "unknown"
-        env_counts[env_key] = env_counts.get(env_key, 0) + 1
+    # Print per-environment breakdown table
+    print("\n=== Per-Environment Breakdown ===")
+    print(f"{'Environment':<20} {'Train':>8} {'Eval':>8} {'Total':>8}")
+    print("-" * 48)
+    for env_key in sorted(env_split_counts.keys()):
+        counts = env_split_counts[env_key]
+        total = counts["train"] + counts["eval"]
+        print(f"{env_key:<20} {counts['train']:>8} {counts['eval']:>8} {total:>8}")
+    print("-" * 48)
+    print(
+        f"{'TOTAL':<20} {len(train_records):>8} {len(eval_records):>8} " f"{len(train_records) + len(eval_records):>8}"
+    )
 
-    print("Tasks by environment:")
-    for env_key, count in sorted(env_counts.items(), key=lambda x: -x[1]):
-        print(f"  {env_key}: {count}")
+
+def _task_to_record(task: Dict[str, Any], env_key: str) -> Optional[Dict[str, Any]]:
+    """Convert a task dict to a dataset record."""
+    task_key = task.get("key") or task.get("task_key")
+    prompt = task.get("prompt", "")
+
+    if not task_key or not prompt:
+        return None
+
+    return {
+        # Required fields for SkyRL
+        "prompt": [{"role": "user", "content": prompt}],
+        "env_class": "fleet_task",  # This tells SkyRL to use FleetTaskEnv
+        # Task identification (passed as env_extras)
+        "task_key": task_key,
+        # Data source for per-environment metrics in WandB
+        "data_source": env_key,
+    }
 
 
 def main():
@@ -163,10 +251,10 @@ def main():
         help="Task modality filter ('all' for no filter)",
     )
     parser.add_argument(
-        "--train-split",
+        "--eval-ratio",
         type=float,
-        default=0.9,
-        help="Fraction of data for training (default: 0.9)",
+        default=0.1,
+        help="Fraction of data for evaluation (default: 0.1)",
     )
     parser.add_argument(
         "--env-filter",
@@ -190,7 +278,7 @@ def main():
         tasks_json=args.tasks_json,
         output_dir=args.output_dir,
         modality=modality,
-        train_split=args.train_split,
+        eval_ratio=args.eval_ratio,
         env_filter=args.env_filter,
         max_tasks=args.max_tasks,
     )
