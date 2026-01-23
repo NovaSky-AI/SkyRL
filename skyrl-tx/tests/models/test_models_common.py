@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from tx.models.configs import Llama3Config, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
@@ -15,42 +15,29 @@ from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.utils.models import load_safetensors
 
 
-QWEN3_MODEL = "Qwen/Qwen3-0.6B"
-LLAMA3_MODEL = "unsloth/Llama-3.2-1B"
-
 MODEL_PARAMS = [
-    (LLAMA3_MODEL, Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
-    (QWEN3_MODEL, Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
+    ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
+    ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
 ]
 MODEL_IDS = ["llama3", "qwen3"]
 
 
-def create_qwen3_model():
-    """Create Qwen3 model for testing."""
-    base_config = PretrainedConfig.from_pretrained(QWEN3_MODEL)
-    config = Qwen3Config(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
-    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
+def create_model(model_name, config_cls, model_cls, mesh_axes):
+    """Create model with random weights for testing."""
+    base_config = AutoConfig.from_pretrained(model_name)
+    config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
+    mesh = jax.make_mesh((1, 1), mesh_axes)
     with jax.set_mesh(mesh):
-        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
     return model, config
 
 
-def create_llama3_model():
-    """Create Llama3 model for testing."""
-    base_config = AutoConfig.from_pretrained(LLAMA3_MODEL)
-    config = Llama3Config(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
-    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
-    with jax.set_mesh(mesh):
-        model = Llama3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
-    return model, config
-
-
-@pytest.mark.parametrize("create_model", [create_qwen3_model, create_llama3_model], ids=["qwen3", "llama3"])
+@pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
 class TestGradientCheckpointing:
 
-    def test_output_matches_non_checkpointed(self, create_model):
+    def test_output_matches_non_checkpointed(self, model_name, config_cls, model_cls, mesh_axes):
         """Forward pass should produce identical outputs with/without checkpointing."""
-        model, config = create_model()
+        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
 
         batch_size, seq_len = 2, 8
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
@@ -59,16 +46,18 @@ class TestGradientCheckpointing:
         # Run without checkpointing
         config.gradient_checkpointing = False
         out_no_ckpt = model(input_ids, attention_mask=attention_mask, is_training=True)
+        logits_no_ckpt = model.compute_logits(out_no_ckpt.last_hidden_state)
 
         # Run with checkpointing
         config.gradient_checkpointing = True
         out_ckpt = model(input_ids, attention_mask=attention_mask, is_training=True)
+        logits_ckpt = model.compute_logits(out_ckpt.last_hidden_state)
 
-        np.testing.assert_allclose(out_no_ckpt.logits, out_ckpt.logits, rtol=1e-4, atol=1e-6)
+        np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-6)
 
-    def test_hidden_states_length_matches(self, create_model):
+    def test_hidden_states_length_matches(self, model_name, config_cls, model_cls, mesh_axes):
         """Both paths should return same number of hidden states."""
-        model, config = create_model()
+        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
 
         batch_size, seq_len = 2, 8
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
@@ -88,9 +77,9 @@ class TestGradientCheckpointing:
                 hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
             )
 
-    def test_is_training_false_uses_standard_path(self, create_model):
+    def test_is_training_false_uses_standard_path(self, model_name, config_cls, model_cls, mesh_axes):
         """is_training=False should use standard path with KV cache support."""
-        model, config = create_model()
+        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
         config.gradient_checkpointing = True
 
         batch_size, seq_len = 2, 8
@@ -103,14 +92,7 @@ class TestGradientCheckpointing:
         assert len(out.kv_cache.keys) == config.num_hidden_layers
 
 
-@pytest.mark.parametrize(
-    "model_name,config_cls,model_cls,mesh_axes",
-    [
-        ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
-        ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
-    ],
-    ids=["llama3", "qwen3"],
-)
+@pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
 def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
