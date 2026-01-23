@@ -32,8 +32,8 @@ class ModelConfig(PretrainedConfig):
         max_lora_adapters: int,
         max_lora_rank: int,
         shard_attention_heads: bool,
-        loss_chunk_size: int,
-        gradient_checkpointing: bool,
+        loss_chunk_size: int = 0,
+        gradient_checkpointing: bool = False,
     ):
         # Copy all attributes from the base config
         super().__init__(**config.to_dict())
