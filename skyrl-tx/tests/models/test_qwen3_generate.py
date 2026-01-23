@@ -19,24 +19,28 @@ from tx.utils.models import load_safetensors
 def test_qwen3_generate():
     """Test batched text generation with KV caching matches HuggingFace."""
     model_name = "Qwen/Qwen3-0.6B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
     inputs = ["My name is", "The capital of France is", "Test stopping", "Test stopping"]
-    batch = tokenizer(inputs, return_tensors="pt", padding=True)
+    max_new_tokens = [10, 20, 50, 2]
 
-    # Generate with HuggingFace (reference)
+    # Generate with HuggingFace (reference) - one at a time to avoid padding issues
+    hf_outputs = []
     with torch.no_grad():
-        hf_output = hf_model.generate(
-            batch.input_ids,
-            attention_mask=batch.attention_mask,
-            max_new_tokens=20,
-            do_sample=False,
-            return_dict_in_generate=True,
-            output_scores=True,
-        )
+        for text, max_tokens in zip(inputs, max_new_tokens):
+            tokens = tokenizer(text, return_tensors="pt")
+            hf_output = hf_model.generate(
+                tokens.input_ids,
+                attention_mask=tokens.attention_mask,
+                max_new_tokens=max_tokens,
+                do_sample=False,
+                return_dict_in_generate=True,
+                output_scores=True,
+            )
+            hf_outputs.append((hf_output, tokens.input_ids.shape[1]))
 
-    # Generate with our implementation
+    # Generate with our implementation (batched with right-padding)
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
         base_config = PretrainedConfig.from_pretrained(model_name)
@@ -54,6 +58,9 @@ def test_qwen3_generate():
             # Stop token at position 3, but max_tokens=2 should cap output first
             types.SamplingParams(max_tokens=2, temperature=0.0, seed=42, stop_tokens=[6149]),
         ]
+
+        # Batch with right-padding for our implementation
+        batch = tokenizer(inputs, return_tensors="pt", padding=True)
         result = model.generate(
             batch.input_ids.numpy(),
             batch.attention_mask.numpy(),
@@ -61,10 +68,10 @@ def test_qwen3_generate():
         )
 
         # Compare generated tokens
-        for i, (our_tokens, hf_tokens, sampling_param) in enumerate(
-            zip(result.generated_ids, hf_output.sequences, sampling_params)
+        for i, (our_tokens, (hf_output, prompt_length), sampling_param) in enumerate(
+            zip(result.generated_ids, hf_outputs, sampling_params)
         ):
-            prompt_length = batch.input_ids.shape[1]
+            hf_tokens = hf_output.sequences[0]
             hf_tokens_truncated = hf_tokens[prompt_length : prompt_length + sampling_param.max_tokens].tolist()
 
             if sampling_param.stop_tokens and result.stop_reasons[i] == "stop":
@@ -85,10 +92,12 @@ def test_qwen3_generate():
         assert result.stop_reasons[3] == "length"
 
         # Compare logprobs for sampled tokens
-        for i, (our_tokens, our_logprobs) in enumerate(zip(result.generated_ids, result.logprobs)):
+        for i, (our_tokens, our_logprobs, (hf_output, _)) in enumerate(
+            zip(result.generated_ids, result.logprobs, hf_outputs)
+        ):
             # Compute expected logprobs from HF scores
             for step_idx, (token_id, our_logprob) in enumerate(zip(our_tokens, our_logprobs)):
-                hf_logits = hf_output.scores[step_idx][i]
+                hf_logits = hf_output.scores[step_idx][0]
                 hf_logprobs = torch.nn.functional.log_softmax(hf_logits, dim=-1)
                 expected_logprob = float(hf_logprobs[token_id])
 
@@ -102,7 +111,7 @@ def test_qwen3_generate():
 def test_qwen3_generate_speed():
     """Profile batched text generation with KV caching."""
     model_name = "Qwen/Qwen3-0.6B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="right")
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
     base_config = PretrainedConfig.from_pretrained(model_name)
     config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)

@@ -148,15 +148,20 @@ class GeneratorMixin:
             adapter_indices=adapter_indices,
         )
 
+        # For left-aligned sequences, find the last real token position for each sequence
+        last_token_idx = attention_mask.sum(axis=1) - 1  # Shape: [B]
+        batch_idx = jnp.arange(input_ids.shape[0])
+
         # Compute logits for sampling and optionally for prompt logprobs
         if prompt_logprobs:
             # Compute all logits for prompt logprobs and sampling the first token
             all_logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
-            last_logits = all_logits[:, -1, :]
+            last_logits = all_logits[batch_idx, last_token_idx, :]  # Shape: [B, vocab_size]
             prompt_logprobs_array = model.logits_to_logprobs(all_logits[:, :-1, :], input_ids[:, 1:])
         else:
             # Only compute logits for the last position for sampling
-            last_logits = model.compute_logits(outputs.last_hidden_state[:, -1:, :], adapter_indices)[:, 0, :]
+            last_hidden = outputs.last_hidden_state[batch_idx, last_token_idx][:, None, :]  # Shape: [B, 1, H]
+            last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
         # Pad KV cache and attention mask
@@ -215,7 +220,7 @@ class GeneratorMixin:
             kv_cache=kv_cache,
             rngs=rngs,
             attention_mask=decode_attention_mask,
-            last_positions=positions[:, -1:],
+            last_positions=last_token_idx[:, None],
             logits=last_logits,
             stop_pos=jnp.full((input_ids.shape[0],), -1),
         )
