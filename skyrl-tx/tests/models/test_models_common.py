@@ -64,62 +64,55 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
         np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
 
 
-def make_model(model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
-    """Create a model with the given config."""
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        # Load HF model, save weights, then delete to free memory
-        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-        hf_model.save_pretrained(tmp, safe_serialization=True)
-        del hf_model
-
-        # Load our model from saved weights
-        base_config = AutoConfig.from_pretrained(model_name)
-        config = config_cls(
-            base_config,
-            max_lora_adapters=1,
-            max_lora_rank=1,
-            shard_attention_heads=True,
-            loss_chunk_size=loss_chunk_size,
-            gradient_checkpointing=False,
-        )
-        mesh = jax.make_mesh((1, 1), mesh_axes)
-        with jax.set_mesh(mesh):
-            model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model)
-
-    return model, tokenizer
+def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
+    """Load model from pre-saved weights directory."""
+    base_config = AutoConfig.from_pretrained(model_name)
+    config = config_cls(
+        base_config,
+        max_lora_adapters=1,
+        max_lora_rank=1,
+        shard_attention_heads=True,
+        loss_chunk_size=loss_chunk_size,
+        gradient_checkpointing=False,
+    )
+    mesh = jax.make_mesh((1, 1), mesh_axes)
+    with jax.set_mesh(mesh):
+        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+    load_safetensors(tmp_dir, config, model)
+    return model
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
 @pytest.mark.parametrize("chunk_size", [8, 16, 32])
 def test_chunked_logprobs(model_name, config_cls, model_cls, mesh_axes, chunk_size):
     """Test that chunked and non-chunked compute_logprobs produce identical results."""
-    model_chunked, tokenizer = make_model(
-        model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size
-    )
-    model_nonchunked, _ = make_model(
-        model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0
-    )
-
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     inputs = ["The capital of France is", "Hello world"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
     input_ids = jnp.array(batch.input_ids.numpy())
     attention_mask = jnp.array(batch.attention_mask.numpy())
     target_ids = jnp.roll(input_ids, -1, axis=1)
 
-    # Get hidden states
-    outputs_chunked = model_chunked(input_ids, attention_mask=attention_mask)
-    outputs_nonchunked = model_nonchunked(input_ids, attention_mask=attention_mask)
+    with tempfile.TemporaryDirectory() as tmp:
+        # Save HF weights once
+        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+        hf_model.save_pretrained(tmp, safe_serialization=True)
+        del hf_model
 
-    # Compute logprobs with both methods
-    logprobs_chunked = model_chunked.compute_logprobs(outputs_chunked.last_hidden_state, target_ids)
-    logprobs_nonchunked = model_nonchunked.compute_logprobs(outputs_nonchunked.last_hidden_state, target_ids)
+        # Load non-chunked model, compute logprobs, then delete
+        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0)
+        outputs = model(input_ids, attention_mask=attention_mask)
+        logprobs_nonchunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
+        del model, outputs
+
+        # Load chunked model, compute logprobs
+        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size)
+        outputs = model(input_ids, attention_mask=attention_mask)
+        logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
 
     np.testing.assert_allclose(
-        np.asarray(logprobs_chunked),
-        np.asarray(logprobs_nonchunked),
+        logprobs_chunked,
+        logprobs_nonchunked,
         rtol=1e-4,
         atol=1e-4,
         err_msg=f"Chunked vs non-chunked logprobs mismatch for chunk_size={chunk_size}",
