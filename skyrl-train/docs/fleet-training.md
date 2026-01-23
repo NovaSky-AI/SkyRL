@@ -49,6 +49,7 @@ sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
 | `LAMBDA_API_KEY` | Yes | Lambda Labs GPU |
 | `RUNPOD_API_KEY` | Yes | RunPod GPU |
 | `VAST_API_KEY` | Yes | Vast.ai GPU |
+| `PRIME_INTELLECT_API_KEY` | Yes | Prime Intellect GPU |
 | `AWS_ACCESS_KEY_ID` | Yes | S3 dataset download & checkpoint upload |
 | `AWS_SECRET_ACCESS_KEY` | Yes | S3 dataset download & checkpoint upload |
 

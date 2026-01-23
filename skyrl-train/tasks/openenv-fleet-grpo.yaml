@@ -18,6 +18,8 @@ resources:
       cloud: runpod
     - accelerators: H100:1
       cloud: vast
+    - accelerators: H100:1
+      cloud: primeintellect
     # Fallback to B200
     - accelerators: B200:1
       cloud: lambda
@@ -25,6 +27,8 @@ resources:
       cloud: runpod
     - accelerators: B200:1
       cloud: vast
+    - accelerators: B200:1
+      cloud: primeintellect
 
 num_nodes: 1
 
