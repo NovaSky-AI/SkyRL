@@ -89,13 +89,6 @@ class TestFlashAttention:
         mask = make_right_padded_mask(batch, seq_len, seq_lengths)
         assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim, seq_lengths=seq_lengths)
 
-    def test_gqa(self):
-        """Grouped query attention (8 Q heads, 2 KV heads)."""
-        batch, seq_len, num_heads, num_kv_heads, head_dim = 2, 64, 8, 2, 64
-        q, k, v = make_qkv(batch, seq_len, num_heads, head_dim, num_kv_heads)
-        mask = jnp.ones((batch, seq_len))
-        assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim)
-
     def test_decode(self):
         """Decode mode (is_causal=False, single query token)."""
         batch, kv_len, num_heads, head_dim = 2, 128, 4, 64
@@ -111,3 +104,20 @@ class TestFlashAttention:
         q, k, v = make_qkv(batch, seq_len, num_heads, head_dim, dtype=jnp.float32)
         mask = jnp.ones((batch, seq_len))
         assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim)
+
+    def test_gqa_decode(self):
+        """GQA decode mode (8 Q heads, 2 KV heads, single query token)."""
+        batch, kv_len, num_heads, num_kv_heads, head_dim = 2, 128, 8, 2, 64
+        q = jax.random.normal(jax.random.key(0), (batch, 1, num_heads, head_dim), dtype=jnp.bfloat16)
+        k = jax.random.normal(jax.random.key(1), (batch, kv_len, num_kv_heads, head_dim), dtype=jnp.bfloat16)
+        v = jax.random.normal(jax.random.key(2), (batch, kv_len, num_kv_heads, head_dim), dtype=jnp.bfloat16)
+        mask = make_right_padded_mask(batch, kv_len, [100, 80])
+        assert_attention_match(q, k, v, mask, is_causal=False, head_dim=head_dim)
+
+    def test_gqa_prefill(self):
+        """GQA prefill mode with right-padded sequences (8 Q heads, 2 KV heads)."""
+        batch, seq_len, num_heads, num_kv_heads, head_dim = 2, 128, 8, 2, 64
+        q, k, v = make_qkv(batch, seq_len, num_heads, head_dim, num_kv_heads)
+        seq_lengths = [100, 80]
+        mask = make_right_padded_mask(batch, seq_len, seq_lengths)
+        assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim, seq_lengths=seq_lengths)
