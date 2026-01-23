@@ -123,8 +123,11 @@ class LogitsProcessorMixin(ModelForCausalLM):
         def compute_chunk_logprobs(args):
             """Compute lm_head and log probabilities for a chunk of tokens."""
             chunk_hidden, chunk_targets, chunk_adapters = args
-            # Compute logits for this chunk: [chunk_size, H] -> [chunk_size, V]
-            chunk_logits = lm_head(chunk_hidden, chunk_adapters)
+            # Reshape to [chunk_size, 1, H] for lm_head (batch=chunk_size, seq=1)
+            # This allows LoRA to work with per-token adapter indices
+            chunk_hidden_3d = chunk_hidden[:, None, :]
+            # Compute logits: [chunk_size, 1, H] -> [chunk_size, 1, V] -> [chunk_size, V]
+            chunk_logits = lm_head(chunk_hidden_3d, chunk_adapters)[:, 0, :]
             # Compute log probabilities
             log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
             target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
@@ -141,7 +144,8 @@ class LogitsProcessorMixin(ModelForCausalLM):
             dummy_adapters = jnp.zeros((num_chunks, chunk_size), dtype=jnp.int32)
             def compute_chunk_logprobs_no_adapter(args):
                 chunk_hidden, chunk_targets, _ = args
-                chunk_logits = lm_head(chunk_hidden, None)
+                chunk_hidden_3d = chunk_hidden[:, None, :]
+                chunk_logits = lm_head(chunk_hidden_3d, None)[:, 0, :]
                 log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
                 target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
                 return (target_logits - log_sum_exp).squeeze(-1)

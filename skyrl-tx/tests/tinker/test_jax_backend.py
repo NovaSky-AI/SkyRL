@@ -559,7 +559,7 @@ def test_adapter_reuse_initializes_lora_adapter():
 
 
 def test_mixed_train_unembed_adapters():
-    """Test that backend correctly routes to chunked/non-chunked path based on train_unembed."""
+    """Test that chunked and non-chunked paths produce same results with train_unembed adapters."""
     config_chunked = JaxBackendConfig(max_lora_adapters=3, max_lora_rank=32, loss_chunk_size=1024)
     config_nonchunked = JaxBackendConfig(max_lora_adapters=3, max_lora_rank=32, loss_chunk_size=0)
     backend_chunked = JaxBackend(BASE_MODEL, config_chunked)
