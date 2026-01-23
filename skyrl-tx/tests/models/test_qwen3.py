@@ -272,6 +272,8 @@ def test_qwen3_lora():
             adapter_indices=adapter_indices,
         )
 
+        logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
+
         # Compare outputs with corresponding adapters
         for idx in range(len(lora_adapters)):
-            assert np.allclose(hf_outputs_list[idx].logits[0], outputs.logits[idx], rtol=1e-3, atol=1e-3)
+            assert np.allclose(hf_outputs_list[idx].logits[0], logits[idx], rtol=1e-3, atol=1e-3)

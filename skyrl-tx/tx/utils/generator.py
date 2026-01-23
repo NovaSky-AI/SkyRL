@@ -113,16 +113,6 @@ def find_string_stop_position(
     return None
 
 
-def compute_prompt_logprobs(prefill_logits: jax.Array, input_ids: jax.Array) -> jax.Array:
-    """Compute log probabilities of prompt tokens from prefill logits"""
-    # TODO: Optimize memory usage by avoiding allocation of full vocab dimension.
-    logits_for_prompt = prefill_logits[:, :-1, :]
-    log_probs = jax.nn.log_softmax(logits_for_prompt, axis=-1)
-    prompt_tokens = input_ids[:, 1:]
-    prompt_logprobs = jnp.take_along_axis(log_probs, prompt_tokens[..., None], axis=-1).squeeze(-1)
-    return prompt_logprobs
-
-
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -151,10 +141,28 @@ class GeneratorMixin:
         positions = compute_positions(attention_mask)
 
         # Prefill: process full prompt
-        outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
+        outputs = model(
+            input_ids,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+        )
 
-        # Compute prompt logprobs if requested
-        prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
+        # For left-aligned sequences, find the last real token position for each sequence
+        last_token_idx = attention_mask.sum(axis=1) - 1  # Shape: [B]
+        batch_idx = jnp.arange(input_ids.shape[0])
+
+        # Compute logits for sampling and optionally for prompt logprobs
+        if prompt_logprobs:
+            # Compute all logits for prompt logprobs and sampling the first token
+            all_logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
+            last_logits = all_logits[batch_idx, last_token_idx, :]  # Shape: [B, vocab_size]
+            prompt_logprobs_array = model.logits_to_logprobs(all_logits[:, :-1, :], input_ids[:, 1:])
+        else:
+            # Only compute logits for the last position for sampling
+            last_hidden = outputs.last_hidden_state[batch_idx, last_token_idx][:, None, :]  # Shape: [B, 1, H]
+            last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
+            prompt_logprobs_array = None
 
         # Pad KV cache and attention mask
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
@@ -180,8 +188,7 @@ class GeneratorMixin:
             )
             greedy = jnp.argmax(s.logits, axis=-1)
             next_token = jnp.where(zero_temp_mask[:, None], greedy[:, None], sampled[:, None])
-            log_probs = jax.nn.log_softmax(s.logits, axis=-1)
-            sampled_logprob = jnp.take_along_axis(log_probs, next_token, axis=-1)
+            sampled_logprob = model.logits_to_logprobs(s.logits, next_token[:, 0])[:, None]
 
             # Track first stop token position (-1 means not stopped yet)
             is_stop = jnp.any(next_token == stop_tokens, axis=1)
@@ -197,12 +204,14 @@ class GeneratorMixin:
                 kv_cache=s.kv_cache,
                 adapter_indices=adapter_indices,
             )
+            # Compute logits for the next token
+            next_logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)[:, 0, :]
             next_state = DecodeState(
                 kv_cache=outputs.kv_cache,
                 rngs=rngs,
                 attention_mask=next_attention_mask,
                 last_positions=s.last_positions + 1,
-                logits=outputs.logits[:, -1, :],
+                logits=next_logits,
                 stop_pos=stop_pos,
             )
             return next_state, (next_token, sampled_logprob)
@@ -211,8 +220,8 @@ class GeneratorMixin:
             kv_cache=kv_cache,
             rngs=rngs,
             attention_mask=decode_attention_mask,
-            last_positions=positions[:, -1:],
-            logits=outputs.logits[:, -1, :],
+            last_positions=last_token_idx[:, None],
+            logits=last_logits,
             stop_pos=jnp.full((input_ids.shape[0],), -1),
         )
 
