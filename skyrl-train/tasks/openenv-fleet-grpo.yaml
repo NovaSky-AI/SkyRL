@@ -38,30 +38,52 @@ envs:
   PR_NUMBER: "0"
   # Optional: limit number of tasks for testing
   MAX_TASKS: ""
-  # S3 Checkpoint Upload (optional - passed via --env from GHA)
-  # If set, checkpoints are uploaded to S3 and local copies deleted to save disk
+  # AWS credentials (required for S3 dataset download, optional for checkpoint upload)
   AWS_ACCESS_KEY_ID: ""
   AWS_SECRET_ACCESS_KEY: ""
   AWS_REGION: "us-east-1"
+  # S3 buckets
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
   S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
 
 setup: |
+  set -euo pipefail
   cd skyrl-train
+
+  # Validate required environment variables
+  echo "Validating environment variables..."
+  if [ -z "$FLEET_API_KEY" ]; then
+    echo "ERROR: FLEET_API_KEY is required"
+    exit 1
+  fi
+  if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+    echo "ERROR: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required for S3 dataset download"
+    exit 1
+  fi
+  if [ "$MODALITY" != "tool_use" ] && [ "$MODALITY" != "computer_use" ]; then
+    echo "ERROR: MODALITY must be 'tool_use' or 'computer_use', got: $MODALITY"
+    exit 1
+  fi
+  echo "Environment validation passed"
+
   uv venv --python 3.12 --seed
   source .venv/bin/activate
   uv sync --extra vllm
-  uv pip install wandb boto3
+  uv pip install wandb boto3 awscli
 
   # Install OpenEnv for Fleet environment access (from branch with FleetTaskEnv)
   uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
 
-  # Use sample dataset (100 booking tasks) committed to repo
+  # Download dataset from S3
   mkdir -p $HOME/data/fleet
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
-  cp data/fleet_booking_sample.json "$TASKS_FILE"
-  echo "Using sample dataset: 100 booking tasks"
+  S3_PATH="s3://${S3_DATASET_BUCKET}/v0.1/openenv/all_${MODALITY}.json"
+  echo "Downloading dataset from $S3_PATH..."
+  aws s3 cp "$S3_PATH" "$TASKS_FILE"
+  TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['tasks']))")
+  echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
 
-  # Prepare dataset from sample tasks
+  # Prepare dataset
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
   uv run python -m integrations.fleet.prepare_dataset \
     --tasks-json "$TASKS_FILE" \
