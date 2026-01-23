@@ -580,14 +580,8 @@ class DeepseekV3ForCausalLM(nnx.Module, GeneratorMixin):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = outputs.last_hidden_state
-        if self.config.tie_word_embeddings:
-            logits = hidden_states @ self.model.embed_tokens.embedding.value.T
-        else:
-            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
         return CausalLMOutput(
-            logits=logits,
             last_hidden_state=outputs.last_hidden_state,
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
