@@ -8,13 +8,23 @@
 name: fleet-task-grpo
 
 resources:
-  accelerators: H100:1
   disk_size: 200  # Needs space for: model (~3GB), optimizer (~6GB), Ray temp (~50GB), vLLM cache, checkpoints
   ports: 6479
   any_of:
-    - cloud: lambda
-    - cloud: runpod
-    - cloud: vast
+    # Prefer H100
+    - accelerators: H100:1
+      cloud: lambda
+    - accelerators: H100:1
+      cloud: runpod
+    - accelerators: H100:1
+      cloud: vast
+    # Fallback to B200
+    - accelerators: B200:1
+      cloud: lambda
+    - accelerators: B200:1
+      cloud: runpod
+    - accelerators: B200:1
+      cloud: vast
 
 num_nodes: 1
 
