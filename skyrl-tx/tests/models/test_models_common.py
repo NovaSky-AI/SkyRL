@@ -64,7 +64,6 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
     outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
     our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
 
-    # Use loose tolerance due to numerical differences (see test_llama3.py which uses 5e-2)
     np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
 
 
