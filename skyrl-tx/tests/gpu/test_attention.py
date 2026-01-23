@@ -30,12 +30,24 @@ def make_right_padded_mask(batch, seq_len, seq_lengths):
     return (jnp.arange(seq_len)[None, :] < seq_lengths[:, None]).astype(jnp.float32)
 
 
-def mask_based_attention(q, k, v, mask, is_causal, head_dim):
-    """Reference implementation using mask-based attention."""
+def assert_attention_match(q, k, v, mask, is_causal, head_dim, seq_lengths=None):
+    """Run both attention implementations and assert they match.
+
+    Args:
+        seq_lengths: If provided, only compare valid positions per batch element.
+                    If None, compare all positions.
+    """
     scale = 1.0 / head_dim**0.5
-    return jax.nn.dot_product_attention(
+    result = dot_product_attention(q, k, v, mask, is_causal=is_causal, head_dim=head_dim)
+    expected = jax.nn.dot_product_attention(
         q, k, v, scale=scale, mask=mask[:, None, None, :].astype(bool), is_causal=is_causal
     )
+
+    if seq_lengths is None:
+        assert jnp.allclose(result, expected, atol=1e-5)
+    else:
+        for b, length in enumerate(seq_lengths):
+            assert jnp.allclose(result[b, :length], expected[b, :length], atol=1e-5), f"Mismatch at batch {b}"
 
 
 class TestFlashAttention:
@@ -46,26 +58,16 @@ class TestFlashAttention:
         """cuDNN matches mask-based for right-padded sequences."""
         batch, num_heads, head_dim = 2, 4, 64
         q, k, v = make_qkv(batch, seq_len, num_heads, head_dim)
-
         seq_lengths = [seq_len - 4, seq_len - 8]
         mask = make_right_padded_mask(batch, seq_len, seq_lengths)
-
-        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-        expected = mask_based_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-
-        # Check valid positions match
-        for b, length in enumerate(seq_lengths):
-            assert jnp.allclose(result[b, :length], expected[b, :length], atol=1e-5), f"Mismatch at batch {b}"
+        assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim, seq_lengths=seq_lengths)
 
     def test_no_padding(self):
         """Full sequences (no padding) work correctly."""
         batch, seq_len, num_heads, head_dim = 2, 64, 4, 64
         q, k, v = make_qkv(batch, seq_len, num_heads, head_dim)
         mask = jnp.ones((batch, seq_len))
-
-        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-        expected = mask_based_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-        assert jnp.allclose(result, expected, atol=1e-5)
+        assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim)
 
     @pytest.mark.parametrize(
         "seq_lengths",
@@ -81,23 +83,14 @@ class TestFlashAttention:
         batch, seq_len, num_heads, head_dim = 4, 128, 4, 64
         q, k, v = make_qkv(batch, seq_len, num_heads, head_dim)
         mask = make_right_padded_mask(batch, seq_len, seq_lengths)
-
-        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-        expected = mask_based_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-
-        # Check valid positions match
-        for b, length in enumerate(seq_lengths):
-            assert jnp.allclose(result[b, :length], expected[b, :length], atol=1e-5), f"Mismatch at batch {b}"
+        assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim, seq_lengths=seq_lengths)
 
     def test_gqa(self):
         """Grouped query attention (8 Q heads, 2 KV heads)."""
         batch, seq_len, num_heads, num_kv_heads, head_dim = 2, 64, 8, 2, 64
         q, k, v = make_qkv(batch, seq_len, num_heads, head_dim, num_kv_heads)
         mask = jnp.ones((batch, seq_len))
-
-        result = dot_product_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-        expected = mask_based_attention(q, k, v, mask, is_causal=True, head_dim=head_dim)
-        assert jnp.allclose(result, expected, atol=1e-5)
+        assert_attention_match(q, k, v, mask, is_causal=True, head_dim=head_dim)
 
     def test_decode(self):
         """Decode mode (is_causal=False, single query token)."""
@@ -106,7 +99,4 @@ class TestFlashAttention:
         k = jax.random.normal(jax.random.key(1), (batch, kv_len, num_heads, head_dim))
         v = jax.random.normal(jax.random.key(2), (batch, kv_len, num_heads, head_dim))
         mask = make_right_padded_mask(batch, kv_len, [100, 80])
-
-        result = dot_product_attention(q, k, v, mask, is_causal=False, head_dim=head_dim)
-        expected = mask_based_attention(q, k, v, mask, is_causal=False, head_dim=head_dim)
-        assert jnp.allclose(result, expected, atol=1e-5)
+        assert_attention_match(q, k, v, mask, is_causal=False, head_dim=head_dim)
