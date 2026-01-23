@@ -56,7 +56,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install SkyPilot
-        run: pip install "skypilot[lambda,runpod,vast]"
+        run: pip install "skypilot[lambda,runpod,vast,primeintellect]"
 
       - name: Configure Cloud Credentials
         run: |
@@ -72,8 +72,12 @@ jobs:
           mkdir -p ~/.config/vastai
           echo "${{ secrets.VAST_API_KEY }}" > ~/.config/vastai/vast_api_key
 
+          # Prime Intellect
+          pip install prime
+          prime config set-api-key "${{ secrets.PRIME_INTELLECT_API_KEY }}"
+
       - name: Verify Cloud Credentials
-        run: sky check lambda runpod vast
+        run: sky check lambda runpod vast primeintellect
 
       - name: Generate Cluster Name
         id: cluster
