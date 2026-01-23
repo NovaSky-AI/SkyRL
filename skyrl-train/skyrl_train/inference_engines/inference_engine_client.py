@@ -172,7 +172,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         Returns:
             InferenceEngineOutput containing num_samples results.
         """
-        # Route to first engine for simplicity (sample() doesn't need load balancing)
+        # TODO(Stage 4 - Tinker API): Add multi-engine load balancing and retry logic for sample().
+        # Currently routes to first engine only, which bottlenecks multi-engine deployments.
+        # Should mirror the load-balancing/retry/pause logic used in generate() for production use.
+        # See: https://github.com/NovaSky-AI/SkyRL/issues/XXX
         engine = self.engines[0]
         return await engine.sample(
             prompt_token_ids=prompt_token_ids,

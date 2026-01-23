@@ -510,6 +510,7 @@ async def test_generator_multi_turn_gsm8k_step_wise():
         ray.shutdown()
 
 
+@pytest.mark.vllm
 @pytest.mark.asyncio
 async def test_generator_with_tinker_sampling_api():
     """

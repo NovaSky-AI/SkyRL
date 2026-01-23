@@ -296,7 +296,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 engine_output = await self.inference_engine_client.sample(
                     prompt_token_ids=agent_loop_state.input_ids,
                     num_samples=1,
-                    sampling_params=sampling_params if sampling_params is not None else {},
+                    sampling_params=current_sampling_params,
                 )
             else:
                 engine_input = InferenceEngineInput(
