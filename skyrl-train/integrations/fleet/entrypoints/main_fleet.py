@@ -2,7 +2,11 @@
 Fleet Task Training Entrypoint for SkyRL.
 
 This entrypoint registers the FleetTaskEnv and runs GRPO training
-on Fleet-hosted environments with optional S3 checkpoint upload.
+on Fleet-hosted environments with checkpoint management.
+
+Features:
+- S3 checkpoint upload (if AWS credentials set)
+- Aggressive local cleanup (keeps only 1 checkpoint to prevent disk exhaustion)
 
 Usage:
     python -m integrations.fleet.entrypoints.main_fleet \
@@ -20,8 +24,6 @@ Environment Variables for S3 Checkpoint Upload:
 
 import asyncio
 import logging
-import os
-from pathlib import Path
 
 import hydra
 import ray
@@ -35,55 +37,27 @@ logger = logging.getLogger(__name__)
 
 class FleetPPOExp(BasePPOExp):
     """
-    Fleet-specific PPO experiment with S3 checkpoint upload support.
+    Fleet-specific PPO experiment with checkpoint management.
 
-    Wraps the trainer to upload checkpoints to S3 after each save,
-    preventing disk exhaustion on cloud instances.
+    Always wraps trainer to:
+    - Clean up old checkpoints before saving (prevents disk exhaustion)
+    - Upload to S3 if AWS credentials are set
     """
 
     def run(self):
         trainer = self._setup_trainer()
 
-        # Wrap trainer with S3 upload if credentials are available
-        if os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY"):
-            try:
-                from integrations.fleet.s3_checkpoints import wrap_trainer_with_s3_upload
+        # Always wrap trainer for checkpoint management
+        # This handles both S3 upload (if credentials set) and local cleanup
+        try:
+            from integrations.fleet.s3_checkpoints import wrap_trainer_with_s3_upload
 
-                bucket = os.environ.get("S3_CHECKPOINT_BUCKET", "skyrl-checkpoints")
-                region = os.environ.get("AWS_REGION", "us-east-1")
-
-                # Build prefix from trainer config
-                # Structure: {project}/{model}/{run_name}/
-                project_name = getattr(self.cfg.trainer, "project_name", "fleet-task-grpo")
-                run_name = getattr(self.cfg.trainer, "run_name", "unknown")
-
-                # Extract model name from path (e.g., "Qwen/Qwen2.5-1.5B-Instruct" -> "Qwen2.5-1.5B-Instruct")
-                model_path = getattr(self.cfg.trainer.policy.model, "path", "unknown-model")
-                model_name = Path(model_path).name
-
-                prefix = f"{project_name}/{model_name}/{run_name}"
-
-                trainer = wrap_trainer_with_s3_upload(
-                    trainer,
-                    bucket=bucket,
-                    prefix=prefix,
-                    region=region,
-                    keep_local=False,  # Delete local after upload to save disk
-                )
-                logger.info(f"S3 checkpoint upload enabled: s3://{bucket}/{prefix}/")
-            except Exception as e:
-                logger.warning(f"Failed to enable S3 checkpoint upload: {e}")
-        else:
-            logger.info("AWS credentials not found, S3 checkpoint upload disabled")
+            trainer = wrap_trainer_with_s3_upload(trainer, keep_local=False)
+        except Exception as e:
+            logger.warning(f"Failed to setup checkpoint management: {e}")
 
         # Start the training loop
         asyncio.run(trainer.train())
-
-        # Wait for any pending S3 uploads before exiting
-        if hasattr(trainer, "_s3_uploader"):
-            logger.info("Waiting for pending S3 uploads to complete...")
-            trainer._s3_uploader.wait_for_uploads(timeout=300)
-            logger.info("All S3 uploads completed")
 
 
 @ray.remote(num_cpus=1)
@@ -100,7 +74,7 @@ def skyrl_entrypoint(cfg: DictConfig):
         entry_point="integrations.fleet.env:FleetTaskEnv",
     )
 
-    # Run training with S3 checkpoint support
+    # Run training with checkpoint management
     exp = FleetPPOExp(cfg)
     exp.run()
 

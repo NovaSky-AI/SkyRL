@@ -9,7 +9,7 @@ name: fleet-task-grpo
 
 resources:
   accelerators: H100:1
-  disk_size: 100  # Increased from 40GB to handle checkpoints before S3 upload
+  disk_size: 200  # Needs space for: model (~3GB), optimizer (~6GB), Ray temp (~50GB), vLLM cache, checkpoints
   ports: 6479
   any_of:
     - cloud: lambda
@@ -83,10 +83,11 @@ run: |
   # Login to Weights & Biases
   uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
 
-  # Ray cluster setup
+  # Ray cluster setup - limit object store to prevent disk exhaustion
   export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+  export RAY_object_store_memory=10000000000  # 10GB limit for object store
   if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
-    ray start --head --disable-usage-stats --port 6479
+    ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
   fi
 
   # Wait for Ray

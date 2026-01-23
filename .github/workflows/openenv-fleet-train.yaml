@@ -27,6 +27,10 @@ on:
           - runpod
           - vast
         default: any
+      task_name:
+        description: "SkyPilot task name (YAML file in skyrl-train/tasks/)"
+        type: string
+        default: "openenv-fleet-grpo"
 
 permissions:
   contents: read
@@ -104,7 +108,7 @@ jobs:
           fi
 
           # Build launch command - direct GPU provisioning (no controller)
-          LAUNCH_CMD="sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml"
+          LAUNCH_CMD="sky launch skyrl-train/tasks/${{ inputs.task_name }}.yaml"
           LAUNCH_CMD="$LAUNCH_CMD --cluster $CLUSTER_NAME"
           LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
           LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"

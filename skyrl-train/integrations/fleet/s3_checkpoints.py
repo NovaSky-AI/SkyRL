@@ -3,15 +3,15 @@ S3 Checkpoint Uploader for SkyRL Training.
 
 Provides async upload of checkpoints to S3 with local cleanup to prevent disk exhaustion.
 
+Key behavior:
+- Cleans up old local checkpoints BEFORE saving new one (prevents disk full)
+- Uploads to S3 asynchronously (non-blocking, training continues)
+- Deletes local checkpoint after successful upload
+
 Usage:
-    from integrations.fleet.s3_checkpoints import S3CheckpointUploader, wrap_trainer_with_s3_upload
+    from integrations.fleet.s3_checkpoints import wrap_trainer_with_s3_upload
 
-    # Option 1: Wrap trainer to auto-upload after each checkpoint
-    trainer = wrap_trainer_with_s3_upload(trainer, bucket="skyrl-checkpoints", prefix="run-name")
-
-    # Option 2: Manual upload
-    uploader = S3CheckpointUploader(bucket="skyrl-checkpoints", prefix="run-name")
-    await uploader.upload_checkpoint("/path/to/checkpoint")
+    trainer = wrap_trainer_with_s3_upload(trainer, bucket="skyrl-checkpoints")
 
 Environment Variables:
     AWS_ACCESS_KEY_ID: AWS access key
@@ -20,13 +20,12 @@ Environment Variables:
     S3_CHECKPOINT_BUCKET: S3 bucket name (default: skyrl-checkpoints)
 """
 
-import asyncio
 import os
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -37,7 +36,7 @@ class S3CheckpointUploader:
     Uploads checkpoint directories to S3 asynchronously.
 
     Uses a background thread pool to avoid blocking training.
-    Cleans up local checkpoints after successful upload to prevent disk exhaustion.
+    Deletes local checkpoints after successful upload.
     """
 
     def __init__(
@@ -45,36 +44,21 @@ class S3CheckpointUploader:
         bucket: str,
         prefix: str,
         region: str = "us-east-1",
-        keep_local: bool = False,
         max_workers: int = 2,
     ):
-        """
-        Initialize S3 checkpoint uploader.
-
-        Args:
-            bucket: S3 bucket name
-            prefix: S3 key prefix (e.g., "fleet-training/run-2024-01-22")
-            region: AWS region
-            keep_local: If True, don't delete local checkpoints after upload
-            max_workers: Number of concurrent upload threads
-        """
         self.bucket = bucket
         self.prefix = prefix
         self.region = region
-        self.keep_local = keep_local
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="s3-upload")
-        self._pending_uploads: set = set()
+        self._pending: set = set()
         self._lock = threading.Lock()
 
     def _upload_sync(self, local_dir: str) -> bool:
-        """
-        Synchronous upload function that runs in thread pool.
-
-        Returns True on success, False on failure.
-        """
+        """Synchronous upload that runs in thread pool."""
         try:
             import boto3
             from botocore.config import Config
+            from boto3.s3.transfer import TransferConfig
 
             config = Config(
                 retries={"max_attempts": 3, "mode": "adaptive"},
@@ -82,20 +66,22 @@ class S3CheckpointUploader:
                 read_timeout=120,
             )
 
-            s3 = boto3.client(
-                "s3",
-                region_name=self.region,
-                config=config,
-            )
+            s3 = boto3.client("s3", region_name=self.region, config=config)
 
             local_path = Path(local_dir)
             if not local_path.exists():
                 logger.warning(f"Checkpoint directory does not exist: {local_dir}")
                 return False
 
-            # Get relative path from parent (e.g., global_step_10)
             checkpoint_name = local_path.name
             s3_prefix = f"{self.prefix}/{checkpoint_name}"
+
+            transfer_config = TransferConfig(
+                multipart_threshold=64 * 1024 * 1024,
+                multipart_chunksize=64 * 1024 * 1024,
+                max_concurrency=4,
+                use_threads=True,
+            )
 
             uploaded_files = 0
             total_size = 0
@@ -104,80 +90,71 @@ class S3CheckpointUploader:
                 if file_path.is_file():
                     relative_path = file_path.relative_to(local_path)
                     s3_key = f"{s3_prefix}/{relative_path}"
-
                     file_size = file_path.stat().st_size
                     total_size += file_size
 
-                    logger.info(f"Uploading {file_path} to s3://{self.bucket}/{s3_key} ({file_size / 1e6:.1f} MB)")
+                    logger.info(f"Uploading {file_path.name} ({file_size / 1e6:.1f} MB)")
 
-                    # Use multipart upload for large files
-                    from boto3.s3.transfer import TransferConfig
-
-                    transfer_config = TransferConfig(
-                        multipart_threshold=64 * 1024 * 1024,  # 64MB
-                        multipart_chunksize=64 * 1024 * 1024,
-                        max_concurrency=4,
-                        use_threads=True,
-                    )
-
-                    s3.upload_file(
-                        str(file_path),
-                        self.bucket,
-                        s3_key,
-                        Config=transfer_config,
-                    )
+                    s3.upload_file(str(file_path), self.bucket, s3_key, Config=transfer_config)
                     uploaded_files += 1
 
             logger.info(
-                f"Successfully uploaded checkpoint {checkpoint_name}: "
-                f"{uploaded_files} files, {total_size / 1e9:.2f} GB total"
+                f"Uploaded {checkpoint_name}: {uploaded_files} files, {total_size / 1e9:.2f} GB to s3://{self.bucket}/{s3_prefix}/"
             )
 
-            # Clean up local checkpoint after successful upload
-            if not self.keep_local:
-                logger.info(f"Cleaning up local checkpoint: {local_dir}")
-                shutil.rmtree(local_dir)
+            # Delete local after successful upload
+            logger.info(f"Deleting local checkpoint: {local_dir}")
+            shutil.rmtree(local_dir)
 
             return True
 
         except Exception as e:
-            logger.error(f"Failed to upload checkpoint {local_dir}: {e}")
+            logger.error(f"S3 upload failed for {local_dir}: {e}")
             return False
         finally:
             with self._lock:
-                self._pending_uploads.discard(local_dir)
+                self._pending.discard(local_dir)
 
-    def upload_checkpoint(self, local_dir: str) -> None:
-        """
-        Queue a checkpoint directory for async upload.
-
-        Non-blocking - returns immediately while upload happens in background.
-        """
+    def upload_async(self, local_dir: str) -> None:
+        """Queue checkpoint for async upload. Non-blocking."""
         with self._lock:
-            if local_dir in self._pending_uploads:
-                logger.warning(f"Checkpoint already queued for upload: {local_dir}")
+            if local_dir in self._pending:
                 return
-            self._pending_uploads.add(local_dir)
+            self._pending.add(local_dir)
 
         logger.info(f"Queuing checkpoint for S3 upload: {local_dir}")
         self._executor.submit(self._upload_sync, local_dir)
 
     def wait_for_uploads(self, timeout: Optional[float] = None) -> None:
-        """
-        Wait for all pending uploads to complete.
-
-        Args:
-            timeout: Maximum seconds to wait (None = wait forever)
-        """
+        """Wait for all pending uploads to complete."""
         self._executor.shutdown(wait=True)
-        # Recreate executor for future uploads
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="s3-upload")
 
-    @property
-    def pending_count(self) -> int:
-        """Number of uploads currently in progress or queued."""
-        with self._lock:
-            return len(self._pending_uploads)
+
+def cleanup_old_local_checkpoints(ckpt_path: str, keep_n: int = 2) -> None:
+    """
+    Delete old local checkpoints, keeping only the most recent N.
+
+    Args:
+        ckpt_path: Base checkpoint directory
+        keep_n: Number of recent checkpoints to keep (default: 2 for safety)
+    """
+    ckpt_dir = Path(ckpt_path)
+    if not ckpt_dir.exists():
+        return
+
+    checkpoint_dirs = sorted(
+        [d for d in ckpt_dir.iterdir() if d.is_dir() and d.name.startswith("global_step_")],
+        key=lambda x: int(x.name.split("_")[-1]),
+        reverse=True,
+    )
+
+    for old_dir in checkpoint_dirs[keep_n:]:
+        logger.info(f"Cleaning up old local checkpoint: {old_dir}")
+        try:
+            shutil.rmtree(old_dir)
+        except Exception as e:
+            logger.warning(f"Failed to delete {old_dir}: {e}")
 
 
 def wrap_trainer_with_s3_upload(
@@ -188,99 +165,68 @@ def wrap_trainer_with_s3_upload(
     keep_local: bool = False,
 ):
     """
-    Wrap a SkyRL trainer to upload checkpoints to S3 after each save.
-
-    This monkey-patches the trainer's save_checkpoints method to add S3 upload.
+    Wrap a SkyRL trainer to:
+    1. Clean up old checkpoints BEFORE saving (prevents disk full)
+    2. Upload to S3 asynchronously AFTER saving (if credentials set)
+    3. Delete local checkpoint after successful upload
 
     Args:
         trainer: SkyRL trainer instance
         bucket: S3 bucket (default: from S3_CHECKPOINT_BUCKET env var)
-        prefix: S3 prefix (default: from trainer config run_name)
-        region: AWS region (default: from AWS_REGION env var or us-east-1)
+        prefix: S3 prefix (default: from trainer config)
+        region: AWS region (default: from AWS_REGION env var)
         keep_local: If True, keep local checkpoints after upload
 
     Returns:
         The trainer (modified in place)
     """
-    # Get config from environment if not provided
     bucket = bucket or os.environ.get("S3_CHECKPOINT_BUCKET", "skyrl-checkpoints")
     region = region or os.environ.get("AWS_REGION", "us-east-1")
 
-    # Get prefix from trainer config if not provided
+    # Build prefix from trainer config
     if prefix is None:
         run_name = getattr(trainer.cfg.trainer, "run_name", None)
         project_name = getattr(trainer.cfg.trainer, "project_name", "skyrl")
-        prefix = f"{project_name}/{run_name}" if run_name else project_name
+        model_path = getattr(trainer.cfg.trainer.policy.model, "path", "unknown-model")
+        model_name = Path(model_path).name
+        prefix = f"{project_name}/{model_name}/{run_name}" if run_name else f"{project_name}/{model_name}"
 
-    # Check if AWS credentials are available
-    if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get("AWS_SECRET_ACCESS_KEY"):
+    # Check AWS credentials
+    aws_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    aws_secret = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    s3_enabled = bool(aws_key and aws_secret)
+
+    if s3_enabled:
+        logger.info(f"S3 checkpoint upload ENABLED: s3://{bucket}/{prefix}/")
+        uploader = S3CheckpointUploader(bucket=bucket, prefix=prefix, region=region)
+    else:
         logger.warning(
-            "AWS credentials not found in environment. S3 checkpoint upload disabled. "
-            "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to enable."
+            "AWS credentials not found. S3 upload DISABLED. "
+            "Using aggressive local cleanup (keeping only 2 checkpoints). "
+            "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to enable S3."
         )
-        return trainer
+        uploader = None
 
-    logger.info(f"Enabling S3 checkpoint upload: s3://{bucket}/{prefix}/")
-
-    # Create uploader
-    uploader = S3CheckpointUploader(
-        bucket=bucket,
-        prefix=prefix,
-        region=region,
-        keep_local=keep_local,
-    )
-
-    # Store original method
     original_save_checkpoints = trainer.save_checkpoints
+    ckpt_path = trainer.cfg.trainer.ckpt_path
 
-    def save_checkpoints_with_s3():
-        """Wrapped save_checkpoints that uploads to S3 after local save."""
-        # Call original save
+    def save_checkpoints_with_cleanup():
+        """Wrapped save_checkpoints with pre-save cleanup and async S3 upload."""
+        # CRITICAL: Clean up old checkpoints BEFORE saving to free disk space
+        keep_n = 2 if s3_enabled else 2  # Keep 2 for safety margin
+        cleanup_old_local_checkpoints(ckpt_path, keep_n=keep_n)
+
+        # Now save the new checkpoint (disk has space)
         original_save_checkpoints()
 
-        # Queue S3 upload for the checkpoint we just saved
-        global_step = trainer.global_step
-        ckpt_path = trainer.cfg.trainer.ckpt_path
-        checkpoint_dir = os.path.join(ckpt_path, f"global_step_{global_step}")
+        # Queue async S3 upload (non-blocking)
+        if s3_enabled and uploader:
+            global_step = trainer.global_step
+            checkpoint_dir = os.path.join(ckpt_path, f"global_step_{global_step}")
+            if os.path.exists(checkpoint_dir):
+                uploader.upload_async(checkpoint_dir)
 
-        if os.path.exists(checkpoint_dir):
-            uploader.upload_checkpoint(checkpoint_dir)
-        else:
-            logger.warning(f"Checkpoint directory not found after save: {checkpoint_dir}")
-
-    # Monkey-patch the method
-    trainer.save_checkpoints = save_checkpoints_with_s3
-
-    # Store uploader reference on trainer for cleanup
+    trainer.save_checkpoints = save_checkpoints_with_cleanup
     trainer._s3_uploader = uploader
 
     return trainer
-
-
-def create_s3_uploader_from_env() -> Optional[S3CheckpointUploader]:
-    """
-    Create S3 uploader from environment variables.
-
-    Returns None if AWS credentials are not configured.
-
-    Environment Variables:
-        S3_CHECKPOINT_BUCKET: Bucket name (required)
-        S3_CHECKPOINT_PREFIX: Key prefix (required)
-        AWS_REGION: Region (default: us-east-1)
-        AWS_ACCESS_KEY_ID: AWS access key
-        AWS_SECRET_ACCESS_KEY: AWS secret key
-    """
-    bucket = os.environ.get("S3_CHECKPOINT_BUCKET")
-    prefix = os.environ.get("S3_CHECKPOINT_PREFIX")
-
-    if not bucket or not prefix:
-        logger.info("S3_CHECKPOINT_BUCKET or S3_CHECKPOINT_PREFIX not set, S3 upload disabled")
-        return None
-
-    if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get("AWS_SECRET_ACCESS_KEY"):
-        logger.warning("AWS credentials not found, S3 upload disabled")
-        return None
-
-    region = os.environ.get("AWS_REGION", "us-east-1")
-
-    return S3CheckpointUploader(bucket=bucket, prefix=prefix, region=region)
