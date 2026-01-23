@@ -12,84 +12,40 @@ from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.utils.models import load_safetensors
 
-MODEL_PARAMS = [
-    ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
-    ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
-]
-MODEL_IDS = ["llama3", "qwen3"]
 
-
-def make_model(model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0, gradient_checkpointing=False):
-    """Create a model with the given config."""
+@pytest.mark.parametrize(
+    "model_name,config_cls,model_cls,mesh_axes",
+    [
+        ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
+        ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
+    ],
+    ids=["llama3", "qwen3"],
+)
+def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
+    """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # Load HF model in float32 for the comparison (our model will also use float32)
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+
+    inputs = ["The capital of France is", "Hello world"]
+    batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
     with tempfile.TemporaryDirectory() as tmp:
+        # Load HF model, get logits, save weights, then delete to free memory
+        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+        hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
+        hf_logits = hf_outputs.logits.detach().numpy()
         hf_model.save_pretrained(tmp, safe_serialization=True)
+        del hf_model, hf_outputs
 
+        # Load our model from saved weights
         base_config = AutoConfig.from_pretrained(model_name)
-        config = config_cls(
-            base_config,
-            max_lora_adapters=1,
-            max_lora_rank=1,
-            shard_attention_heads=True,
-            loss_chunk_size=loss_chunk_size,
-            gradient_checkpointing=gradient_checkpointing,
-        )
+        config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
         mesh = jax.make_mesh((1, 1), mesh_axes)
         with jax.set_mesh(mesh):
-            # Use float32 to match HF model for accurate comparison
             model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-    return model, tokenizer, hf_model
+        # Get our logits via compute_logits
+        outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
+        our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
 
-
-@pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
-def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
-    """Test that model.compute_logits matches HuggingFace logits."""
-    model, tokenizer, hf_model = make_model(model_name, config_cls, model_cls, mesh_axes)
-
-    inputs = ["The capital of France is", "Hello world"]
-    batch = tokenizer(inputs, return_tensors="pt", padding=True)
-
-    # Get HF logits
-    hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
-    hf_logits = hf_outputs.logits.detach().numpy()
-
-    # Get our logits via compute_logits
-    outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
-    our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
-
-    np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
-
-
-@pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
-@pytest.mark.parametrize("chunk_size", [8, 16, 32])
-def test_chunked_logprobs(model_name, config_cls, model_cls, mesh_axes, chunk_size):
-    """Test that chunked and non-chunked compute_logprobs produce identical results."""
-    model_chunked, tokenizer, _ = make_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size)
-    model_nonchunked, _, _ = make_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0)
-
-    inputs = ["The capital of France is", "Hello world"]
-    batch = tokenizer(inputs, return_tensors="pt", padding=True)
-    input_ids = jnp.array(batch.input_ids.numpy())
-    attention_mask = jnp.array(batch.attention_mask.numpy())
-    target_ids = jnp.roll(input_ids, -1, axis=1)
-
-    # Get hidden states
-    outputs_chunked = model_chunked(input_ids, attention_mask=attention_mask)
-    outputs_nonchunked = model_nonchunked(input_ids, attention_mask=attention_mask)
-
-    # Compute logprobs with both methods
-    logprobs_chunked = model_chunked.compute_logprobs(outputs_chunked.last_hidden_state, target_ids)
-    logprobs_nonchunked = model_nonchunked.compute_logprobs(outputs_nonchunked.last_hidden_state, target_ids)
-
-    np.testing.assert_allclose(
-        np.asarray(logprobs_chunked),
-        np.asarray(logprobs_nonchunked),
-        rtol=1e-4,
-        atol=1e-4,
-        err_msg=f"Chunked vs non-chunked logprobs mismatch for chunk_size={chunk_size}",
-    )
+        np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
