@@ -35,15 +35,16 @@ def dot_product_attention(
     scale = 1.0 / head_dim**0.5
 
     if jax.default_backend() == "gpu" and q.dtype in _CUDNN_SUPPORTED_DTYPES:
-        seq_lengths = attention_mask.sum(axis=1).astype(jnp.int32)
+        kv_seq_lengths = attention_mask.sum(axis=1).astype(jnp.int32)
+        q_seq_lengths = jnp.minimum(kv_seq_lengths, q.shape[1])
         return jax.nn.dot_product_attention(
             q,
             k,
             v,
             scale=scale,
             is_causal=is_causal,
-            query_seq_lengths=seq_lengths,
-            key_value_seq_lengths=seq_lengths,
+            query_seq_lengths=q_seq_lengths,
+            key_value_seq_lengths=kv_seq_lengths,
             implementation="cudnn",
         )
 
