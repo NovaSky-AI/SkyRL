@@ -153,6 +153,7 @@ jobs:
           sky status
 
       - name: Notify Slack - Training Run Started
+        id: slack_start
         if: success()
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -225,7 +226,7 @@ jobs:
           fi
 
       - name: Notify Slack - Training Completed
-        if: success()
+        if: success() && steps.slack_start.outputs.ts
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -233,6 +234,7 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
+              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
               "text": "✅ Fleet Training Completed",
               "blocks": [
                 {
@@ -262,7 +264,7 @@ jobs:
             }
 
       - name: Notify Slack - Training Failed
-        if: failure()
+        if: failure() && steps.slack_start.outputs.ts
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -270,6 +272,7 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
+              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
               "text": "❌ Fleet Training Failed",
               "blocks": [
                 {
