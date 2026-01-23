@@ -1,27 +1,24 @@
-# Fleet Task Training Guide
+# SkyRL Fleet Training Guide
 
-This guide explains how to trigger RL training on Fleet-hosted environments using SkyPilot for GPU provisioning.
+RL training on Fleet-hosted environments using SkyPilot for GPU provisioning.
 
-## Overview
+## Quick Start
 
-The training pipeline:
-1. **GitHub Actions** triggers a workflow
-2. **SkyPilot** provisions a GPU instance (H100) on Lambda/RunPod/Vast
-3. **SkyRL** runs training using Fleet environments (supports GRPO, PPO, etc.)
-4. **WandB** logs metrics and training progress
-5. **S3** stores checkpoints (optional, prevents disk exhaustion)
+**Run training via GitHub Actions:**
+1. Go to **Actions** → **"Fleet Task Training (SkyPilot)"** → **"Run workflow"**
+2. Select `modality` (`tool_use` or `computer_use`), optionally filter by `env_key`, and set `task_name` to point to a YAML file in `skyrl-train/tasks/`
+3. Training provisions H100, logs to WandB, uploads checkpoints to S3
 
-## Available Tasks
+**Run training via CLI:**
+```bash
+sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
+    --env FLEET_API_KEY=$FLEET_API_KEY \
+    --env WANDB_API_KEY=$WANDB_API_KEY \
+    --env MODALITY=tool_use \
+    -d -y
+```
 
-### Task Breakdown by Modality
-
-| Modality | Total Tasks |
-|----------|-------------|
-| tool_use | 3,603 |
-| computer_use | 1,278 |
-| **Total** | **4,881** |
-
-### Task Breakdown by Environment
+## Available Tasks (4,881 total)
 
 | Environment | tool_use | computer_use | Total |
 |-------------|----------|--------------|-------|
@@ -41,271 +38,71 @@ The training pipeline:
 | outlook | 24 | 0 | 24 |
 | hubspot | 12 | 0 | 12 |
 | dropbox | 2 | 0 | 2 |
-| **Total** | **3,603** | **1,278** | **4,881** |
 
-**Notes:**
-- `github` and `booking` are tool_use only
-- `amazon`, `rops`, `walmart`, `dmv`, `google-flights`, `instacart` are computer_use only
-- Currently training uses sample dataset (`fleet_booking_sample.json` with 100 booking tasks)
+## GitHub Secrets
 
-## Prerequisites
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `FLEET_API_KEY` | Yes | Fleet API access |
+| `WANDB_API_KEY_TOOL_USE` | Yes | WandB for tool_use |
+| `WANDB_API_KEY_COMPUTER_USE` | Yes | WandB for computer_use |
+| `LAMBDA_API_KEY` | Yes | Lambda Labs GPU |
+| `RUNPOD_API_KEY` | Yes | RunPod GPU |
+| `VAST_API_KEY` | Yes | Vast.ai GPU |
+| `AWS_ACCESS_KEY_ID` | No | S3 checkpoint upload |
+| `AWS_SECRET_ACCESS_KEY` | No | S3 checkpoint upload |
 
-### GitHub Secrets Required
+## Key Configuration
 
-The following secrets must be configured in the repository settings:
+Edit `skyrl-train/tasks/openenv-fleet-grpo.yaml`:
 
-| Secret | Description | Required |
-|--------|-------------|----------|
-| `FLEET_API_KEY` | Fleet API key for environment access | Yes |
-| `WANDB_API_KEY_TOOL_USE` | WandB API key for tool_use modality runs | Yes |
-| `WANDB_API_KEY_COMPUTER_USE` | WandB API key for computer_use modality runs | Yes |
-| `LAMBDA_API_KEY` | Lambda Labs API key | Yes |
-| `RUNPOD_API_KEY` | RunPod API key | Yes |
-| `VAST_API_KEY` | Vast.ai API key | Yes |
-| `AWS_ACCESS_KEY_ID` | AWS access key for S3 checkpoint upload | No |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 checkpoint upload | No |
-| `SLACK_BOT_TOKEN` | Slack bot token for notifications | No |
+| What to change | Parameter |
+|----------------|-----------|
+| Base model | `trainer.policy.model.path` (default: `Qwen/Qwen2.5-1.5B-Instruct`) |
+| Algorithm | `trainer.algorithm.advantage_estimator` (default: `grpo`) |
+| Learning rate | `trainer.policy.optimizer_config.lr` (default: `1e-6`) |
+| Batch size | `trainer.train_batch_size` (default: `4`) |
+| Epochs | `trainer.epochs` (default: `20`) |
+| Max turns | `generator.max_turns` (default: `50`) |
+| Checkpoint interval | `trainer.ckpt_interval` (default: `10`) |
 
-### Local Testing
+## Checkpoints
 
-For local testing, set environment variables:
-```bash
-export FLEET_API_KEY="sk_..."
-export WANDB_API_KEY="..."
+Uploaded to S3 (if AWS credentials set):
 ```
-
-## Triggering a Training Run
-
-### Via GitHub Actions (Recommended)
-
-1. Go to **Actions** tab in the SkyRL repository
-2. Select **"Fleet Task Training (SkyPilot)"** workflow
-3. Click **"Run workflow"**
-4. Configure options:
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `modality` | Task modality: `tool_use` or `computer_use` | `tool_use` |
-| `env_key` | Filter by environment (e.g., `booking`, `github`) | empty (all) |
-| `max_tasks` | Limit number of tasks for testing | empty (all) |
-| `cloud` | Preferred cloud: `any`, `lambda`, `runpod`, `vast` | `any` |
-
-5. Click **"Run workflow"**
-
-### Via SkyPilot (Remote GPU)
-
-```bash
-# Install SkyPilot
-pip install "skypilot[lambda,runpod,vast]"
-
-# Configure credentials
-mkdir -p ~/.lambda_cloud
-echo "api_key = YOUR_LAMBDA_KEY" > ~/.lambda_cloud/lambda_keys
-
-# Launch training
-sky launch skyrl-train/tasks/openenv-fleet-grpo.yaml \
-    --env FLEET_API_KEY=$FLEET_API_KEY \
-    --env WANDB_API_KEY=$WANDB_API_KEY \
-    --env MODALITY=tool_use \
-    -d -y
+s3://skyrl-checkpoints/{project}/{model}/{run_name}/global_step_N/
 ```
-
-## Configuration
-
-### SkyPilot Task YAML
-
-The main configuration is in `skyrl-train/tasks/openenv-fleet-grpo.yaml`:
-
-```yaml
-resources:
-  accelerators: H100:1      # GPU type and count
-  disk_size: 100            # Disk size in GB
-
-envs:
-  MODALITY: "tool_use"      # or "computer_use"
-  MAX_TURNS: 50             # Max agent turns per episode
-  NUM_EPOCHS: 20            # Training epochs
-```
-
-### Training Hyperparameters
-
-Key training parameters (in the YAML `run` section):
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `trainer.algorithm.advantage_estimator` | `grpo` | Algorithm (grpo, ppo, etc.) |
-| `trainer.policy.model.path` | `Qwen/Qwen2.5-1.5B-Instruct` | Base model |
-| `trainer.train_batch_size` | 4 | Training batch size |
-| `trainer.epochs` | 20 | Number of epochs |
-| `generator.n_samples_per_prompt` | 4 | Samples per prompt |
-| `generator.max_turns` | 50 | Max agent turns |
-| `trainer.policy.optimizer_config.lr` | 1e-6 | Learning rate |
-| `trainer.ckpt_interval` | 10 | Save checkpoint every N steps |
-
-To change the algorithm, modify `trainer.algorithm.advantage_estimator` in the YAML.
-
-### Sample Dataset
-
-The training uses a pre-committed sample dataset:
-- **File:** `skyrl-train/data/fleet_booking_sample.json`
-- **Tasks:** 100 booking environment tasks
-- **Split:** 90/10 train/validation
-
-## S3 Checkpoint Upload
-
-To prevent disk exhaustion on cloud instances, checkpoints can be automatically uploaded to S3.
-
-### Setup
-
-1. Add AWS credentials to GitHub Secrets:
-   - `AWS_ACCESS_KEY_ID`
-   - `AWS_SECRET_ACCESS_KEY`
-
-2. Checkpoints are uploaded to:
-   ```
-   s3://skyrl-checkpoints/{project_name}/{model_name}/{run_name}/global_step_N/
-   ```
-
-3. Local checkpoints are deleted after successful upload to save disk space.
-
-### S3 Bucket Structure
-
-```
-s3://skyrl-checkpoints/
-  └── fleet-task-grpo/                          # project_name
-      ├── Qwen2.5-1.5B-Instruct/                # model_name
-      │   └── fleet_tool_use_booking_pr0/       # run_name
-      │       ├── global_step_10/
-      │       │   ├── policy/
-      │       │   ├── critic/
-      │       │   ├── data.pt
-      │       │   └── trainer_state.pt
-      │       ├── global_step_20/
-      │       └── ...
-      └── Qwen2.5-7B-Instruct/                  # different model
-          └── ...
-```
-
-### Without S3
-
-If AWS credentials are not configured:
-- Training continues normally
-- Checkpoints are stored locally on 100GB disk
-- Disk may fill up on long training runs
+Local checkpoints deleted after upload to save disk.
 
 ## Monitoring
 
-### WandB Dashboard
-
-Training metrics are logged to WandB:
-- **Project:** `fleet-task-grpo`
-- **URL:** https://wandb.ai/thefleet/fleet-task-grpo
-
-### Slack Notifications
-
-If configured, notifications are sent to `#fleet-training-runs-test`:
-- Run started
-- Run completed
-- Run failed
-
-### SkyPilot Status
-
-Check cluster status:
-```bash
-sky status
-sky logs <cluster-name>
-```
-
-## Troubleshooting
-
-### Common Errors
-
-**`OSError: [Errno 28] No space left on device`**
-- Disk filled up with checkpoints
-- Solution: Add AWS credentials for S3 checkpoint upload, or increase `trainer.ckpt_interval`
-
-**`FleetVersionNotFoundError`**
-- The environment version doesn't exist in ECR
-- Solution: Use versions available in the Fleet API
-
-**`ModuleNotFoundError: No module named 'envs'`**
-- OpenEnv not installed correctly
-- Solution: Ensure `git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client` is in dependencies
-
-**Cluster won't start**
-- Check cloud credentials: `sky check lambda runpod vast`
-- Check GPU availability on the selected cloud
-
-### Logs
-
-View training logs:
-```bash
-# Stream logs
-sky logs --follow <cluster-name>
-
-# Get cluster name from workflow output or:
-sky status
-```
-
-### Cleanup
-
-Terminate a running cluster:
-```bash
-sky down <cluster-name> -y
-```
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     GitHub Actions                          │
-│  .github/workflows/openenv-fleet-train.yaml                │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ sky launch
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      SkyPilot                               │
-│  Provisions H100 on Lambda/RunPod/Vast                     │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ runs
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│              skyrl-train/tasks/openenv-fleet-grpo.yaml     │
-│                                                             │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    │
-│  │   Setup     │───▶│  Prepare    │───▶│    Train    │    │
-│  │  (uv sync)  │    │  Dataset    │    │   (GRPO)    │    │
-│  └─────────────┘    └─────────────┘    └─────────────┘    │
-│                                               │             │
-└───────────────────────────────────────────────┼─────────────┘
-                                                │
-                      ┌─────────────────────────┼─────────────┐
-                      │                         ▼             │
-                      │  ┌─────────────────────────────────┐ │
-                      │  │         Fleet API               │ │
-                      │  │  (Environment provisioning)     │ │
-                      │  └─────────────────────────────────┘ │
-                      │                                       │
-                      │  ┌─────────────────────────────────┐ │
-                      │  │           WandB                 │ │
-                      │  │    (Metrics & logging)         │ │
-                      │  └─────────────────────────────────┘ │
-                      │                                       │
-                      │  ┌─────────────────────────────────┐ │
-                      │  │      S3 (optional)              │ │
-                      │  │  (Checkpoint storage)          │ │
-                      │  └─────────────────────────────────┘ │
-                      └───────────────────────────────────────┘
-```
+- **WandB:** https://wandb.ai/thefleet/fleet-task-grpo
+- **Slack:** `#fleet-training-runs`
+- **Logs:** `sky logs --follow <cluster-name>`
+- **Status:** `sky status`
 
 ## Files Reference
 
 | File | Purpose |
 |------|---------|
 | `.github/workflows/openenv-fleet-train.yaml` | GitHub Actions workflow |
-| `skyrl-train/tasks/openenv-fleet-grpo.yaml` | SkyPilot task for GPU provisioning |
-| `skyrl-train/integrations/fleet/env.py` | Fleet environment wrapper (BaseTextEnv) |
+| `skyrl-train/tasks/openenv-fleet-grpo.yaml` | SkyPilot task config |
+| `skyrl-train/integrations/fleet/env.py` | Fleet environment (BaseTextEnv) |
 | `skyrl-train/integrations/fleet/entrypoints/main_fleet.py` | Training entrypoint |
-| `skyrl-train/integrations/fleet/s3_checkpoints.py` | S3 checkpoint upload module |
-| `skyrl-train/integrations/fleet/prepare_dataset.py` | Dataset preparation script |
-| `skyrl-train/data/fleet_booking_sample.json` | Sample task dataset (100 booking tasks) |
+| `skyrl-train/integrations/fleet/s3_checkpoints.py` | S3 upload module |
+| `skyrl-train/integrations/fleet/prepare_dataset.py` | Dataset prep |
+| `skyrl-train/data/fleet_booking_sample.json` | Sample dataset (100 tasks) |
+
+## Troubleshooting
+
+| Error | Solution |
+|-------|----------|
+| `No space left on device` | Add AWS credentials for S3 upload |
+| `ModuleNotFoundError: envs` | Check OpenEnv install from `deniz/fleet_client` branch |
+| Cluster won't start | Run `sky check lambda runpod vast` |
+
+## Creating PRs
+
+1. Never push to main - create a branch (`feat/`, `fix/`, `docs/`)
+2. Training runs triggered manually via Actions tab
+3. Checkpoints stored at `s3://skyrl-checkpoints/{project}/{model}/{run}/`
