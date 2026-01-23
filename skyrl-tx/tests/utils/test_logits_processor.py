@@ -60,14 +60,17 @@ def assert_chunked_matches_nonchunked(
 class TestChunkedLogprobs:
     """Tests for chunked vs non-chunked logprobs computation."""
 
-    @pytest.mark.parametrize("B,T,chunk_size", [
-        (2, 4, 3),   # chunk doesn't divide evenly, needs padding
-        (2, 4, 8),   # chunk equals B*T exactly
-        (2, 4, 16),  # chunk larger than B*T
-        (1, 8, 3),   # single batch element
-        (4, 1, 2),   # single token per sequence
-        (1, 1, 1),   # minimal case
-    ])
+    @pytest.mark.parametrize(
+        "B,T,chunk_size",
+        [
+            (2, 4, 3),  # chunk doesn't divide evenly, needs padding
+            (2, 4, 8),  # chunk equals B*T exactly
+            (2, 4, 16),  # chunk larger than B*T
+            (1, 8, 3),  # single batch element
+            (4, 1, 2),  # single token per sequence
+            (1, 1, 1),  # minimal case
+        ],
+    )
     def test_chunk_boundary_cases(self, B, T, chunk_size):
         """Test various chunk size vs total token relationships."""
         V = 16  # vocab_size = hidden_size for identity lm_head
@@ -76,12 +79,15 @@ class TestChunkedLogprobs:
 
         assert_chunked_matches_nonchunked(hidden_states, target_ids, chunk_size, vocab_size=V)
 
-    @pytest.mark.parametrize("B,T,chunk_size,adapter_indices", [
-        (2, 4, 3, None),                    # no adapters
-        (2, 4, 3, "arange"),                # different adapter per batch, chunk spans boundary
-        (3, 4, 5, "arange"),                # chunk spans multiple batches
-        (4, 2, 3, "zeros"),                 # all same adapter
-    ])
+    @pytest.mark.parametrize(
+        "B,T,chunk_size,adapter_indices",
+        [
+            (2, 4, 3, None),  # no adapters
+            (2, 4, 3, "arange"),  # different adapter per batch, chunk spans boundary
+            (3, 4, 5, "arange"),  # chunk spans multiple batches
+            (4, 2, 3, "zeros"),  # all same adapter
+        ],
+    )
     def test_adapter_indices_handling(self, B, T, chunk_size, adapter_indices):
         """Test adapter indices are correctly mapped across chunk boundaries."""
         V = 16
