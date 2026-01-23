@@ -30,9 +30,7 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
 
     with tempfile.TemporaryDirectory() as tmp:
         # Load HF model, get logits, save weights, then delete to free memory
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            model_name, attn_implementation="eager", use_safetensors=True
-        )
+        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
         hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
         hf_logits = hf_outputs.logits.detach().numpy()
         hf_model.save_pretrained(tmp, safe_serialization=True)
