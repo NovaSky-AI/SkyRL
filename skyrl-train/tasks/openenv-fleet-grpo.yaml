@@ -49,7 +49,7 @@ envs:
   # Training parameters
   MAX_TURNS: 50
   NUM_EPOCHS: 20
-  PR_NUMBER: "0"
+  RUN_ID: ""
   # Optional: limit number of tasks for testing
   MAX_TASKS: ""
   # AWS credentials (required for S3 dataset download, optional for checkpoint upload)
@@ -184,7 +184,7 @@ run: |
     generator.gpu_memory_utilization=0.8 \
     trainer.logger="$LOGGER" \
     trainer.project_name="fleet-task-grpo" \
-    trainer.run_name="fleet_${MODALITY}_${ENV_KEY:-all}_pr${PR_NUMBER}" \
+    trainer.run_name="fleet_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
     trainer.resume_mode=latest \
     trainer.ckpt_path="$HOME/ckpts/fleet_${MODALITY}" \
     trainer.dump_data_batch=true
