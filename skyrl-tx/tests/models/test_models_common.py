@@ -9,7 +9,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from tx.models.configs import Llama3Config, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
-from tx.utils.models import get_dtype, load_safetensors
+from tx.utils.models import load_safetensors
 
 
 @pytest.mark.parametrize(
@@ -51,5 +51,4 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
         our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
 
-        # Use loose tolerance due to numerical differences (see test_llama3.py which uses 5e-2)
         np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
