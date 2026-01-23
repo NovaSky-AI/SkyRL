@@ -5,6 +5,4 @@ cloud: sky-anyscale-aws-us-east-1
 ray_version: "2.51.1"
 compute_config: l4_ci
 working_dir: .
-env_vars:
-  RAY_RUNTIME_ENV_HOOK: ray._private.runtime_env.uv_runtime_env_hook.hook
 max_retries: 0
