@@ -67,14 +67,14 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
 def make_model(model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
     """Create a model with the given config."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_name, attn_implementation="eager", use_safetensors=True
-    )
 
     with tempfile.TemporaryDirectory() as tmp:
+        # Load HF model, save weights, then delete to free memory
+        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
         hf_model.save_pretrained(tmp, safe_serialization=True)
         del hf_model
 
+        # Load our model from saved weights
         base_config = AutoConfig.from_pretrained(model_name)
         config = config_cls(
             base_config,
