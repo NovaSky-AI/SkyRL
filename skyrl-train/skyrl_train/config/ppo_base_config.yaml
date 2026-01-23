@@ -308,6 +308,10 @@ generator:
 
   step_wise_trajectories: false
 
+  # Experimental: Use Tinker-compatible sample() API instead of generate()
+  # This enables token-in/token-out semantics matching the Tinker API
+  use_tinker_sampling_api: false
+
 environment:
   env_class: "gsm8k"
   # NOTE: environment specific defaults for environment.skyrl_gym are set at the following path:

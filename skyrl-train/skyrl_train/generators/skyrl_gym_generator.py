@@ -130,6 +130,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             self.env_executor = None
 
+        # Experimental: Use Tinker-compatible sample() API instead of generate()
+        self.use_tinker_sampling_api = generator_cfg.get("use_tinker_sampling_api", False)
+
         self._validate_cfg(generator_cfg)
 
         # base_conversation is used when `use_conversation_multi_turn==True and custom_chat_template==None` to
@@ -288,10 +291,18 @@ class SkyRLGymGenerator(GeneratorInterface):
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
 
-            engine_input = InferenceEngineInput(
-                prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
-            )
-            engine_output = await self.inference_engine_client.generate(engine_input)
+            if self.use_tinker_sampling_api:
+                # Use Tinker-compatible sample() API for token-in/token-out semantics
+                engine_output = await self.inference_engine_client.sample(
+                    prompt_token_ids=agent_loop_state.input_ids,
+                    num_samples=1,
+                    sampling_params=sampling_params if sampling_params is not None else {},
+                )
+            else:
+                engine_input = InferenceEngineInput(
+                    prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
+                )
+                engine_output = await self.inference_engine_client.generate(engine_input)
             output = engine_output["responses"][0]
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]

@@ -10,7 +10,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from tests.gpu.utils import Timer, get_test_generator_input
 from omegaconf import DictConfig, OmegaConf
 from skyrl_train.utils.utils import initialize_ray
@@ -506,5 +506,125 @@ async def test_generator_multi_turn_gsm8k_step_wise():
         )
         # Expect atleast one response with more than one turn
         assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_generator_with_tinker_sampling_api():
+    """
+    Test the generator with the use_tinker_sampling_api flag enabled.
+
+    This verifies that the Tinker-compatible sample() API path works correctly
+    through the generator's agent_loop.
+    """
+    initialize_ray(get_default_config())
+    try:
+        model = "Qwen/Qwen2.5-1.5B-Instruct"
+        tokenizer = AutoTokenizer.from_pretrained(model)
+
+        inference_engines = create_ray_wrapped_inference_engines(
+            num_inference_engines=1,
+            tensor_parallel_size=2,
+            model_dtype="bfloat16",
+            pretrain=model,
+            seed=42,
+            vllm_v1_disable_multiproc=True,
+            enable_prefix_caching=True,
+            enforce_eager=True,
+            shared_pg=None,
+            gpu_memory_utilization=0.8,
+            inference_engine_enable_sleep=True,
+            async_engine=True,
+            max_num_batched_tokens=32768,
+            max_num_seqs=1024,
+            tokenizer=tokenizer,
+            sleep_level=1,
+        )
+
+        cfg = get_test_config(
+            max_generate_length=256,
+            max_input_length=512,
+            batched=False,
+            max_turns=1,
+            use_conversation_multi_turn=True,
+            max_env_workers=0,
+            model=model,
+            is_step_wise=False,
+            temperature=0.7,
+            get_logprobs=False,
+        )
+
+        # Enable Tinker sampling API
+        OmegaConf.update(cfg.generator, "use_tinker_sampling_api", True)
+
+        inference_engine_client = InferenceEngineClient(
+            inference_engines,
+            tokenizer,
+            cfg,
+        )
+
+        await inference_engine_client.wake_up()
+
+        generator = SkyRLGymGenerator(
+            generator_cfg=cfg.generator,
+            skyrl_gym_cfg=cfg.environment.skyrl_gym,
+            inference_engine_client=inference_engine_client,
+            tokenizer=tokenizer,
+            model_name=model,
+        )
+
+        # Verify the flag is set
+        assert generator.use_tinker_sampling_api is True, "use_tinker_sampling_api flag should be True"
+
+        # Use test_env which doesn't require reward_spec (simpler for testing)
+        num_prompts = 2
+        n_samples_per_prompt = 2
+        prompts = []
+        env_extras = []
+        for i in range(num_prompts):
+            prompt = [{"role": "user", "content": f"What is {i+1} + {i+1}?"}]
+            prompts.extend([prompt] * n_samples_per_prompt)
+            env_extras.extend([{}] * n_samples_per_prompt)
+
+        input_batch: GeneratorInput = {
+            "prompts": prompts,
+            "env_classes": ["test_env"] * len(prompts),
+            "env_extras": env_extras,
+            "trajectory_ids": [TrajectoryID(instance_id=f"{i}", repetition_id=0) for i in range(len(prompts))],
+        }
+        input_batch["sampling_params"] = get_sampling_params_for_backend(
+            "vllm",
+            DictConfig({
+                "temperature": 0.7,
+                "top_p": 1.0,
+                "top_k": -1,
+                "max_generate_length": 256,
+                "min_p": 0.0,
+                "logprobs": None,
+            }),
+        )
+
+        generator_output = await generator.generate(input_batch)
+
+        # Verify output structure
+        assert "response_ids" in generator_output
+        assert "prompt_token_ids" in generator_output
+        assert "rewards" in generator_output
+        assert "loss_masks" in generator_output
+        assert "stop_reasons" in generator_output
+
+        # Verify we got the expected number of outputs
+        expected_outputs = num_prompts * n_samples_per_prompt
+        assert len(generator_output["response_ids"]) == expected_outputs
+
+        # Verify each output has valid tokens
+        for i, response_ids in enumerate(generator_output["response_ids"]):
+            assert isinstance(response_ids, list), f"Response {i} should be a list"
+            assert len(response_ids) > 0, f"Response {i} should have tokens"
+            assert all(isinstance(t, int) for t in response_ids), f"All tokens should be integers"
+
+        logger.info(f"Tinker sampling API test passed with {len(generator_output['response_ids'])} outputs")
+
     finally:
         ray.shutdown()
