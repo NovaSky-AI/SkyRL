@@ -5,13 +5,14 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
+from tx.models.types import ModelForCausalLM
 
 
 # lm_head: (hidden_states, adapter_indices) -> logits
 LMHead = Callable[[jax.Array, jax.Array | None], jax.Array]
 
 
-class LogitsProcessorMixin:
+class LogitsProcessorMixin(ModelForCausalLM):
     """Mixin providing logits/logprobs computation for causal language models."""
 
     @abstractmethod
