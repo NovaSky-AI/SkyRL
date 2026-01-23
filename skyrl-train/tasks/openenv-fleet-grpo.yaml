@@ -105,6 +105,7 @@ run: |
     --with "litellm>=1.75.5" \
     --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" \
     --with "fleet-python" \
+    --with "boto3" \
     -m integrations.fleet.entrypoints.main_fleet \
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/validation.parquet']" \
