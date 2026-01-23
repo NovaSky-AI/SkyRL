@@ -98,12 +98,18 @@ async def lifespan(app: FastAPI):
     monitor_task.cancel()
 
     logger.info(f"Stopping background engine (PID {app.state.background_engine.pid})")
-    background_engine.terminate()
+    try:
+        background_engine.terminate()
+    except ProcessLookupError:
+        pass
     try:
         await asyncio.wait_for(background_engine.wait(), timeout=5)
     except asyncio.TimeoutError:
         logger.warning(f"Background engine (PID {background_engine.pid}) did not terminate gracefully, killing")
-        background_engine.kill()
+        try:
+            background_engine.kill()
+        except ProcessLookupError:
+            pass
         await background_engine.wait()
     logger.info("Background engine stopped")
 
