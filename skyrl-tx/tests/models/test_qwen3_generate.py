@@ -44,7 +44,7 @@ def test_qwen3_generate():
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
         base_config = PretrainedConfig.from_pretrained(model_name)
-        config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
+        config = Qwen3Config(base_config, max_lora_adapters=2, max_lora_rank=32, shard_attention_heads=True)
 
         mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
         with jax.set_mesh(mesh):
