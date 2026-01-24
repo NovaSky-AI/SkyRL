@@ -1,0 +1,41 @@
+name: Sync-Rabbit Memory Update
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  update-memory:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: files
+        run: |
+          FILES=$(gh pr view ${{ github.event.pull_request.number }} --json files -q '.files[].path' | tr '\n' ',' | sed 's/,$//')
+          echo "list=$FILES" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Update Sync-Rabbit Memory
+        run: |
+          curl -X POST "${{ secrets.SYNC_RABBIT_URL }}/webhook/pr-merged" \
+            -H "Content-Type: application/json" \
+            -H "bypass-tunnel-reminder: true" \
+            -d '{
+              "repoId": "${{ github.repository }}",
+              "pr": {
+                "number": ${{ github.event.pull_request.number }},
+                "title": "${{ github.event.pull_request.title }}",
+                "author": "${{ github.event.pull_request.user.login }}",
+                "changedFiles": ${{ github.event.pull_request.changed_files }},
+                "additions": ${{ github.event.pull_request.additions }},
+                "deletions": ${{ github.event.pull_request.deletions }},
+                "diffSummary": "PR #${{ github.event.pull_request.number }}",
+                "fileList": ["${{ steps.files.outputs.list }}"]
+              },
+              "anthropicApiKey": "${{ secrets.ANTHROPIC_API_KEY }}"
+            }'
