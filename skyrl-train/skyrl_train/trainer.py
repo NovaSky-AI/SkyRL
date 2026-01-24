@@ -69,6 +69,7 @@ from skyrl_train.utils.trainer_utils import (
     zero_variance_filter,
 )
 from skyrl_train.utils.utils import configure_ray_worker_logging
+from skyrl_train.utils.random_seed import set_random_seed
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl_train.workers.worker_utils import reduce_metrics
@@ -121,6 +122,12 @@ class RayPPOTrainer:
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         self.dispatch: WorkerDispatch = None
         configure_ray_worker_logging()
+        
+        # Set random seed for reproducibility
+        seed = cfg.trainer.get("seed", 42)
+        deterministic = cfg.trainer.get("deterministic", True)
+        set_random_seed(seed, deterministic=deterministic, warn_only=True)
+        logger.info(f"Initialized random seed management: seed={seed}, deterministic={deterministic}")
 
     @property
     def has_critic(self) -> bool:

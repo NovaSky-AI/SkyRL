@@ -167,6 +167,7 @@ trainer:
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
   seed: 42
+  deterministic: true  # Set to false for faster training (less reproducible)
   resume_mode: latest # null/"none", "latest", "from_path"
   resume_path: null
   ckpt_path: "${oc.env:HOME}/ckpts/" # Path for resumable training checkpoints (model state, optimizer state, etc.)
