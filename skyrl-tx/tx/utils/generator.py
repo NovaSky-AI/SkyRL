@@ -20,6 +20,25 @@ class KVCache:
     values: list[jax.Array]
     cache_position: jax.Array  # Per-sequence positions of shape [B] for left-aligned decoding
 
+    @staticmethod
+    def update_layer(kv_cache, k, v, positions):
+        """Update a single layer's KV cache at the given positions.
+
+        Args:
+            kv_cache: Tuple of (k_cache, v_cache) arrays for this layer.
+            k: New key values with shape [B, seq_len, num_heads, head_dim].
+            v: New value values with shape [B, seq_len, num_heads, head_dim].
+            positions: Position indices with shape [B, seq_len].
+        """
+        k_cache, v_cache = kv_cache
+
+        def update_at_pos(cache_slice, new_val_slice, pos):
+            return jax.lax.dynamic_update_slice(cache_slice, new_val_slice, (pos, 0, 0))
+
+        k = jax.vmap(update_at_pos)(k_cache, k, positions[:, 0])
+        v = jax.vmap(update_at_pos)(v_cache, v, positions[:, 0])
+        return k, v
+
     def pad_to_length(self, max_length: int) -> KVCache:
         """Pad KV cache to a specified maximum length.
 

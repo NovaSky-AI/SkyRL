@@ -97,13 +97,7 @@ class Llama3Attention(nnx.Module):
 
         # Handle KV cache (use positions for per-sequence writes in left-aligned decoding)
         if kv_cache is not None:
-            k_cache, v_cache = kv_cache
-
-            def update_at_pos(cache_slice, new_val_slice, pos):
-                return jax.lax.dynamic_update_slice(cache_slice, new_val_slice, (pos, 0, 0))
-
-            k = jax.vmap(update_at_pos)(k_cache, k, positions[:, 0])
-            v = jax.vmap(update_at_pos)(v_cache, v, positions[:, 0])
+            k, v = KVCache.update_layer(kv_cache, k, v, positions)
 
         updated_cache = (k, v)
 
