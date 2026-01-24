@@ -120,6 +120,20 @@ class RayPPOTrainer:
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         self.dispatch: WorkerDispatch = None
+        
+        # Initialize early stopping if configured
+        self.early_stopping = None
+        if hasattr(cfg.trainer, "early_stopping") and cfg.trainer.early_stopping is not None:
+            from skyrl_train.utils.early_stopping import EarlyStopping
+            early_stop_cfg = cfg.trainer.early_stopping
+            self.early_stopping = EarlyStopping(
+                monitor=early_stop_cfg.get("monitor", "eval/reward_mean"),
+                patience=early_stop_cfg.get("patience", 10),
+                min_delta=early_stop_cfg.get("min_delta", 0.0),
+                mode=early_stop_cfg.get("mode", "max"),
+                restore_best_weights=early_stop_cfg.get("restore_best_weights", False),
+            )
+        
         configure_ray_worker_logging()
 
     @property
@@ -323,6 +337,26 @@ class RayPPOTrainer:
                     **{f"timing/{k}": v for k, v in self.all_timings.items()},
                 }
                 self.tracker.log(log_payload, step=self.global_step, commit=True)
+                
+                # Check early stopping if configured
+                if self.early_stopping is not None:
+                    # Get model for weight restoration if needed
+                    model = None
+                    if hasattr(self, "policy_model") and self.policy_model is not None:
+                        # Try to get the actual model from the actor group
+                        try:
+                            if hasattr(self.policy_model, "get_model"):
+                                model = self.policy_model.get_model()
+                        except:
+                            pass
+                    
+                    should_continue = self.early_stopping.on_step_end(
+                        log_payload, self.global_step, model=model
+                    )
+                    if not should_continue:
+                        logger.info("Early stopping triggered. Stopping training.")
+                        break
+                
                 self.all_metrics = {}
                 self.all_timings = {}
 
