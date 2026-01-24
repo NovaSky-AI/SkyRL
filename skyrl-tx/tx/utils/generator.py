@@ -232,8 +232,7 @@ class GeneratorMixin:
 
             # Update attention mask at per-sequence positions (for left-aligned sequences)
             batch_idx = jnp.arange(s.attention_mask.shape[0])
-            new_positions = (s.last_positions + 1)[:, 0]  # Shape: [B]
-            next_attention_mask = s.attention_mask.at[batch_idx, new_positions].set(1)
+            next_attention_mask = s.attention_mask.at[batch_idx, s.kv_cache.cache_position].set(1)
 
             outputs = model(
                 next_token,
