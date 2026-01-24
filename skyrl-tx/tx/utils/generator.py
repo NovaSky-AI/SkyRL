@@ -69,8 +69,8 @@ class GenerateOutput:
 
 
 def batch_roll(arr: jax.Array, shifts: jax.Array) -> jax.Array:
-    """Roll each row of arr by its corresponding shift amount along axis 0."""
-    return jax.vmap(jnp.roll)(arr, shifts)
+    """Roll each element of a batch along its first non-batch axis (the sequence axis)."""
+    return jax.vmap(functools.partial(jnp.roll, axis=0))(arr, shifts)
 
 
 def find_string_stop_position(
