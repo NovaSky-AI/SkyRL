@@ -2,14 +2,14 @@ set -x
 
 # Fully async GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 # This bash script is copied from examples/async/async_run_gsm8k.sh, except for:
-# - running examples.fully_async.main_async
+# - running examples.fully_async.main_fully_async
 # - setting the generator.batched=false.
 # - colocate_all=false
 # - the various generator configs at the end (http, chat template, etc.)
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/gsm8k/run_gsm8k.sh
+# bash examples/fully_async/fully_async_run_gsm8k.sh
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
@@ -33,7 +33,7 @@ TIS_IMP_RATIO_CAP=2.0
 
 RUN_NAME=gsm8k-async-qwen2.5_1.5B-useTIS_${USE_TIS}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
 
-uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_async \
+uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
