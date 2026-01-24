@@ -17,4 +17,4 @@ def chat(tokenizer: PreTrainedTokenizer, dataset: Dataset, batch_size: int) -> L
             "text": batch["input_ids"][:, :-1],
             "attention_mask": batch["attention_mask"][:, :-1],
             "target": batch["input_ids"][:, 1:],
-        }, {"shape": batch["input_ids"].shape, "tokens": batch["attention_mask"].sum()}
+        }, {"shape": batch["input_ids"].shape, "tokens": batch["attention_mask"].sum()}t
