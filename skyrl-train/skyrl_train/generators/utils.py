@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
@@ -14,6 +15,49 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
+
+
+def _validate_template_file_path(file_path: str) -> str:
+    """
+    Validate and sanitize a template file path.
+
+    NOTE(Charlie): this is vibe coded to address comment https://github.com/NovaSky-AI/SkyRL/pull/890#discussion_r2699773416.
+    Could be too strict.
+    """
+    # Resolve to absolute path first
+    resolved_path = os.path.abspath(os.path.expanduser(file_path))
+
+    # Check for path traversal attempts in the original path
+    # Normalize path separators for consistent checking
+    normalized_input = os.path.normpath(file_path)
+
+    # Check if the path contains parent directory references that could indicate traversal
+    # After normpath, legitimate paths won't start with .. but malicious ones trying to escape might
+    if normalized_input.startswith(".."):
+        raise ValueError(
+            f"Invalid template file path '{file_path}': Path traversal sequences are not allowed. "
+            "Please use an absolute path or a path relative to the current working directory."
+        )
+
+    # Additional check: ensure the path doesn't contain null bytes (which could bypass checks)
+    if "\x00" in file_path:
+        raise ValueError(f"Invalid template file path '{file_path}': Null bytes are not allowed in paths.")
+
+    # Ensure the resolved path is a regular file (not a directory, symlink to sensitive location, etc.)
+    if os.path.exists(resolved_path):
+        if not os.path.isfile(resolved_path):
+            raise ValueError(f"Invalid template file path '{file_path}': Path must point to a regular file.")
+
+        # Check that the file has a reasonable size (prevent reading very large files)
+        file_size = os.path.getsize(resolved_path)
+        max_template_size = 1024 * 1024  # 1MB should be more than enough for any chat template
+        if file_size > max_template_size:
+            raise ValueError(
+                f"Template file '{file_path}' is too large ({file_size} bytes). "
+                f"Maximum allowed size is {max_template_size} bytes."
+            )
+
+    return resolved_path
 
 
 CUSTOM_CHAT_TEMPLATES = {
@@ -84,8 +128,10 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
                 f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
             )
     elif source == "file":
+        # Validate and sanitize the file path to prevent path traversal attacks
+        validated_path = _validate_template_file_path(name_or_path)
         try:
-            with open(name_or_path, "r", encoding="utf-8") as f:
+            with open(validated_path, "r", encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError as e:
             raise ValueError(f"Template file '{name_or_path}' not found") from e

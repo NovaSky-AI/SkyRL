@@ -364,17 +364,26 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         model_name = model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-        models = OpenAIServingModels(engine, model_config, base_model_paths)
+
+        # vllm >= 0.11.2 removed model_config from OpenAI serving APIs
+        is_new_api = version.parse(vllm.__version__) >= version.parse("0.11.2")
+        legacy_kwargs = {}
+        if is_new_api:
+            models = OpenAIServingModels(engine, base_model_paths)
+        else:
+            models = OpenAIServingModels(engine, model_config, base_model_paths)
+            legacy_kwargs["model_config"] = model_config
+
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
-            model_config=model_config,
             models=models,
             response_role="assistant",
             request_logger=None,
-            chat_template=None,
+            chat_template=openai_kwargs.pop("chat_template", None),  # used to template /chat/completions requests
             chat_template_content_format="auto",
+            **legacy_kwargs,
             **openai_kwargs,
         )
 
@@ -382,9 +391,9 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
-            model_config=model_config,
             models=models,
             request_logger=None,
+            **legacy_kwargs,
         )
         return engine
 

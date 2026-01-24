@@ -80,7 +80,7 @@ The code for the DAPO recipe is available at :code_link:`examples/algorithms/dap
 For evals we report Pass@32 and Mean@32. In the WandB metrics we log "avg_score" - since reward is either -1 or 1 for the AIME task, mean@32 can be computed as mean@32 = (avg_score + 1) / 2. 
 In the table below we report the peak mean@32 and pass@32 over the course of the run. All runs are DAPO but without Dynamic Sampling enabled (just clip-higher, overlong buffer, overlong filtering, and token level loss aggregation).
 
-All results can be reproduced with commit `cca7d96741f143ce6aa89a0f2cbb18d528cfcf33 <https://github.com/novasky-ai/SkyRL/commit/cca7d96741f143ce6aa89a0f2cbb18d528cfcf33>`_, and the WandB report for all runs is available `here <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/ijmo1v6q>`_.
+All results can be reproduced with commit `8263149145f2455b75c082f3280d344b8a554f5d <https://github.com/novasky-ai/SkyRL/commit/8263149145f2455b75c082f3280d344b8a554f5d>`_, and the WandB report for all runs is available `here <https://api.wandb.ai/links/sky-posttraining-uc-berkeley/ijmo1v6q>`_.
 
 
 .. raw:: html
@@ -123,6 +123,24 @@ All results can be reproduced with commit `cca7d96741f143ce6aa89a0f2cbb18d528cfc
          <td>0.381</td>
          <td>2x8xH100</td>
          <td>260</td>
+       </tr>
+       <tr>
+         <td>DAPO</td>
+         <td>Qwen/Qwen3-30B-A3B-Base</td>
+         <td>Megatron (tp=4, ep=8)</td>
+         <td>0.733</td>
+         <td>0.4375</td>
+         <td>2x8xH100</td>
+         <td>120</td>
+       </tr>
+       <tr>
+         <td>DAPO + LoRA (rank 128, alpha 128)</td>
+         <td>Qwen/Qwen3-30B-A3B-Base</td>
+         <td>Megatron (tp=4, ep=8)</td>
+         <td>0.8</td>
+         <td>0.433</td>
+         <td>8xH100</td>
+         <td>165</td>
        </tr>
        <tr>
          <td>DAPO</td>

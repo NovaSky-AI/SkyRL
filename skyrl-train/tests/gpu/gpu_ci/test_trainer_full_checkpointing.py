@@ -70,6 +70,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
     )
     cfg.trainer.placement.colocate_all = False  # Disable colocation for simpler testing
     cfg.trainer.train_batch_size = NUM_GPUS
+    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.epochs = 1
@@ -131,15 +132,24 @@ def create_minimal_trainer(cfg: DictConfig):
 
 
 @pytest.mark.parametrize(
-    ("strategy, fsdp2_cpu_offload"),
+    ("strategy", "fsdp2_cpu_offload", "lora"),
     [
-        ("fsdp", False),
-        ("fsdp2", False),
-        ("fsdp2", True),
-        pytest.param("megatron", False, marks=pytest.mark.megatron),
+        ("fsdp", False, False),
+        ("fsdp", False, False),
+        ("fsdp2", False, False),
+        ("fsdp2", True, False),
+        pytest.param("megatron", False, False, marks=pytest.mark.megatron),
+    ],
+    ids=[
+        "fsdp_no_lora",
+        "fsdp_lora",
+        "fsdp2_no_lora",
+        "fsdp2_lora",
+        "megatron_no_lora",
+        # TODO (erictang000): add megatron lora test - currently full checkpointing fails
     ],
 )
-def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload):
+def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload, lora):
     """
     Test full trainer checkpointing by:
     1. Creating trainer and setting it up
@@ -152,6 +162,9 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
     8. Continuing training to ensure it works
     """
     cfg = get_test_trainer_config(strategy, fsdp2_cpu_offload)
+    if lora:
+        cfg.trainer.policy.model.lora.rank = 32
+        cfg.trainer.policy.model.lora.alpha = 32
 
     checkpoint_dir = None
     try:

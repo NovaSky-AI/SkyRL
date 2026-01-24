@@ -2,21 +2,21 @@
 uv  run --isolated --extra dev pytest tests/cpu/test_trainer.py
 """
 
-import torch
-import pytest
-from jaxtyping import Float, Integer
-from pytest import approx
 from unittest.mock import MagicMock, patch
 
-
+import numpy as np
+import pytest
+import torch
+from jaxtyping import Float, Integer
+from pytest import approx
+from skyrl_train.config.utils import get_default_config
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
-import numpy as np
-from skyrl_train.workers.worker import PolicyWorkerBase, CriticWorkerBase
-from skyrl_train.workers.worker_utils import BatchIterator
 from skyrl_train.utils.utils import validate_batch_sizes
-from skyrl_train.config.utils import get_default_config
+from skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
+from skyrl_train.workers.worker_utils import BatchIterator
+
 from tests.cpu.util import example_dummy_config
 
 
@@ -170,7 +170,14 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
 
 
 def test_normalize_mini_batch_size():
-    """Test the _normalize_mini_batch_size method with various configurations."""
+    """Test the _normalize_mini_batch_size method initializes micro batch tracking.
+
+    Workers don't need to know mini batch sizes per GPU.
+    They receive batches from the trainer and split them into micro batches.
+    _normalize_mini_batch_size only initializes micro batch tracking for gradient scaling.
+
+    # TODO: Update naming once Megatron is updated to not be aware of mini batch sizes.
+    """
 
     # Create minimal worker instances for testing
     class TestPolicyWorker(PolicyWorkerBase):
@@ -199,16 +206,10 @@ def test_normalize_mini_batch_size():
         def _forward_micro_batch(self, micro_batch):
             pass
 
-    def create_policy_worker_with_config(
-        train_batch_size, policy_mini_batch_size, micro_train_batch_size_per_gpu, n_samples_per_prompt, dp_size
-    ):
+    def create_policy_worker_with_config(dp_size):
         """Helper to create policy worker with specific config."""
         cfg = get_default_config()
-        cfg.trainer.train_batch_size = train_batch_size
-        cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
-        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
         cfg.trainer.algorithm.policy_loss_type = "regular"
-        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
 
         worker = TestPolicyWorker(
             cfg=cfg,
@@ -225,15 +226,9 @@ def test_normalize_mini_batch_size():
 
         return worker
 
-    def create_critic_worker_with_config(
-        train_batch_size, critic_mini_batch_size, micro_train_batch_size_per_gpu, n_samples_per_prompt, dp_size
-    ):
+    def create_critic_worker_with_config(dp_size):
         """Helper to create critic worker with specific config."""
         cfg = get_default_config()
-        cfg.trainer.train_batch_size = train_batch_size
-        cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
-        cfg.trainer.micro_train_batch_size_per_gpu = micro_train_batch_size_per_gpu
-        cfg.generator.n_samples_per_prompt = n_samples_per_prompt
 
         worker = TestCriticWorker(
             cfg=cfg,
@@ -250,66 +245,29 @@ def test_normalize_mini_batch_size():
 
         return worker
 
-    # Test Case 1: Basic valid configuration for PolicyWorker
-    policy_worker = create_policy_worker_with_config(
-        train_batch_size=128,
-        policy_mini_batch_size=16,
-        micro_train_batch_size_per_gpu=2,
-        n_samples_per_prompt=2,
-        dp_size=4,
-    )
+    # Test Case 1: PolicyWorker initializes _micro_batches_accumulated
+    policy_worker = create_policy_worker_with_config(dp_size=4)
     policy_worker._normalize_mini_batch_size()
 
-    expected_policy_mini_batch_size_per_gpu = (16 * 2) // 4  # 8
-    assert policy_worker.policy_mini_batch_size_per_gpu == expected_policy_mini_batch_size_per_gpu
+    assert hasattr(policy_worker, "_micro_batches_accumulated")
+    assert policy_worker._micro_batches_accumulated == 0
 
-    # Test Case 2: Basic valid configuration for CriticWorker
-    critic_worker = create_critic_worker_with_config(
-        train_batch_size=128,
-        critic_mini_batch_size=8,
-        micro_train_batch_size_per_gpu=2,
-        n_samples_per_prompt=2,
-        dp_size=4,
-    )
+    # Test Case 2: CriticWorker initializes _micro_batches_accumulated
+    critic_worker = create_critic_worker_with_config(dp_size=4)
     critic_worker._normalize_mini_batch_size()
 
-    expected_critic_mini_batch_size_per_gpu = (8 * 2) // 4  # 4
-    assert critic_worker.critic_mini_batch_size_per_gpu == expected_critic_mini_batch_size_per_gpu
+    assert hasattr(critic_worker, "_micro_batches_accumulated")
+    assert critic_worker._micro_batches_accumulated == 0
 
     # Test Case 3: Single GPU (dp_size=1) for PolicyWorker
-    policy_worker = create_policy_worker_with_config(
-        train_batch_size=32,
-        policy_mini_batch_size=8,
-        micro_train_batch_size_per_gpu=4,
-        n_samples_per_prompt=1,
-        dp_size=1,
-    )
+    policy_worker = create_policy_worker_with_config(dp_size=1)
     policy_worker._normalize_mini_batch_size()
 
-    expected_policy_mini_batch_size_per_gpu = (8 * 1) // 1  # 8
-    assert policy_worker.policy_mini_batch_size_per_gpu == expected_policy_mini_batch_size_per_gpu
+    assert hasattr(policy_worker, "_micro_batches_accumulated")
+    assert policy_worker._micro_batches_accumulated == 0
 
-    # Test Case 4: High n_samples_per_prompt for CriticWorker
-    critic_worker = create_critic_worker_with_config(
-        train_batch_size=256,
-        critic_mini_batch_size=32,
-        micro_train_batch_size_per_gpu=8,
-        n_samples_per_prompt=4,
-        dp_size=2,
-    )
-    critic_worker._normalize_mini_batch_size()
-
-    expected_critic_mini_batch_size_per_gpu = (32 * 4) // 2  # 64
-    assert critic_worker.critic_mini_batch_size_per_gpu == expected_critic_mini_batch_size_per_gpu
-
-    # Test Case 5: Error case - mesh_rank not initialized
-    policy_worker_no_mesh = create_policy_worker_with_config(
-        train_batch_size=128,
-        policy_mini_batch_size=16,
-        micro_train_batch_size_per_gpu=2,
-        n_samples_per_prompt=1,
-        dp_size=4,
-    )
+    # Test Case 4: Error case - mesh_rank not initialized
+    policy_worker_no_mesh = create_policy_worker_with_config(dp_size=4)
     policy_worker_no_mesh.mesh_rank = None
 
     with pytest.raises(RuntimeError, match="mesh_rank must be initialized"):
@@ -486,8 +444,13 @@ def test_validate_batch_sizes():
         validate_batch_sizes(cfg)
 
 
-def test_ppo_train_batch_calculations():
-    """Test the key batch calculations and control flow in ppo_train methods."""
+def test_forward_backward_batch_calculations():
+    """Test the key batch calculations and control flow in forward_backward methods.
+
+    FSDP workers use the forward_backward + optim_step pattern:
+    - forward_backward handles micro-batching internally and accumulates gradients
+    - optim_step scales gradients by 1/num_accumulated and takes optimizer step
+    """
 
     # Create test configuration
     cfg = get_default_config()
@@ -526,18 +489,13 @@ def test_ppo_train_batch_calculations():
             master_port=12345,
             sequence_parallel_size=1,
         )
-        # Set appropriate mini batch size per gpu based on worker type
-        if worker_class == PolicyWorkerBase:
-            worker.policy_mini_batch_size_per_gpu = 6  # Should result in 3 micro batches per mini batch
-        elif worker_class == CriticWorkerBase:
-            worker.critic_mini_batch_size_per_gpu = 6  # Should result in 3 micro batches per mini batch
 
         # Mock dependencies
         worker.strategy = MagicMock()
         worker.strategy.is_rank_0.return_value = False  # Disable progress bars
         worker.strategy.all_reduce.return_value = {"loss": 0.5, "lr": 1e-4}
 
-        # Always set model for all worker types (policy/critic need this for ppo_train)
+        # Always set model for all worker types
         worker.model = MagicMock()
 
         return worker
@@ -545,97 +503,71 @@ def test_ppo_train_batch_calculations():
     # Test PolicyWorkerBase
     policy_worker = create_test_worker(PolicyWorkerBase)
 
-    # Mock forward_backward and optim_step to track calls and verify accumulation behavior
-    policy_forward_backward_calls = []
+    # Initialize _micro_batches_accumulated (normally done in _normalize_mini_batch_size)
+    policy_worker._micro_batches_accumulated = 0
 
-    def mock_policy_forward_backward(experience, microbatch_weight):
-        policy_forward_backward_calls.append({"microbatch_weight": microbatch_weight})
+    # Mock _forward_backward_micro to track calls
+    policy_forward_backward_micro_calls = []
+
+    def mock_policy_forward_backward_micro(experience):
+        policy_forward_backward_micro_calls.append(experience)
         return {"policy_loss": 0.5, "ppo_clip_ratio": 0.1, "policy_entropy": 2.0, "response_length": response_length}
 
-    policy_worker.forward_backward = mock_policy_forward_backward
-    policy_worker.optim_step = MagicMock(return_value=None)
-    policy_worker.scheduler = MagicMock()
-    policy_worker.scheduler.get_last_lr.return_value = [1e-4]
+    policy_worker._forward_backward_micro = mock_policy_forward_backward_micro
     policy_worker.record_memory = False
 
-    # Calculate expected values based on new accumulation logic
+    # Calculate expected values
     dataloader = BatchIterator(
         dummy_databatch, sample_batch_size=cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
     )
-    total_micro_batches = len(dataloader)  # Should be 6
-    micro_batches_per_mini_batch = (
-        policy_worker.policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu
-    )  # 6 // 2 = 3
-    # New logic: accumulation_steps = micro_batches_per_mini_batch (accumulate within mini-batch)
-    expected_accumulation_steps = micro_batches_per_mini_batch  # Should be 3
-    expected_microbatch_weight = 1.0 / expected_accumulation_steps
+    expected_micro_batches = len(dataloader)  # Should be 6
 
-    # Run policy ppo_train with minimal mocking
-    with (
-        patch("torch.distributed.barrier"),
-        patch("tqdm.tqdm", side_effect=lambda x, **kwargs: x),
-    ):  # Disable progress bar
-        result = policy_worker.ppo_train(dummy_databatch)
+    # Run forward_backward
+    with (patch("torch.distributed.barrier"),):
+        result = policy_worker.forward_backward(dummy_databatch)
 
     # Verify Policy Worker Results
     assert (
-        len(policy_forward_backward_calls) == total_micro_batches
-    ), f"PolicyWorker: Expected {total_micro_batches} forward_backward calls, got {len(policy_forward_backward_calls)}"
+        len(policy_forward_backward_micro_calls) == expected_micro_batches
+    ), f"PolicyWorker: Expected {expected_micro_batches} _forward_backward_micro calls, got {len(policy_forward_backward_micro_calls)}"
 
-    # Verify accumulation_steps are consistent (should equal micro_batches_per_mini_batch)
-    for call in policy_forward_backward_calls:
-        assert (
-            call["microbatch_weight"] == expected_microbatch_weight
-        ), f"PolicyWorker: Expected microbatch_weight={expected_microbatch_weight}, got {call['microbatch_weight']}"
+    # Verify _micro_batches_accumulated is set correctly
+    assert policy_worker._micro_batches_accumulated == expected_micro_batches
 
     # Verify result structure
-    assert "train_status" in result.metadata
-    train_status = result.metadata["train_status"]
-    assert "policy_update_steps" in train_status
+    assert isinstance(result, dict)
+    assert "policy_loss" in result
 
-    # Verify policy_update_steps calculation (should be total_calls / accumulation_steps)
-    expected_policy_update_steps_normalized = len(policy_forward_backward_calls) / expected_accumulation_steps
-    assert train_status["policy_update_steps"] == expected_policy_update_steps_normalized
-
-    # Test CriticWorkerBase with same accumulation logic
+    # Test CriticWorkerBase with same pattern
     critic_worker = create_test_worker(CriticWorkerBase)
 
-    # Mock forward_backward and optim_step for critic
-    critic_forward_backward_calls = []
+    # Initialize _micro_batches_accumulated (normally done in _normalize_mini_batch_size)
+    critic_worker._micro_batches_accumulated = 0
 
-    def mock_critic_forward_backward(experience, microbatch_weight):
-        critic_forward_backward_calls.append({"microbatch_weight": microbatch_weight})
-        return {"critic_loss": 0.3, "values": 1.0}
+    # Mock _forward_backward_micro for critic
+    critic_forward_backward_micro_calls = []
 
-    critic_worker.forward_backward = mock_critic_forward_backward
-    critic_worker.optim_step = MagicMock(return_value=None)
-    critic_worker.scheduler = MagicMock()
-    critic_worker.scheduler.get_last_lr.return_value = [1e-4]
+    def mock_critic_forward_backward_micro(experience):
+        critic_forward_backward_micro_calls.append(experience)
+        return {"critic_loss": 0.3, "values_mean": 1.0}
 
-    # Run critic ppo_train
-    with (
-        patch("torch.distributed.barrier"),
-        patch("tqdm.tqdm", side_effect=lambda x, **kwargs: x),
-        patch("torch.cuda.empty_cache"),
-    ):
-        result = critic_worker.ppo_train(dummy_databatch)
+    critic_worker._forward_backward_micro = mock_critic_forward_backward_micro
+
+    # Run forward_backward for critic
+    with (patch("torch.distributed.barrier"),):
+        result = critic_worker.forward_backward(dummy_databatch)
 
     # Verify Critic Worker Results
     assert (
-        len(critic_forward_backward_calls) == total_micro_batches
-    ), f"CriticWorker: Expected {total_micro_batches} forward_backward calls, got {len(critic_forward_backward_calls)}"
+        len(critic_forward_backward_micro_calls) == expected_micro_batches
+    ), f"CriticWorker: Expected {expected_micro_batches} _forward_backward_micro calls, got {len(critic_forward_backward_micro_calls)}"
 
-    # Verify accumulation_steps are consistent for critic (should equal micro_batches_per_mini_batch)
-    for call in critic_forward_backward_calls:
-        assert (
-            call["microbatch_weight"] == expected_microbatch_weight
-        ), f"CriticWorker: Expected microbatch_weight={expected_microbatch_weight}, got {call['microbatch_weight']}"
+    # Verify _micro_batches_accumulated is set correctly
+    assert critic_worker._micro_batches_accumulated == expected_micro_batches
 
     # Verify result structure for critic
-    assert "train_status" in result.metadata
-    train_status = result.metadata["train_status"]
-    assert "critic_update_steps" in train_status
-    assert train_status["critic_update_steps"] == len(critic_forward_backward_calls) / expected_accumulation_steps
+    assert isinstance(result, dict)
+    assert "critic_loss" in result
 
 
 def test_validate_batch_sizes_lcm_dp_requirement():

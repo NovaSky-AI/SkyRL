@@ -96,8 +96,6 @@ trainer:
       kl_target: 0.1 # target KL divergence for adaptive KL controller
       horizon: 10000 # controls the update rate of the adaptive KL controller
     kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
-    use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
-    use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
     # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
@@ -193,8 +191,6 @@ trainer:
   max_prompt_length: 512
   flash_attn: true
   disable_fast_tokenizer: false
-  target_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.target_modules or trainer.critic.model.lora.target_modules instead
-  exclude_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.exclude_modules or trainer.critic.model.lora.exclude_modules instead
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
@@ -243,7 +239,9 @@ generator:
   http_endpoint_port: 8000
   max_turns: 1
 
-  # chat template configuration
+  # chat template configuration for SkyRLGymGenerator.
+  # For `/chat/completions` with vllm via the HTTP endpoint for rollout, instead use say
+  # `+generator.engine_init_kwargs.chat_template=/path/to/templates/qwen3_acc_thinking.jinja2`
   chat_template:
     source: "name"  # "name" or "file"
     name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"

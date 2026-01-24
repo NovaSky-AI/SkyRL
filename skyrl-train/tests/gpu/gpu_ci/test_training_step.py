@@ -8,19 +8,19 @@ import pytest
 import hydra
 from omegaconf import DictConfig
 
-from tests.gpu.utils import init_worker_with_type, make_dummy_experience, validate_cfg
+from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, validate_cfg
 from skyrl_train.utils.utils import print_mem
 from skyrl_train.entrypoints.main_base import config_dir
 
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 
 def get_test_actor_config() -> DictConfig:
     with hydra.initialize_config_dir(config_dir=config_dir):
         cfg = hydra.compose(config_name="ppo_base_config")
 
-    cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.logger = "console"
     cfg.generator.inference_engine_tensor_parallel_size = 2
@@ -35,21 +35,26 @@ def cfg() -> DictConfig:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("packed", "strategy"),
-    [(True, "fsdp"), (False, "fsdp"), (True, "fsdp2"), (False, "fsdp2")],
-    ids=[
-        "packed-fsdp",
-        "unpacked-fsdp",
-        "packed-fsdp2",
-        "unpacked-fsdp2",
+    ("packed", "strategy", "model_name"),
+    [
+        (True, "fsdp", MODEL_NAME),
+        (False, "fsdp", MODEL_NAME),
+        (True, "fsdp2", MODEL_NAME),
+        (False, "fsdp2", MODEL_NAME),
+        # TODO (erictang000): Add test for MoE model for FSDP backend
+        # right now this fails due to token routing issues
+        # (True, "fsdp2", MOE_MODEL_NAME),
     ],
+    ids=["packed-fsdp", "unpacked-fsdp", "packed-fsdp2", "unpacked-fsdp2"],
 )
-async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, packed, strategy):
+async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, packed, strategy, model_name):
     """
     Full test: initialize actor group, send dummy experience to forward_backward + optim_step, validate output.
     """
     cfg.trainer.use_sample_packing = packed
     cfg.trainer.strategy = strategy
+    cfg.trainer.policy.model.path = model_name
+
     validate_cfg(cfg)
 
     try:
@@ -61,9 +66,11 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
             cfg=cfg,
         )
 
-        dummy_experience = make_dummy_experience()
+        # Create TrainingInputBatch - worker's forward_backward handles micro-batching internally
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        dummy_batch = make_dummy_training_batch(batch_size=dp_size)
 
-        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience, 1))
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
@@ -109,9 +116,11 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
             cfg=cfg,
         )
 
-        dummy_experience = make_dummy_experience()
+        # Create TrainingInputBatch - worker's forward_backward handles micro-batching internally
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        dummy_batch = make_dummy_training_batch(batch_size=dp_size)
 
-        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_experience, 1))
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for result in results:

@@ -12,7 +12,7 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
@@ -23,6 +23,7 @@ import hydra
 from loguru import logger
 from skyrl_train.utils.tracking import Tracking
 import multiprocessing as mp
+import asyncio
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -297,7 +298,7 @@ class BasePPOExp:
     def run(self):
         trainer = self._setup_trainer()
         # Start the training loop
-        trainer.train()
+        asyncio.run(trainer.train())
 
 
 @ray.remote(num_cpus=1)

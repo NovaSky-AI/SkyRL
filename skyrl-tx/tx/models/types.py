@@ -36,13 +36,11 @@ class CausalLMOutput:
     """Output type for causal language models like Qwen3ForCausalLM.
 
     Attributes:
-        logits: The language modeling logits.
         last_hidden_state: The last hidden state from the model.
         kv_cache: The updated key-value cache.
         hidden_states: All hidden states, if output_hidden_states=True.
     """
 
-    logits: jax.Array
     last_hidden_state: jax.Array
     kv_cache: KVCache
     hidden_states: list[jax.Array] | None = None

@@ -133,8 +133,10 @@ def load_megatron_grads_to_gpu(models):
             model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
             for buffers in model_chunk_all_buffers:
                 for buffer in buffers:
-                    buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                    buffer.grad_data.zero_()
+                    # grad_data_size is set
+                    if hasattr(buffer, "grad_data_size"):
+                        buffer.grad_data.storage().resize_(buffer.grad_data_size)
+                        buffer.grad_data.zero_()
         else:
             # we need this for ref module
             for _, param in model_chunk.named_parameters():
