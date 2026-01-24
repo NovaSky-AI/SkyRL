@@ -10,10 +10,7 @@ from omegaconf import DictConfig
 
 from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.entrypoints.main_base import (
-    create_ray_wrapped_inference_engines_from_config,
-    create_remote_inference_engines_from_config,
     BasePPOExp,
     config_dir,
 )
@@ -37,16 +34,10 @@ class TerminalBenchGenerateExp(BasePPOExp):
     def _setup_generator(self):
         logger.info(self.get_cfg_as_str(self.cfg))
 
-        tokenizer = self.tokenizer
-        if self.cfg.generator.run_engines_locally:
-            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
-        else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
-
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
+        inference_engine_client = self.get_inference_client()
         asyncio.run(inference_engine_client.wake_up())
 
-        return self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        return self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
 
     def get_train_dataset(self):
         """Initializes the training dataset.

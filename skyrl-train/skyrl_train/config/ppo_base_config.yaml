@@ -212,6 +212,12 @@ generator:
   run_engines_locally: true
   num_inference_engines: 1
   backend: "vllm"
+  
+  # External inference endpoints (used with _SKYRL_USE_HTTP_INFERENCE=1)
+  # If both are null, servers are built internally based on placement group config.
+  # See docs for valid combinations.
+  external_proxy_url: null       # Data plane URL (load-balanced router)
+  external_server_urls: null     # Control plane URLs (direct backend access)
   weight_sync_backend: "nccl"
   # if using cuda_ipc, we send in batches of this size in GB
   weight_transfer_threshold_cuda_ipc_GB: 1.0
