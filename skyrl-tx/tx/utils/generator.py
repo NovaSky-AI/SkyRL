@@ -68,14 +68,9 @@ class GenerateOutput:
     prompt_logprobs: list[list[float]] | None = None
 
 
-def compute_positions(attention_mask: jax.Array) -> jax.Array:
-    """Compute positions from attention mask.
-
-    Positions start at 0 from the first non-zero value in the attention mask
-    and increment sequentially.
-    """
-    first_token_idx = jnp.argmax(attention_mask, axis=1, keepdims=True)
-    return jnp.arange(attention_mask.shape[1])[None, :] - first_token_idx
+def batch_roll(arr: jax.Array, shifts: jax.Array) -> jax.Array:
+    """Roll each row of arr by its corresponding shift amount along axis 0."""
+    return jax.vmap(jnp.roll)(arr, shifts)
 
 
 def find_string_stop_position(
@@ -137,19 +132,16 @@ class GeneratorMixin:
         prompt_logprobs: bool = False,
     ):
         """JIT-compiled prefill + decode loop. Fuses everything for maximum efficiency."""
-        # Compute positions from attention mask
-        positions = compute_positions(attention_mask)
-
-        # Prefill: process full prompt
+        # Prefill: process full prompt (left-aligned, so positions start at 0)
         outputs = model(
             input_ids,
             attention_mask=attention_mask,
-            positions=positions,
             adapter_indices=adapter_indices,
         )
 
-        # For left-aligned sequences, find the last real token position for each sequence
-        last_token_idx = attention_mask.sum(axis=1) - 1  # Shape: [B]
+        # Compute sequence lengths and last token positions
+        seq_lengths = attention_mask.sum(axis=1)  # Shape: [B]
+        last_token_idx = seq_lengths - 1
         batch_idx = jnp.arange(input_ids.shape[0])
 
         # Compute logits for sampling and optionally for prompt logprobs
@@ -164,8 +156,18 @@ class GeneratorMixin:
             last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
-        # Pad KV cache and attention mask
-        kv_cache = outputs.kv_cache.pad_to_length(max_length)
+        # Right-align KV cache and attention mask so decoding doesn't have gaps
+        prompt_length = attention_mask.shape[1]
+        shifts = prompt_length - seq_lengths
+        kv_cache = KVCache(
+            keys=[batch_roll(k, shifts) for k in outputs.kv_cache.keys],
+            values=[batch_roll(v, shifts) for v in outputs.kv_cache.values],
+            cache_position=outputs.kv_cache.cache_position,
+        )
+        attention_mask = batch_roll(attention_mask, shifts)
+
+        # Pad KV cache and attention mask to max_length
+        kv_cache = kv_cache.pad_to_length(max_length)
         decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
 
         def decode_fn(s: DecodeState, step: jax.Array) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:

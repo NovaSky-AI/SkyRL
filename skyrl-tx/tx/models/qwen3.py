@@ -10,7 +10,7 @@ from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.configs import Qwen3Config
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
-from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
+from tx.utils.generator import GeneratorMixin, KVCache
 
 
 class Qwen3Attention(nnx.Module):
@@ -418,7 +418,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
         kv_cache: KVCache | None = None,
     ) -> CausalLMOutput:
         if positions is None:
-            positions = compute_positions(attention_mask)
+            positions = jnp.arange(attention_mask.shape[1])[None, :]
 
         outputs = self.model(
             input_ids,
