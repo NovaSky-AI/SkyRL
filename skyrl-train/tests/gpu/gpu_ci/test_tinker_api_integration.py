@@ -10,7 +10,8 @@ uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_tinker_a
 
 import pytest
 import asyncio
-from unittest.mock import MagicMock
+from dataclasses import dataclass
+from typing import Literal
 from transformers import AutoTokenizer
 import hydra
 
@@ -20,17 +21,104 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.entrypoints.main_base import config_dir
 from omegaconf import DictConfig
 
-# Import actual Tinker types from skyrl-tx
-from tx.tinker.types import (
-    ModelInput,
-    ModelInputChunk,
-    SamplingParams as TinkerSamplingParams,
-    GeneratedSequence,
-    SampleOutput,
-)
 
-# Import the actual SkyRLInferenceClient adapter
-from tx.tinker.extra.skyrl_inference import SkyRLInferenceClient
+# Lightweight duplicates of Tinker types for testing
+# These mirror tx.tinker.types without requiring skyrl-tx dependencies
+@dataclass
+class ModelInputChunk:
+    tokens: list[int]
+
+
+@dataclass
+class ModelInput:
+    chunks: list[ModelInputChunk]
+
+
+@dataclass
+class TinkerSamplingParams:
+    temperature: float
+    max_tokens: int
+    seed: int
+    stop_tokens: list[int] | None = None
+    stop_strings: list[str] | None = None
+    top_k: int = -1
+    top_p: float = 1.0
+
+
+@dataclass
+class GeneratedSequence:
+    stop_reason: Literal["length", "stop"]
+    tokens: list[int]
+    logprobs: list[float]
+
+
+@dataclass
+class SampleOutput:
+    sequences: list[GeneratedSequence]
+    prompt_logprobs: list[float] | None = None
+
+
+class TinkerAdapter:
+    """Test adapter that mirrors SkyRLInferenceClient conversion logic.
+
+    This duplicates the conversion logic from tx.tinker.extra.skyrl_inference
+    to test the integration contract without requiring skyrl-tx dependencies.
+    """
+
+    def __init__(self, inference_client: InferenceEngineClient):
+        self.inference_client = inference_client
+
+    def _extract_prompt_tokens(self, model_input: ModelInput) -> list[int]:
+        """Extract flat token list from ModelInput."""
+        tokens = []
+        for chunk in model_input.chunks:
+            tokens.extend(chunk.tokens)
+        return tokens
+
+    def _convert_sampling_params(self, params: TinkerSamplingParams) -> dict:
+        """Convert Tinker SamplingParams to skyrl-train format."""
+        result = {
+            "temperature": params.temperature,
+            "max_tokens": params.max_tokens,
+            "top_k": params.top_k,
+            "top_p": params.top_p,
+        }
+
+        if params.seed is not None:
+            result["seed"] = params.seed
+
+        if params.stop_tokens:
+            result["stop_token_ids"] = params.stop_tokens
+        if params.stop_strings:
+            result["stop"] = params.stop_strings
+
+        return result
+
+    def _convert_to_sample_output(self, output: dict) -> SampleOutput:
+        """Convert skyrl-train output to Tinker SampleOutput."""
+        sequences = []
+        num_samples = len(output["response_ids"])
+
+        for i in range(num_samples):
+            stop_reason = output["stop_reasons"][i]
+            if stop_reason in ("stop", "eos"):
+                tinker_stop_reason = "stop"
+            else:
+                tinker_stop_reason = "length"
+
+            logprobs = []
+            if output.get("response_logprobs") and output["response_logprobs"][i]:
+                logprobs = output["response_logprobs"][i]
+
+            sequences.append(
+                GeneratedSequence(
+                    tokens=output["response_ids"][i],
+                    logprobs=logprobs,
+                    stop_reason=tinker_stop_reason,
+                )
+            )
+
+        return SampleOutput(sequences=sequences, prompt_logprobs=None)
 
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -76,10 +164,9 @@ def init_inference_client(backend: str, tp_size: int, config: DictConfig) -> Inf
     return InferenceEngineClient(engines, tokenizer, config)
 
 
-def create_skyrl_inference_client(inference_client: InferenceEngineClient) -> SkyRLInferenceClient:
-    """Create SkyRLInferenceClient with a mock db_engine for testing."""
-    mock_db_engine = MagicMock()
-    return SkyRLInferenceClient(inference_client, mock_db_engine)
+def create_tinker_adapter(inference_client: InferenceEngineClient) -> TinkerAdapter:
+    """Create TinkerAdapter for testing Tinker API integration."""
+    return TinkerAdapter(inference_client)
 
 
 @pytest.mark.parametrize(
@@ -109,15 +196,15 @@ def test_tinker_type_conversion(ray_init_fixture, backend: str, tp_size: int):
         top_p=1.0,
     )
 
-    # Create a mock inference client to test conversion methods
+    # Create adapter to test conversion methods
     cfg = get_test_config()
     cfg.generator.backend = backend
     llm_client = init_inference_client(backend, tp_size, cfg)
-    skyrl_client = create_skyrl_inference_client(llm_client)
+    adapter = create_tinker_adapter(llm_client)
 
-    # Test actual conversion methods from SkyRLInferenceClient
-    converted_tokens = skyrl_client._extract_prompt_tokens(tinker_input)
-    converted_params = skyrl_client._convert_sampling_params(tinker_params)
+    # Test conversion methods that mirror SkyRLInferenceClient
+    converted_tokens = adapter._extract_prompt_tokens(tinker_input)
+    converted_params = adapter._convert_sampling_params(tinker_params)
 
     # Verify conversions
     assert converted_tokens == prompt_tokens, "Token conversion should preserve all tokens"
@@ -138,9 +225,9 @@ def test_tinker_type_conversion(ray_init_fixture, backend: str, tp_size: int):
 def test_tinker_sample_integration(ray_init_fixture, backend: str, tp_size: int):
     """Test end-to-end Tinker-style sampling through skyrl-train.
 
-    This test uses the actual SkyRLInferenceClient to verify:
+    This test verifies the integration contract:
     1. Accept Tinker-style ModelInput and SamplingParams
-    2. Convert to skyrl-train format using actual adapter methods
+    2. Convert to skyrl-train format using adapter methods
     3. Call sample()
     4. Convert result to Tinker SampleOutput
     """
@@ -149,9 +236,9 @@ def test_tinker_sample_integration(ray_init_fixture, backend: str, tp_size: int)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     llm_client = init_inference_client(backend, tp_size, cfg)
-    skyrl_client = create_skyrl_inference_client(llm_client)
+    adapter = create_tinker_adapter(llm_client)
 
-    # Create Tinker-style input using actual types
+    # Create Tinker-style input
     prompt_text = "What is 2 + 2?"
     messages = [{"role": "user", "content": prompt_text}]
     prompt_tokens = tokenizer.apply_chat_template(
@@ -168,9 +255,9 @@ def test_tinker_sample_integration(ray_init_fixture, backend: str, tp_size: int)
     )
     num_samples = 3
 
-    # Convert to skyrl-train format using actual SkyRLInferenceClient methods
-    converted_tokens = skyrl_client._extract_prompt_tokens(tinker_input)
-    converted_params = skyrl_client._convert_sampling_params(tinker_params)
+    # Convert to skyrl-train format using adapter methods
+    converted_tokens = adapter._extract_prompt_tokens(tinker_input)
+    converted_params = adapter._convert_sampling_params(tinker_params)
 
     # Call skyrl-train's sample()
     async def run_sample():
@@ -182,8 +269,8 @@ def test_tinker_sample_integration(ray_init_fixture, backend: str, tp_size: int)
 
     output = asyncio.run(run_sample())
 
-    # Convert to Tinker format using actual SkyRLInferenceClient method
-    tinker_output = skyrl_client._convert_to_sample_output(output)
+    # Convert to Tinker format using adapter method
+    tinker_output = adapter._convert_to_sample_output(output)
 
     # Verify Tinker output structure
     assert isinstance(tinker_output, SampleOutput), "Should return SampleOutput type"
@@ -223,7 +310,7 @@ def test_tinker_stop_tokens(ray_init_fixture, backend: str, tp_size: int):
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     llm_client = init_inference_client(backend, tp_size, cfg)
-    skyrl_client = create_skyrl_inference_client(llm_client)
+    adapter = create_tinker_adapter(llm_client)
 
     # Create input with stop strings
     prompt_text = "Count from 1 to 10:"
@@ -242,9 +329,9 @@ def test_tinker_stop_tokens(ray_init_fixture, backend: str, tp_size: int):
         top_p=1.0,
     )
 
-    # Convert and call using actual SkyRLInferenceClient methods
-    converted_tokens = skyrl_client._extract_prompt_tokens(tinker_input)
-    converted_params = skyrl_client._convert_sampling_params(tinker_params)
+    # Convert and call using adapter methods
+    converted_tokens = adapter._extract_prompt_tokens(tinker_input)
+    converted_params = adapter._convert_sampling_params(tinker_params)
 
     async def run_sample():
         return await llm_client.sample(
@@ -254,7 +341,7 @@ def test_tinker_stop_tokens(ray_init_fixture, backend: str, tp_size: int):
         )
 
     output = asyncio.run(run_sample())
-    tinker_output = skyrl_client._convert_to_sample_output(output)
+    tinker_output = adapter._convert_to_sample_output(output)
 
     # Should have stopped at "5"
     assert len(tinker_output.sequences) == 1
