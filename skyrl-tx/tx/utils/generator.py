@@ -22,7 +22,7 @@ class KVCache:
 
     @staticmethod
     def update_layer(kv_cache, k, v, positions):
-        """Update a single layer's KV cache at the given positions.
+        """Update a single layer's KV cache at the given positions (for left-aligned decoding).
 
         Args:
             kv_cache: Tuple of (k_cache, v_cache) arrays for this layer.

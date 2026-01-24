@@ -96,7 +96,7 @@ class Qwen3Attention(nnx.Module):
         q = apply_rope(q, positions, self.head_dim, self.config.rope_theta)
         k = apply_rope(k, positions, self.head_dim, self.config.rope_theta)
 
-        # Handle KV cache (use positions for per-sequence writes in left-aligned decoding)
+        # Handle KV cache
         if kv_cache is not None:
             k, v = KVCache.update_layer(kv_cache, k, v, positions)
 
