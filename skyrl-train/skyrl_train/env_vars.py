@@ -68,3 +68,25 @@ See https://github.com/ray-project/ray/issues/56697 for details on why this is n
 
 # Alias for backwards compatibility with kh/inference-2 branch
 SKYRL_INCLUDE_PYTHONPATH_IN_RUNTIME_ENV = SKYRL_PYTHONPATH_EXPORT
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature Flags (Private)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SKYRL_USE_HTTP_INFERENCE = str(os.environ.get("_SKYRL_USE_HTTP_INFERENCE", "0")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+**Private feature flag** - Enables the new HTTP-based inference layer.
+
+When enabled, uses `RemoteInferenceClient` with HTTP endpoints for inference
+instead of the legacy `InferenceEngineClient` with Ray actors.
+
+Default: False (uses legacy code path).
+Set `_SKYRL_USE_HTTP_INFERENCE=1` to enable the new HTTP-based inference.
+
+This flag is intended for internal testing and will be removed once the new
+inference layer is validated and made the default.
+"""

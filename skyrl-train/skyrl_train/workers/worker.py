@@ -38,6 +38,7 @@ from skyrl_train.distributed.ulysses import (
     set_ulysses_sequence_parallel_group,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.env_vars import _SKYRL_USE_HTTP_INFERENCE
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.utils import (
     get_ray_pg_ready_with_timeout,
@@ -297,8 +298,14 @@ class Worker(DistributedTorchRayActor):
 
         assert inference_engine_client is not None
 
-        # Create init info on all ranks (it's deterministic from cfg)
-        init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
+        # For HTTP inference path, fetch world_size from servers
+        # For legacy path, calculate from config
+        inference_world_size = None
+        if _SKYRL_USE_HTTP_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
+            inference_world_size = await inference_engine_client.get_world_size()
+
+        # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
+        init_info = self._transfer_strategy_cls.create_init_info(self.cfg, inference_world_size=inference_world_size)
 
         # Create sender on all ranks
         # Strategy implementations may have different logic for different ranks

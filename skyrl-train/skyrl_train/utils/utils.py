@@ -17,7 +17,12 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from skyrl_train.env_vars import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import (
+    SKYRL_LD_LIBRARY_PATH_EXPORT,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_PYTHONPATH_EXPORT,
+    _SKYRL_USE_HTTP_INFERENCE,
+)
 
 
 class Timer:
@@ -450,6 +455,46 @@ def validate_generator_cfg(cfg: DictConfig):
             f"If inference expert parallel is enabled, data parallel size * tensor parallel size must equal expert "
             f"parallel size. "
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
+        )
+
+    # Validate new HTTP inference config options
+    _validate_http_inference_cfg(cfg)
+
+
+def _validate_http_inference_cfg(cfg: DictConfig):
+    """Validates config options for the new HTTP-based inference layer.
+
+    This validation only applies when _SKYRL_USE_HTTP_INFERENCE=1.
+
+    Config combinations:
+    - Colocated + external URLs → ERROR (requires driver-managed servers for PG sharing)
+    - Neither set → Build servers internally
+    - external_server_urls only → Create router over external servers
+    - external_proxy_url only → Use proxy for both data + control plane
+    - Both set → Fully external (proxy for data plane, servers for control plane)
+
+    Args:
+        cfg: The config to validate.
+
+    Raises:
+        ValueError: If colocated mode is used with external URLs.
+    """
+    if not _SKYRL_USE_HTTP_INFERENCE:
+        # Only validate when using the new HTTP inference path
+        return
+
+    is_colocated = cfg.trainer.placement.colocate_all
+    has_external_proxy = cfg.generator.get("external_proxy_url") is not None
+    has_external_servers = cfg.generator.get("external_server_urls") is not None
+
+    # Colocated mode cannot use external endpoints
+    if is_colocated and (has_external_proxy or has_external_servers):
+        raise ValueError(
+            "Cannot use external_proxy_url or external_server_urls with colocate_all=true. "
+            "Colocated mode requires driver-managed inference servers to share placement groups "
+            "between trainer and inference workers. Please either:\n"
+            "  1. Set colocate_all=false to use external inference servers, or\n"
+            "  2. Remove external_proxy_url and external_server_urls to build servers internally."
         )
 
 
