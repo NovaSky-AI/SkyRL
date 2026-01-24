@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Protocol
 
 import jax
 
@@ -9,9 +10,7 @@ from tx.models.configs import ModelConfig
 from tx.utils.generator import KVCache
 
 
-class ModelForCausalLM:
-    """Base class for causal language models."""
-
+class ModelForCausalLM(Protocol):
     config: ModelConfig
 
 
