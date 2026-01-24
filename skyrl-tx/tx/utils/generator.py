@@ -115,11 +115,6 @@ class GenerateOutput:
     prompt_logprobs: list[list[float]] | None = None
 
 
-def batch_roll(arr: jax.Array, shifts: jax.Array) -> jax.Array:
-    """Roll each element of a batch along its first non-batch axis (the sequence axis)."""
-    return jax.vmap(functools.partial(jnp.roll, axis=0))(arr, shifts)
-
-
 def find_string_stop_position(
     tokens: list[int],
     tokenizer,
