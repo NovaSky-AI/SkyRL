@@ -153,11 +153,29 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=response_logprobs if add_resp_logprobs else None,
         )
 
+    def _select_engine_idx(self, session_id: Optional[Union[str, int]] = None) -> int:
+        """Select an engine index for routing a request.
+
+        This is the shared logic for engine selection used by sample(), chat_completion(),
+        and single-prompt generate().
+
+        Args:
+            session_id: Optional session ID for consistent routing. If None, uses random selection.
+
+        Returns:
+            Engine index to route the request to.
+        """
+        if session_id is None:
+            return random.randint(0, len(self.engines) - 1)
+        else:
+            return hash_with_sha256(str(session_id)) % len(self.engines)
+
     async def sample(
         self,
         prompt_token_ids: List[int],
         num_samples: int,
         sampling_params: Dict[str, Any],
+        session_id: Optional[Union[str, int]] = None,
     ) -> InferenceEngineOutput:
         """Generate multiple independent samples from a single prompt.
 
@@ -168,15 +186,18 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_token_ids: Token IDs for a single prompt (not batched).
             num_samples: Number of independent samples to generate.
             sampling_params: Sampling parameters (temperature, max_tokens, etc.).
+            session_id: Optional session ID for consistent engine routing.
 
         Returns:
             InferenceEngineOutput containing num_samples results.
         """
-        # TODO(Stage 4 - Tinker API): Add multi-engine load balancing and retry logic for sample().
-        # Currently routes to first engine only, which bottlenecks multi-engine deployments.
-        # Should mirror the load-balancing/retry/pause logic used in generate() for production use.
-        # See: https://github.com/NovaSky-AI/SkyRL/issues/XXX
-        engine = self.engines[0]
+        # Wait for generation to resume if paused (for weight updates)
+        await self._wait_for_generation_to_resume()
+
+        # Select engine using shared logic
+        engine_idx = self._select_engine_idx(session_id)
+        engine = self.engines[engine_idx]
+
         return await engine.sample(
             prompt_token_ids=prompt_token_ids,
             num_samples=num_samples,
@@ -396,12 +417,9 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = request_payload["json"].pop("session_id", None)
-        if session_id is None:
-            # if session_id is not provided, we'll use a random engine
-            engine_idx = random.randint(0, len(self.engines) - 1)
-        else:
+        if session_id is not None:
             assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/chat/completions`"
-            engine_idx = hash_with_sha256(str(session_id)) % len(self.engines)
+        engine_idx = self._select_engine_idx(session_id)
 
         # Always use the retry loop which also issues the first request inside
         return await self._chat_completion_with_retry(engine_idx, request_payload)
