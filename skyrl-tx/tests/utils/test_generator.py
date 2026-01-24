@@ -46,7 +46,9 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             # Per-sequence cache_position (all same length in this test)
-            cache_position = attention_mask.sum(axis=1) if attention_mask is not None else jnp.full((batch_size,), seq_len)
+            cache_position = (
+                attention_mask.sum(axis=1) if attention_mask is not None else jnp.full((batch_size,), seq_len)
+            )
             kv_cache = KVCache(keys=keys, values=values, cache_position=cache_position)
         else:
             # Step: hidden_states vary with cache_position (use mean for batched position)
