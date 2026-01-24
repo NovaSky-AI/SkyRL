@@ -18,7 +18,7 @@ class KVCache:
 
     keys: list[jax.Array]
     values: list[jax.Array]
-    cache_position: int
+    cache_position: jax.Array  # Per-sequence positions of shape [B] for left-aligned decoding
 
     def pad_to_length(self, max_length: int) -> KVCache:
         """Pad KV cache to a specified maximum length.
@@ -139,9 +139,8 @@ class GeneratorMixin:
             adapter_indices=adapter_indices,
         )
 
-        # Compute sequence lengths and last token positions
-        seq_lengths = attention_mask.sum(axis=1)  # Shape: [B]
-        last_token_idx = seq_lengths - 1
+        # For left-aligned sequences, find the last real token position for each sequence
+        last_token_idx = attention_mask.sum(axis=1) - 1  # Shape: [B]
         batch_idx = jnp.arange(input_ids.shape[0])
 
         # Compute logits for sampling and optionally for prompt logprobs
@@ -156,15 +155,8 @@ class GeneratorMixin:
             last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
-        # Right-align KV cache and attention mask so decoding doesn't have gaps
-        prompt_length = attention_mask.shape[1]
-        shifts = prompt_length - seq_lengths
-        kv_cache = KVCache(
-            keys=[batch_roll(k, shifts) for k in outputs.kv_cache.keys],
-            values=[batch_roll(v, shifts) for v in outputs.kv_cache.values],
-            cache_position=outputs.kv_cache.cache_position,
-        )
-        attention_mask = batch_roll(attention_mask, shifts)
+        # Pad KV cache and attention mask
+        kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
         # Pad KV cache and attention mask to max_length
         kv_cache = kv_cache.pad_to_length(max_length)
@@ -196,8 +188,10 @@ class GeneratorMixin:
             is_stop = jnp.any(next_token == stop_tokens, axis=1)
             stop_pos = jnp.where((s.stop_pos == -1) & is_stop, step + 1, s.stop_pos)
 
-            # Update attention mask: set next position to 1
-            next_attention_mask = s.attention_mask.at[:, s.kv_cache.cache_position].set(1)
+            # Update attention mask at per-sequence positions (for left-aligned sequences)
+            batch_idx = jnp.arange(s.attention_mask.shape[0])
+            new_positions = (s.last_positions + 1)[:, 0]  # Shape: [B]
+            next_attention_mask = s.attention_mask.at[batch_idx, new_positions].set(1)
 
             outputs = model(
                 next_token,
