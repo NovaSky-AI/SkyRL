@@ -21,6 +21,34 @@ class KVCache:
     cache_position: jax.Array  # Per-sequence positions of shape [B] for left-aligned decoding
 
     @staticmethod
+    def update(
+        kv_cache: KVCache | None,
+        keys: list[jax.Array],
+        values: list[jax.Array],
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> KVCache:
+        """Create an updated KVCache with computed cache positions for left-aligned decoding.
+
+        Args:
+            kv_cache: Existing KVCache (None during prefill).
+            keys: List of key arrays per layer.
+            values: List of value arrays per layer.
+            positions: Position indices with shape [B, seq_len].
+            attention_mask: Attention mask with shape [B, seq_len].
+
+        Returns:
+            New KVCache with computed cache_position.
+        """
+        if kv_cache is not None:
+            # Decode: next position is current position + 1
+            cache_position = positions[:, 0] + 1
+        else:
+            # Prefill: next position is the sequence length (number of real tokens)
+            cache_position = attention_mask.sum(axis=1)
+        return KVCache(keys=keys, values=values, cache_position=cache_position)
+
+    @staticmethod
     def update_layer(kv_cache, k, v, positions):
         """Update a single layer's KV cache at the given positions (for left-aligned decoding).
 

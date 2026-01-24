@@ -250,17 +250,9 @@ class Llama3Model(nnx.Module):
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        # Compute per-sequence cache positions for left-aligned decoding
-        if kv_cache is not None:
-            # Decode: next position is current position + 1
-            new_cache_position = positions[:, 0] + 1
-        else:
-            # Prefill: next position is the sequence length (number of real tokens)
-            new_cache_position = attention_mask.sum(axis=1)
-
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
+            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
