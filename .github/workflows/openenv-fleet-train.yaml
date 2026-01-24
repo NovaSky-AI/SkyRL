@@ -184,7 +184,7 @@ jobs:
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:1`" },
+                    { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" }
                   ]
@@ -257,7 +257,7 @@ jobs:
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:1`" },
+                    { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.cluster_status }}`" }
                   ]
@@ -295,7 +295,7 @@ jobs:
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:1`" },
+                    { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.cluster_status || 'FAILED' }}`" }
                   ]
@@ -333,7 +333,7 @@ jobs:
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*GPUs:*\n`H100:1`" },
+                    { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
                     { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Status:*\n`CANCELLED`" }
                   ]
@@ -368,7 +368,7 @@ jobs:
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Run | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| GPUs | \`H100:1\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Task | \`${{ inputs.task_name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Final Status | \`${{ steps.stream.outputs.cluster_status || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Modality | \`${{ inputs.modality }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Env Filter | \`${{ inputs.env_key || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
