@@ -103,24 +103,23 @@ class CustomTrainer(RayPPOTrainer):
         # use base class impl for metrics and per-token reward conversion
         return super().postprocess_generator_output(generator_output, uids)
 
+class CustomExp(BasePPOExp):
+    def get_trainer(self, *args, **kwargs):
+        return CustomTrainer(*args, **kwargs)
+
+@ray.remote(num_cpus=1)
+def skyrl_entrypoint(cfg: DictConfig):
+    exp = CustomExp(cfg)
+    exp.run()
+
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    # validate the arguments
+    validate_cfg(cfg)
+
+    initialize_ray(cfg)
+    ray.get(skyrl_entrypoint.remote(cfg))
+
+if __name__ == "__main__":
+    main()
 ```
-
-   class CustomExp(BasePPOExp):
-       def get_trainer(self, *args, **kwargs):
-           return CustomTrainer(*args, **kwargs)
-
-    @ray.remote(num_cpus=1)
-    def skyrl_entrypoint(cfg: DictConfig):
-        exp = CustomExp(cfg)
-        exp.run()
-
-    @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-    def main(cfg: DictConfig) -> None:
-        # validate the arguments
-        validate_cfg(cfg)
-
-        initialize_ray(cfg)
-        ray.get(skyrl_entrypoint.remote(cfg))
-
-    if __name__ == "__main__":
-        main()
