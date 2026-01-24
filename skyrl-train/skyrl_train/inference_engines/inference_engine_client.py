@@ -153,6 +153,33 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=response_logprobs if add_resp_logprobs else None,
         )
 
+    async def sample(
+        self,
+        prompt_token_ids: List[int],
+        num_samples: int,
+        sampling_params: Dict[str, Any],
+    ) -> InferenceEngineOutput:
+        """Generate multiple independent samples from a single prompt.
+
+        This method provides Tinker-compatible token-in/token-out sampling semantics.
+        Generates num_samples independent completions from the same prompt.
+
+        Args:
+            prompt_token_ids: Token IDs for a single prompt (not batched).
+            num_samples: Number of independent samples to generate.
+            sampling_params: Sampling parameters (temperature, max_tokens, etc.).
+
+        Returns:
+            InferenceEngineOutput containing num_samples results.
+        """
+        # Route to first engine for simplicity (sample() doesn't need load balancing)
+        engine = self.engines[0]
+        return await engine.sample(
+            prompt_token_ids=prompt_token_ids,
+            num_samples=num_samples,
+            sampling_params=sampling_params,
+        )
+
     async def _generate_single_with_retry(
         self, engine_idx: int, original_prompt_ids: List[int], sampling_params: Optional[Dict[str, Any]]
     ) -> InferenceEngineOutput:

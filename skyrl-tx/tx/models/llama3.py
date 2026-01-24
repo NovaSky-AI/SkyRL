@@ -83,7 +83,7 @@ class Llama3Attention(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
@@ -98,9 +98,7 @@ class Llama3Attention(nnx.Module):
 
         # Handle KV cache
         if kv_cache is not None:
-            k_cache, v_cache, cache_position = kv_cache
-            k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
-            v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
+            k, v = KVCache.update_layer(kv_cache, k, v, positions)
 
         updated_cache = (k, v)
 
@@ -169,7 +167,7 @@ class Llama3DecoderLayer(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -237,7 +235,7 @@ class Llama3Model(nnx.Module):
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
+                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
             )
             updated_keys.append(k)
             updated_values.append(v)
@@ -246,12 +244,9 @@ class Llama3Model(nnx.Module):
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        # Increment cache_position if cache exists, or use sequence length for new cache
-        new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
-
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
+            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 

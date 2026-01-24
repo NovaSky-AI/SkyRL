@@ -18,7 +18,54 @@ class KVCache:
 
     keys: list[jax.Array]
     values: list[jax.Array]
-    cache_position: int
+    cache_position: jax.Array  # Per-sequence positions of shape [B] for left-aligned decoding
+
+    @staticmethod
+    def update(
+        kv_cache: KVCache | None,
+        keys: list[jax.Array],
+        values: list[jax.Array],
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> KVCache:
+        """Create an updated KVCache with computed cache positions for left-aligned decoding.
+
+        Args:
+            kv_cache: Existing KVCache (None during prefill).
+            keys: List of key arrays per layer.
+            values: List of value arrays per layer.
+            positions: Position indices with shape [B, seq_len].
+            attention_mask: Attention mask with shape [B, seq_len].
+
+        Returns:
+            New KVCache with computed cache_position.
+        """
+        if kv_cache is not None:
+            # Decode: next position is current position + 1
+            cache_position = positions[:, 0] + 1
+        else:
+            # Prefill: next position is the sequence length (number of real tokens)
+            cache_position = attention_mask.sum(axis=1)
+        return KVCache(keys=keys, values=values, cache_position=cache_position)
+
+    @staticmethod
+    def update_layer(kv_cache, k, v, positions):
+        """Update a single layer's KV cache at the given positions (for left-aligned decoding).
+
+        Args:
+            kv_cache: Tuple of (k_cache, v_cache) arrays for this layer.
+            k: New key values with shape [B, seq_len, num_heads, head_dim].
+            v: New value values with shape [B, seq_len, num_heads, head_dim].
+            positions: Position indices with shape [B, seq_len].
+        """
+        k_cache, v_cache = kv_cache
+
+        def update_at_pos(cache_slice, new_val_slice, pos):
+            return jax.lax.dynamic_update_slice(cache_slice, new_val_slice, (pos, 0, 0))
+
+        k = jax.vmap(update_at_pos)(k_cache, k, positions[:, 0])
+        v = jax.vmap(update_at_pos)(v_cache, v, positions[:, 0])
+        return k, v
 
     def pad_to_length(self, max_length: int) -> KVCache:
         """Pad KV cache to a specified maximum length.
@@ -66,11 +113,6 @@ class GenerateOutput:
     stop_reasons: list[str]
     logprobs: list[list[float]]
     prompt_logprobs: list[list[float]] | None = None
-
-
-def batch_roll(arr: jax.Array, shifts: jax.Array) -> jax.Array:
-    """Roll each element of a batch along its first non-batch axis (the sequence axis)."""
-    return jax.vmap(functools.partial(jnp.roll, axis=0))(arr, shifts)
 
 
 def find_string_stop_position(
@@ -139,9 +181,8 @@ class GeneratorMixin:
             adapter_indices=adapter_indices,
         )
 
-        # Compute sequence lengths and last token positions
-        seq_lengths = attention_mask.sum(axis=1)  # Shape: [B]
-        last_token_idx = seq_lengths - 1
+        # For left-aligned sequences, find the last real token position for each sequence
+        last_token_idx = attention_mask.sum(axis=1) - 1  # Shape: [B]
         batch_idx = jnp.arange(input_ids.shape[0])
 
         # Compute logits for sampling and optionally for prompt logprobs
@@ -156,15 +197,8 @@ class GeneratorMixin:
             last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
-        # Right-align KV cache and attention mask so decoding doesn't have gaps
-        prompt_length = attention_mask.shape[1]
-        shifts = prompt_length - seq_lengths
-        kv_cache = KVCache(
-            keys=[batch_roll(k, shifts) for k in outputs.kv_cache.keys],
-            values=[batch_roll(v, shifts) for v in outputs.kv_cache.values],
-            cache_position=outputs.kv_cache.cache_position,
-        )
-        attention_mask = batch_roll(attention_mask, shifts)
+        # Pad KV cache and attention mask
+        kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
         # Pad KV cache and attention mask to max_length
         kv_cache = kv_cache.pad_to_length(max_length)
@@ -196,8 +230,9 @@ class GeneratorMixin:
             is_stop = jnp.any(next_token == stop_tokens, axis=1)
             stop_pos = jnp.where((s.stop_pos == -1) & is_stop, step + 1, s.stop_pos)
 
-            # Update attention mask: set next position to 1
-            next_attention_mask = s.attention_mask.at[:, s.kv_cache.cache_position].set(1)
+            # Update attention mask at per-sequence positions (for left-aligned sequences)
+            batch_idx = jnp.arange(s.attention_mask.shape[0])
+            next_attention_mask = s.attention_mask.at[batch_idx, s.kv_cache.cache_position].set(1)
 
             outputs = model(
                 next_token,

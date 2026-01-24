@@ -45,10 +45,15 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
             hidden_states = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
-            kv_cache = KVCache(keys=keys, values=values, cache_position=seq_len)
+            # Per-sequence cache_position (all same length in this test)
+            cache_position = (
+                attention_mask.sum(axis=1) if attention_mask is not None else jnp.full((batch_size,), seq_len)
+            )
+            kv_cache = KVCache(keys=keys, values=values, cache_position=cache_position)
         else:
-            # Step: hidden_states vary with cache_position
-            hidden_states = jnp.tile(base[None, None, :] + kv_cache.cache_position, (batch_size, 1, 1))
+            # Step: hidden_states vary with cache_position (use mean for batched position)
+            mean_pos = kv_cache.cache_position.mean()
+            hidden_states = jnp.tile(base[None, None, :] + mean_pos, (batch_size, 1, 1))
             kv_cache = KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1)
 
         return CausalLMOutput(last_hidden_state=hidden_states, kv_cache=kv_cache)
