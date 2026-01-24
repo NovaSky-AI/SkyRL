@@ -188,20 +188,27 @@ class FleetTaskEnv(BaseTextEnv):
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
 
-        # Add tool information if available
+        # Build system prompt with tool definitions
         if self.tools:
-            tool_names = [t.get("name", "unknown") for t in self.tools]
-            tools_info = f"\n\nAvailable tools: {', '.join(tool_names)}\n"
-            tools_info += (
-                'To use a tool, respond with: <tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>\n'
-            )
-            tools_info += "When you have completed the task, include <done> in your response."
-        else:
-            tools_info = ""
+            tools_json = json.dumps(self.tools, indent=2)
+            system_content = f"""You are a helpful agent. Complete the task by calling tools. The session ends when you stop calling tools.
 
-        # Build conversation
-        initial_message = {"role": "user", "content": task_prompt + tools_info}
-        self.chat_history = [initial_message]
+## Available Tools
+{tools_json}
+
+## Tool Call Format
+<tool_call>{{"name": "tool_name", "arguments": {{"param": "value"}}}}</tool_call>
+
+When done, include <done> in your response."""
+        else:
+            system_content = (
+                """You are a helpful agent. Complete the task. When done, include <done> in your response."""
+            )
+
+        # Build conversation with system prompt
+        system_message = {"role": "system", "content": system_content}
+        user_message = {"role": "user", "content": task_prompt}
+        self.chat_history = [system_message, user_message]
 
         metadata = {
             "task_key": self.task_key,
