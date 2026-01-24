@@ -58,7 +58,7 @@ azure = [
 ]
 
 skyrl-train = [
-    "skyrl-train @ git+https://github.com/tyler-griggs/SkyRL@5fa7d148fda71cfbc4429198270e2f884c5b3a1a#subdirectory=skyrl-train",
+    "skyrl-train[vllm] @ git+https://github.com/tyler-griggs/SkyRL@5fa7d148fda71cfbc4429198270e2f884c5b3a1a#subdirectory=skyrl-train",
 ]
 
 dev = [
