@@ -8,7 +8,6 @@ from pathlib import Path
 
 import ray
 import torch
-from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 from ray.util.placement_group import placement_group
 
@@ -21,6 +20,7 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
+from skyrl_train.config.utils import get_default_config
 
 
 class SkyRLTrainBackendConfig(BaseModel, extra="forbid"):
@@ -31,50 +31,10 @@ class SkyRLTrainBackendConfig(BaseModel, extra="forbid"):
 
 
 def _build_config(base_model: str, config: SkyRLTrainBackendConfig, lora_config: types.LoraConfig | None = None):
-    """Build minimal config for SkyRL-Train workers."""
-    lora_cfg = {
-        "rank": lora_config.rank if lora_config else 0,
-        "alpha": lora_config.alpha if lora_config else 16,
-        "dropout": 0,
-        "lora_sync_path": "/tmp/skyrl_lora_sync",
-        "target_modules": "all-linear",
-        "exclude_modules": None,
-        "init_method": "kaiming",
-    }
-
-    return OmegaConf.create({
-        "trainer": {
-            "placement": {"colocate_all": False, "colocate_policy_ref": None, "policy_num_nodes": 1, "policy_num_gpus_per_node": config.num_gpus},
-            "strategy": "fsdp2",
-            "policy": {
-                "model": {"path": base_model, "lora": lora_cfg},
-                "optimizer_config": {
-                    "lr": 1e-5, "adam_betas": [0.9, 0.999], "weight_decay": 0.01,
-                    "max_grad_norm": 1.0, "offload_after_step": False, "num_warmup_steps": 0, "scheduler": "constant_with_warmup",
-                },
-                "fsdp_config": {"cpu_offload": False, "reshard_after_forward": True, "fsdp_size": -1},
-                "sequence_parallel_size": 1, "use_torch_compile": False, "record_memory": False, "model_config_kwargs": {},
-            },
-            "algorithm": {
-                "policy_loss_type": "regular", "loss_reduction": "token_mean",
-                "eps_clip_low": 0.2, "eps_clip_high": 0.2,
-                "use_kl_loss": False, "kl_loss_coef": 0.0, "use_entropy_loss": False, "entropy_loss_coef": 0.0,
-            },
-            "gradient_checkpointing": True, "gradient_checkpointing_use_reentrant": False,
-            "seed": 42, "bf16": True,
-            "micro_train_batch_size_per_gpu": config.micro_train_batch_size_per_gpu,
-            "micro_forward_batch_size_per_gpu": 4,
-            "policy_mini_batch_size": 256,
-            "flash_attn": True, "use_sample_packing": False,
-            "ckpt_path": "/tmp/skyrl_ckpts", "logger": "console",
-        },
-        "generator": {
-            "n_samples_per_prompt": 1,
-            "sampling_params": {"temperature": 1.0},
-            "weight_transfer_threshold_cuda_ipc_GB": 1.0,
-            "weight_sync_backend": "nccl",
-        },
-    })
+    """Build config for SkyRL-Train workers using default config."""
+    cfg = get_default_config()
+    cfg.trainer.policy.model.path = base_model
+    return cfg
 
 
 class SkyRLTrainBackend(AbstractBackend):
@@ -179,7 +139,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 seq_len = len(prepared_batch.all_input_ids[i])
                 loss_fn_outputs.append({
                     "elementwise_loss": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
-                    "logprobs": {"data": [0.0] * seq_len, "dtype": "float32", "shape": [seq_len]},
+                    "logprobs": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
                 })
             results[request_id] = types.ForwardBackwardOutput(
                 loss_fn_output_type="scalar", loss_fn_outputs=loss_fn_outputs, metrics={},
