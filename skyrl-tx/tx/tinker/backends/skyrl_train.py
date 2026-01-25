@@ -66,10 +66,14 @@ class SkyRLTrainBackend(AbstractBackend):
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
         self._actor_group = PPORayActorGroup(
-            cfg=self._cfg, num_nodes=1, num_gpus_per_node=num_gpus,
-            ray_actor_type=PolicyWorker, pg=pg,
+            cfg=self._cfg,
+            num_nodes=1,
+            num_gpus_per_node=num_gpus,
+            ray_actor_type=PolicyWorker,
+            pg=pg,
             num_gpus_per_actor=0.75 if num_gpus == 1 else 1.0,
-            colocate_all=False, sequence_parallel_size=1,
+            colocate_all=False,
+            sequence_parallel_size=1,
         )
         ray.get(self._actor_group.async_init_model(self.base_model))
         self._dispatch = WorkerDispatch(self._cfg, policy_actor_group=self._actor_group)
@@ -111,16 +115,19 @@ class SkyRLTrainBackend(AbstractBackend):
         # since skyrl_train computes loss only on the response portion
         loss_mask_tensor = loss_mask_tensor[:, -response_length:]
 
-        batch = TrainingInputBatch({
-            "sequences": sequences_tensor,
-            "attention_mask": attention_mask_tensor,
-            "loss_mask": loss_mask_tensor,
-        })
+        batch = TrainingInputBatch(
+            {
+                "sequences": sequences_tensor,
+                "attention_mask": attention_mask_tensor,
+                "loss_mask": loss_mask_tensor,
+            }
+        )
         batch.metadata = {"response_length": response_length}
         return batch
 
     def forward_backward(
-        self, prepared_batch: types.PreparedModelPassBatch,
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
         loss_fn: str = "cross_entropy",
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         if not prepared_batch.all_input_ids:
@@ -137,17 +144,22 @@ class SkyRLTrainBackend(AbstractBackend):
             loss_fn_outputs = []
             for i in range(start_idx, end_idx):
                 seq_len = len(prepared_batch.all_input_ids[i])
-                loss_fn_outputs.append({
-                    "elementwise_loss": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
-                    "logprobs": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
-                })
+                loss_fn_outputs.append(
+                    {
+                        "elementwise_loss": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
+                        "logprobs": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
+                    }
+                )
             results[request_id] = types.ForwardBackwardOutput(
-                loss_fn_output_type="scalar", loss_fn_outputs=loss_fn_outputs, metrics={},
+                loss_fn_output_type="scalar",
+                loss_fn_outputs=loss_fn_outputs,
+                metrics={},
             )
         return results
 
     def forward(
-        self, prepared_batch: types.PreparedModelPassBatch,
+        self,
+        prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         return self.forward_backward(prepared_batch)
 
@@ -159,7 +171,8 @@ class SkyRLTrainBackend(AbstractBackend):
         return types.OptimStepOutput()
 
     def sample(
-        self, prepared_batch: types.PreparedSampleBatch,
+        self,
+        prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         raise NotImplementedError("Sampling not supported")
 
