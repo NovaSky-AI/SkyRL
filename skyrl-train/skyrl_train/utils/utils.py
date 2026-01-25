@@ -599,7 +599,9 @@ def configure_ray_worker_logging() -> None:
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
     through Loguru so third-party logs match formatting
     """
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    from skyrl_train.env_vars import SKYRL_LOG_LEVEL
+
+    level_name = SKYRL_LOG_LEVEL
 
     # 1) Loguru formatting (force colors)
     logger.remove()
@@ -639,9 +641,19 @@ def initialize_ray(cfg: DictConfig):
         cfg: Training config
     """
     from .ppo_utils import sync_registries
+    from skyrl_train.env_vars import SKYRL_LOG_LEVEL
+
+    # SKYRL_LOG_LEVEL=DEBUG enables verbose Ray logging
+    verbose_logging = SKYRL_LOG_LEVEL == "DEBUG"
+
+    if not verbose_logging:
+        # Suppress C++ logs (metrics exporter errors) on stdout
+        os.environ["RAY_BACKEND_LOG_LEVEL"] = "fatal"
 
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+
+    # log_to_driver=False suppresses worker/raylet logs forwarding to driver stdout
+    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=verbose_logging)
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()

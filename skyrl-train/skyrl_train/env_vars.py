@@ -49,3 +49,15 @@ Whether to export ``PYTHONPATH`` environment variable from the driver to the wor
 
 See https://github.com/ray-project/ray/issues/56697 for details on why this is needed.
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_LOG_LEVEL = os.environ.get("SKYRL_LOG_LEVEL", "INFO").upper()
+"""
+Log level for SkyRL (default: INFO). Controls both application log filtering and Ray verbosity.
+
+DEBUG: Shows debug logs and enables verbose Ray logging (raylet/worker logs to stdout).
+INFO or higher: Normal logging with suppressed Ray infrastructure logs.
+"""
