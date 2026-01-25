@@ -79,14 +79,16 @@ def env():
 
 def test_round_robin(env):
     """Requests without session distribute across servers."""
-    server_ids = {httpx.get(f"{env}/health").json()["server_id"] for _ in range(4)}
+    # Use /test (data plane route) instead of /health (control plane route)
+    server_ids = {httpx.get(f"{env}/test").json()["server_id"] for _ in range(4)}
     assert len(server_ids) == 2
 
 
 def test_session_affinity(env):
     """Same X-Session-ID routes to same server."""
     headers = {"X-Session-ID": "sticky"}
-    ids = [httpx.get(f"{env}/health", headers=headers).json()["server_id"] for _ in range(3)]
+    # Use /test (data plane route) instead of /health (control plane route)
+    ids = [httpx.get(f"{env}/test", headers=headers).json()["server_id"] for _ in range(3)]
     assert len(set(ids)) == 1
 
 
