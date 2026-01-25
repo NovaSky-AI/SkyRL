@@ -31,7 +31,6 @@ CONTROL_PLANE_ROUTES = [
     "/wake_up",
     "/reset_prefix_cache",
     "/collective_rpc",
-    "/health",
     # SKYRL-SPECIFIC ROUTES
     "/init_weight_transfer",
     "/update_weights",
