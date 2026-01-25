@@ -173,10 +173,15 @@ class TestServerGroupAndRouter:
             )
             assert resp.status_code == 200
 
-            # Check is paused
+            # Check is paused - router returns aggregated responses from all servers
             resp = await client.get(f"{router_url}/is_paused", timeout=30.0)
             assert resp.status_code == 200
-            assert resp.json()["is_paused"] is True
+            # Response format: {server_url: {"status": 200, "body": {...}}}
+            server_responses = resp.json()
+            # All servers should report is_paused=True
+            for server_url, server_resp in server_responses.items():
+                assert server_resp["status"] == 200, f"Server {server_url} failed"
+                assert server_resp["body"]["is_paused"] is True, f"Server {server_url} not paused"
 
             # Send a request while paused (should block)
             async def send_request():

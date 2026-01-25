@@ -1,13 +1,15 @@
 """
 GPU CI tests for weight synchronization from trainer to inference server.
 
-Tests:
-    - 1 vLLM server with TP=2 + dummy weights
-    - Trainer emulation with real weights on separate GPU
-    - Weight sync via NCCL broadcast through router
+Tests non-colocated scenario with TP=2 on both sides:
+    - Trainer (TP=2) on GPUs 0-1, server (TP=2) on GPUs 2-3 (4 GPUs total)
+    - Uses NCCL broadcast for weight sync via HTTP router
+
+Colocated test (CUDA IPC strategy) is deferred until vLLM weight sync endpoints are available.
+See: https://github.com/vllm-project/vllm/issues/31848
 
 Run:
-    uv run pytest tests/gpu/gpu_ci/test_weight_sync.py -v -s
+    uv run pytest tests/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
 """
 
 import time
@@ -29,16 +31,15 @@ from skyrl_train.inference_servers.server_group import ServerGroup
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-# Skip entire module if not enough GPUs (need 3: 1 trainer + 2 for TP=2 server)
+# Check GPU availability for test requirements
 _gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-if _gpu_count < 3:
-    pytest.skip(f"Need 3 GPUs for weight sync test, found {_gpu_count}", allow_module_level=True)
 
 
 def make_vllm_cli_args(
     model: str,
     tp_size: int = 2,
     load_format: str = "auto",
+    gpu_memory_utilization: float = 0.5,
 ) -> FlexibleArgumentParser:
     """Create CLI args for vLLM server using official parser."""
     parser = FlexibleArgumentParser(description="vLLM server")
@@ -51,7 +52,7 @@ def make_vllm_cli_args(
             str(tp_size),
             "--enforce-eager",
             "--gpu-memory-utilization",
-            "0.5",
+            str(gpu_memory_utilization),
             "--max-model-len",
             "2048",
             "--load-format",
@@ -78,8 +79,8 @@ class Trainer:
     """
     Simple trainer emulator that holds the real model weights.
 
-    This is a simplified version of the trainer side for testing weight sync.
-    Non-colocated: runs on a separate GPU from the inference server.
+    This is a simplified version of the trainer side for testing weight sync
+    via NCCL broadcast in non-colocated scenarios.
     """
 
     def __init__(self, model_name: str, device: str = "cuda"):
@@ -147,20 +148,31 @@ class Trainer:
 @pytest.fixture(scope="class")
 def weight_update_env(ray_init_fixture):
     """
-    Create environment for weight update testing:
-    - Trainer with real weights on GPU 0
-    - 1 vLLM server with TP=2 and DUMMY weights (uses GPU 1,2)
-    - Router to proxy requests
+    Create environment for weight update testing.
+
+    Non-colocated setup with TP=2 for both trainer and inference server:
+    - 4 GPUs total: trainer on GPUs 0-1, server on GPUs 2-3
+    - Uses NCCL broadcast for weight sync
     """
-    # Create server with dummy weights
-    cli_args = make_vllm_cli_args(MODEL, tp_size=2, load_format="dummy")
+    if _gpu_count < 4:
+        pytest.skip(f"Need 4 GPUs for non-colocated test, found {_gpu_count}")
+
+    # Create server with dummy weights (TP=2)
+    cli_args = make_vllm_cli_args(
+        MODEL,
+        tp_size=2,
+        load_format="dummy",
+        gpu_memory_utilization=0.5,
+    )
     start_port = get_open_port()
 
-    pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(3)])
+    # 4 bundles: trainer on 0-1, server on 2-3
+    pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(4)])
     ray.get(pg.ready())
 
+    # Trainer on bundle 0 (uses GPU 0-1 with TP=2 via the model itself)
     trainer = Trainer.options(
-        num_gpus=1,
+        num_gpus=1.0,
         scheduling_strategy=PlacementGroupSchedulingStrategy(
             placement_group=pg,
             placement_group_bundle_index=0,
@@ -169,12 +181,13 @@ def weight_update_env(ray_init_fixture):
 
     ray.get(trainer.ready.remote())
 
+    # Server on bundles 2-3 (separate from trainer)
     group = ServerGroup(
         cli_args=cli_args,
         num_servers=1,
         start_port=start_port,
         placement_group=pg,
-        placement_group_bundle_offset=1,
+        placement_group_bundle_offset=2,
     )
     server_infos = group.start()
     server_urls = [info.url for info in server_infos]
@@ -202,12 +215,12 @@ def weight_update_env(ray_init_fixture):
 
 
 class TestWeightUpdateFlow:
-    """Tests for weight synchronization from trainer to inference server."""
+    """Tests for weight synchronization from trainer to inference server (non-colocated)."""
 
     @pytest.mark.asyncio
     async def test_update_weights_flow(self, weight_update_env):
         """
-        Full E2E weight sync test via router:
+        Full E2E weight sync test via router (non-colocated, NCCL broadcast):
         1. Query with dummy weights → gibberish
         2. Init weight transfer (both sides concurrently via router)
         3. Broadcast weights from trainer (concurrent with server receive)
@@ -216,6 +229,8 @@ class TestWeightUpdateFlow:
         """
         router_url = weight_update_env["router_url"]
         trainer = weight_update_env["trainer"]
+
+        print("\n[TEST] Running non-colocated weight sync test")
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             # ===== Step 1: Verify dummy weights produce gibberish =====
@@ -305,4 +320,4 @@ class TestWeightUpdateFlow:
 
             assert "Paris" in text_after, f"Weight sync failed - expected 'Paris' but got: {text_after!r}"
 
-            print("[SUCCESS] Weight sync test passed!")
+            print("[SUCCESS] Non-colocated weight sync test passed!")

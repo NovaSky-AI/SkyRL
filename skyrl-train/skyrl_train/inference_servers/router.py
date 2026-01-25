@@ -25,11 +25,13 @@ logger = logging.getLogger(__name__)
 CONTROL_PLANE_ROUTES = [
     # BUILT-IN ROUTES
     "/pause",
+    "/is_paused",
     "/resume",
     "/sleep",
     "/wake_up",
     "/reset_prefix_cache",
     "/collective_rpc",
+    "/health",
     # SKYRL-SPECIFIC ROUTES
     "/init_weight_transfer",
     "/update_weights",
