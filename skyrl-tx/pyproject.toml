@@ -56,7 +56,7 @@ azure = [
     "cloudpathlib[azure]",
 ]
 
-skyrl-train = [
+skyrl_train = [
     "skyrl-train[vllm]; python_version >= '3.12'",
 ]
 
