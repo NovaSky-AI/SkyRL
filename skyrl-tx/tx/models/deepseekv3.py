@@ -10,7 +10,8 @@ from tx.layers.rotary_embedding import apply_rope_interleave
 from tx.layers.util import Param, prepare_routing
 from tx.layers.layernorm import RMSNorm
 from tx.models.types import CausalLMOutput, ModelOutput
-from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
+from tx.utils.generator import GeneratorMixin, KVCache
+from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
 
 class DeepseekV3Attention(nnx.Module):
@@ -535,7 +536,7 @@ class DeepseekV3Model(nnx.Module):
         )
 
 
-class DeepseekV3ForCausalLM(nnx.Module, GeneratorMixin):
+class DeepseekV3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
@@ -554,6 +555,10 @@ class DeepseekV3ForCausalLM(nnx.Module, GeneratorMixin):
                 rngs=rngs,
             )
 
+    def get_lm_head(self) -> LMHead:
+        """Return the lm_head callable for logits computation."""
+        return self.lm_head
+
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to LoRA weights."""
@@ -570,7 +575,7 @@ class DeepseekV3ForCausalLM(nnx.Module, GeneratorMixin):
         kv_cache: KVCache | None = None,
     ) -> CausalLMOutput:
         if positions is None:
-            positions = compute_positions(attention_mask)
+            positions = jnp.arange(attention_mask.shape[1])[None, :]
 
         outputs = self.model(
             input_ids,
