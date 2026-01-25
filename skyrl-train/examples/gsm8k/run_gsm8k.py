@@ -13,17 +13,20 @@ Usage:
     # With default settings (4 GPUs, vLLM, wandb logging):
     uv run --extra vllm examples/gsm8k/run_gsm8k.py
 
-    # With CLI overrides:
+    # With CLI overrides (any config field via --key.path=value):
     uv run --extra vllm examples/gsm8k/run_gsm8k.py \
         --trainer.epochs=30 \
         --trainer.policy.model.path="Qwen/Qwen2.5-7B" \
-        --num-gpus=8
+        --trainer.algorithm.advantage_estimator="gae"
 
-    # With environment variable overrides:
-    NUM_GPUS=2 LOGGER=console INFERENCE_BACKEND=sglang uv run --extra sglang examples/gsm8k/run_gsm8k.py
+    # With environment variables for convenience params:
+    NUM_GPUS=8 LOGGER=console INFERENCE_BACKEND=sglang \
+        uv run --extra sglang examples/gsm8k/run_gsm8k.py
 
     # Programmatic usage:
-    python -c "from examples.gsm8k.run_gsm8k import get_gsm8k_config; cfg = get_gsm8k_config(); ..."
+    from examples.gsm8k.run_gsm8k import get_gsm8k_config
+    cfg = get_gsm8k_config(num_gpus=8)
+    # cfg is a fully typed SkyRLConfig object
 """
 
 import os
@@ -141,47 +144,22 @@ def get_gsm8k_config(
 
 def main():
     """Main entrypoint for GSM8K training with Pydantic config."""
-    import argparse
-    from skyrl_train.config.cli_overrides import apply_overrides, parse_args_with_overrides
+    import sys
+    from skyrl_train.config.cli import apply_overrides
 
-    # Create argument parser
-    parser = argparse.ArgumentParser(
-        description="GSM8K Training with Pydantic Config",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Default settings:
-  uv run --extra vllm examples/gsm8k/run_gsm8k.py
+    # Collect all --key=value args as config overrides
+    overrides = []
+    for arg in sys.argv[1:]:
+        if arg.startswith("--") and "=" in arg:
+            overrides.append(arg[2:])  # Strip leading --
 
-  # Override via CLI:
-  uv run --extra vllm examples/gsm8k/run_gsm8k.py \\
-      --num-gpus=8 \\
-      --trainer.epochs=30 \\
-      --trainer.policy.model.path="Qwen/Qwen2.5-7B"
-
-  # Override via environment:
-  NUM_GPUS=2 LOGGER=console uv run --extra vllm examples/gsm8k/run_gsm8k.py
-        """
-    )
-    parser.add_argument("--data-dir", type=str, default=None,
-                        help="Path to GSM8K data directory")
-    parser.add_argument("--num-gpus", type=int, default=None,
-                        help="Number of GPUs to use")
-    parser.add_argument("--logger", type=str, default=None,
-                        choices=["wandb", "console"],
-                        help="Logging backend")
-    parser.add_argument("--inference-backend", type=str, default=None,
-                        choices=["vllm", "sglang"],
-                        help="Inference backend")
-
-    # Parse args and collect overrides
-    args, overrides = parse_args_with_overrides(parser)
-
-    # Read configuration from CLI args or environment variables
-    data_dir = args.data_dir or os.environ.get("DATA_DIR", None)
-    num_gpus = args.num_gpus or int(os.environ.get("NUM_GPUS", "4"))
-    logger = args.logger or os.environ.get("LOGGER", "wandb")
-    inference_backend = args.inference_backend or os.environ.get("INFERENCE_BACKEND", "vllm")
+    # Read base settings from environment variables
+    # Note: num_gpus is a convenience param that sets multiple config fields
+    # (placement and generator). Use env vars or override each field directly.
+    data_dir = os.environ.get("DATA_DIR", None)
+    num_gpus = int(os.environ.get("NUM_GPUS", "4"))
+    logger = os.environ.get("LOGGER", "wandb")
+    inference_backend = os.environ.get("INFERENCE_BACKEND", "vllm")
 
     # Create base configuration
     cfg = get_gsm8k_config(
