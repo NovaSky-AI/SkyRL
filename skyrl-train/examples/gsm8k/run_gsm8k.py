@@ -32,7 +32,7 @@ Usage:
 import os
 from pathlib import Path
 
-from skyrl_train.config.configs import create_default_config, SkyRLConfig
+from skyrl_train.config.configs import SkyRLConfig
 from skyrl_train.entrypoints.main_base import run_training
 
 

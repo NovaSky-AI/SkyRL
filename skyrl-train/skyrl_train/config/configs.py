@@ -483,6 +483,30 @@ class SkyRLConfig(BaseModel):
 # Helper Functions
 # ============================================================================
 
+def _validate_path(path: str) -> List[str]:
+    """
+    Validate and split a dot-notation path, rejecting unsafe patterns.
+
+    Args:
+        path: Dot-separated path string
+
+    Returns:
+        List of path components
+
+    Raises:
+        ValueError: If path is invalid or contains unsafe patterns
+    """
+    if not path or not isinstance(path, str):
+        raise ValueError(f"Invalid path: {path}")
+    parts = path.split(".")
+    for part in parts:
+        if not part:
+            raise ValueError(f"Invalid path with empty component: {path}")
+        if part.startswith("_"):
+            raise ValueError(f"Access to private/dunder attributes not allowed: {path}")
+    return parts
+
+
 def set_nested_attr(obj: Any, path: str, value: Any) -> None:
     """
     Set a nested attribute on a Pydantic model using dot notation.
@@ -496,7 +520,7 @@ def set_nested_attr(obj: Any, path: str, value: Any) -> None:
         >>> cfg = SkyRLConfig(...)
         >>> set_nested_attr(cfg, "trainer.policy.model.path", "Qwen/Qwen2.5-1.5B")
     """
-    parts = path.split(".")
+    parts = _validate_path(path)
     for part in parts[:-1]:
         obj = getattr(obj, part)
     setattr(obj, parts[-1], value)
@@ -517,7 +541,7 @@ def get_nested_attr(obj: Any, path: str) -> Any:
         >>> cfg = SkyRLConfig(...)
         >>> model_path = get_nested_attr(cfg, "trainer.policy.model.path")
     """
-    parts = path.split(".")
+    parts = _validate_path(path)
     for part in parts:
         obj = getattr(obj, part)
     return obj
