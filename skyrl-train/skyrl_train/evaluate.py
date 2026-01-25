@@ -101,8 +101,7 @@ async def evaluate(
         }
     )
 
-    # 4. Prepare dumping data
-    # TODO[Ben] update this to be cloud-compatible
+    # 4. Prepare dumping data and upload to S3
     if cfg.trainer.dump_eval_results:
         with Timer("dump_eval_results"):
             data_save_dir = (
@@ -120,6 +119,23 @@ async def evaluate(
                 concat_env_extras,
                 eval_metrics,
             )
+
+            # Upload to S3 if credentials are available
+            try:
+                from integrations.fleet.s3_checkpoints import upload_eval_results_to_s3
+
+                run_name = getattr(cfg.trainer, "run_name", None)
+                if run_name:
+                    upload_eval_results_to_s3(
+                        local_dir=str(data_save_dir),
+                        run_name=run_name,
+                        global_step=global_step,
+                        delete_local=False,  # Keep local copy
+                    )
+            except ImportError:
+                pass  # S3 upload not available
+            except Exception as e:
+                logger.warning(f"Failed to upload eval results to S3: {e}")
 
     return eval_metrics
 
@@ -216,8 +232,7 @@ async def evaluate_step_wise(
         }
     )
 
-    # 4. Prepare dumping data
-    # TODO[Ben] update this to be cloud-compatible
+    # 4. Prepare dumping data and upload to S3
     if cfg.trainer.dump_eval_results:
         with Timer("dump_eval_results"):
             data_save_dir = (
@@ -235,5 +250,22 @@ async def evaluate_step_wise(
                 concat_env_extras,
                 eval_metrics,
             )
+
+            # Upload to S3 if credentials are available
+            try:
+                from integrations.fleet.s3_checkpoints import upload_eval_results_to_s3
+
+                run_name = getattr(cfg.trainer, "run_name", None)
+                if run_name:
+                    upload_eval_results_to_s3(
+                        local_dir=str(data_save_dir),
+                        run_name=run_name,
+                        global_step=global_step,
+                        delete_local=False,  # Keep local copy
+                    )
+            except ImportError:
+                pass  # S3 upload not available
+            except Exception as e:
+                logger.warning(f"Failed to upload eval results to S3: {e}")
 
     return eval_metrics

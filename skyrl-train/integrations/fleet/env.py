@@ -191,7 +191,7 @@ class FleetTaskEnv(BaseTextEnv):
         # Build system prompt with tool definitions
         if self.tools:
             tools_json = json.dumps(self.tools, indent=2)
-            system_content = f"""You are a helpful agent. Complete the task by calling tools. The session ends when you stop calling tools.
+            system_content = f"""You are a helpful agent. Complete the task by calling tools.
 
 ## Available Tools
 {tools_json}
@@ -199,10 +199,11 @@ class FleetTaskEnv(BaseTextEnv):
 ## Tool Call Format
 <tool_call>{{"name": "tool_name", "arguments": {{"param": "value"}}}}</tool_call>
 
-When done, include <done> in your response."""
+## Important
+You MUST call tools to complete the task. Only include <done> AFTER you have successfully completed the task using the tools above. Do not say <done> until you have actually performed the required actions."""
         else:
             system_content = (
-                """You are a helpful agent. Complete the task. When done, include <done> in your response."""
+                """You are a helpful agent. Complete the task. Only include <done> AFTER you have completed the task."""
             )
 
         # Build conversation with system prompt

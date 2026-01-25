@@ -51,6 +51,8 @@ envs:
   MODALITY: "tool_use"
   # Training parameters
   MAX_TURNS: 50
+  MAX_INPUT_LENGTH: 24000  # Max context at each turn (Qwen3-8B has 32K)
+  MAX_GENERATE_LENGTH: 4096
   NUM_EPOCHS: 20
   RUN_ID: ""
   # Optional: limit number of tasks for testing
@@ -62,6 +64,7 @@ envs:
   # S3 buckets
   S3_DATASET_BUCKET: "fleet-internal-datasets"
   S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
 
 setup: |
   set -euo pipefail
@@ -159,18 +162,19 @@ run: |
     generator.num_inference_engines=$TOTAL_GPUS \
     generator.inference_engine_tensor_parallel_size=1 \
     trainer.epochs=${NUM_EPOCHS} \
-    trainer.eval_batch_size=4 \
+    trainer.eval_batch_size=8 \
     trainer.eval_before_train=true \
-    trainer.eval_interval=5 \
+    trainer.eval_interval=10 \
     trainer.update_epochs_per_batch=1 \
     trainer.train_batch_size=8 \
-    trainer.policy_mini_batch_size=4 \
+    trainer.policy_mini_batch_size=8 \
     trainer.micro_forward_batch_size_per_gpu=4 \
     trainer.micro_train_batch_size_per_gpu=4 \
     trainer.ckpt_interval=10 \
     trainer.max_prompt_length=512 \
-    generator.sampling_params.max_generate_length=2048 \
-    generator.sampling_params.temperature=0.6 \
+    generator.max_input_length=$MAX_INPUT_LENGTH \
+    generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+    generator.sampling_params.temperature=0.9 \
     generator.sampling_params.top_p=0.95 \
     generator.sampling_params.stop='["</tool_call>", "<done>"]' \
     generator.eval_sampling_params.stop='["</tool_call>", "<done>"]' \
