@@ -57,7 +57,7 @@ azure = [
 ]
 
 skyrl_train = [
-    "skyrl-train[vllm]; python_version >= '3.12'",
+    "skyrl-train[vllm]; python_version == '3.12'",
 ]
 
 dev = [
