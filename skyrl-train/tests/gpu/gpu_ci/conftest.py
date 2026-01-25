@@ -35,7 +35,10 @@ def ray_init_fixture():
     env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if SKYRL_PYTHONPATH_EXPORT:
-        env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
+        pythonpath = os.environ.get("PYTHONPATH")
+        if pythonpath is None:
+            raise RuntimeError("SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment")
+        env_vars["PYTHONPATH"] = pythonpath
 
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
     ray.init(runtime_env={"env_vars": env_vars})

@@ -18,24 +18,17 @@ import httpx
 import pytest
 import ray
 import torch
+import argparse
+
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
-# Skip entire module if vllm is not installed (e.g., when running sglang tests)
-vllm = pytest.importorskip("vllm")
-from vllm.entrypoints.openai.cli_args import make_arg_parser  # noqa: E402
-from vllm.utils.argparse_utils import FlexibleArgumentParser  # noqa: E402
-
-from skyrl_train.inference_servers.common import get_node_ip, get_open_port  # noqa: E402
-from skyrl_train.inference_servers.router import InferenceRouter  # noqa: E402
-from skyrl_train.inference_servers.server_group import ServerGroup  # noqa: E402
+from skyrl_train.inference_servers.common import get_node_ip, get_open_port
+from skyrl_train.inference_servers.router import InferenceRouter
+from skyrl_train.inference_servers.server_group import ServerGroup
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-
-
-# Check GPU availability for test requirements
-_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
 
 def make_vllm_cli_args(
@@ -43,8 +36,11 @@ def make_vllm_cli_args(
     tp_size: int = 2,
     load_format: str = "auto",
     gpu_memory_utilization: float = 0.5,
-) -> FlexibleArgumentParser:
+) -> argparse.Namespace:
     """Create CLI args for vLLM server using official parser."""
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+
     parser = FlexibleArgumentParser(description="vLLM server")
     parser = make_arg_parser(parser)
     return parser.parse_args(
@@ -157,8 +153,6 @@ def weight_update_env(ray_init_fixture):
     - 4 GPUs total: trainer on GPUs 0-1, server on GPUs 2-3
     - Uses NCCL broadcast for weight sync
     """
-    if _gpu_count < 4:
-        pytest.skip(f"Need 4 GPUs for non-colocated test, found {_gpu_count}")
 
     # Create server with dummy weights (TP=2)
     cli_args = make_vllm_cli_args(
@@ -217,6 +211,7 @@ def weight_update_env(ray_init_fixture):
     ray.get(trainer.teardown.remote())
 
 
+@pytest.mark.vllm
 class TestWeightUpdateFlow:
     """Tests for weight synchronization from trainer to inference server (non-colocated)."""
 
