@@ -140,7 +140,7 @@ class SkyRLTrainBackend(AbstractBackend):
         metrics = self._dispatch.forward_backward("policy", batch, loss_fn=loss_fn)
 
         # Get the loss from metrics and distribute per token
-        loss = float(metrics.get("loss", 0.0))
+        loss = float(metrics.get("loss", float("nan")))
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
@@ -149,7 +149,9 @@ class SkyRLTrainBackend(AbstractBackend):
                 seq_len = len(prepared_batch.all_input_ids[i])
                 loss_fn_outputs.append(
                     {
+                        # TODO: elementwise_loss needs to be implemented
                         "elementwise_loss": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
+                        # TODO: logprobs needs to be implemented
                         "logprobs": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
                     }
                 )
@@ -164,7 +166,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        return self.forward_backward(prepared_batch)
+        raise NotImplementedError("Forward-only pass not supported")
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         if model_id != self._model_id:
@@ -180,16 +182,10 @@ class SkyRLTrainBackend(AbstractBackend):
         raise NotImplementedError("Sampling not supported")
 
     def save_checkpoint(self, output_path, model_id: str) -> None:
-        if model_id != self._model_id:
-            raise ValueError(f"Model {model_id} not found")
-        output_path = Path(output_path)
-        output_path.mkdir(parents=True, exist_ok=True)
-        ray.get([actor.save_checkpoint.remote(output_path) for actor in self._actor_group._actor_handlers])
+        raise NotImplementedError("Saving checkpoints not supported")
 
     def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
-        if model_id != self._model_id:
-            raise ValueError(f"Model {model_id} not found")
-        ray.get([actor.load_checkpoint.remote(Path(checkpoint_path)) for actor in self._actor_group._actor_handlers])
+        raise NotImplementedError("Loading checkpoints not supported")
 
     def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
         raise NotImplementedError("Sampler checkpoints not supported")
