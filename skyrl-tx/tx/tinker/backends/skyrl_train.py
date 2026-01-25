@@ -154,8 +154,8 @@ class SkyRLTrainBackend(AbstractBackend):
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         if model_id != self._model_id:
             raise ValueError(f"Model {model_id} not found")
-        refs = self._actor_group.async_run_ray_method("pass_through", "optim_step")
-        ray.get(refs)
+        grad_norm = self._dispatch.optim_step("policy")
+        logger.info(f"grad_norm: {grad_norm}")
         return types.OptimStepOutput()
 
     def sample(
