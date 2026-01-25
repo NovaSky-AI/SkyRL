@@ -13,6 +13,6 @@ export WANDB_API_KEY=<your_key_here>
 bash examples/async/async_run_gsm8k.sh
 ```
 
-For more details, refer to the [documentation](https://skyrl.readthedocs.io/en/latest/tutorials/async.html)
+For more details, refer to the [documentation](https://docs.skyrl.ai/docs/tutorials/async)
 
-For difference between `async` and `fully_async`, see the documentation: https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html
+For difference between `async` and `fully_async`, see the documentation: https://docs.skyrl.ai/docs/tutorials/fully_async
