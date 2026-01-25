@@ -139,7 +139,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
-        loss_mask_tensor = torch.tensor(loss_masks, dtype=torch.float32)
+        loss_mask_tensor = torch.tensor(loss_masks, dtype=torch.long)
 
         # Slice loss_mask to only include the last response_length positions
         # since skyrl_train computes loss only on the response portion
