@@ -56,8 +56,18 @@ See https://github.com/ray-project/ray/issues/56697 for details on why this is n
 
 SKYRL_LOG_LEVEL = os.environ.get("SKYRL_LOG_LEVEL", "INFO").upper()
 """
-Log level for SkyRL (default: INFO). Controls both application log filtering and Ray verbosity.
+Log level for SkyRL (default: INFO). Controls log filtering and Ray verbosity.
 
-DEBUG: Shows debug logs and enables verbose Ray logging (raylet/worker logs to stdout).
-INFO or higher: Normal logging with suppressed Ray infrastructure logs.
+- Application logs: Filters loguru output (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+- Ray verbosity: DEBUG enables verbose Ray logging (worker/raylet logs to stdout);
+  INFO or higher suppresses Ray infrastructure logs
+"""
+
+SKYRL_LOG_DIR = os.environ.get("SKYRL_LOG_DIR", "/tmp/skyrl-logs")
+"""
+Directory for SkyRL log files (default: /tmp/skyrl-logs).
+
+All logs (infra + training) are written to {SKYRL_LOG_DIR}/{run_name}/logs.log.
+By default, only training progress logs go to stdout. Set SKYRL_LOG_LEVEL=DEBUG
+to also show infrastructure logs on stdout.
 """
