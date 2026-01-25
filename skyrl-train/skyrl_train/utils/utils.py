@@ -17,7 +17,14 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from skyrl_train.env_vars import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import (
+    SKYRL_LD_LIBRARY_PATH_EXPORT,
+    SKYRL_LOG_DIR,
+    SKYRL_LOG_LEVEL,
+    SKYRL_PYTHONPATH_EXPORT,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+)
+from pathlib import Path
 
 
 class Timer:
@@ -595,9 +602,14 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
 def configure_ray_worker_logging() -> None:
     """
-    In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
-    This method forces color and formatting (e.g., bold) and routes stdlib `logging`
-    through Loguru so third-party logs match formatting
+    Configure logging for Ray workers.
+
+    This method:
+    1. Forces color and formatting for Loguru (even without TTY)
+    2. Routes stdlib logging through Loguru
+
+    Note: This does NOT redirect stdout/stderr. For infra actors (vLLM, workers),
+    call redirect_actor_output_to_file() separately in their __init__.
     """
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -640,8 +652,28 @@ def initialize_ray(cfg: DictConfig):
     """
     from .ppo_utils import sync_registries
 
+    # Determine if we should show all logs on stdout (DEBUG mode)
+    verbose_logging = SKYRL_LOG_LEVEL == "DEBUG"
+
+    # Suppress Ray backend logs unless in verbose mode
+    if not verbose_logging:
+        os.environ["RAY_BACKEND_LOG_LEVEL"] = "fatal"
+
+    # Set up log file for infrastructure logs
+    log_dir = Path(SKYRL_LOG_DIR) / cfg.trainer.run_name
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = str(log_dir / "infra.log")
+    os.environ["SKYRL_LOG_FILE"] = log_file
+
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+    # Pass log file path to workers so they can redirect their output
+    env_vars["SKYRL_LOG_FILE"] = log_file
+
+    # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
+    # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
+    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+
+    logger.info(f"Infrastructure logs will be written to: {log_file}")
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()

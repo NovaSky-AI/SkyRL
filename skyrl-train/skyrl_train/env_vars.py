@@ -49,3 +49,23 @@ Whether to export ``PYTHONPATH`` environment variable from the driver to the wor
 
 See https://github.com/ray-project/ray/issues/56697 for details on why this is needed.
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_LOG_LEVEL = os.environ.get("SKYRL_LOG_LEVEL", "INFO").upper()
+"""
+Log level for SkyRL. Controls log filtering and stdout verbosity.
+
+- INFO (default): Training progress on stdout, infrastructure logs to file only
+- DEBUG: All logs (including vLLM, Ray, workers) shown on stdout
+- Also used by loguru for log level filtering (ERROR, WARNING, etc.)
+"""
+
+SKYRL_LOG_DIR = os.environ.get("SKYRL_LOG_DIR", "/tmp/skyrl-logs")
+"""
+Base directory for SkyRL log files (default: /tmp/skyrl-logs).
+
+Infrastructure logs are written to: {SKYRL_LOG_DIR}/{run_name}/infra.log
+"""

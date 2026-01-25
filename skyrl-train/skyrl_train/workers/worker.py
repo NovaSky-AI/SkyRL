@@ -89,6 +89,11 @@ class DistributedTorchRayActor:
         self.record_memory = record_memory
         if record_memory:
             torch.cuda.memory._record_memory_history()
+
+        # Redirect worker output to log file (infra logs shouldn't pollute driver stdout)
+        from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
+
+        redirect_actor_output_to_file()
         configure_ray_worker_logging()
 
     def get_node_local_rank(self):
