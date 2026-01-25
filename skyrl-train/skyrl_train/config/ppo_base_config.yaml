@@ -149,7 +149,7 @@ trainer:
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
   
-  # Fully async specific knobs. For more see http://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
+  # Fully async specific knobs. For more see https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:
     # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,
     # and it is used to train at step j, it is guaranteed that j - i <= max_staleness_steps.

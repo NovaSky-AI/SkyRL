@@ -1,25 +1,30 @@
 from __future__ import annotations
 
+import asyncio
+import random
+import threading
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+
+from loguru import logger
+from omegaconf import DictConfig
+from transformers import PreTrainedTokenizerBase
+
 from skyrl_train.inference_engines.base import (
-    InferenceEngineInterface,
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
 )
-from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
-from transformers import PreTrainedTokenizerBase
-import asyncio
-from typing import List, Any, Optional, Dict, Union, TYPE_CHECKING
+from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
+    ErrorInfo,
+    ErrorResponse,
+)
 from skyrl_train.inference_engines.utils import (
-    route_prompts_to_engines,
+    aggregate_completion_usage_info,
     hash_with_sha256,
     postprocess_completion_request,
-    aggregate_completion_usage_info,
+    route_prompts_to_engines,
 )
-from omegaconf import DictConfig
-import threading
-from loguru import logger
-import random
-from dataclasses import dataclass, field
 
 if TYPE_CHECKING:
     from skyrl_train.weight_sync import WeightUpdateRequest
@@ -151,6 +156,57 @@ class InferenceEngineClient(InferenceEngineInterface):
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
+        )
+
+    def _select_engine_idx(self, session_id: Optional[Union[str, int]] = None) -> int:
+        """Select an engine index for routing a request.
+
+        Args:
+            session_id: Optional session ID for consistent routing (e.g., conversation ID for chat).
+                       If None, uses random load-balancing.
+
+        Returns:
+            Engine index to route the request to.
+        """
+        if session_id is None:
+            return random.randint(0, len(self.engines) - 1)
+        else:
+            return hash_with_sha256(str(session_id)) % len(self.engines)
+
+    async def sample(
+        self,
+        prompt_token_ids: List[int],
+        num_samples: int,
+        sampling_params: Dict[str, Any],
+        session_id: Optional[Union[str, int]] = None,
+    ) -> InferenceEngineOutput:
+        """Generate multiple independent samples from a single prompt.
+
+        This method provides Tinker-compatible token-in/token-out sampling semantics.
+        Generates num_samples independent completions from the same prompt.
+
+        Args:
+            prompt_token_ids: Token IDs for a single prompt (not batched).
+            num_samples: Number of independent samples to generate.
+            sampling_params: Sampling parameters (temperature, max_tokens, etc.).
+            session_id: Optional session ID for consistent engine routing (e.g., conversation ID).
+                       If None, uses random load-balancing. Tinker API should pass None since
+                       each sample() call is independent.
+
+        Returns:
+            InferenceEngineOutput containing num_samples results.
+        """
+        # Wait for generation to resume if paused (for weight updates)
+        await self._wait_for_generation_to_resume()
+
+        # Select engine (random if session_id is None, consistent hash otherwise)
+        engine_idx = self._select_engine_idx(session_id)
+        engine = self.engines[engine_idx]
+
+        return await engine.sample(
+            prompt_token_ids=prompt_token_ids,
+            num_samples=num_samples,
+            sampling_params=sampling_params,
         )
 
     async def _generate_single_with_retry(
@@ -366,12 +422,9 @@ class InferenceEngineClient(InferenceEngineInterface):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         session_id = request_payload["json"].pop("session_id", None)
-        if session_id is None:
-            # if session_id is not provided, we'll use a random engine
-            engine_idx = random.randint(0, len(self.engines) - 1)
-        else:
+        if session_id is not None:
             assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/chat/completions`"
-            engine_idx = hash_with_sha256(str(session_id)) % len(self.engines)
+        engine_idx = self._select_engine_idx(session_id)
 
         # Always use the retry loop which also issues the first request inside
         return await self._chat_completion_with_retry(engine_idx, request_payload)
@@ -582,7 +635,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             and self._server_thread is not None
         ):
             try:
-                from skyrl_train.inference_engines.inference_engine_client_http_endpoint import shutdown_server
+                from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
+                    shutdown_server,
+                )
 
                 shutdown_server(
                     host=self.http_endpoint_host,

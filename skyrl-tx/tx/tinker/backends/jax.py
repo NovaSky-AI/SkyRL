@@ -731,7 +731,6 @@ class JaxBackendImpl(AbstractBackend):
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
-                # Use right-padding, which means during decoding there will be "gaps" in the attention mask.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
                 input_ids = pad_batch(batch_prompts, max_len, np.int32)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
