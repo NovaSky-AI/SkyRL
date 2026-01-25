@@ -385,7 +385,12 @@ class TestFleetTaskEnvInitMethod:
 
         # Mock OpenEnv's FleetTaskEnv
         mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.return_value = {"prompt": "Search for flights", "tools": [], "step": 0}
+
+        # Mock reset_async as coroutine (OpenEnv now fetches tools in __init__)
+        async def mock_reset_async():
+            return {"prompt": "Search for flights", "tools": [], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
         mock_openenv_class.return_value = mock_openenv_env
 
         env_config = DictConfig({"tasks_file": str(tasks_file)})
@@ -396,12 +401,12 @@ class TestFleetTaskEnvInitMethod:
 
         # Verify OpenEnv FleetTaskEnv was created
         mock_openenv_class.assert_called_once()
-        mock_openenv_env.reset.assert_called_once()
 
         # Verify return values
-        assert len(chat_history) == 1
-        assert chat_history[0]["role"] == "user"
-        assert "Search for flights" in chat_history[0]["content"]
+        assert len(chat_history) == 2  # system + user message
+        assert chat_history[0]["role"] == "system"
+        assert chat_history[1]["role"] == "user"
+        assert "Search for flights" in chat_history[1]["content"]
         assert metadata["task_key"] == "task-1"
         assert metadata["env_key"] == "booking"
 
@@ -412,13 +417,17 @@ class TestFleetTaskEnvInitMethod:
         tasks_file = tmp_path / "tasks.json"
         tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Do something", "env_id": "test"}]))
 
-        # Mock OpenEnv with tools
+        # Mock OpenEnv with tools (tools are fetched in __init__, returned in reset_async)
         mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.return_value = {
-            "prompt": "Do something",
-            "tools": [{"name": "search"}, {"name": "click"}],
-            "step": 0,
-        }
+
+        async def mock_reset_async():
+            return {
+                "prompt": "Do something",
+                "tools": [{"name": "search"}, {"name": "click"}],
+                "step": 0,
+            }
+
+        mock_openenv_env.reset_async = mock_reset_async
         mock_openenv_class.return_value = mock_openenv_env
 
         env_config = DictConfig({"tasks_file": str(tasks_file)})
@@ -426,7 +435,7 @@ class TestFleetTaskEnvInitMethod:
 
         chat_history, metadata = env.init([])
 
-        # Verify tools are mentioned in prompt
+        # Verify tools are mentioned in system prompt
         assert "search" in chat_history[0]["content"]
         assert "click" in chat_history[0]["content"]
         assert "<tool_call>" in chat_history[0]["content"]
@@ -438,34 +447,21 @@ class TestFleetTaskEnvInitMethod:
     @patch("integrations.fleet.env.OpenEnvFleetTaskEnv")
     @patch.dict(os.environ, {"FLEET_API_KEY": "test-key"})
     def test_init_openenv_creation_fails(self, mock_openenv_class, tmp_path):
-        """Test error when OpenEnv FleetTaskEnv creation fails."""
+        """Test error when OpenEnv FleetTaskEnv creation fails.
+
+        Since OpenEnv now creates the Fleet env and fetches tools in __init__,
+        this error covers both env creation and tool fetching failures.
+        """
         tasks_file = tmp_path / "tasks.json"
         tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
 
-        # Mock OpenEnv to raise error
+        # Mock OpenEnv to raise error (simulates fleet.make or list_tools failure)
         mock_openenv_class.side_effect = Exception("Failed to create environment")
 
         env_config = DictConfig({"tasks_file": str(tasks_file)})
         env = FleetTaskEnv(env_config, extras={"task_key": "task-1"})
 
         with pytest.raises(RuntimeError, match="Failed to create OpenEnv FleetTaskEnv"):
-            env.init([])
-
-    @patch("integrations.fleet.env.OpenEnvFleetTaskEnv")
-    @patch.dict(os.environ, {"FLEET_API_KEY": "test-key"})
-    def test_init_reset_fails(self, mock_openenv_class, tmp_path):
-        """Test error when OpenEnv reset fails."""
-        tasks_file = tmp_path / "tasks.json"
-        tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
-
-        mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.side_effect = Exception("Reset failed")
-        mock_openenv_class.return_value = mock_openenv_env
-
-        env_config = DictConfig({"tasks_file": str(tasks_file)})
-        env = FleetTaskEnv(env_config, extras={"task_key": "task-1"})
-
-        with pytest.raises(RuntimeError, match="Failed to reset Fleet environment"):
             env.init([])
 
 
@@ -485,7 +481,11 @@ class TestFleetTaskEnvStep:
 
         # Setup mocks
         mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.return_value = {"prompt": "Test", "tools": [], "step": 0}
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
 
         # Mock step_async to return a coroutine
         async def mock_step_async(action):
@@ -516,7 +516,11 @@ class TestFleetTaskEnvStep:
         tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
 
         mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.return_value = {"prompt": "Test", "tools": [], "step": 0}
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
 
         async def mock_step_async(action):
             return ({}, 1.0, True, {})
@@ -542,7 +546,11 @@ class TestFleetTaskEnvStep:
         tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
 
         mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.return_value = {"prompt": "Test", "tools": [], "step": 0}
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
         mock_openenv_class.return_value = mock_openenv_env
 
         env_config = DictConfig({"tasks_file": str(tasks_file)})
@@ -568,7 +576,11 @@ class TestFleetTaskEnvStep:
         tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
 
         mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.return_value = {"prompt": "Test", "tools": [], "step": 0}
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
         mock_openenv_class.return_value = mock_openenv_env
 
         env_config = DictConfig({"tasks_file": str(tasks_file)})
@@ -596,7 +608,11 @@ class TestFleetTaskEnvClose:
         tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
 
         mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.return_value = {"prompt": "Test", "tools": [], "step": 0}
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
         mock_openenv_class.return_value = mock_openenv_env
 
         env_config = DictConfig({"tasks_file": str(tasks_file)})
@@ -616,7 +632,11 @@ class TestFleetTaskEnvClose:
         tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
 
         mock_openenv_env = MagicMock()
-        mock_openenv_env.reset.return_value = {"prompt": "Test", "tools": [], "step": 0}
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
         mock_openenv_env.close.side_effect = Exception("Connection error")
         mock_openenv_class.return_value = mock_openenv_env
 
