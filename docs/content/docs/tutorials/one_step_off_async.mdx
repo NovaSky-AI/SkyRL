@@ -3,7 +3,6 @@ title: "Async Training: One-Step Off-Policy Pipelining"
 description: "Async Training: One-Step Off-Policy Pipelining"
 ---
 
-# Async Training: One-Step Off-Policy Pipelining
 
 This example demonstrates how to implement asynchronous training with one-off pipelining, showcasing the flexibility of the training framework to support different execution plans with minimal code changes.
 
@@ -12,8 +11,6 @@ The complete code from this example is available at [examples/async](https://git
 ## Overview
 
 The one-off pipelining approach separates the generation and training phases into two parallel coroutines, allowing the model to generate new samples while simultaneously training on previously generated data. This can lead to better GPU utilization and greater training throughput.
-
-.. TODO(tgriggs): Add a diagram here.
 
 In the SkyRL framework, only minimal code changes are required to modify the synchronous training pipeline to an asynchronous one.
 

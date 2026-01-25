@@ -3,14 +3,13 @@ title: "Multi-Turn RL for Search with SkyRL"
 description: "Multi-Turn RL for Search with SkyRL"
 ---
 
-# Multi-Turn RL for Search with SkyRL
 
 In this example, we walk through an example for training a multi-turn search agent with Qwen2.5-3B-Instruct and GRPO (with VLLM async rollouts), using the dataset and recipe
 from [Search-R1](https://arxiv.org/pdf/2503.09516).
 
 The full implementation of the search environment can be found in :skyrl_gym_link:`skyrl_gym/envs/search/env.py`.
 
-You can find the exact step by step commands to reproduce our results in the [../recipes/searchr1](../recipes/searchr1) recipe, and you can find a link to our training runs 
+You can find the exact step by step commands to reproduce our results in the [SearchR1 Recipe](../recipes/searchr1) recipe, and you can find a link to our training runs 
 with 2, 3, and 4 turns for comparison at our [WandB report](https://api.wandb.ai/links/sky-posttraining-uc-berkeley/5kvkzdzr).
 
 ## Task Overview
@@ -133,7 +132,7 @@ The full script is available in `examples/search/run_search_conversation_format.
 
 ## Launching Your Training Run
 
-Let's get our training run started! Make sure your WandB API key is set, your dataset paths are correctly set, and that you have launched the local retrieval server, following the [../recipes/searchr1](../recipes/searchr1) recipe instructions.
+Let's get our training run started! Make sure your WandB API key is set, your dataset paths are correctly set, and that you have launched the local retrieval server, following the [SearchR1 Recipe](../recipes/searchr1) recipe instructions.
 
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
@@ -153,5 +152,5 @@ Additionally we thank the SGLang + Verl team for their work reproducing Search-R
 
 Now that you've trained a multi-turn search agent, you might want to build your own multi-turn environments:
 
-- [../tutorials/new_env](../tutorials/new_env): Learn how to build your own multi-turn environments!
-- [../examples/multi_turn_text2sql](../examples/multi_turn_text2sql): Learn how to train a multi-turn text2sql agent with SkyRL!
+- [Creating a New Environment](../tutorials/new_env): Learn how to build your own multi-turn environments!
+- [Multi-Turn Text2SQL](../examples/multi_turn_text2sql): Learn how to train a multi-turn text2sql agent with SkyRL!

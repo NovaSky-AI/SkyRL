@@ -3,7 +3,6 @@ title: "Creating a New Environment or Task"
 description: "Creating a New Environment or Task"
 ---
 
-# Creating a New Environment or Task
 
 To demonstrate how to create custom environments in SkyRL-Gym and train with SkyRL, let's build a simple multiplication environment!
 
@@ -43,7 +42,7 @@ class BaseTextEnv(Env[ConversationType, str]):
 
 ```
 
-This class inherits from `Env`, which is a generic environment interface (i.e., not specific to text-based tasks). An API reference for `Env` can be found in [../api/env](../api/env).
+This class inherits from `Env`, which is a generic environment interface (i.e., not specific to text-based tasks). An API reference for `Env` can be found in [Environment API](../api/env).
 
 For our multiplication environment, we only need to implement the `step` method above because we don't have any initialization or cleanup to do.
 
@@ -256,7 +255,7 @@ for idx in range(num_examples):
 
 Note that the `env_class` here should match the name of the environment we registered. In this case, it is `multiply`. You can optionally omit the `env_class` here and instead set it in the training configuration to apply to all training samples, but setting `env_class` per-sample allows for multi-environment training so it is the recommended practice.
 
-See the doc on [../datasets/dataset-preparation](../datasets/dataset-preparation) for more details on the required dataset format and how to prepare your own dataset.
+See the doc on [Dataset Preparation](../datasets/dataset-preparation) for more details on the required dataset format and how to prepare your own dataset.
 
 Now we can generate the datsaet:
 

@@ -3,7 +3,6 @@ title: "Megatron Backend for 5D Parallelism"
 description: "Megatron Backend for 5D Parallelism"
 ---
 
-# Megatron Backend for 5D Parallelism
 
 SkyRL supports NVIDIA's [Megatron-Core](https://developer.nvidia.com/megatron-core) library as an RL training backend, inheriting support for 5D parallelism (tensor+sequence, pipeline, context, expert, and data parallelism), and optimized performance for large scale models.
 
@@ -43,7 +42,7 @@ For more details on configuring the Megatron backend, and enabling checkpointing
 
 ### Setting up the Docker image
 
-To get started, you can follow the instructions for installing via Docker in the [../getting-started/installation](../getting-started/installation) page, but using the `novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron` image instead of the default image.
+To get started, you can follow the instructions for installing via Docker in the [Installation Guide](../getting-started/installation) page, but using the `novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8-megatron` image instead of the default image.
 
 This ensures that the necessary dependencies needed for Megatron are installed and don't need to be built on each node for each run, which can be time consuming. Previously, we recommended setting PYTHONPATH to the location of TransformerEngine installation, but this is no longer necessary.
 
