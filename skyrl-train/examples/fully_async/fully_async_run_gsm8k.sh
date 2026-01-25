@@ -13,7 +13,7 @@ set -x
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
-# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
+# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/fully_async/fully_async_run_gsm8k.sh`.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${NUM_INFERENCE_GPUS:=2}"
@@ -31,7 +31,7 @@ set -x
 USE_TIS=true
 TIS_IMP_RATIO_CAP=2.0
 
-RUN_NAME=gsm8k-async-qwen2.5_1.5B-useTIS_${USE_TIS}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
+RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-useTIS_${USE_TIS}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
 
 uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \

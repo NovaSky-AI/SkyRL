@@ -1,5 +1,5 @@
 """
-Main entrypoint for async training.
+Main entrypoint for fully async training.
 """
 
 import hydra
@@ -11,7 +11,7 @@ from skyrl_train.utils import initialize_ray
 import ray
 
 
-class AsyncPPOExp(BasePPOExp):
+class FullyAsyncPPOExp(BasePPOExp):
     def get_trainer(
         self,
         cfg,
@@ -43,7 +43,7 @@ class AsyncPPOExp(BasePPOExp):
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
-    exp = AsyncPPOExp(cfg)
+    exp = FullyAsyncPPOExp(cfg)
     exp.run()
 
 
