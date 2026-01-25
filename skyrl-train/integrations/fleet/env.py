@@ -46,9 +46,7 @@ def load_tasks_from_json(tasks_file: str) -> Dict[str, Any]:
         elif isinstance(data, dict) and "tasks" in data:
             tasks = data["tasks"]
         else:
-            raise ValueError(
-                f"Invalid JSON format in {tasks_file}: expected array or object with 'tasks' key"
-            )
+            raise ValueError(f"Invalid JSON format in {tasks_file}: expected array or object with 'tasks' key")
 
         if not tasks:
             raise ValueError(f"No tasks found in {tasks_file}")
@@ -123,8 +121,7 @@ class FleetTaskEnv(BaseTextEnv):
         if not self.task_config:
             available_keys = list(tasks.keys())[:5]
             raise ValueError(
-                f"Task '{self.task_key}' not found in {self.tasks_file}. "
-                f"Available keys (first 5): {available_keys}"
+                f"Task '{self.task_key}' not found in {self.tasks_file}. " f"Available keys (first 5): {available_keys}"
             )
 
         # API key
@@ -180,9 +177,7 @@ class FleetTaskEnv(BaseTextEnv):
             raise RuntimeError(f"Failed to create OpenEnv FleetTaskEnv: {e}") from e
 
         # Reset episode state (tools are already cached from __init__)
-        obs = asyncio.get_event_loop().run_until_complete(
-            self.openenv_task_env.reset_async()
-        )
+        obs = asyncio.get_event_loop().run_until_complete(self.openenv_task_env.reset_async())
 
         # Reset state
         self.turns = 0
@@ -211,7 +206,9 @@ class FleetTaskEnv(BaseTextEnv):
 ## Important
 You MUST call tools to complete the task. Only include <done> AFTER you have successfully completed the task using the tools above. Do not say <done> until you have actually performed the required actions."""
         else:
-            system_content = """You are a helpful agent. Complete the task. Only include <done> AFTER you have completed the task."""
+            system_content = (
+                """You are a helpful agent. Complete the task. Only include <done> AFTER you have completed the task."""
+            )
 
         # Build conversation with system prompt
         system_message = {"role": "system", "content": system_content}
@@ -220,8 +217,7 @@ You MUST call tools to complete the task. Only include <done> AFTER you have suc
 
         metadata = {
             "task_key": self.task_key,
-            "env_key": self.task_config.get("env_key")
-            or self.task_config.get("env_id"),
+            "env_key": self.task_config.get("env_key") or self.task_config.get("env_id"),
             "tools": self.tools,
             "modality": self.task_config.get("task_modality", "tool_use"),
         }
@@ -338,8 +334,7 @@ You MUST call tools to complete the task. Only include <done> AFTER you have suc
         """Return environment metrics for this episode."""
         return {
             "task_key": self.task_key,
-            "env_key": self.task_config.get("env_key")
-            or self.task_config.get("env_id"),
+            "env_key": self.task_config.get("env_key") or self.task_config.get("env_id"),
             "turns": self.turns,
         }
 
