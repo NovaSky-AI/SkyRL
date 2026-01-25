@@ -18,6 +18,7 @@ from tx.utils.log import logger
 
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.workers.worker import PPORayActorGroup
+from skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 
@@ -43,7 +44,7 @@ def _build_config(base_model: str, config: SkyRLTrainBackendConfig, lora_config:
 
     return OmegaConf.create({
         "trainer": {
-            "placement": {"colocate_all": False, "policy_num_nodes": 1, "policy_num_gpus_per_node": config.num_gpus},
+            "placement": {"colocate_all": False, "colocate_policy_ref": None, "policy_num_nodes": 1, "policy_num_gpus_per_node": config.num_gpus},
             "strategy": "fsdp2",
             "policy": {
                 "model": {"path": base_model, "lora": lora_cfg},
@@ -85,6 +86,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._model_id: str | None = None
         self._model_metadata: types.ModelMetadata | None = None
         self._actor_group: PPORayActorGroup | None = None
+        self._dispatch: WorkerDispatch | None = None
+        self._cfg = None
 
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
@@ -96,19 +99,20 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._model_id is not None:
             raise ValueError(f"Model '{self._model_id}' already exists. Only one model supported.")
 
-        cfg = _build_config(self.base_model, self.config, lora_config)
+        self._cfg = _build_config(self.base_model, self.config, lora_config)
         num_gpus = self.config.num_gpus
 
         pg = placement_group([{"GPU": num_gpus, "CPU": num_gpus}], strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
         self._actor_group = PPORayActorGroup(
-            cfg=cfg, num_nodes=1, num_gpus_per_node=num_gpus,
+            cfg=self._cfg, num_nodes=1, num_gpus_per_node=num_gpus,
             ray_actor_type=PolicyWorker, pg=pg,
             num_gpus_per_actor=0.75 if num_gpus == 1 else 1.0,
             colocate_all=False, sequence_parallel_size=1,
         )
         ray.get(self._actor_group.async_init_model(self.base_model))
+        self._dispatch = WorkerDispatch(self._cfg, policy_actor_group=self._actor_group)
 
         self._model_id = model_id
         self._model_metadata = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
@@ -117,9 +121,11 @@ class SkyRLTrainBackend(AbstractBackend):
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:
             raise ValueError(f"Model {model_id} not found")
+        self._dispatch = None
         self._actor_group = None
         self._model_id = None
         self._model_metadata = None
+        self._cfg = None
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""
@@ -161,7 +167,7 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         batch = self._to_training_batch(prepared_batch)
-        metrics = self._actor_group.run_method("mesh", "forward_backward", batch, loss_fn=loss_fn)
+        metrics = self._dispatch.forward_backward("policy", batch, loss_fn=loss_fn)
 
         # Get the loss from metrics and distribute per token
         loss = float(metrics.get("loss", 0.0))
