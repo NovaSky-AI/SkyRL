@@ -16,12 +16,15 @@ import time
 import httpx
 import pytest
 import torch
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-from skyrl_train.inference_servers.common import get_open_port
-from skyrl_train.inference_servers.router import InferenceRouter
-from skyrl_train.inference_servers.server_group import ServerGroup
+# Skip entire module if vllm is not installed (e.g., when running sglang tests)
+vllm = pytest.importorskip("vllm")
+from vllm.entrypoints.openai.cli_args import make_arg_parser  # noqa: E402
+from vllm.utils.argparse_utils import FlexibleArgumentParser  # noqa: E402
+
+from skyrl_train.inference_servers.common import get_open_port  # noqa: E402
+from skyrl_train.inference_servers.router import InferenceRouter  # noqa: E402
+from skyrl_train.inference_servers.server_group import ServerGroup  # noqa: E402
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
