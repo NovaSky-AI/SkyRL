@@ -8,7 +8,7 @@ description: "Megatron Backend for 5D Parallelism"
 SkyRL supports NVIDIA's [Megatron-Core](https://developer.nvidia.com/megatron-core) library as an RL training backend, inheriting support for 5D parallelism (tensor+sequence, pipeline, context, expert, and data parallelism), and optimized performance for large scale models.
 
 We provide example scripts for running efficient large scale MoE training with models like `Qwen3-30B-A3B` using Megatron in the [examples/megatron](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/megatron) directory.
-For details on configuring the Megatron backend, and enabling checkpointing, see [megatron-configurations](#megatron-configurations), and [megatron-checkpointing](#megatron-checkpointing).
+For details on configuring the Megatron backend, and enabling checkpointing, see the [Megatron configuration guide](../configuration/config.mdx#megatron-configuration) and the [Megatron checkpointing guide](../checkpointing-logging/checkpointing.mdx#megatron-checkpointing).
 
 ## When to use the Megatron backend
 
@@ -37,7 +37,7 @@ A script for running the Qwen3-30B-A3B experiment can be found [here](https://gi
 Additionally, we provide a script for running basic GSM8K training on Qwen3-235B-A22B with Megatron [here](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/megatron/run_megatron_qwen3-235b-a22b.sh). 
 Note that although training at 100B+ scale using Megatron is currently possible, we are in the process of further optimizing peformance.
 
-For more details on configuring the Megatron backend, and enabling checkpointing, see [megatron-configurations](#megatron-configurations), and [megatron-checkpointing](#megatron-checkpointing).
+For more details on configuring the Megatron backend, and enabling checkpointing, see [Megatron configuration guide](../configuration/config.mdx#megatron-configuration), and [Megatron checkpointing guide](../checkpointing-logging/checkpointing.mdx#megatron-checkpointing).
 
 ## Installation
 
@@ -54,7 +54,7 @@ This is handled in the `pyproject.toml` file for the `mcore` extra.
 ## Configuration
 
 We provide the following options for fully configuring the Megatron backend, exposing the underlying Megatron optimizer, DDP, and model config objects
-for advanced users to fully take advantage of all of Megatron-Core's feature flags. For more details, see the [megatron-configurations](#megatron-configurations) section.
+for advanced users to fully take advantage of all of Megatron-Core's feature flags. For more details, see the [Megatron configuration guide](../configuration/config.mdx#megatron-configuration) section.
 
 ```yaml
 :caption: `skyrl_train/config/megatron/policy.yaml`

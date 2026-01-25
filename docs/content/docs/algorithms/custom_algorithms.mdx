@@ -92,7 +92,7 @@ def skyrl_entrypoint(cfg: DictConfig):
 ### Creating a Custom Trainer
 
 To create a custom trainer for full control of your training loop, you can subclass the `BasePPOExp` class from `skyrl_train/entrypoints/main_base.py` and override the `BasePPOExp.get_trainer` method to return a custom trainer class.
-We show the outline of creating a custom trainer below, and you can find a full running example in our DAPO example (see `\<dapo-custom-trainer\>` section).
+We show the outline of creating a custom trainer below, and you can find a full running example in our [DAPO example](./dapo.mdx#creating-a-custom-trainer).
 
 ```python
 class CustomTrainer(RayPPOTrainer):
