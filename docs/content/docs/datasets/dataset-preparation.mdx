@@ -41,9 +41,7 @@ SkyRL supports loading datasets of this format from a local parquet file, a json
 - **prompt**: List of dictionaries following standard OpenAI chat format
 - **env_class**: Name of environment that the data sample corresponds to. This is used to tell the Generator which environment to instantiate for this prompt.
 
-<Callout type="info">
-`env_class` can also be specified in the training configuration to apply to all dataset entries.
-</Callout>
+  - Note: **env_class** can also be specified in the training configuration to apply to all dataset entries.
 - **reward_spec**: Dictionary containing the reward specification for the dataset entry (ie, how to get rewards).
 
   - **method**: Must be either `"rule"` or `"reward_model"`
