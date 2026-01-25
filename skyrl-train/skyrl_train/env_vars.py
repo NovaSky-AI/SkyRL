@@ -86,3 +86,23 @@ Set `_SKYRL_USE_NEW_INFERENCE=1` to enable the new inference layer.
 This flag is intended for internal testing and will be removed once the new
 inference layer is validated and made the default.
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_LOG_LEVEL = os.environ.get("SKYRL_LOG_LEVEL", "INFO").upper()
+"""
+Log level for SkyRL. Controls log filtering and stdout verbosity.
+
+- INFO (default): Training progress on stdout, infrastructure logs to file only
+- DEBUG: All logs (including vLLM, Ray, workers) shown on stdout
+- Also used by loguru for log level filtering (ERROR, WARNING, etc.)
+"""
+
+SKYRL_LOG_DIR = os.environ.get("SKYRL_LOG_DIR", "/tmp/skyrl-logs")
+"""
+Base directory for SkyRL log files (default: /tmp/skyrl-logs).
+
+Infrastructure logs are written to: {SKYRL_LOG_DIR}/{run_name}/infra.log
+"""
