@@ -177,7 +177,7 @@ class FleetTaskEnv(BaseTextEnv):
             raise RuntimeError(f"Failed to create OpenEnv FleetTaskEnv: {e}") from e
 
         # Reset episode state (tools are already cached from __init__)
-        obs = asyncio.get_event_loop().run_until_complete(self.openenv_task_env.reset_async())
+        obs = asyncio.run(self.openenv_task_env.reset_async())
 
         # Reset state
         self.turns = 0
@@ -257,9 +257,7 @@ You MUST call tools to complete the task. Only include <done> AFTER you have suc
 
             try:
                 # Use async step method
-                obs, reward, done, info = asyncio.get_event_loop().run_until_complete(
-                    self.openenv_task_env.step_async(openenv_action)
-                )
+                obs, reward, done, info = asyncio.run(self.openenv_task_env.step_async(openenv_action))
                 tool_result = obs.get("observation")
                 if "tool_error" in info:
                     error = info["tool_error"]
@@ -269,9 +267,7 @@ You MUST call tools to complete the task. Only include <done> AFTER you have suc
             # Agent signaled done without tool call
             openenv_action = {"done": True}
             try:
-                obs, reward, done, info = asyncio.get_event_loop().run_until_complete(
-                    self.openenv_task_env.step_async(openenv_action)
-                )
+                obs, reward, done, info = asyncio.run(self.openenv_task_env.step_async(openenv_action))
             except Exception as e:
                 error = str(e)
 
