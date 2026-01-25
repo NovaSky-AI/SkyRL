@@ -25,6 +25,7 @@ from loguru import logger
 from skyrl_train.utils.tracking import Tracking
 import multiprocessing as mp
 import asyncio
+from typing import Union
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -33,7 +34,7 @@ import asyncio
 mp.set_start_method("spawn", force=True)
 
 config_dir = str(Path(__file__).parent.parent / "config")
-__all__ = ["BasePPOExp", "config_dir"]
+__all__ = ["BasePPOExp", "config_dir", "run_training"]
 
 
 def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
@@ -316,18 +317,65 @@ class BasePPOExp:
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
+    from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
+    redirect_actor_output_to_file()  # Prevent Ray from forwarding logs to driver
+
     # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
-    # validate the arguments
+def run_training(cfg: Union[DictConfig, "SkyRLConfig"]) -> None:
+    """
+    Run SkyRL training with either a Hydra DictConfig or Pydantic SkyRLConfig.
+
+    This is the unified entry point that accepts both configuration types:
+    - DictConfig: From YAML files loaded via Hydra
+    - SkyRLConfig: From Python-based Pydantic models
+
+    Args:
+        cfg: Configuration (DictConfig from Hydra or SkyRLConfig from Pydantic)
+
+    Example with Pydantic:
+        >>> from skyrl_train.config.configs import create_default_config
+        >>> from skyrl_train.entrypoints.main_base import run_training
+        >>>
+        >>> cfg = create_default_config()
+        >>> cfg.trainer.policy.model.path = "Qwen/Qwen2.5-1.5B"
+        >>> cfg.data.train_data = ["~/data/gsm8k/train.parquet"]
+        >>> run_training(cfg)
+
+    Example with YAML:
+        >>> from hydra import compose, initialize_config_dir
+        >>> from skyrl_train.entrypoints.main_base import run_training
+        >>>
+        >>> with initialize_config_dir(config_dir="path/to/config"):
+        >>>     cfg = compose(config_name="ppo_base_config", overrides=["trainer.epochs=10"])
+        >>> run_training(cfg)
+    """
+    from skyrl_train.config.configs import SkyRLConfig, pydantic_to_dictconfig
+
+    # Normalize to DictConfig for validation and internal use
+    if isinstance(cfg, SkyRLConfig):
+        cfg = pydantic_to_dictconfig(cfg)
+
+    # Validate the config
     validate_cfg(cfg)
 
+    # Initialize Ray and run
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
+
+
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    """
+    Main entrypoint using Hydra for YAML-based configuration.
+
+    This maintains backward compatibility with existing .sh scripts that use
+    Hydra's CLI override syntax. Internally calls run_training().
+    """
+    run_training(cfg)
 
 
 if __name__ == "__main__":
