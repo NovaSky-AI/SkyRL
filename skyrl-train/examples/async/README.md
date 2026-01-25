@@ -14,3 +14,5 @@ bash examples/async/async_run_gsm8k.sh
 ```
 
 For more details, refer to the [documentation](https://skyrl.readthedocs.io/en/latest/tutorials/async.html)
+
+For difference between `async` and `fully_async`, see the documentation: https://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html
