@@ -155,7 +155,7 @@ class SkyRLTrainBackend(AbstractBackend):
         metrics = self._actor_group.run_method("mesh", "forward_backward", batch)
 
         # Get the loss from metrics and distribute per token
-        loss = metrics.get("loss", 0.0)
+        loss = float(metrics.get("loss", 0.0))
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
@@ -167,7 +167,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     "logprobs": {"data": [0.0] * seq_len, "dtype": "float32", "shape": [seq_len]},
                 })
             results[request_id] = types.ForwardBackwardOutput(
-                loss_fn_output_type="scalar", loss_fn_outputs=loss_fn_outputs, metrics=metrics,
+                loss_fn_output_type="scalar", loss_fn_outputs=loss_fn_outputs, metrics={},
             )
         return results
 
