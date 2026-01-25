@@ -26,8 +26,7 @@ from skyrl_train.config.utils import get_default_config
 class SkyRLTrainBackendConfig(BaseModel, extra="forbid"):
     """Configuration for the SkyRL-Train backend."""
 
-    num_gpus: int = Field(default=1, description="Number of GPUs to use")
-    micro_train_batch_size_per_gpu: int = Field(default=2, description="Micro batch size per GPU")
+    pass
 
 
 def _build_config(base_model: str, config: SkyRLTrainBackendConfig, lora_config: types.LoraConfig | None = None):
@@ -41,6 +40,10 @@ class SkyRLTrainBackend(AbstractBackend):
     """SkyRL-Train backend for supervised training."""
 
     def __init__(self, base_model: str, config: SkyRLTrainBackendConfig):
+        logger.warning("=" * 80)
+        logger.warning("SkyRLTrainBackend is currently EXPERIMENTAL!")
+        logger.warning("=" * 80)
+
         self.base_model = base_model
         self.config = config
         self._model_id: str | None = None
@@ -60,9 +63,9 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{self._model_id}' already exists. Only one model supported.")
 
         self._cfg = _build_config(self.base_model, self.config, lora_config)
-        num_gpus = self.config.num_gpus
+        num_gpus = self._cfg.trainer.placement.policy_num_gpus_per_node
 
-        pg = placement_group([{"GPU": num_gpus, "CPU": num_gpus}], strategy="PACK")
+        pg = placement_group([{"GPU": num_gpus, "CPU": 4}], strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
         self._actor_group = PPORayActorGroup(
