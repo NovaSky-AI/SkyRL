@@ -15,7 +15,9 @@ A typical PPO training workflow involves 5 model-based components:
 - **Reward model** (optional; scores action quality)
 - **Critic model** (estimates future rewards)
 
-*Note: GRPO training generally uses the first 2-4 components depending on the setup – no critic model needed.*
+<Callout type="info">
+GRPO training generally uses the first 2-4 components depending on the setup – no critic model needed.
+</Callout>
 
 ## Inference Engine Management
 
@@ -37,7 +39,9 @@ Inference engines share GPUs with training models:
 - Engines will `sleep()` after generation to free GPU memory
 - Engines will `wake_up()` before the next generation round
 
-NOTE: As of now, colocated engines are only supported with `generator.run_engines_locally=true`.
+<Callout type="warn">
+Colocated engines are only supported with `generator.run_engines_locally=true`.
+</Callout>
 
 **Disaggregated Engines (colocate_all = false)**
 
@@ -86,7 +90,8 @@ generator:
 
 ```
 
-   **Resource Allocation Guidelines**
-   
-   - When `colocate_all=true`, all training models should have identical node and GPU counts.
-   - When `generator.run_engines_locally=true`, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.
+<Callout type="info">
+**Resource Allocation Guidelines**
+- When `colocate_all=true`, all training models should have identical node and GPU counts.
+- When `generator.run_engines_locally=true`, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.
+</Callout>
