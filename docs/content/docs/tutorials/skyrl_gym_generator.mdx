@@ -111,26 +111,21 @@ Response2
      at the end to obtain `assistant_masks` and final `response_ids`.
    - TI/TO: NOT enforced
 
-> **Note:**   Qwen3's official chat template strips earlier-turn thinking tokens.
-  
-  With code path 1 (the default, no custom chat template), we never retokenize the chat history, so
-  earlier-turn thinking tokens remain in the strictly appended token sequence for each turn's
-  inference. When passing the token sequence to the training pipeline, all turns' thinking tokens
-  are kept as well.
+<Callout type="info">
+Qwen3's official chat template strips earlier-turn thinking tokens.
 
-  Alternatively, with code path 3 (set `generator.chat_template` as below), we retokenize each
-  turn and the template strips earlier-turn thinking tokens, keeping only the last turn's thinking
-  tokens in both inference and training.
+With code path 1 (the default, no custom chat template), we never retokenize the chat history, so earlier-turn thinking tokens remain in the strictly appended token sequence for each turn's inference. When passing the token sequence to the training pipeline, all turns' thinking tokens are kept as well.
 
-  .. code-block:: yaml
+Alternatively, with code path 3 (set `generator.chat_template` as below), we retokenize each turn and the template strips earlier-turn thinking tokens, keeping only the last turn's thinking tokens in both inference and training.
 
-    chat_template:
-      source: "name"
-      name_or_path: "qwen3_without_thinking"
+```yaml
+chat_template:
+  source: "name"
+  name_or_path: "qwen3_without_thinking"
+```
 
-  It remains an open question which is best for training Qwen3. We will soon add a custom attention mask
-  to match the official chat template's inference behavior (stripping thinking tokens),
-  while preserving on-policy training by masking the previous turns' thinking tokens during training.
+It remains an open question which is best for training Qwen3. We will soon add a custom attention mask to match the official chat template's inference behavior (stripping thinking tokens), while preserving on-policy training by masking the previous turns' thinking tokens during training.
+</Callout>
 
 ## Multi-turn Tokenization and TI/TO
 

@@ -109,7 +109,9 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
 
 ```
 
-> **Tip:** With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `run_engines_locally=True` to maximize throughput
+<Callout type="info">
+With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `run_engines_locally=True` to maximize throughput.
+</Callout>
 
 ## Launching Your Training Run
 

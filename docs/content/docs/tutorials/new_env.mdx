@@ -215,7 +215,9 @@ if __name__ == "__main__":
 
 Now, the training stack can simply build the new environment with `skyrl_gym.make("multiply")`!
 
-   All example code written in this document is *outside* of the `skyrl-train` and `skyrl-gym` packages. There is no need to fork and edit `skyrl-train` or `skyrl-gym` code -- just implement and register your environment, and the training stack can find the environment seamlessly!
+<Callout type="info">
+All example code written in this document is *outside* of the `skyrl-train` and `skyrl-gym` packages. There is no need to fork and edit `skyrl-train` or `skyrl-gym` code -- just implement and register your environment, and the training stack can find the environment seamlessly!
+</Callout>
 
 ## Preparing Training Data
 
@@ -258,16 +260,12 @@ See the doc on [../datasets/dataset-preparation](../datasets/dataset-preparation
 
 Now we can generate the datsaet:
 
-```bash
-:linenos:
-:caption: Generate training data
-
+```bash title="Generate training data"
 uv run --isolated examples/multiply/multiply_dataset.py \
   --output_dir $HOME/data/multiply \
   --num_digits 4 \
   --train_size 10000 \
   --test_size 200
-
 ```
 
 This creates `train.parquet` and `validation.parquet` files in the `$HOME/data/multiply` directory.
@@ -289,13 +287,9 @@ Then, configure how the environment should be executed. For multi-turn environme
 
 **Launch Training**
 
-```bash
-:linenos:
-:caption: Run training
-
+```bash title="Run training"
 export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
 bash examples/multiply/run_multiply.sh
-
 ```
 
 **Next Steps:** Want to make multiplication easier? Try integrating a calculator tool into your environment! Check out the [tools_guide](tools_guide) documentation for details.

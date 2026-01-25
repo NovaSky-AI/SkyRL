@@ -65,7 +65,9 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
 ```
 
-   **Flexible execution plans:** The underlying implementation of training and generation is unchanged -- only the training loop is modified to parallelize the two phases. In general, SkyRL enables flexibile modifications to the execution plan simply by modifying the high-level training loop.
+<Callout type="info">
+**Flexible execution plans:** The underlying implementation of training and generation is unchanged -- only the training loop is modified to parallelize the two phases. In general, SkyRL enables flexible modifications to the execution plan simply by modifying the high-level training loop.
+</Callout>
 
 ### Step 2: Create New Training Entrypoint
 

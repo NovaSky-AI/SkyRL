@@ -56,9 +56,7 @@ This is handled in the `pyproject.toml` file for the `mcore` extra.
 We provide the following options for fully configuring the Megatron backend, exposing the underlying Megatron optimizer, DDP, and model config objects
 for advanced users to fully take advantage of all of Megatron-Core's feature flags. For more details, see the [Megatron configuration guide](../configuration/config.mdx#megatron-configuration) section.
 
-```yaml
-:caption: `skyrl_train/config/megatron/policy.yaml`
-
+```yaml title="config/megatron/policy.yaml"
 # @package megatron_config.policy
 tensor_model_parallel_size: 1
 pipeline_model_parallel_size: 1

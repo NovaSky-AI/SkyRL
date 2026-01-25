@@ -76,9 +76,7 @@ unzip <path_to_file.zip>
 
 Now that we have our dataset and database files, let's walk through the some of the key training configurations.
 
-```bash
-:caption: Training configuration at `skyrl_train/examples/text_to_sql/run_skyrl_sql.sh`
-
+```bash title="examples/text_to_sql/run_skyrl_sql.sh"
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/sql"
 # path for .db files for environment interaction
