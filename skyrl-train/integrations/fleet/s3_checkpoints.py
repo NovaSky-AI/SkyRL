@@ -1,23 +1,26 @@
 """
-S3 Checkpoint Uploader for SkyRL Training.
+S3 Checkpoint and Eval Uploader for SkyRL Training.
 
-Provides async upload of checkpoints to S3 with local cleanup to prevent disk exhaustion.
+Provides async upload of checkpoints and eval results to S3 with local cleanup.
 
 Key behavior:
 - Cleans up old local checkpoints BEFORE saving new one (prevents disk full)
 - Uploads to S3 asynchronously (non-blocking, training continues)
 - Deletes local checkpoint after successful upload
+- Uploads eval results to S3 for persistence
 
 Usage:
-    from integrations.fleet.s3_checkpoints import wrap_trainer_with_s3_upload
+    from integrations.fleet.s3_checkpoints import wrap_trainer_with_s3_upload, upload_eval_results_to_s3
 
     trainer = wrap_trainer_with_s3_upload(trainer, bucket="skyrl-checkpoints")
+    upload_eval_results_to_s3(local_dir, run_name, global_step)
 
 Environment Variables:
     AWS_ACCESS_KEY_ID: AWS access key
     AWS_SECRET_ACCESS_KEY: AWS secret key
     AWS_REGION: AWS region (default: us-east-1)
-    S3_CHECKPOINT_BUCKET: S3 bucket name (default: skyrl-checkpoints)
+    S3_CHECKPOINT_BUCKET: S3 bucket for checkpoints (default: skyrl-checkpoints)
+    S3_TRAJECTORY_BUCKET: S3 bucket for eval trajectories (default: skyrl-trajectories)
 """
 
 import os
@@ -230,3 +233,85 @@ def wrap_trainer_with_s3_upload(
     trainer._s3_uploader = uploader
 
     return trainer
+
+
+def upload_eval_results_to_s3(
+    local_dir: str,
+    run_name: str,
+    global_step: Optional[int] = None,
+    bucket: Optional[str] = None,
+    region: Optional[str] = None,
+    delete_local: bool = False,
+) -> bool:
+    """
+    Upload eval results directory to S3.
+
+    Args:
+        local_dir: Local directory containing eval JSONL files
+        run_name: Run name for S3 prefix (e.g., "fleet_tool_use_abc123")
+        global_step: Global step number (for organizing in S3)
+        bucket: S3 bucket (default: from S3_TRAJECTORY_BUCKET env var)
+        region: AWS region (default: from AWS_REGION env var)
+        delete_local: If True, delete local files after upload
+
+    Returns:
+        True if upload succeeded, False otherwise
+    """
+    bucket = bucket or os.environ.get("S3_TRAJECTORY_BUCKET", "skyrl-trajectories")
+    region = region or os.environ.get("AWS_REGION", "us-east-1")
+
+    # Check AWS credentials
+    aws_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    aws_secret = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not (aws_key and aws_secret):
+        logger.warning("AWS credentials not found. Skipping S3 upload for eval results.")
+        return False
+
+    local_path = Path(local_dir)
+    if not local_path.exists():
+        logger.warning(f"Eval directory does not exist: {local_dir}")
+        return False
+
+    try:
+        import boto3
+        from botocore.config import Config
+
+        config = Config(
+            retries={"max_attempts": 3, "mode": "adaptive"},
+            connect_timeout=30,
+            read_timeout=60,
+        )
+
+        s3 = boto3.client("s3", region_name=region, config=config)
+
+        # Build S3 prefix: evals/{run_name}/global_step_{N}/
+        step_suffix = f"global_step_{global_step}" if global_step is not None else "eval_only"
+        s3_prefix = f"evals/{run_name}/{step_suffix}"
+
+        uploaded_files = 0
+        total_size = 0
+
+        for file_path in local_path.rglob("*"):
+            if file_path.is_file():
+                relative_path = file_path.relative_to(local_path)
+                s3_key = f"{s3_prefix}/{relative_path}"
+                file_size = file_path.stat().st_size
+                total_size += file_size
+
+                s3.upload_file(str(file_path), bucket, s3_key)
+                uploaded_files += 1
+
+        logger.info(
+            f"Uploaded eval results: {uploaded_files} files, {total_size / 1e6:.2f} MB "
+            f"to s3://{bucket}/{s3_prefix}/"
+        )
+
+        if delete_local:
+            shutil.rmtree(local_dir)
+            logger.info(f"Deleted local eval directory: {local_dir}")
+
+        return True
+
+    except Exception as e:
+        logger.error(f"S3 upload failed for eval results {local_dir}: {e}")
+        return False

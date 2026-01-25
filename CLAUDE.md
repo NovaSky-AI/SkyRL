@@ -1,5 +1,12 @@
 # Claude Code Instructions for SkyRL
 
+## Learnings
+
+The `learnings/` folder contains documented knowledge about SkyRL internals:
+- `training-mechanics.md` - step_wise_trajectories, retokenize_chat_history, chat templates, loss reduction
+
+**Always check learnings/ before asking questions about SkyRL training mechanics.**
+
 ## Critical Rules - DO NOT VIOLATE
 
 1. **NEVER push to main** - Always create a branch and open a PR for review.

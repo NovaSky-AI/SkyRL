@@ -59,6 +59,7 @@ envs:
   # S3 buckets
   S3_DATASET_BUCKET: "fleet-internal-datasets"
   S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
 
 setup: |
   set -euo pipefail
