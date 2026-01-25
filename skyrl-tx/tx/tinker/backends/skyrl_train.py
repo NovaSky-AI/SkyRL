@@ -147,12 +147,13 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def forward_backward(
         self, prepared_batch: types.PreparedModelPassBatch,
+        loss_fn: str = "cross_entropy",
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
         if not prepared_batch.all_input_ids:
             return {}
 
         batch = self._to_training_batch(prepared_batch)
-        metrics = self._actor_group.run_method("mesh", "forward_backward", batch)
+        metrics = self._actor_group.run_method("mesh", "forward_backward", batch, loss_fn=loss_fn)
 
         # Get the loss from metrics and distribute per token
         loss = float(metrics.get("loss", 0.0))
