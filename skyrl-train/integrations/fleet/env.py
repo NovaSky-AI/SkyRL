@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from omegaconf import DictConfig
 
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
+from skyrl_gym.envs.base_text_env import (
+    BaseTextEnv,
+    BaseTextEnvStepOutput,
+    ConversationType,
+)
 from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
 
 logger = logging.getLogger(__name__)
@@ -42,7 +46,9 @@ def load_tasks_from_json(tasks_file: str) -> Dict[str, Any]:
         elif isinstance(data, dict) and "tasks" in data:
             tasks = data["tasks"]
         else:
-            raise ValueError(f"Invalid JSON format in {tasks_file}: expected array or object with 'tasks' key")
+            raise ValueError(
+                f"Invalid JSON format in {tasks_file}: expected array or object with 'tasks' key"
+            )
 
         if not tasks:
             raise ValueError(f"No tasks found in {tasks_file}")
@@ -117,7 +123,8 @@ class FleetTaskEnv(BaseTextEnv):
         if not self.task_config:
             available_keys = list(tasks.keys())[:5]
             raise ValueError(
-                f"Task '{self.task_key}' not found in {self.tasks_file}. " f"Available keys (first 5): {available_keys}"
+                f"Task '{self.task_key}' not found in {self.tasks_file}. "
+                f"Available keys (first 5): {available_keys}"
             )
 
         # API key
@@ -170,12 +177,16 @@ class FleetTaskEnv(BaseTextEnv):
         except Exception as e:
             raise RuntimeError(f"Failed to create OpenEnv FleetTaskEnv: {e}") from e
 
-        # Reset the OpenEnv environment
+        # Reset the OpenEnv environment (use async to fetch tools)
         try:
-            obs = self.openenv_task_env.reset()
+            obs = asyncio.get_event_loop().run_until_complete(
+                self.openenv_task_env.reset_async()
+            )
             self._init_failed = False
         except Exception as e:
-            logger.error(f"Failed to reset Fleet environment for task {self.task_key}: {e}")
+            logger.error(
+                f"Failed to reset Fleet environment for task {self.task_key}: {e}"
+            )
             self._init_failed = True
             obs = {}
 
@@ -184,6 +195,10 @@ class FleetTaskEnv(BaseTextEnv):
 
         # Get tools from observation (if available)
         self.tools = obs.get("tools", []) if not self._init_failed else []
+        if self.tools:
+            logger.info(f"Task {self.task_key}: loaded {len(self.tools)} tools")
+        else:
+            logger.warning(f"Task {self.task_key}: no tools found in observation")
 
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
@@ -202,9 +217,7 @@ class FleetTaskEnv(BaseTextEnv):
 ## Important
 You MUST call tools to complete the task. Only include <done> AFTER you have successfully completed the task using the tools above. Do not say <done> until you have actually performed the required actions."""
         else:
-            system_content = (
-                """You are a helpful agent. Complete the task. Only include <done> AFTER you have completed the task."""
-            )
+            system_content = """You are a helpful agent. Complete the task. Only include <done> AFTER you have completed the task."""
 
         # Build conversation with system prompt
         system_message = {"role": "system", "content": system_content}
@@ -213,7 +226,8 @@ You MUST call tools to complete the task. Only include <done> AFTER you have suc
 
         metadata = {
             "task_key": self.task_key,
-            "env_key": self.task_config.get("env_key") or self.task_config.get("env_id"),
+            "env_key": self.task_config.get("env_key")
+            or self.task_config.get("env_id"),
             "tools": self.tools,
             "modality": self.task_config.get("task_modality", "tool_use"),
         }
@@ -330,7 +344,8 @@ You MUST call tools to complete the task. Only include <done> AFTER you have suc
         """Return environment metrics for this episode."""
         return {
             "task_key": self.task_key,
-            "env_key": self.task_config.get("env_key") or self.task_config.get("env_id"),
+            "env_key": self.task_config.get("env_key")
+            or self.task_config.get("env_id"),
             "turns": self.turns,
         }
 
