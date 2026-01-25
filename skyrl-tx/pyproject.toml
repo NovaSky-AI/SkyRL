@@ -7,8 +7,7 @@ name = "skyrl-tx"
 dynamic = ["version"]
 description = "Unified API for training and inference"
 readme = "README.md"
-# requires-python = ">=3.11"
-requires-python = "==3.12.*"
+requires-python = ">=3.11"
 dependencies = [
     "datasets>=4.0.0",
     "flax>=0.12.2",
@@ -58,7 +57,7 @@ azure = [
 ]
 
 skyrl-train = [
-    "skyrl-train[vllm] @ git+https://github.com/tyler-griggs/SkyRL@5fa7d148fda71cfbc4429198270e2f884c5b3a1a#subdirectory=skyrl-train",
+    "skyrl-train[vllm]; python_version >= '3.12'",
 ]
 
 dev = [
@@ -88,3 +87,6 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+
+[tool.uv.sources]
+skyrl-train = { git = "https://github.com/tyler-griggs/SkyRL", rev = "5fa7d148fda71cfbc4429198270e2f884c5b3a1a", subdirectory = "skyrl-train" }
