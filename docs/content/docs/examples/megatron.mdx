@@ -19,57 +19,19 @@ SkyRL supports efficient data-parallel training with the FSDP backend, with supp
 We show performance comparisons for the Megatron and FSDP2 backends on the Search-R1 task (4K max context length) for various model sizes in the table below. Training speed for small scale dense models with Megatron
 is similar to the FSDP2 backend, and Megatron enables high throughput training for larger scale MoE models where FSDP is no longer feasible as the only parallelism strategy.
 
-   :header-rows: 1
-   :widths: 20 15 20 20 20 10
+| Model | Backend | Compute | Policy Training Time (s) | Forward Pass Time (s) | Avg Num Tokens |
+|-------|---------|---------|--------------------------|----------------------|----------------|
+| Qwen2.5-3B-Instruct | Megatron | 8xH100 | 48 | 39 | 658 |
+| Qwen2.5-3B-Instruct | FSDP2 | 8xH100 | 42 | 28 | 658 |
+| Qwen2.5-7B-Instruct | Megatron | 8xH100 | 93 | 46 | 819 |
+| Qwen2.5-7B-Instruct | FSDP2 | 8xH100 | 100 | 33 | 834 |
+| Qwen3-30B-A3B | Megatron | 4x8xH100 | 189 | 145 | 1158 |
 
-   * - Model
-     - Backend
-     - Compute
-     - Policy Training Time (s)
-     - Forward Pass Time (s)
-     - Avg Num Tokens
-   * - Qwen2.5-3B-Instruct
-     - Megatron
-     - 8xH100
-     - 48
-     - 39
-     - 658
-   * - Qwen2.5-3B-Instruct
-     - FSDP2
-     - 8xH100
-     - 42
-     - 28
-     - 658
-   * - Qwen2.5-7B-Instruct
-     - Megatron
-     - 8xH100
-     - 93
-     - 46
-     - 819
-   * - Qwen2.5-7B-Instruct
-     - FSDP2
-     - 8xH100
-     - 100
-     - 33
-     - 834
-   * - Qwen3-30B-A3B
-     - Megatron
-     - 4x8xH100
-     - 189
-     - 145
-     - 1158
-
-For all experiments, we used a train batch size of 512. For Qwen2.5 3B and 7B Megatron was configured with only data parallel=8. 
-For Qwen3-30B-A3B Megatron was configured with DP=4, TP=2, and EP=8, and the FSDP2 backend was unable to complete a training step due to memory constraints. 
+For all experiments, we used a train batch size of 512. For Qwen2.5 3B and 7B Megatron was configured with only data parallel=8.
+For Qwen3-30B-A3B Megatron was configured with DP=4, TP=2, and EP=8, and the FSDP2 backend was unable to complete a training step due to memory constraints.
 All statistics shown were averaged over the first 10 steps of training. Micro batch sizes were tuned to be the max possible for each backend.
 
-   :widths: 50 50
-   :header-rows: 0
-
-   * -          :width: 400px
-         :align: center
-     -          :width: 400px
-         :align: center
+![Parallelism Diagram](/images/examples/parallelism.svg)
 
 A script for running the Qwen3-30B-A3B experiment can be found [here](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/megatron/run_search_megatron.sh). 
 Additionally, we provide a script for running basic GSM8K training on Qwen3-235B-A22B with Megatron [here](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/megatron/run_megatron_qwen3-235b-a22b.sh). 

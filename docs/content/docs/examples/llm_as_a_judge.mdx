@@ -71,18 +71,18 @@ Do not include any explanation after the final score.
 
 2. **Verify Dataset**: Make sure your dataset is properly prepared:
 
-   .. code-block:: bash
-
-      ls $HOME/data/gsm8k_llm_judge/
-      # Should show: train.parquet  validation.parquet
+   ```bash
+   ls $HOME/data/gsm8k_llm_judge/
+   # Should show: train.parquet  validation.parquet
+   ```
 
 ## Training Configuration
 
 The training configuration uses GRPO with colocated training and generation. Key parameters include:
 
-```bash
-:caption: Training configuration at `examples/llm_as_a_judge/run_llm_judge.sh`
+**Training configuration** (from `examples/llm_as_a_judge/run_llm_judge.sh`):
 
+```bash
 # Data and model paths
 DATA_DIR="$HOME/data/gsm8k_llm_judge"
 CKPT_PATH="$HOME/ckpts/llm_judge"

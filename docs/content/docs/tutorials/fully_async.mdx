@@ -11,15 +11,9 @@ We treat "fully async training" synonymous to the terms **"in-flight weight upda
 
 The core logic of fully async training lives in [fully_async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/fully_async_trainer.py), a subclass of the synchronous trainer class in [trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/trainer.py). This `fully_async_trainer.py` works out-of-the-box with any generator that the user implements -- so users do not need to implement any additional logic for fully async training.
 
-   :alt: Systems Diagram of Fully Async Training in SkyRL
-   :align: center
-   :width: 90%
-   
-   **Overview of Fully Async Training in SkyRL**
+![Systems Diagram of Fully Async Training in SkyRL](/images/tutorials/skyrl_fully_async.png)
 
-   :local:
-   :depth: 2
-   :backlinks: none
+**Overview of Fully Async Training in SkyRL**
 
 > **Note:**     The fully async training is currently only supported for Generators that use `/chat/completions`. We will support `.generate()` and `/completions` soon.
 
@@ -27,11 +21,9 @@ The core logic of fully async training lives in [fully_async_trainer.py](https:/
 
 There are three types of RL training we are interested in here, well-depicted by AReal's Figure 1 and Figure 3.
 
-   :alt: AReal Figure 1: Synchronous Training vs. One-Step-Off Async Training
-   :align: center
-   :width: 90%
-   
-   **AReal Figure 1: Synchronous Training vs. One-Step-Off Async Training**
+![AReal Figure 1: Synchronous Training vs. One-Step-Off Async Training](/images/tutorials/areal_figure1.png)
+
+**AReal Figure 1: Synchronous Training vs. One-Step-Off Async Training**
 
 ### a. Synchronous Training
 
@@ -51,11 +43,9 @@ Here we split the GPUs into two groups, dedicated to training and generation res
 
 ### c. Fully Async Training (this page)
 
-   :alt: AReal Figure 3: Fully Async Training
-   :align: center
-   :width: 90%
-   
-   **AReal Figure 3: Fully Async Training**
+![AReal Figure 3: Fully Async Training](/images/tutorials/areal_figure3.png)
+
+**AReal Figure 3: Fully Async Training**
 
 Both approaches above suffer from the straggler issues in generation. Fully async training addresses this with in-flight weight update. After the trainer finishes a training step, we: 1) pause the generation of the ongoing trajectories, 2) update the generator weights in-flight, 3) resume generation of the trajectories.
 
@@ -124,11 +114,9 @@ Other restrictions (will be validated by the trainer):
 
 The high-level control logics of fully async training in SkyRL are shown in the figure below.
 
-   :alt: Systems Diagram of Fully Async Training in SkyRL
-   :align: center
-   :width: 90%
-   
-   **Systems Diagram of Fully Async Training in SkyRL**
+![Systems Diagram of Fully Async Training in SkyRL](/images/tutorials/skyrl_fully_async.png)
+
+**Systems Diagram of Fully Async Training in SkyRL**
 
 There are 5 core components:
 

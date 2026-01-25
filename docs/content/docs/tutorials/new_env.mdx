@@ -15,10 +15,9 @@ We'll walk through the complete process: implementing the environment, registeri
 
 SkyRL-Gym includes a simple text-in/text-out environment interface for LLM tasks, `BaseTextEnv`, which looks like this:
 
-```python
-:linenos:
-:caption: Base text environment interface at [skyrl_gym/envs/base_text_env.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-gym/skyrl_gym/envs/base_text_env.py)
+**Base text environment interface** (from [skyrl_gym/envs/base_text_env.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-gym/skyrl_gym/envs/base_text_env.py)):
 
+```python
 class BaseTextEnv(Env[ConversationType, str]):
    def step(self, action: str) -> BaseTextEnvStepOutput:
       """
@@ -59,10 +58,9 @@ The prompt and response format expected by the `multiply` environment is as foll
 
 So, the environment `step` must simply parse the answer out of `\\boxed{answer}` and check if it matches the ground truth.
 
-```python
-:linenos:
-:caption: Simple multiplication environment
+**Simple multiplication environment**:
 
+```python
 class MultiplyEnv(BaseTextEnv):
    def _parse_action(self, action: str) -> str:
       """Extract answer from \\boxed{answer} format"""
@@ -98,10 +96,9 @@ We will make a few simple extensions to our `step()` method:
   - Incorrect answer, and not in format of `\\boxed{...}`: 0.0.
 - If the model is incorrect and has more turns remaining, we also provide feedback as a new `observation`.
 
-```python
-:linenos:
-:caption: Multi-turn multiplication environment in [examples/multiply/env.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/env.py)
+**Multi-turn multiplication environment in [examples/multiply/env.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/env.py)**:
 
+```python
 def step(self, action: str) -> BaseTextEnvStepOutput:
      self.turns += 1
      answer = self._parse_action(action)
@@ -187,10 +184,9 @@ Finally, we need to `register` the new environment so the training stack can fin
 
 We will create a new entrypoint for training with the `multiply` environment by creating a file at `examples/multiply/main_multiply.py` that looks like this:
 
-```python
-:linenos:
-:caption: Environment registration at [examples/multiply/main_multiply.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/main_multiply.py)
+**Environment registration at [examples/multiply/main_multiply.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/main_multiply.py)**:
 
+```python
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
    # Register the multiply environment
@@ -227,10 +223,9 @@ Before we can train, we need a dataset of problems to train on.
 
 We can generate a dataset of multiplication problems using [examples/multiply/multiply_dataset.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py). See the file for more details, but the core idea is to generate random multiplication problems of n-digit numbers, and ensure the dataset example is in the correct format:
 
-```python
-:linenos:
-:caption: Generating a dataset of random multiplication problems.
+**Generating a dataset of random multiplication problems.**:
 
+```python
 for idx in range(num_examples):
      question, answer = generate_multiplication_problem(num_digits)
 

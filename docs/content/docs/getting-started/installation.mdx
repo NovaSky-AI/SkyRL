@@ -12,7 +12,7 @@ description: "Installation"
 
 We use [uv](https://docs.astral.sh/uv/) to manage dependencies. We also make use of the `uv` and `ray` integration to manage dependencies for ray workers. 
 
-If you're running on an existing Ray cluster (see `\<running-on-existing-ray-cluster\>` section), we suggest using Ray 2.51.1 and Python 3.12. However, we support Ray versions >= 2.44.0. 
+If you're running on an existing Ray cluster (see [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster) section), we suggest using Ray 2.51.1 and Python 3.12. However, we support Ray versions >= 2.44.0. 
 
 > **Warning:**     ⚠️ We do not recommend using Ray 2.47.0 and 2.47.1 for SkyRL due to known issues in the uv+ray integration.
 
@@ -44,7 +44,7 @@ That is it! After initializing the ray cluster as described below, you should no
 > **Warning:**     ⚠️ The older docker image `novaskyai/skyrl-train-ray-2.48.0-py3.12-cu12.8` is compatible with SkyRL only till commit https://github.com/NovaSky-AI/SkyRL/commit/0ee61a70a71344fbf15e0c6a603cdcc8b4d0cad5
     We recommend upgrading to the new docker image `novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8`.
 
-    If you wish to use SkyRL with ray != 2.51.1, see the guide for running on an existing Ray cluster (see `\<running-on-existing-ray-cluster\>` section)
+    If you wish to use SkyRL with ray != 2.51.1, see the guide for running on an existing Ray cluster (see [Running on an existing Ray cluster](#running-on-an-existing-ray-cluster) section)
 
 ## Install without Dockerfile
 
