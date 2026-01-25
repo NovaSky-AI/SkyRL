@@ -176,8 +176,8 @@ run: |
     generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
     generator.sampling_params.temperature=0.9 \
     generator.sampling_params.top_p=0.95 \
-    generator.sampling_params.stop='["</tool_call>", "<done>"]' \
-    generator.eval_sampling_params.stop='["</tool_call>", "<done>"]' \
+    generator.sampling_params.stop='["</tool_call>"]' \
+    generator.eval_sampling_params.stop='["</tool_call>"]' \
     trainer.policy.optimizer_config.lr=1.0e-6 \
     trainer.algorithm.use_kl_loss=true \
     generator.max_turns=$MAX_TURNS \
