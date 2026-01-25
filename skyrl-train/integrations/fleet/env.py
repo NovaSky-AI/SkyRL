@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from omegaconf import DictConfig
 
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
+from skyrl_gym.envs.base_text_env import (
+    BaseTextEnv,
+    BaseTextEnvStepOutput,
+    ConversationType,
+)
 from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
 
 logger = logging.getLogger(__name__)
@@ -153,11 +157,13 @@ class FleetTaskEnv(BaseTextEnv):
         Initialize the Fleet environment and return initial observation.
 
         Creates Fleet environment via OpenEnv's FleetTaskEnv and returns the task prompt.
+        OpenEnv's FleetTaskEnv.__init__() creates the Fleet env and fetches tools.
         """
         # Close any existing environment
         self.close()
 
         # Create OpenEnv's FleetTaskEnv with normalized config
+        # This creates the Fleet env (fleet.make) and fetches tools (list_tools)
         task_config = self._normalize_task_config()
 
         try:
@@ -170,20 +176,18 @@ class FleetTaskEnv(BaseTextEnv):
         except Exception as e:
             raise RuntimeError(f"Failed to create OpenEnv FleetTaskEnv: {e}") from e
 
-        # Reset the OpenEnv environment
-        try:
-            obs = self.openenv_task_env.reset()
-            self._init_failed = False
-        except Exception as e:
-            logger.error(f"Failed to reset Fleet environment for task {self.task_key}: {e}")
-            self._init_failed = True
-            obs = {}
+        # Reset episode state (tools are already cached from __init__)
+        obs = asyncio.get_event_loop().run_until_complete(self.openenv_task_env.reset_async())
 
         # Reset state
         self.turns = 0
 
-        # Get tools from observation (if available)
-        self.tools = obs.get("tools", []) if not self._init_failed else []
+        # Get tools from observation (cached from __init__)
+        self.tools = obs.get("tools", [])
+        if self.tools:
+            logger.info(f"Task {self.task_key}: loaded {len(self.tools)} tools")
+        else:
+            logger.warning(f"Task {self.task_key}: no tools found in observation")
 
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
