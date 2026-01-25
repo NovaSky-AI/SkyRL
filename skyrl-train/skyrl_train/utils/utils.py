@@ -637,11 +637,24 @@ def initialize_ray(cfg: DictConfig):
 
     Args:
         cfg: Training config
+
+    Environment variables:
+        SKYRL_DEBUG_LOGGING: Set to "true" to enable verbose Ray worker logging
     """
     from .ppo_utils import sync_registries
 
+    # Check if debug logging is enabled
+    debug_logging = os.getenv("SKYRL_DEBUG_LOGGING", "").lower() == "true"
+
+    if not debug_logging:
+        # Suppress C++ ERROR logs (metrics exporter errors) on stdout
+        # These still go to Ray's log files
+        os.environ["RAY_BACKEND_LOG_LEVEL"] = "fatal"
+
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+
+    # log_to_driver=False suppresses worker/raylet logs forwarding to driver stdout
+    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=debug_logging)
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()
