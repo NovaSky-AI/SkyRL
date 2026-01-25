@@ -59,10 +59,16 @@ from tx.utils.log import logger
 class JaxBackendConfig(BaseModel, extra="forbid"):
     """Configuration specific to the JAX backend."""
 
-    max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
+    max_lora_adapters: int = Field(
+        default=32, description="Maximum number of LoRA adapters"
+    )
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
-    tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
-    expert_parallel_size: int = Field(default=1, description="Expert parallelism degree for MoE layers")
+    tensor_parallel_size: int = Field(
+        default=1, description="Tensor parallelism degree to use for the model"
+    )
+    expert_parallel_size: int = Field(
+        default=1, description="Expert parallelism degree for MoE layers"
+    )
     fully_sharded_data_parallel_size: int = Field(
         default=1, description="Fully sharded data parallelism degree for the model"
     )
@@ -74,7 +80,9 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=0,
         description="Maximum batch size (measured in number of sequences) for sampling/generation; 0 means disabled (use full batch)",
     )
-    enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
+    enforce_eager: bool = Field(
+        default=False, description="Disable JAX JIT compilation"
+    )
     shard_attention_heads: bool = Field(
         default=True,
         description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
@@ -92,6 +100,32 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=None,
         description="Total number of processes in the multi-node cluster",
     )
+    # Ray configuration (Solution C: Ray as process launcher only)
+    enable_ray: bool = Field(
+        default=False,
+        description="If true, use Ray to automatically manage worker processes across nodes",
+    )
+    ray_num_workers: int = Field(
+        default=1,
+        description="Number of Ray worker actors to spawn (only used when enable_ray=True)",
+    )
+    # TODO: Future enhancements for GPU allocation:
+    #   1. Support "auto" mode: detect GPUs per node via ray.cluster_resources()
+    #   2. Support scheduling_strategy (SPREAD, PACK) for better placement control
+    #   3. Support placement_group for gang scheduling (ensure all workers start together)
+    #   4. Support accelerator_type (e.g., "A100", "H100") for heterogeneous clusters
+    ray_gpus_per_worker: int | None = Field(
+        default=None,
+        description=(
+            "Number of GPUs to allocate per Ray worker actor (typically the number of local GPUs per node). "
+            "If None, no GPU resource constraint is applied. "
+            "Example: For 2 nodes with 8 GPUs each, set ray_num_workers=2 and ray_gpus_per_worker=8."
+        ),
+    )
+    ray_cpus_per_worker: int = Field(
+        default=1,
+        description="Number of CPUs to allocate per Ray worker actor",
+    )
 
 
 @jax.tree_util.register_dataclass
@@ -103,14 +137,18 @@ class AccumulatedGradients:
     counts: jax.Array
 
     @classmethod
-    def create(cls, lora_params: nnx.State, max_adapters: int) -> "AccumulatedGradients":
+    def create(
+        cls, lora_params: nnx.State, max_adapters: int
+    ) -> "AccumulatedGradients":
         """Initialize with zeros."""
         return cls(
             grad_sum=jax.tree.map(jnp.zeros_like, lora_params),
             counts=jnp.zeros((max_adapters,), dtype=jnp.int32),
         )
 
-    def add(self, lora_grads: nnx.State, adapter_indices: jax.Array) -> "AccumulatedGradients":
+    def add(
+        self, lora_grads: nnx.State, adapter_indices: jax.Array
+    ) -> "AccumulatedGradients":
         """Accumulate gradients and increment counts."""
         # Count occurrences of each adapter index in the batch
         batch_counts = jnp.bincount(adapter_indices, length=self.counts.shape[0])
@@ -123,14 +161,18 @@ class AccumulatedGradients:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
         return jax.tree.map(
-            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
+            lambda g: jnp.zeros_like(g)
+            .at[adapter_index]
+            .set(g[adapter_index] / count.astype(g.dtype)),
             self.grad_sum,
         )
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
         return AccumulatedGradients(
-            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            grad_sum=jax.tree.map(
+                lambda g: g.at[adapter_index].set(0.0), self.grad_sum
+            ),
             counts=self.counts.at[adapter_index].set(0),
         )
 
@@ -177,17 +219,29 @@ class JaxBackendImpl(AbstractBackend):
             ("fsdp", "ep", "tp"),
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
-            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
+            self.model = model_class(
+                self.model_config,
+                dtype=get_dtype(self.model_config.dtype),
+                rngs=nnx.Rngs(0),
+            )
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
             # Split model into LoRA and non-LoRA parameters
-            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
+            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(
+                self.model, self.model.is_lora_param, ...
+            )
 
             # Initialize adapter 0 with minimal config (required for base model sampling path)
-            init_lora_adapter(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0, seed=0))
+            init_lora_adapter(
+                self.model,
+                adapter_index=0,
+                lora_config=types.LoraConfig(rank=1, alpha=1.0, seed=0),
+            )
 
             # Initialize global accumulated gradients
-            self.accumulated_grads = AccumulatedGradients.create(self.lora_params, config.max_lora_adapters)
+            self.accumulated_grads = AccumulatedGradients.create(
+                self.lora_params, config.max_lora_adapters
+            )
 
         # Per-model optimizer storage (managed internally)
         self.optimizers: dict[str, nnx.Optimizer] = {}
@@ -215,14 +269,20 @@ class JaxBackendImpl(AbstractBackend):
             seq_len: The sequence length being compiled
             mode: Either 'train' or 'sample' to track separately
         """
-        jit_times = self.metrics.train_seq_len_jit_times if mode == "train" else self.metrics.sample_seq_len_jit_times
+        jit_times = (
+            self.metrics.train_seq_len_jit_times
+            if mode == "train"
+            else self.metrics.sample_seq_len_jit_times
+        )
         if not self.config.enforce_eager and seq_len not in jit_times:
             logger.info(f"JIT compiling for {mode} seq_len={seq_len} in progress...")
             start_time = time.time()
             yield
             elapsed = time.time() - start_time
             jit_times[seq_len] = elapsed
-            logger.info(f"JIT compilation for {mode} seq_len={seq_len} took {elapsed:.2f}s")
+            logger.info(
+                f"JIT compilation for {mode} seq_len={seq_len} took {elapsed:.2f}s"
+            )
         else:
             yield
 
@@ -245,7 +305,9 @@ class JaxBackendImpl(AbstractBackend):
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
             )
-            return model.compute_logprobs(output.last_hidden_state, target_ids, adapter_indices)
+            return model.compute_logprobs(
+                output.last_hidden_state, target_ids, adapter_indices
+            )
 
         if self.config.gradient_checkpointing:
             # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
@@ -274,7 +336,9 @@ class JaxBackendImpl(AbstractBackend):
                 target_ids,
             )
 
-            def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
+            def compute_loss_per_example(
+                loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages
+            ):
                 return jax.lax.switch(
                     loss_fn_type,
                     LOSS_FUNCTIONS,
@@ -292,7 +356,9 @@ class JaxBackendImpl(AbstractBackend):
                 advantages,
             )
 
-            per_seq_loss = per_token_losses.sum(axis=-1) / jnp.maximum(loss_mask.sum(axis=-1), 1e-9)
+            per_seq_loss = per_token_losses.sum(axis=-1) / jnp.maximum(
+                loss_mask.sum(axis=-1), 1e-9
+            )
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
             return per_seq_loss.sum(), (target_logprobs, per_token_losses)
 
@@ -365,14 +431,17 @@ class JaxBackendImpl(AbstractBackend):
         else:
             # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
             lora_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
+                lambda spec: jax.NamedSharding(self.mesh, spec),
+                nnx.get_partition_spec(self.lora_params),
             )
             non_lora_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
+                lambda spec: jax.NamedSharding(self.mesh, spec),
+                nnx.get_partition_spec(self.non_lora_params),
             )
             # Get sharding for AccumulatedGradients
             accumulated_grads_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.accumulated_grads)
+                lambda spec: jax.NamedSharding(self.mesh, spec),
+                nnx.get_partition_spec(self.accumulated_grads),
             )
 
             # Shard batch inputs along the FSDP axis (batch, seq_len)
@@ -395,14 +464,32 @@ class JaxBackendImpl(AbstractBackend):
             )
             self._forward_backward_and_accumulate = jax.jit(
                 forward_backward_and_accumulate,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
-                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
+                in_shardings=(
+                    accumulated_grads_shardings,
+                    lora_shardings,
+                    non_lora_shardings,
+                )
+                + input_shardings,
+                out_shardings=(
+                    accumulated_grads_shardings,
+                    batch_sharded_2d,
+                    batch_sharded_2d,
+                ),
                 donate_argnames=("accumulated_grads",),
             )
             self._forward = jax.jit(
                 forward_only,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
-                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
+                in_shardings=(
+                    accumulated_grads_shardings,
+                    lora_shardings,
+                    non_lora_shardings,
+                )
+                + input_shardings,
+                out_shardings=(
+                    accumulated_grads_shardings,
+                    batch_sharded_2d,
+                    batch_sharded_2d,
+                ),
             )
 
         # JIT-compiled function to compute full gradients and apply optimizer update
@@ -435,13 +522,17 @@ class JaxBackendImpl(AbstractBackend):
         used_indices = {m.adapter_index for m in self.models.values()}
         available_indices = set(range(1, self.config.max_lora_adapters)) - used_indices
         if not available_indices:
-            raise ValueError(f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached")
+            raise ValueError(
+                f"Maximum number of LoRA adapters ({self.config.max_lora_adapters}) reached"
+            )
         adapter_index = min(available_indices)
         assert 1 <= adapter_index <= self.config.max_lora_adapters - 1
 
         # Validate rank doesn't exceed max
         if not (0 < lora_config.rank <= self.config.max_lora_rank):
-            raise ValueError(f"LoRA rank {lora_config.rank} must be between 1 and {self.config.max_lora_rank}")
+            raise ValueError(
+                f"LoRA rank {lora_config.rank} must be between 1 and {self.config.max_lora_rank}"
+            )
 
         # Store model metadata
         self.models[model_id] = types.ModelMetadata(
@@ -452,11 +543,15 @@ class JaxBackendImpl(AbstractBackend):
         # Create optimizer
         with jax.set_mesh(self.mesh):
             tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
-            self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
+            self.optimizers[model_id] = nnx.Optimizer(
+                self.model, tx, wrt=self.model.is_lora_param
+            )
 
         # Configure adapter
         init_lora_adapter(self.model, adapter_index, lora_config)
-        logger.info(f"Created model {model_id} with adapter_index={adapter_index}, config={lora_config}")
+        logger.info(
+            f"Created model {model_id} with adapter_index={adapter_index}, config={lora_config}"
+        )
 
     def delete_model(self, model_id: str) -> None:
         """Delete a model and free all associated resources."""
@@ -507,7 +602,10 @@ class JaxBackendImpl(AbstractBackend):
         request_batch_slices = prepared_batch.request_batch_slices
 
         # Convert model_ids to adapter_indices
-        all_adapter_indices = [self.models[model_id].adapter_index for model_id in prepared_batch.all_model_ids]
+        all_adapter_indices = [
+            self.models[model_id].adapter_index
+            for model_id in prepared_batch.all_model_ids
+        ]
 
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
         max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
@@ -518,7 +616,9 @@ class JaxBackendImpl(AbstractBackend):
         loss_fn_types = np.array(all_loss_fn_types, dtype=np.int32)
 
         # Create attention mask (1 for real tokens, 0 for padding)
-        attention_mask = pad_batch([[1] * len(seq) for seq in all_input_ids], max_len, np.int32)
+        attention_mask = pad_batch(
+            [[1] * len(seq) for seq in all_input_ids], max_len, np.int32
+        )
         loss_mask = pad_batch(all_token_weights, max_len, np.float32)
         sampling_logprobs = pad_batch(all_sampling_logprobs, max_len, np.float32)
         advantages = pad_batch(all_advantages, max_len, np.float32)
@@ -565,18 +665,20 @@ class JaxBackendImpl(AbstractBackend):
                     (sharding_2d,) * 6 + (sharding_1d,) * 2,
                 )
 
-                self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
-                    self.accumulated_grads,
-                    self.lora_params,
-                    self.non_lora_params,
-                    mb_input_ids,
-                    mb_attention_mask,
-                    mb_adapter_indices,
-                    mb_target_ids,
-                    mb_loss_mask,
-                    mb_loss_fn_types,
-                    mb_sampling_logprobs,
-                    mb_advantages,
+                self.accumulated_grads, per_token_losses, target_logprobs = (
+                    model_pass_fn(
+                        self.accumulated_grads,
+                        self.lora_params,
+                        self.non_lora_params,
+                        mb_input_ids,
+                        mb_attention_mask,
+                        mb_adapter_indices,
+                        mb_target_ids,
+                        mb_loss_mask,
+                        mb_loss_fn_types,
+                        mb_sampling_logprobs,
+                        mb_advantages,
+                    )
                 )
                 # Slice back to original size (remove FSDP padding)
                 token_losses_device.append(per_token_losses[: mb_end - mb_start])
@@ -584,11 +686,19 @@ class JaxBackendImpl(AbstractBackend):
 
         # Gather results from all hosts before device_get
         if jax.process_count() > 1:
-            token_losses_device = [multihost_utils.process_allgather(x, tiled=True) for x in token_losses_device]
-            logprobs_device = [multihost_utils.process_allgather(x, tiled=True) for x in logprobs_device]
+            token_losses_device = [
+                multihost_utils.process_allgather(x, tiled=True)
+                for x in token_losses_device
+            ]
+            logprobs_device = [
+                multihost_utils.process_allgather(x, tiled=True)
+                for x in logprobs_device
+            ]
 
         # Single batched device-to-host transfer for all arrays
-        token_losses_host, logprobs_host = jax.device_get((token_losses_device, logprobs_device))
+        token_losses_host, logprobs_host = jax.device_get(
+            (token_losses_device, logprobs_device)
+        )
 
         # Flatten microbatches and slice to actual sequence lengths
         token_losses_out = []
@@ -596,7 +706,9 @@ class JaxBackendImpl(AbstractBackend):
         idx = 0
         for mb_losses, mb_logprobs in zip(token_losses_host, logprobs_host):
             for i in range(mb_losses.shape[0]):
-                token_losses_out.append(mb_losses[i, : seq_lens[idx]].astype(jnp.float32))
+                token_losses_out.append(
+                    mb_losses[i, : seq_lens[idx]].astype(jnp.float32)
+                )
                 logprobs_out.append(mb_logprobs[i, : seq_lens[idx]].astype(jnp.float32))
                 idx += 1
 
@@ -645,14 +757,18 @@ class JaxBackendImpl(AbstractBackend):
         """Run forward-only pass on a batch (no gradient computation)."""
         return self._model_pass(prepared_batch, self._forward)
 
-    def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
+    def optim_step(
+        self, model_id: str, request_data: types.OptimStepInput
+    ) -> types.OptimStepOutput:
         """Apply an optimizer step using accumulated gradients."""
         adapter_index = self.models[model_id].adapter_index
         optimizer = self.optimizers[model_id]
 
         # Check if we have any gradients accumulated (count > 0)
         if self.accumulated_grads.counts[adapter_index] == 0:
-            logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
+            logger.warning(
+                f"No accumulated gradients for model {model_id}, skipping optimizer step"
+            )
             return types.OptimStepOutput()
 
         # Update hyperparameters from the request
@@ -672,7 +788,9 @@ class JaxBackendImpl(AbstractBackend):
                 jnp.int32(adapter_index),
             )
 
-        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
+        logger.info(
+            f"Applied optimizer step for model {model_id} (adapter {adapter_index})"
+        )
         return types.OptimStepOutput()
 
     def sample(
@@ -703,7 +821,9 @@ class JaxBackendImpl(AbstractBackend):
 
         total_batch_size = len(all_prompts)
         max_batch_size = (
-            self.config.sample_max_num_sequences if self.config.sample_max_num_sequences > 0 else total_batch_size
+            self.config.sample_max_num_sequences
+            if self.config.sample_max_num_sequences > 0
+            else total_batch_size
         )
         # Collect generated sequences and prompt logprobs across batches
         all_sequences: list[types.GeneratedSequence] = []
@@ -717,22 +837,36 @@ class JaxBackendImpl(AbstractBackend):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
-                batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])
-                batch_adapter_indices = pad(all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0)
+                batch_prompts = pad(
+                    all_prompts[batch_start:batch_end], max_batch_size, fill=[]
+                )
+                batch_adapter_indices = pad(
+                    all_adapter_indices[batch_start:batch_end], max_batch_size, fill=0
+                )
                 sampling_params = pad(
-                    all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
+                    all_sampling_params[batch_start:batch_end],
+                    max_batch_size,
+                    fill=all_sampling_params[batch_start],
                 )
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
                 # Use right-padding, which means during decoding there will be "gaps" in the attention mask.
-                max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
+                max_len = round_up_seq_len(
+                    max((len(seq) for seq in batch_prompts), default=0)
+                )
                 input_ids = pad_batch(batch_prompts, max_len, np.int32)
-                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
+                attention_mask = pad_batch(
+                    [[1] * len(seq) for seq in batch_prompts], max_len, np.int32
+                )
 
                 # Shard inputs along FSDP axis (already padded to max_batch_size)
                 input_ids, attention_mask, adapter_indices = jax.device_put(
-                    (input_ids, attention_mask, np.array(batch_adapter_indices, dtype=np.int32)),
+                    (
+                        input_ids,
+                        attention_mask,
+                        np.array(batch_adapter_indices, dtype=np.int32),
+                    ),
                     (sharding_2d, sharding_2d, sharding_1d),
                 )
 
@@ -748,7 +882,9 @@ class JaxBackendImpl(AbstractBackend):
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start
                 all_sequences.extend(
-                    types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
+                    types.GeneratedSequence(
+                        stop_reason=stop_reason, tokens=tokens, logprobs=logprobs
+                    )
                     for stop_reason, tokens, logprobs in zip(
                         result.stop_reasons[:batch_size],
                         result.generated_ids[:batch_size],
@@ -758,13 +894,23 @@ class JaxBackendImpl(AbstractBackend):
                 if needs_prompt_logprobs and result.prompt_logprobs:
                     all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
 
-        for request_id, _, start_idx, end_idx, prompt_logprobs_requested in request_batch_slices:
+        for (
+            request_id,
+            _,
+            start_idx,
+            end_idx,
+            prompt_logprobs_requested,
+        ) in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
             # Each of `num_samples` samples in a request share the same prompt; use the first's prompt logprobs
             prompt_logprobs = (
-                all_prompt_logprobs[start_idx] if prompt_logprobs_requested and all_prompt_logprobs else None
+                all_prompt_logprobs[start_idx]
+                if prompt_logprobs_requested and all_prompt_logprobs
+                else None
             )
-            results[request_id] = types.SampleOutput(sequences=sequences, prompt_logprobs=prompt_logprobs)
+            results[request_id] = types.SampleOutput(
+                sequences=sequences, prompt_logprobs=prompt_logprobs
+            )
 
         return results
 
@@ -785,7 +931,9 @@ class JaxBackendImpl(AbstractBackend):
         adapter_index = self.models[model_id].adapter_index
         rank = self.models[model_id].lora_config.rank
         lora_weights = extract_adapter_state(adapter_index, self.lora_params, rank)
-        optimizer_state = extract_adapter_state(adapter_index, nnx.state(self.optimizers[model_id]), rank)
+        optimizer_state = extract_adapter_state(
+            adapter_index, nnx.state(self.optimizers[model_id]), rank
+        )
         return {
             "lora_weights": lora_weights,
             "optimizer_state": optimizer_state,
@@ -803,9 +951,14 @@ class JaxBackendImpl(AbstractBackend):
                 f"model configured with rank {self.models[model_id].lora_config.rank}"
             )
 
-        insert_adapter_state(adapter_index, self.lora_params, checkpoint_data["lora_weights"], rank)
         insert_adapter_state(
-            adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
+            adapter_index, self.lora_params, checkpoint_data["lora_weights"], rank
+        )
+        insert_adapter_state(
+            adapter_index,
+            nnx.state(self.optimizers[model_id]),
+            checkpoint_data["optimizer_state"],
+            rank,
         )
 
     def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
@@ -817,7 +970,9 @@ class JaxBackendImpl(AbstractBackend):
         )
 
         if checkpoint is None:
-            raise FileNotFoundError(f"Training checkpoint not found in {checkpoint_path}")
+            raise FileNotFoundError(
+                f"Training checkpoint not found in {checkpoint_path}"
+            )
 
         self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
@@ -834,15 +989,21 @@ class JaxBackendImpl(AbstractBackend):
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
-    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath) -> None:
+    def load_sampler_checkpoint(
+        self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath
+    ) -> None:
         """Insert sampler weights from checkpoint file."""
         adapter_index = self.models[model_id].adapter_index
         adapter_config = self.models[model_id].lora_config
         load_lora_checkpoint(self.model, adapter_config, adapter_index, checkpoint_path)
         self.models[model_id].loaded_checkpoint_id = checkpoint_id
-        logger.info(f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}")
+        logger.info(
+            f"Loaded LoRA sampler weights for model {model_id} at adapter index {adapter_index}"
+        )
 
-    def load_sampler_weights(self, prepared_batch: types.PreparedSampleBatch) -> list[int]:
+    def load_sampler_weights(
+        self, prepared_batch: types.PreparedSampleBatch
+    ) -> list[int]:
         """Load sampler weights for all requests and return adapter indices array.
 
         Ensures all required checkpoints are loaded before sampling.
@@ -858,7 +1019,9 @@ class JaxBackendImpl(AbstractBackend):
         loaded_adapters = set()  # Track adapters already used in this batch
 
         for model_id, checkpoint_id, checkpoint_path in zip(
-            prepared_batch.all_model_ids, prepared_batch.all_checkpoint_ids, prepared_batch.all_checkpoint_paths
+            prepared_batch.all_model_ids,
+            prepared_batch.all_checkpoint_ids,
+            prepared_batch.all_checkpoint_paths,
         ):
             if model_id:
                 # This code path is for sampling from a LoRA adapter
@@ -870,10 +1033,16 @@ class JaxBackendImpl(AbstractBackend):
                     adapter_indices.append(adapter_index)
                 else:
                     # Need to load from disk
-                    assert adapter_index not in loaded_adapters, "Cannot override already used adapter"
+                    assert (
+                        adapter_index not in loaded_adapters
+                    ), "Cannot override already used adapter"
 
-                    logger.info(f"Loading LoRA sampler checkpoint from {checkpoint_path}")
-                    self.load_sampler_checkpoint(model_id, checkpoint_id, AnyPath(checkpoint_path))
+                    logger.info(
+                        f"Loading LoRA sampler checkpoint from {checkpoint_path}"
+                    )
+                    self.load_sampler_checkpoint(
+                        model_id, checkpoint_id, AnyPath(checkpoint_path)
+                    )
                     adapter_indices.append(adapter_index)
 
                 loaded_adapters.add(adapter_index)
@@ -940,9 +1109,20 @@ class JaxBackend(JaxBackendImpl):
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
         if config.coordinator_address is not None:
+            # Calculate num_processes: if enable_ray, use ray_num_workers + 1 (for coordinator)
+            num_processes = config.num_processes
+            if num_processes is None and config.enable_ray:
+                num_processes = config.ray_num_workers + 1
+                logger.info(
+                    f"Auto-calculated num_processes={num_processes} (ray_num_workers={config.ray_num_workers} + 1 coordinator)"
+                )
+
+            if num_processes is None:
+                raise ValueError("num_processes must be set when using multi-node mode")
+
             jax.distributed.initialize(
                 coordinator_address=config.coordinator_address,
-                num_processes=config.num_processes,
+                num_processes=num_processes,
                 process_id=0,
             )
             logger.info(
@@ -955,33 +1135,48 @@ class JaxBackend(JaxBackendImpl):
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
         if jax.process_count() > 1:
-            clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
+            clean = {
+                k: v.model_dump() if isinstance(v, BaseModel) else v
+                for k, v in kwargs.items()
+            }
             _broadcast_command(RpcPayload(method=method, kwargs=clean))
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
-        self._broadcast_and_call("create_model", model_id=model_id, lora_config=lora_config)
+        self._broadcast_and_call(
+            "create_model", model_id=model_id, lora_config=lora_config
+        )
 
     def forward_backward(self, prepared_batch: types.PreparedModelPassBatch):
-        return self._broadcast_and_call("forward_backward", prepared_batch=prepared_batch)
+        return self._broadcast_and_call(
+            "forward_backward", prepared_batch=prepared_batch
+        )
 
     def forward(self, prepared_batch: types.PreparedModelPassBatch):
         return self._broadcast_and_call("forward", prepared_batch=prepared_batch)
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput):
-        return self._broadcast_and_call("optim_step", model_id=model_id, request_data=request_data)
+        return self._broadcast_and_call(
+            "optim_step", model_id=model_id, request_data=request_data
+        )
 
     def sample(self, prepared_batch: types.PreparedSampleBatch):
         return self._broadcast_and_call("sample", prepared_batch=prepared_batch)
 
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("save_checkpoint", output_path=output_path, model_id=model_id)
+        self._broadcast_and_call(
+            "save_checkpoint", output_path=output_path, model_id=model_id
+        )
 
     def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
+        self._broadcast_and_call(
+            "load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id
+        )
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
+        self._broadcast_and_call(
+            "save_sampler_checkpoint", output_path=output_path, model_id=model_id
+        )
 
 
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):
@@ -1010,9 +1205,13 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
 
     # Receive INIT payload with base_model and config from coordinator
     init_payload = _broadcast_command(None)
-    assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
+    assert (
+        init_payload.method == "__init__"
+    ), f"Expected __init__, got {init_payload.method}"
     config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
-    logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}")
+    logger.info(
+        f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}"
+    )
 
     backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
 
@@ -1029,8 +1228,282 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
 
         # Re-hydrate raw dicts into Pydantic models using type hints
         hints = get_type_hints(method)
-        kwargs = {k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v for k, v in payload.kwargs.items()}
+        kwargs = {
+            k: TypeAdapter(hints[k]).validate_python(v) if k in hints else v
+            for k, v in payload.kwargs.items()
+        }
         method(**kwargs)
+
+
+# =============================================================================
+# Ray-based process launcher (Solution C)
+# =============================================================================
+#
+# This uses Ray only to launch worker processes on remote nodes.
+# After launching, all communication goes through JAX distributed (PR #810 architecture).
+#
+# Usage:
+#     uv run -m tx.tinker.api --base-model Qwen/Qwen3-8B \
+#         --backend-config '{"enable_ray": true, "ray_num_workers": 2}'
+
+try:
+    import ray
+
+    RAY_AVAILABLE = True
+except ImportError:
+    RAY_AVAILABLE = False
+
+
+def _create_ray_worker_launcher_class():
+    """Factory function to create the RayWorkerLauncher class with ray.remote decorator."""
+    if not RAY_AVAILABLE:
+        raise ImportError("Ray is not installed. Install it with: pip install ray")
+
+    @ray.remote
+    class RayWorkerLauncher:
+        """Ray Actor that launches and runs a JAX worker process.
+
+        This actor runs on a Ray worker node and executes the run_worker() function,
+        which enters the JAX distributed worker loop. The actor stays alive as long
+        as the worker is running.
+        """
+
+        def __init__(self):
+            self.process_id: int | None = None
+            self.is_running = False
+
+        def start_worker(
+            self,
+            coordinator_address: str,
+            num_processes: int,
+            process_id: int,
+        ) -> dict:
+            """Start the JAX worker process.
+
+            This method blocks and runs the worker loop until shutdown.
+            """
+            self.process_id = process_id
+            self.is_running = True
+
+            logger.info(
+                f"[RayWorkerLauncher] Starting JAX worker process_id={process_id}"
+            )
+
+            try:
+                # This will block and run the worker loop
+                run_worker(coordinator_address, num_processes, process_id)
+            except Exception as e:
+                logger.error(f"[RayWorkerLauncher] Worker {process_id} failed: {e}")
+                self.is_running = False
+                raise
+
+            self.is_running = False
+            return {"process_id": process_id, "status": "stopped"}
+
+        def get_status(self) -> dict:
+            """Get worker status."""
+            return {
+                "process_id": self.process_id,
+                "is_running": self.is_running,
+            }
+
+    return RayWorkerLauncher
+
+
+class RayProcessManager:
+    """Manages launching JAX worker processes on a Ray cluster.
+
+    This class uses Ray to spawn worker processes on different nodes,
+    then relies on JAX distributed for all subsequent communication.
+    This is the "Solution C" approach - Ray is just a process launcher.
+
+    Usage:
+        manager = RayProcessManager(coordinator_address, num_workers, gpus_per_worker=4)
+        manager.start_workers()
+        # ... workers are now running and communicating via JAX distributed ...
+        manager.shutdown()
+    """
+
+    def __init__(
+        self,
+        coordinator_address: str,
+        num_workers: int,
+        gpus_per_worker: int | None = None,
+        cpus_per_worker: int = 1,
+    ):
+        if not RAY_AVAILABLE:
+            raise ImportError("Ray is not installed. Install it with: pip install ray")
+
+        # Ray should already be initialized by start_ray_workers()
+        if not ray.is_initialized():
+            raise RuntimeError(
+                "Ray must be initialized before creating RayProcessManager"
+            )
+
+        self.coordinator_address = coordinator_address
+        self.num_workers = num_workers
+        self.gpus_per_worker = gpus_per_worker
+        self.cpus_per_worker = cpus_per_worker
+        self.worker_handles: list = []
+        self.worker_futures: list = []
+
+    def start_workers(self) -> None:
+        """Start all worker processes on Ray cluster.
+
+        Workers are started with process_id from 1 to num_workers.
+        Process 0 is reserved for the coordinator (JaxBackend).
+
+        Resource allocation strategy:
+            - gpus_per_worker: Number of local GPUs per node (e.g., 8 for a node with 8 GPUs)
+            - This ensures each worker is placed on a separate node with dedicated GPU access
+            - Ray scheduler will wait until a node with enough GPUs is available
+
+        Example topology (2 nodes, 8 GPUs each):
+            Node 0 (head): Coordinator (process_id=0) + 8 GPUs
+            Node 1: Worker (process_id=1) + 8 GPUs via RayWorkerLauncher
+        """
+        RayWorkerLauncher = _create_ray_worker_launcher_class()
+
+        num_processes = self.num_workers + 1  # +1 for coordinator (process 0)
+
+        # Build resource options for Ray actor placement
+        # gpus_per_worker should match the number of local GPUs per node
+        actor_options: dict = {"num_cpus": self.cpus_per_worker}
+        if self.gpus_per_worker is not None:
+            actor_options["num_gpus"] = self.gpus_per_worker
+
+        # TODO: Future enhancements for resource allocation:
+        #   1. Auto-detect GPUs per node:
+        #      cluster_resources = ray.cluster_resources()
+        #      total_gpus = cluster_resources.get("GPU", 0)
+        #      gpus_per_node = total_gpus // num_nodes
+        #
+        #   2. Use SPREAD scheduling to distribute workers across nodes:
+        #      from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+        #      actor_options["scheduling_strategy"] = "SPREAD"
+        #
+        #   3. Use placement groups for gang scheduling:
+        #      pg = ray.util.placement_group([{"GPU": gpus_per_worker}] * num_workers)
+        #      ray.get(pg.ready())
+        #      actor_options["placement_group"] = pg
+
+        logger.info(
+            f"Launching {self.num_workers} JAX workers via Ray with resources: "
+            f"num_gpus={self.gpus_per_worker}, num_cpus={self.cpus_per_worker}"
+        )
+
+        for i in range(self.num_workers):
+            process_id = i + 1  # Workers start from 1
+
+            # Create the launcher actor with resource specification
+            launcher = RayWorkerLauncher.options(**actor_options).remote()
+            self.worker_handles.append(launcher)
+
+            # Start the worker (non-blocking, returns a future)
+            future = launcher.start_worker.remote(
+                self.coordinator_address,
+                num_processes,
+                process_id,
+            )
+            self.worker_futures.append(future)
+
+            logger.info(f"Launched worker process_id={process_id} via Ray")
+
+        logger.info(f"All {self.num_workers} Ray worker launchers started")
+
+    def shutdown(self) -> None:
+        """Shutdown all worker processes."""
+        logger.info("Shutting down Ray worker launchers...")
+        for handle in self.worker_handles:
+            try:
+                ray.kill(handle)
+            except Exception as e:
+                logger.warning(f"Error killing worker: {e}")
+        self.worker_handles = []
+        self.worker_futures = []
+        logger.info("RayProcessManager shutdown complete")
+
+
+def _get_coordinator_address(config: JaxBackendConfig) -> str:
+    """Get or auto-detect the JAX coordinator address.
+
+    When enable_ray is True and coordinator_address is not set,
+    automatically use the Ray head node's IP with a default port.
+
+    Args:
+        config: JaxBackendConfig with coordinator_address and enable_ray
+
+    Returns:
+        The coordinator address (host:port)
+    """
+    if config.coordinator_address is not None:
+        return config.coordinator_address
+
+    if not config.enable_ray:
+        raise ValueError("coordinator_address must be set when enable_ray is False")
+
+    # Auto-detect coordinator address using Ray head node IP
+    # This assumes the coordinator (JaxBackend) runs on the Ray head node
+    head_node_ip = ray.util.get_node_ip_address()
+    default_port = 7777  # Default JAX coordinator port
+    coordinator_address = f"{head_node_ip}:{default_port}"
+    logger.info(f"Auto-detected coordinator_address: {coordinator_address}")
+    return coordinator_address
+
+
+def start_ray_workers(
+    config: JaxBackendConfig,
+) -> tuple[RayProcessManager | None, str | None]:
+    """Start Ray worker processes if enable_ray is True.
+
+    This should be called before JaxBackend.__init__ so that workers are
+    ready to receive the JAX distributed initialization.
+
+    When enable_ray is True but coordinator_address is not set, this function
+    will auto-detect the coordinator address using the Ray head node's IP.
+
+    Args:
+        config: JaxBackendConfig with enable_ray and ray_num_workers
+
+    Returns:
+        Tuple of (RayProcessManager, coordinator_address) if enable_ray is True,
+        (None, None) otherwise. The coordinator_address is returned so the caller
+        can use it when initializing JaxBackend.
+    """
+    if not config.enable_ray:
+        return None, None
+
+    if not RAY_AVAILABLE:
+        raise ImportError("Ray is not installed. Install it with: pip install ray")
+
+    # Initialize Ray if not already initialized (needed for auto-detect)
+    if not ray.is_initialized():
+        ray.init(
+            include_dashboard=True,
+            dashboard_host="0.0.0.0",
+            dashboard_port=8265,
+        )
+        logger.info(
+            "Ray initialized for process management (dashboard at http://localhost:8265)"
+        )
+
+    # Get or auto-detect coordinator address
+    coordinator_address = _get_coordinator_address(config)
+
+    manager = RayProcessManager(
+        coordinator_address=coordinator_address,
+        num_workers=config.ray_num_workers,
+        gpus_per_worker=config.ray_gpus_per_worker,
+        cpus_per_worker=config.ray_cpus_per_worker,
+    )
+    manager.start_workers()
+
+    # Give workers time to initialize JAX distributed
+    import time
+
+    time.sleep(2)
+
+    return manager, coordinator_address
 
 
 def main():

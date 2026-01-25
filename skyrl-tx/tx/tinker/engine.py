@@ -11,10 +11,17 @@ from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, ModelDB, SessionDB
+from tx.tinker.db_models import (
+    FutureDB,
+    RequestStatus,
+    CheckpointDB,
+    CheckpointStatus,
+    ModelDB,
+    SessionDB,
+)
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
+from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig, start_ray_workers
 from tx.tinker.backends.utils import log_timing
 from tx.tinker.loss_fns import LOSS_TYPES
 from tx.utils.log import logger
@@ -43,17 +50,24 @@ def prepare_sample_batch(
     all_checkpoint_paths = []
     request_batch_slices = []
 
-    needs_prompt_logprobs = any(request_data.prompt_logprobs for (_, request_data) in requests.values())
+    needs_prompt_logprobs = any(
+        request_data.prompt_logprobs for (_, request_data) in requests.values()
+    )
 
     for request_id, (model_id, request_data) in requests.items():
         request_start = len(all_prompts)
 
         # Expand requests for num_samples
-        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+        prompt_tokens = [
+            token for chunk in request_data.prompt.chunks for token in chunk.tokens
+        ]
         checkpoint_path = ""
         if model_id and request_data.checkpoint_id and checkpoints_base:
             checkpoint_path = str(
-                checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
+                checkpoints_base
+                / model_id
+                / "sampler_weights"
+                / f"{request_data.checkpoint_id}.tar.gz"
             )
         for _ in range(request_data.num_samples):
             all_prompts.append(prompt_tokens)
@@ -63,7 +77,13 @@ def prepare_sample_batch(
             all_checkpoint_paths.append(checkpoint_path)
 
         request_batch_slices.append(
-            (request_id, model_id, request_start, len(all_prompts), request_data.prompt_logprobs)
+            (
+                request_id,
+                model_id,
+                request_start,
+                len(all_prompts),
+                request_data.prompt_logprobs,
+            )
         )
 
     return types.PreparedSampleBatch(
@@ -115,7 +135,9 @@ def prepare_model_pass_batch(
             all_model_ids.append(model_id)
             all_loss_fn_types.append(loss_fn_type)
 
-        request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
+        request_batch_slices.append(
+            (request_id, model_id, request_start, len(all_input_ids))
+        )
 
     return types.PreparedModelPassBatch(
         all_input_ids=all_input_ids,
@@ -188,16 +210,43 @@ class TinkerEngine:
 
         # Initialize the backend (handles model state, computation, and adapter management)
         if config.backend not in BACKENDS:
-            raise ValueError(f"Unknown backend: {config.backend}. Available backends: {list(BACKENDS.keys())}")
+            raise ValueError(
+                f"Unknown backend: {config.backend}. Available backends: {list(BACKENDS.keys())}"
+            )
 
         backend_class, backend_config_class = BACKENDS[config.backend]
         backend_config = backend_config_class(**config.backend_config)
+
+        # If enable_ray is True, start Ray worker processes before initializing the backend
+        # The workers will connect via JAX distributed when JaxBackend initializes
+        self._ray_process_manager = None
+        if hasattr(backend_config, "enable_ray") and backend_config.enable_ray:
+            logger.info("Starting Ray worker processes for multi-node support...")
+            self._ray_process_manager, coordinator_address = start_ray_workers(
+                backend_config
+            )
+
+            # Update backend_config with auto-detected coordinator_address if it was None
+            if (
+                backend_config.coordinator_address is None
+                and coordinator_address is not None
+            ):
+                # Create a new config with the auto-detected coordinator_address
+                backend_config = backend_config.model_copy(
+                    update={"coordinator_address": coordinator_address}
+                )
+                logger.info(
+                    f"Updated backend_config with auto-detected coordinator_address: {coordinator_address}"
+                )
+
         self.backend = backend_class(config.base_model, backend_config)
 
         # Track last cleanup time for periodic stale session cleanup
         self._last_cleanup_time: float = time.time()
 
-        logger.info(f"Initialized TinkerEngine with backend={type(self.backend).__name__}")
+        logger.info(
+            f"Initialized TinkerEngine with backend={type(self.backend).__name__}"
+        )
 
     @property
     def metrics(self) -> types.EngineMetrics:
@@ -205,14 +254,18 @@ class TinkerEngine:
         return self.backend.metrics
 
     @contextmanager
-    def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
+    def _checkpoint_status_context(
+        self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType
+    ):
         """Context manager to handle checkpoint DB status updates.
 
         Fetches the checkpoint entry, yields it, and updates its status to COMPLETED
         or FAILED based on whether an exception occurred.
         """
         with Session(self.db_engine) as session:
-            checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type))
+            checkpoint_db = session.get(
+                CheckpointDB, (model_id, checkpoint_id, checkpoint_type)
+            )
             if checkpoint_db is None:
                 raise ValueError(
                     f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}', type '{checkpoint_type}'"
@@ -222,7 +275,9 @@ class TinkerEngine:
                 yield checkpoint_db
                 checkpoint_db.status = CheckpointStatus.COMPLETED
             except Exception as e:
-                logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
+                logger.exception(
+                    f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}"
+                )
                 checkpoint_db.status = CheckpointStatus.FAILED
                 checkpoint_db.error_message = str(e)
                 raise
@@ -268,14 +323,23 @@ class TinkerEngine:
         ops = session.exec(query).all()
 
         # Filter: only include ops that come before their model's barrier
-        batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
+        batchable = [
+            op
+            for op in ops
+            if op.model_id not in barriers or op.request_id < barriers[op.model_id]
+        ]
 
         return {
-            str(f.request_id): (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
+            str(f.request_id): (
+                f.model_id,
+                types.ForwardBackwardInput.model_validate(f.request_data),
+            )
             for f in batchable
         }
 
-    def find_batchable_sample(self, session: Session) -> dict[str, tuple[str, types.SampleInput]]:
+    def find_batchable_sample(
+        self, session: Session
+    ) -> dict[str, tuple[str, types.SampleInput]]:
         """Find all sample ops that can be safely batched together.
 
         Returns sample operations ensuring that each model_id has only one checkpoint_id
@@ -300,22 +364,39 @@ class TinkerEngine:
         sample_ops = session.exec(sample_query).all()
 
         batchable = []
-        model_checkpoints = {}  # Map from model_id to checkpoint_id of first request to that model
+        model_checkpoints = (
+            {}
+        )  # Map from model_id to checkpoint_id of first request to that model
         for op in sample_ops:
             checkpoint_id = op.request_data["checkpoint_id"]
             # Base model requests (empty checkpoint_id) are always compatible, otherwise only
             # take only requests with one checkpoint_id for a given model_id
-            if checkpoint_id == "" or model_checkpoints.setdefault(op.model_id, checkpoint_id) == checkpoint_id:
+            if (
+                checkpoint_id == ""
+                or model_checkpoints.setdefault(op.model_id, checkpoint_id)
+                == checkpoint_id
+            ):
                 batchable.append(op)
 
         # TODO: This leaks the abstraction by accessing backend-specific config.
         # We should find a better way to handle this going forward.
-        if isinstance(self.backend, JaxBackend) and self.backend.config.sample_max_num_sequences > 0:
+        if (
+            isinstance(self.backend, JaxBackend)
+            and self.backend.config.sample_max_num_sequences > 0
+        ):
             batchable = batchable[: self.backend.config.sample_max_num_sequences]
 
-        return {str(f.request_id): (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
+        return {
+            str(f.request_id): (
+                f.model_id,
+                types.SampleInput.model_validate(f.request_data),
+            )
+            for f in batchable
+        }
 
-    def find_single_requests(self, session: Session) -> dict[str, tuple[str, types.RequestType, dict]]:
+    def find_single_requests(
+        self, session: Session
+    ) -> dict[str, tuple[str, types.RequestType, dict]]:
         """Find all requests that need to be processed individually (not batchable).
 
         Args:
@@ -335,9 +416,14 @@ class TinkerEngine:
         )
         other_futures = session.exec(statement).all()
 
-        return {str(f.request_id): (f.model_id, f.request_type, f.request_data) for f in other_futures}
+        return {
+            str(f.request_id): (f.model_id, f.request_type, f.request_data)
+            for f in other_futures
+        }
 
-    def process_create_model(self, model_id: str, request_data: types.CreateModelInput) -> types.CreateModelOutput:
+    def process_create_model(
+        self, model_id: str, request_data: types.CreateModelInput
+    ) -> types.CreateModelOutput:
         """Create and initialize a model."""
         # Create model in backend (allocates adapter_index, creates optimizer, and configures adapter)
         self.backend.create_model(model_id, request_data.lora_config)
@@ -350,16 +436,24 @@ class TinkerEngine:
             lora_config=request_data.lora_config,
         )
 
-    def process_unload_model(self, model_id: str, request_data: types.UnloadModelInput) -> types.UnloadModelOutput:
+    def process_unload_model(
+        self, model_id: str, request_data: types.UnloadModelInput
+    ) -> types.UnloadModelOutput:
         """Unload a model and free all resources."""
         if not self.backend.has_model(model_id):
-            logger.warning(f"Ignoring unload request for model {model_id} that is not loaded.")
+            logger.warning(
+                f"Ignoring unload request for model {model_id} that is not loaded."
+            )
         else:
             self.backend.delete_model(model_id)
 
             # Update model status in DB
             with Session(self.db_engine) as session:
-                _ = session.exec(update(ModelDB).where(ModelDB.model_id == model_id).values(status="unloaded"))
+                _ = session.exec(
+                    update(ModelDB)
+                    .where(ModelDB.model_id == model_id)
+                    .values(status="unloaded")
+                )
                 session.commit()
 
             logger.info(f"Unloaded model {model_id}")
@@ -372,7 +466,9 @@ class TinkerEngine:
         Returns:
             Number of models unloaded
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.config.session_timeout_sec)
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            seconds=self.config.session_timeout_sec
+        )
         unloaded_count = 0
 
         with Session(self.db_engine) as session:
@@ -404,9 +500,13 @@ class TinkerEngine:
                         self.backend.delete_model(model.model_id)
                         model.status = "unloaded"
                         unloaded_count += 1
-                        logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
+                        logger.info(
+                            f"Auto-unloaded stale model {model.model_id} from session {model.session_id}"
+                        )
                     except Exception as e:
-                        logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
+                        logger.error(
+                            f"Failed to auto-unload model {model.model_id}: {e}"
+                        )
                         sessions_with_failed_unloads.add(model.session_id)
                 else:
                     # Model not in backend but status not unloaded - fix DB state
@@ -415,48 +515,66 @@ class TinkerEngine:
             for sess in stale_sessions:
                 if sess.session_id not in sessions_with_failed_unloads:
                     sess.status = "expired"
-                    logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
+                    logger.info(
+                        f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})"
+                    )
 
             session.commit()
 
         return unloaded_count
 
-    def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
+    def process_optim_step(
+        self, model_id: str, request_data: types.OptimStepInput
+    ) -> types.OptimStepOutput:
         """Process an optim_step request and apply accumulated gradients."""
         if not self.backend.has_model(model_id):
             raise ValueError(f"Model {model_id} not loaded")
 
         return self.backend.optim_step(model_id, request_data)
 
-    def process_forward_backward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
+    def process_forward_backward(
+        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
+    ) -> dict:
         """Run forward and backward pass on a batch of requests."""
         prepared = prepare_model_pass_batch(requests)
         return self.backend.forward_backward(prepared)
 
-    def process_forward(self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]) -> dict:
+    def process_forward(
+        self, requests: dict[str, tuple[str, types.ForwardBackwardInput]]
+    ) -> dict:
         """Run forward-only pass on a batch of requests."""
         prepared = prepare_model_pass_batch(requests)
         return self.backend.forward(prepared)
 
-    def process_sample(self, requests: dict[str, tuple[str, types.SampleInput]]) -> dict:
+    def process_sample(
+        self, requests: dict[str, tuple[str, types.SampleInput]]
+    ) -> dict:
         """Generate samples for a batch of requests."""
         prepared = prepare_sample_batch(requests, self.config.checkpoints_base)
         return self.backend.sample(prepared)
 
-    def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
+    def process_load_weights(
+        self, model_id: str, request_data: types.LoadWeightsInput
+    ) -> types.LoadWeightsOutput:
         """Loads a clean, trimmed training checkpoint."""
         if not self.backend.has_model(model_id):
-            raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
+            raise ValueError(
+                "Model not loaded. Create the model before loading a checkpoint."
+            )
 
         checkpoint_path = (
-            self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
+            self.config.checkpoints_base
+            / request_data.source_model_id
+            / f"{request_data.checkpoint_id}.tar.gz"
         )
 
         self.backend.load_checkpoint(checkpoint_path, model_id)
 
         return types.LoadWeightsOutput(type="load_weights")
 
-    def process_save_weights(self, model_id: str, request_data: types.SaveWeightsInput) -> types.SaveWeightsOutput:
+    def process_save_weights(
+        self, model_id: str, request_data: types.SaveWeightsInput
+    ) -> types.SaveWeightsOutput:
         """
         Saves a clean training checkpoint by converting the trimmed NNX graph
         to a pure dictionary before serialization, following official Flax docs.
@@ -465,11 +583,17 @@ class TinkerEngine:
             raise ValueError(f"Model {model_id} not loaded")
 
         checkpoint_id = request_data.path
-        output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        output_path = (
+            self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
+        )
 
-        with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.TRAINING):
+        with self._checkpoint_status_context(
+            model_id, checkpoint_id, types.CheckpointType.TRAINING
+        ):
             self.backend.save_checkpoint(output_path, model_id)
-            logger.info(f"Saved trimmed training checkpoint for model {model_id} to {output_path}")
+            logger.info(
+                f"Saved trimmed training checkpoint for model {model_id} to {output_path}"
+            )
 
         return types.SaveWeightsOutput(
             path=f"tinker://{model_id}/weights/{checkpoint_id}",
@@ -485,14 +609,26 @@ class TinkerEngine:
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
-        output_path = self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
+        output_path = (
+            self.config.checkpoints_base
+            / model_id
+            / "sampler_weights"
+            / f"{checkpoint_id}.tar.gz"
+        )
 
-        with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
+        with self._checkpoint_status_context(
+            model_id, checkpoint_id, types.CheckpointType.SAMPLER
+        ):
             self.backend.save_sampler_checkpoint(output_path, model_id)
-            logger.info(f"Saved LoRA adapter weights for model {model_id} to {output_path}")
+            logger.info(
+                f"Saved LoRA adapter weights for model {model_id} to {output_path}"
+            )
 
         # Return path=None when using sampling_session_seq_id and seq_id (SDK expects this)
-        if request_data.sampling_session_seq_id is not None and request_data.seq_id is not None:
+        if (
+            request_data.sampling_session_seq_id is not None
+            and request_data.seq_id is not None
+        ):
             output_path_str = None
         else:
             output_path_str = f"tinker://{model_id}/{checkpoint_id}"
@@ -514,7 +650,11 @@ class TinkerEngine:
             {
                 "request_id": int(request_id),
                 "result_data": result.model_dump(),
-                "status": RequestStatus.FAILED if isinstance(result, types.ErrorResponse) else RequestStatus.COMPLETED,
+                "status": (
+                    RequestStatus.FAILED
+                    if isinstance(result, types.ErrorResponse)
+                    else RequestStatus.COMPLETED
+                ),
                 "completed_at": completed_at,
             }
             for request_id, result in results.items()
@@ -524,26 +664,41 @@ class TinkerEngine:
             session.execute(update(FutureDB), params)
             session.commit()
 
-    def process_single_request(self, request_type: types.RequestType, model_id: str, request_data: dict) -> BaseModel:
+    def process_single_request(
+        self, request_type: types.RequestType, model_id: str, request_data: dict
+    ) -> BaseModel:
         match request_type:
             case types.RequestType.CREATE_MODEL:
-                return self.process_create_model(model_id, types.CreateModelInput.model_validate(request_data))
+                return self.process_create_model(
+                    model_id, types.CreateModelInput.model_validate(request_data)
+                )
             case types.RequestType.OPTIM_STEP:
-                return self.process_optim_step(model_id, types.OptimStepInput.model_validate(request_data))
+                return self.process_optim_step(
+                    model_id, types.OptimStepInput.model_validate(request_data)
+                )
             case types.RequestType.SAVE_WEIGHTS_FOR_SAMPLER:
                 return self.process_save_weights_for_sampler(
-                    model_id, types.SaveWeightsForSamplerInput.model_validate(request_data)
+                    model_id,
+                    types.SaveWeightsForSamplerInput.model_validate(request_data),
                 )
             case types.RequestType.SAVE_WEIGHTS:
-                return self.process_save_weights(model_id, types.SaveWeightsInput.model_validate(request_data))
+                return self.process_save_weights(
+                    model_id, types.SaveWeightsInput.model_validate(request_data)
+                )
             case types.RequestType.LOAD_WEIGHTS:
-                return self.process_load_weights(model_id, types.LoadWeightsInput.model_validate(request_data))
+                return self.process_load_weights(
+                    model_id, types.LoadWeightsInput.model_validate(request_data)
+                )
             case types.RequestType.UNLOAD_MODEL:
-                return self.process_unload_model(model_id, types.UnloadModelInput.model_validate(request_data))
+                return self.process_unload_model(
+                    model_id, types.UnloadModelInput.model_validate(request_data)
+                )
             case _:
                 raise ValueError(f"Unknown request type: {request_type}")
 
-    def process_single_requests(self, requests: dict[str, tuple[str, types.RequestType, dict]]):
+    def process_single_requests(
+        self, requests: dict[str, tuple[str, types.RequestType, dict]]
+    ):
         """Process a collection of single (non-batchable) requests.
 
         Args:
@@ -555,7 +710,9 @@ class TinkerEngine:
         for request_id, (model_id, request_type, request_data) in requests.items():
             with log_timing(f"process_single_request({request_type.value})"):
                 try:
-                    result = self.process_single_request(request_type, model_id, request_data)
+                    result = self.process_single_request(
+                        request_type, model_id, request_data
+                    )
                 except Exception as e:
                     logger.exception(f"Error processing request {request_id}: {e}")
                     result = types.ErrorResponse(error=str(e), status="failed")
@@ -587,7 +744,10 @@ class TinkerEngine:
                     results = error_results
             except Exception as e:
                 logger.exception(f"Error processing batch: {e}")
-                results = {request_id: types.ErrorResponse(error=str(e), status="failed") for request_id in requests}
+                results = {
+                    request_id: types.ErrorResponse(error=str(e), status="failed")
+                    for request_id in requests
+                }
         self._complete_futures(results)
 
     def process_pending_requests(self):
@@ -599,23 +759,38 @@ class TinkerEngine:
                 forward_backward_requests = self.find_batchable_model_passes(
                     session, types.RequestType.FORWARD_BACKWARD
                 )
-                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
+                forward_requests = self.find_batchable_model_passes(
+                    session, types.RequestType.FORWARD
+                )
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non forward_backward and non sampling)
                 other_requests = self.find_single_requests(session)
 
             # Process batches outside of session context
-            self.process_batch_requests(forward_backward_requests, self.process_forward_backward, "forward_backward")
-            self.process_batch_requests(forward_requests, self.process_forward, "forward")
+            self.process_batch_requests(
+                forward_backward_requests,
+                self.process_forward_backward,
+                "forward_backward",
+            )
+            self.process_batch_requests(
+                forward_requests, self.process_forward, "forward"
+            )
             self.process_batch_requests(sample_requests, self.process_sample, "sample")
 
             # Process other request types individually (in the future we can also batch independent optim_steps)
             self.process_single_requests(other_requests)
 
             # Periodically cleanup stale sessions (disabled if either config is negative)
-            cleanup_enabled = self.config.session_cleanup_interval_sec >= 0 and self.config.session_timeout_sec >= 0
-            if cleanup_enabled and time.time() - self._last_cleanup_time > self.config.session_cleanup_interval_sec:
+            cleanup_enabled = (
+                self.config.session_cleanup_interval_sec >= 0
+                and self.config.session_timeout_sec >= 0
+            )
+            if (
+                cleanup_enabled
+                and time.time() - self._last_cleanup_time
+                > self.config.session_cleanup_interval_sec
+            ):
                 _ = self.cleanup_stale_sessions()
                 self._last_cleanup_time = time.time()
 
@@ -631,7 +806,9 @@ class TinkerEngine:
 def main():
     """Entry point for the background engine."""
     # Create argument parser and add Pydantic model fields
-    parser = argparse.ArgumentParser(description="SkyRL tx tinker engine for processing requests")
+    parser = argparse.ArgumentParser(
+        description="SkyRL tx tinker engine for processing requests"
+    )
     add_model(parser, EngineConfig)
 
     # Parse command-line arguments

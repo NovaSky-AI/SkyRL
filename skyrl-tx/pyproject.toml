@@ -34,6 +34,10 @@ tpu = [
     "jax[tpu]>=0.7.2",
 ]
 
+ray = [
+    "ray[default]>=2.53.0",
+]
+
 tinker = [
     "tinker>=0.3.0",
     "fastapi[standard]",
