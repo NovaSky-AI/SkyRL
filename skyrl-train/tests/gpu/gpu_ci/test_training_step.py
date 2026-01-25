@@ -66,11 +66,9 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
             cfg=cfg,
         )
 
-        # Create TrainingInputBatch - worker's forward_backward handles micro-batching internally
-        dp_size = actor_group.actor_infos[0].rank.dp_size
-        dummy_batch = make_dummy_training_batch(batch_size=dp_size)
+        dummy_batch = make_dummy_training_batch()
 
-        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
+        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
@@ -116,11 +114,9 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
             cfg=cfg,
         )
 
-        # Create TrainingInputBatch - worker's forward_backward handles micro-batching internally
-        dp_size = actor_group.actor_infos[0].rank.dp_size
-        dummy_batch = make_dummy_training_batch(batch_size=dp_size)
+        dummy_batch = make_dummy_training_batch()
 
-        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
+        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for result in results:

@@ -28,7 +28,7 @@ NUM_GPUS = 4
 def run_one_training_step(
     actor_group,
     strategy,
-    data=None,
+    training_batch=None,
     megatron_batch=None,
 ):
     """Run forward_backward + optim_step to perform one training step."""
@@ -36,8 +36,8 @@ def run_one_training_step(
         assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
         return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
     else:
-        assert data is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
-        ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=data))
+        assert training_batch is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
+        ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", training_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
@@ -93,9 +93,8 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
 
         checkpoint_dir = None
         # Create dummy training batches for training steps
-        dp_size = actor_group.actor_infos[0].rank.dp_size
-        dummy_batch_1 = make_dummy_training_batch(batch_size=dp_size)  # First training step
-        dummy_batch_2 = make_dummy_training_batch(batch_size=dp_size)  # Second training step
+        dummy_batch_1 = make_dummy_training_batch()  # First training step
+        dummy_batch_2 = make_dummy_training_batch()  # Second training step
 
         # Ensure the second batch is different from the first
         dummy_batch_2["sequences"] = torch.randint(100, 200, dummy_batch_2["sequences"].shape, device="cpu")
@@ -115,7 +114,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         run_one_training_step(
             actor_group,
             strategy,
-            data=dummy_batch_1,
+            training_batch=dummy_batch_1,
             megatron_batch=train_batch_1,
         )
 
@@ -161,7 +160,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         run_one_training_step(
             actor_group,
             strategy,
-            data=dummy_batch_2,
+            training_batch=dummy_batch_2,
             megatron_batch=train_batch_2,
         )
 
@@ -181,7 +180,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         run_one_training_step(
             actor_group,
             strategy,
-            data=dummy_batch_2,
+            training_batch=dummy_batch_2,
             megatron_batch=train_batch_2,
         )
 

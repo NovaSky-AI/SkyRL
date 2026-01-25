@@ -1067,26 +1067,28 @@ class RayPPOTrainer:
         """
         Run the training step for the policy and critic models.
 
-        For Megatron strategy: uses ppo_train (training loop inside worker)
-        For FSDP strategy: uses forward_backward + optim_step (training loop in trainer)
+        For Megatron: Uses ppo_train via dispatch.
+        For FSDP/FSDP2: Uses forward_backward + optim_step via dispatch.
+
+        Dispatch handles offload/backload automatically when colocate_all=True.
         """
         data.metadata["global_step"] = self.global_step
         critic_status = None
 
         if self.cfg.trainer.strategy == "megatron":
-            # Megatron: training loop inside worker via ppo_train
+            # Megatron: use ppo_train via dispatch
             if self.has_critic:
                 with Timer("critic_train", self.all_timings):
                     critic_status = self.dispatch.ppo_train("critic", data)
             with Timer("policy_train", self.all_timings):
                 policy_status = self.dispatch.ppo_train("policy", data)
         else:
-            # FSDP: training loop in trainer via forward_backward + optim_step
+            # FSDP/FSDP2: use forward_backward + optim_step via dispatch
             if self.has_critic:
                 with Timer("critic_train", self.all_timings):
-                    critic_status = self._execute_training_step("critic", data)
+                    critic_status = self._execute_training_step("critic", data, "critic")
             with Timer("policy_train", self.all_timings):
-                policy_status = self._execute_training_step("policy", data)
+                policy_status = self._execute_training_step("policy", data, "policy")
 
         # Update metrics
         if critic_status is not None:
@@ -1096,6 +1098,7 @@ class RayPPOTrainer:
         for k, v in policy_status.items():
             self.all_metrics.update({f"policy/{k}": v})
 
+        # Empty cache after training
         self.dispatch.empty_cache()
 
         return policy_status

@@ -630,6 +630,27 @@ class PPORayActorGroup:
 
 
 class PolicyWorkerBase(Worker):
+    # TODO(tgriggs): Remove once loss function naming is unified.
+    # Tinker loss_fn names -> SkyRL PolicyLossRegistry names
+    TINKER_LOSS_FN_MAP = {"ppo": "regular"}
+
+    @staticmethod
+    def convert_tinker_loss_config(loss_fn_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert Tinker loss_fn_config to SkyRL algorithm config format.
+
+        Tinker uses absolute ratio bounds (e.g., 0.9, 1.1).
+        SkyRL uses offsets from 1.0 (e.g., 0.1, 0.1).
+        """
+        skyrl_config = {}
+        for k, v in loss_fn_config.items():
+            if k == "clip_low_threshold":
+                skyrl_config["eps_clip_low"] = 1.0 - v  # 0.9 -> 0.1
+            elif k == "clip_high_threshold":
+                skyrl_config["eps_clip_high"] = v - 1.0  # 1.1 -> 0.1
+            else:
+                skyrl_config[k] = v
+        return skyrl_config
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
@@ -647,16 +668,29 @@ class PolicyWorkerBase(Worker):
         The worker no longer needs to know mini batch size - it processes whatever
         batch it receives, breaking it into micro batches. Gradient scaling happens
         at optim_step time based on how many micro batches were accumulated.
-
-        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
-        requires mini-batch normalization in its override. The name is kept for
-        backwards compatibility with Megatron which still does actual normalization.
         """
         if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
             raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
 
         # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
+
+        dp_size = self.mesh_rank.dp_size
+        self.policy_mini_batch_size_per_gpu = (
+            self.cfg.trainer.policy_mini_batch_size * self.cfg.generator.n_samples_per_prompt // dp_size
+        )
+
+    def _get_loss_fn(self, loss_fn: Optional[str] = None) -> Callable:
+        """Get loss function from Tinker name or fall back to config."""
+        if loss_fn is None:
+            name = self.cfg.trainer.algorithm.policy_loss_type
+        elif loss_fn in self.TINKER_LOSS_FN_MAP:
+            name = self.TINKER_LOSS_FN_MAP[loss_fn]
+        else:
+            raise ValueError(
+                f"loss_fn '{loss_fn}' not yet supported. Supported: {list(self.TINKER_LOSS_FN_MAP.keys())}"
+            )
+        return PolicyLossRegistry.get(name)
 
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
         """
@@ -758,6 +792,7 @@ class PolicyWorkerBase(Worker):
         kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
         loss = policy_loss + kl_loss_term - entropy_loss_term
+        # NO loss scaling here - gradient scaling happens at optim_step
         self.strategy.backward(loss, self.model, self.optimizer)
 
         status = {
@@ -894,10 +929,6 @@ class CriticWorkerBase(Worker):
         The worker no longer needs to know mini batch size - it processes whatever
         batch it receives, breaking it into micro batches. Gradient scaling happens
         at optim_step time based on how many micro batches were accumulated.
-
-        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
-        requires mini-batch normalization in its override. The name is kept for
-        backwards compatibility with Megatron which still does actual normalization.
         """
         if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
             raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")

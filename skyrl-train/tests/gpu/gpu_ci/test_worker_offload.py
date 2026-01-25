@@ -92,10 +92,9 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
         actor_group.backload_to_gpu()
         get_rank_0_memory(actor_group, "Before training")
 
-        dp_size = actor_group.actor_infos[0].rank.dp_size
-        dummy_batch = make_dummy_training_batch(batch_size=dp_size)
+        dummy_batch = make_dummy_training_batch()
         # Run first forward_backward + optim_step to get optimizer initialized and stepped
-        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
+        results = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         after_training = get_rank_0_memory(actor_group, "After training")
@@ -141,7 +140,7 @@ async def test_critic_policy_offload_memory_and_correctness(ray_init_fixture, cf
         ), f"Memory after backload model should be greater than after backload optimizer: {after_backload} bytes, after backload optimizer: {after_backload_optimizer} bytes"
 
         # Run training again and ensure output consistency
-        results_backload = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
+        results_backload = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
         for i, result in enumerate(results):
@@ -330,11 +329,10 @@ def test_offload_after_ckpt(ray_init_fixture, strategy):
         get_rank_0_memory(actor_group, "After init")
 
         # Create dummy training batch for training steps
-        dp_size = actor_group.actor_infos[0].rank.dp_size
-        dummy_batch_1 = make_dummy_training_batch(batch_size=dp_size)
+        dummy_batch_1 = make_dummy_training_batch()  # First training step
 
         # Step 1: Do initial forward_backward + optim_step
-        ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch_1))
+        ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", dummy_batch_1))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
         get_rank_0_memory(actor_group, "After training step 1")
 

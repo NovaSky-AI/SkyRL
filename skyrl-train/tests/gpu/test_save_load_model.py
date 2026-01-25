@@ -54,7 +54,7 @@ def get_test_actor_config(strategy: str) -> DictConfig:
 def run_one_training_step(
     actor_group,
     strategy,
-    data=None,
+    training_batch=None,
     megatron_batch=None,
 ):
     """Run forward_backward + optim_step to perform one training step."""
@@ -62,8 +62,8 @@ def run_one_training_step(
         assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
         return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
     else:
-        assert data is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
-        ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=data))
+        assert training_batch is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
+        ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", training_batch))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
@@ -105,15 +105,15 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
             run_one_training_step(
                 actor_group_1,
                 strategy,
-                data=None,
+                training_batch=None,
                 megatron_batch=train_batch_1,
             )
         else:
-            dummy_batch = make_dummy_training_batch(batch_size=dp_size)
+            dummy_batch = make_dummy_training_batch()
             run_one_training_step(
                 actor_group_1,
                 strategy,
-                data=dummy_batch,
+                training_batch=dummy_batch,
                 megatron_batch=None,
             )
 

@@ -9,7 +9,7 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import ray
 from omegaconf import DictConfig
@@ -152,6 +152,8 @@ class WorkerDispatch:
 
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
+
+    # === Training ===
 
     def forward_backward(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """Run forward/backward pass. Needs model + optimizer."""
