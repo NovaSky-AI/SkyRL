@@ -262,11 +262,15 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         num_local_experts = self.lora_A[...].shape[1]
 
         # Reshape LoRA weights in expert-first order
-        lora_A = self.lora_A[...].transpose((1, 0, 2, 3)).reshape(
-            self.max_lora_adapters * num_local_experts, self.in_features, self.max_lora_rank
+        lora_A = (
+            self.lora_A[...]
+            .transpose((1, 0, 2, 3))
+            .reshape(self.max_lora_adapters * num_local_experts, self.in_features, self.max_lora_rank)
         )
-        lora_B = self.lora_B[...].transpose((1, 0, 2, 3)).reshape(
-            self.max_lora_adapters * num_local_experts, self.max_lora_rank, self.out_features
+        lora_B = (
+            self.lora_B[...]
+            .transpose((1, 0, 2, 3))
+            .reshape(self.max_lora_adapters * num_local_experts, self.max_lora_rank, self.out_features)
         )
 
         # Sort tokens by combined index
