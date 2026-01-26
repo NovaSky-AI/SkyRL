@@ -30,7 +30,7 @@ def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_ch
         loss_chunk_size=loss_chunk_size,
         gradient_checkpointing=False,
     )
-    mesh = jax.make_mesh((1, 1), mesh_axes)
+    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=(jax.sharding.AxisType.Auto,) * 2)
     with jax.set_mesh(mesh):
         model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
     load_safetensors(tmp_dir, config, model)

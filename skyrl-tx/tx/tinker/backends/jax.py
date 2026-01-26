@@ -181,6 +181,7 @@ class JaxBackendImpl(AbstractBackend):
                 config.tensor_parallel_size,
             ),
             ("fsdp", "ep", "tp"),
+            axis_types=(jax.sharding.AxisType.Auto,) * 3,
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
