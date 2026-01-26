@@ -175,9 +175,14 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
-        refs = self._actor_groups[model].async_run_ray_method(
-            "mesh", "forward_backward", data, loss_fn=loss_fn, loss_fn_config=loss_fn_config
-        )
+        # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
+        kwargs = {}
+        if loss_fn is not None:
+            kwargs["loss_fn"] = loss_fn
+        if loss_fn_config is not None:
+            kwargs["loss_fn_config"] = loss_fn_config
+
+        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data, **kwargs)
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")

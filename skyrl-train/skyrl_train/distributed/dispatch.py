@@ -161,14 +161,20 @@ class MeshDispatch(Dispatch):
 
     @classmethod
     def validate_dispatch_args(cls, *args, **kwargs) -> Tuple[Tuple, Dict[str, Any]]:
-        # First positional arg must be data (TrainingInputBatch)
-        if not args:
-            raise ValueError("MeshDispatch requires 'data' as first positional argument")
-        data = args[0]
+        # Extract data from either positional arg or kwarg
+        if args:
+            data = args[0]
+            remaining_kwargs = kwargs
+        elif "data" in kwargs:
+            data = kwargs.pop("data")
+            remaining_kwargs = kwargs
+        else:
+            raise ValueError("MeshDispatch requires 'data' as first positional argument or keyword argument")
+
         if not isinstance(data, TrainingInputBatch):
             raise ValueError(f"For MeshDispatch, `data` entry should be a `TrainingInputBatch`, got {type(data)}")
-        # Pass through data as positional arg, and any kwargs (e.g., loss_fn, loss_fn_config)
-        return (data,), kwargs
+        # Pass through data as positional arg, and any other kwargs (e.g., loss_fn, loss_fn_config)
+        return (data,), remaining_kwargs
 
 
 class PassThroughDispatch(Dispatch):
