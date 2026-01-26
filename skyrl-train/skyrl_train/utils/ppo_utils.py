@@ -471,6 +471,8 @@ class PolicyLossType(StrEnum):
     CLIP_COV = "clip_cov"
     KL_COV = "kl_cov"
     SAPO = "sapo"
+    CROSS_ENTROPY = "cross_entropy"
+    IMPORTANCE_SAMPLING = "importance_sampling"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -592,6 +594,82 @@ def ppo_policy_loss(
 
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
     return loss, clip_ratio
+
+
+@register_policy_loss(PolicyLossType.CROSS_ENTROPY)
+def cross_entropy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    """
+    Cross-entropy loss for supervised learning (negative log-likelihood).
+
+    This is the standard supervised learning loss that maximizes the probability
+    of target tokens. It ignores old_log_probs and advantages - those parameters
+    are only present for API compatibility with other policy loss functions.
+
+    Compatible with Tinker's CrossEntropyLoss: loss = -target_logprobs.sum()
+    """
+    loss_reduction = config.loss_reduction
+    assert loss_reduction in [
+        "token_mean",
+        "sequence_mean",
+        "seq_mean_token_sum_norm",
+    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
+
+    # Simply negate log probabilities (supervised learning objective)
+    loss = -log_probs
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    return loss, 0.0  # no clipping for cross-entropy
+
+
+@register_policy_loss(PolicyLossType.IMPORTANCE_SAMPLING)
+def importance_sampling_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    """
+    Importance sampling loss (REINFORCE with importance sampling correction).
+
+    This computes the standard policy gradient objective:
+        loss = -(ratio * advantages)
+    where ratio = exp(log_probs - old_log_probs)
+
+    This is equivalent to PPO without clipping (surr1 only).
+    Compatible with Tinker's ImportanceSamplingLoss.
+    """
+    loss_reduction = config.loss_reduction
+    assert loss_reduction in [
+        "token_mean",
+        "sequence_mean",
+        "seq_mean_token_sum_norm",
+    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
+
+    # Compute importance sampling ratio
+    ratio = _safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+
+    # Policy gradient objective (no clipping)
+    loss = -ratio * advantages
+
+    # Apply TIS if configured
+    if config.use_tis:
+        from loguru import logger as logger_
+
+        logger_.debug(f"Using TIS with dtype: {rollout_logprobs.dtype}")
+        tis_imp_ratio = _safe_exp_delta(old_log_probs - rollout_logprobs, clip=20.0, out_dtype=log_probs.dtype)
+        tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
+        loss = loss * tis_imp_ratio
+
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    return loss, 0.0  # no clipping for importance sampling
 
 
 @register_policy_loss(PolicyLossType.SAPO)

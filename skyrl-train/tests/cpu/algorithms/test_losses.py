@@ -621,3 +621,267 @@ def test_sapo_policy_loss_basic():
 
     # SAPO should always report clip_ratio = 0.0
     assert actual_clip_ratio == 0.0
+
+
+def test_cross_entropy_loss():
+    """Tests cross-entropy loss for supervised learning.
+
+    Cross-entropy should simply negate log probabilities, ignoring old_log_probs and advantages.
+    This is the standard supervised learning objective.
+    """
+
+    device = "cpu"
+
+    # Create test data
+    # For cross-entropy, only log_probs matter (old_log_probs and advantages are ignored)
+    log_probs = torch.tensor([[-0.5, -1.0, -1.5], [-0.8, -1.2, -0.9]], device=device)
+    old_log_probs = torch.tensor([[-999.0, -999.0, -999.0], [-999.0, -999.0, -999.0]], device=device)  # Should be ignored
+    advantages = torch.tensor([[999.0, 999.0, 999.0], [999.0, 999.0, 999.0]], device=device)  # Should be ignored
+
+    # Create config
+    config = DictConfig(
+        {
+            "policy_loss_type": "cross_entropy",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    # Get loss function
+    loss_fn = PolicyLossRegistry.get("cross_entropy")
+
+    # Calculate actual loss
+    actual_loss, actual_clip_ratio = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+    )
+
+    # Expected: simply -log_probs
+    expected_loss_per_token = -log_probs
+    expected_loss = expected_loss_per_token.mean()
+
+    # Verify results
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-6, atol=1e-8)
+    # Cross-entropy should return 0.0 for clip_ratio (no clipping in supervised learning)
+    assert actual_clip_ratio == 0.0
+
+    # Verify that old_log_probs and advantages are truly ignored
+    # Call again with different values - result should be identical
+    different_old_log_probs = torch.zeros_like(old_log_probs)
+    different_advantages = torch.zeros_like(advantages)
+
+    actual_loss_2, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=different_old_log_probs,
+        advantages=different_advantages,
+        config=config,
+    )
+
+    torch.testing.assert_close(actual_loss, actual_loss_2, rtol=1e-6, atol=1e-8)
+
+
+def test_cross_entropy_loss_with_mask():
+    """Tests cross-entropy loss with masking for variable-length sequences."""
+
+    device = "cpu"
+
+    # Create test data with masking
+    log_probs = torch.tensor(
+        [
+            [-0.5, -1.0, -1.5, -2.0],  # Full sequence
+            [-0.8, -1.2, -999.0, -999.0],  # Only first 2 tokens valid
+        ],
+        device=device,
+    )
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 0.0, 0.0]], device=device)
+
+    old_log_probs = torch.zeros_like(log_probs)
+    advantages = torch.zeros_like(log_probs)
+
+    # Test with token_mean
+    config_token = DictConfig(
+        {
+            "policy_loss_type": "cross_entropy",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    loss_fn = PolicyLossRegistry.get("cross_entropy")
+    actual_loss_token, _ = loss_fn(log_probs, old_log_probs, advantages, config_token, loss_mask)
+
+    # Expected: masked mean of -log_probs
+    loss_per_token = -log_probs
+    expected_loss_token = (loss_per_token * loss_mask).sum() / (loss_mask.sum() + 1e-8)
+
+    torch.testing.assert_close(actual_loss_token, expected_loss_token, rtol=1e-6, atol=1e-8)
+
+    # Test with sequence_mean
+    config_seq = DictConfig(
+        {
+            "policy_loss_type": "cross_entropy",
+            "loss_reduction": "sequence_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    actual_loss_seq, _ = loss_fn(log_probs, old_log_probs, advantages, config_seq, loss_mask)
+
+    # Expected: mean of per-sequence masked means
+    seq_means = (loss_per_token * loss_mask).sum(dim=1) / (loss_mask.sum(dim=1) + 1e-8)
+    expected_loss_seq = seq_means.mean()
+
+    torch.testing.assert_close(actual_loss_seq, expected_loss_seq, rtol=1e-6, atol=1e-8)
+
+
+def test_importance_sampling_loss():
+    """Tests importance sampling loss (REINFORCE with IS correction).
+
+    Importance sampling should compute -(ratio * advantages) without clipping.
+    This is equivalent to PPO's surr1 without the clipping of surr2.
+    """
+
+    device = "cpu"
+
+    # Create test data
+    advantages = torch.tensor([[1.0, -1.0, 2.0], [0.5, 1.5, -0.5]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0], [-1.0, -1.0, -1.0]], device=device)
+    log_probs = torch.tensor([[-1.5, -0.5, -1.2], [-0.8, -1.3, -0.9]], device=device)
+
+    # Create config
+    config = DictConfig(
+        {
+            "policy_loss_type": "importance_sampling",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    # Get loss function
+    loss_fn = PolicyLossRegistry.get("importance_sampling")
+
+    # Calculate actual loss
+    actual_loss, actual_clip_ratio = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+    )
+
+    # Expected: -(ratio * advantages) where ratio = exp(log_probs - old_log_probs)
+    ratio = torch.exp(log_probs - old_log_probs)
+    expected_loss_per_token = -ratio * advantages
+    expected_loss = expected_loss_per_token.mean()
+
+    # Verify results
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-8)
+    # Importance sampling has no clipping, so clip_ratio should be 0.0
+    assert actual_clip_ratio == 0.0
+
+
+def test_importance_sampling_vs_ppo():
+    """Tests that importance sampling is equivalent to PPO without clipping.
+
+    When the ratio is within the clipping bounds, PPO and importance sampling
+    should give identical results. When ratio is outside bounds, they should differ.
+    """
+
+    device = "cpu"
+
+    clip_eps = 0.2
+
+    # Create test data with ratios both inside and outside clipping bounds
+    advantages = torch.tensor([[1.0, 1.0, 1.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+
+    # Ratios: [0.6065, 1.0, 1.6487] -> first and third are outside [0.8, 1.2]
+    log_probs = torch.tensor([[-1.5, -1.0, -0.5]], device=device)
+
+    # Importance sampling config
+    is_config = DictConfig(
+        {
+            "policy_loss_type": "importance_sampling",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    # PPO config
+    ppo_config = DictConfig(
+        {
+            "eps_clip_low": clip_eps,
+            "eps_clip_high": clip_eps,
+            "policy_loss_type": "regular",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": False,
+        }
+    )
+
+    is_loss_fn = PolicyLossRegistry.get("importance_sampling")
+    ppo_loss_fn = PolicyLossRegistry.get("regular")
+
+    is_loss, _ = is_loss_fn(log_probs, old_log_probs, advantages, is_config)
+    ppo_loss, _ = ppo_loss_fn(log_probs, old_log_probs, advantages, ppo_config)
+
+    # They should be different because some ratios are outside clipping bounds
+    assert not torch.allclose(
+        is_loss, ppo_loss, rtol=1e-3
+    ), f"IS and PPO should differ with clipping: is={is_loss:.6f} vs ppo={ppo_loss:.6f}"
+
+    # Verify IS loss is unclipped
+    ratio = torch.exp(log_probs - old_log_probs)
+    expected_is_loss = -(ratio * advantages).mean()
+    torch.testing.assert_close(is_loss, expected_is_loss, rtol=1e-5, atol=1e-8)
+
+
+def test_importance_sampling_with_tis():
+    """Tests importance sampling with truncated importance sampling (TIS)."""
+
+    device = "cpu"
+
+    # Create test data
+    advantages = torch.tensor([[1.0, -1.0, 2.0]], device=device)
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
+    log_probs = torch.tensor([[-1.5, -0.5, -1.2]], device=device)
+    rollout_logprobs = torch.tensor([[-0.8, -1.2, -0.9]], device=device)
+
+    # Create config with TIS enabled
+    config = DictConfig(
+        {
+            "policy_loss_type": "importance_sampling",
+            "loss_reduction": "token_mean",
+            "max_seq_len": 4,
+            "use_tis": True,
+            "tis_imp_ratio_cap": 2.0,
+        }
+    )
+
+    # Get loss function
+    loss_fn = PolicyLossRegistry.get("importance_sampling")
+
+    # Calculate actual loss
+    actual_loss, _ = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        rollout_logprobs=rollout_logprobs,
+    )
+
+    # Expected: -(ratio * advantages * tis_ratio)
+    ratio = torch.exp(log_probs - old_log_probs)
+    tis_imp_ratio = torch.exp(old_log_probs - rollout_logprobs)
+    tis_imp_ratio = torch.clamp(tis_imp_ratio, max=2.0)
+    expected_loss_per_token = -ratio * advantages * tis_imp_ratio
+    expected_loss = expected_loss_per_token.mean()
+
+    # Verify results
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-8)

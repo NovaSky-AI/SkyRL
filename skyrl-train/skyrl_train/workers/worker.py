@@ -722,8 +722,15 @@ class PolicyWorkerBase(Worker):
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
             )
             # loss function
+            # Check if batch metadata specifies a loss function (e.g., from Tinker API)
+            # Otherwise fall back to config (standard SkyRL behavior)
+            if experience.metadata and "loss_fn" in experience.metadata:
+                policy_loss_fn = PolicyLossRegistry.get(experience.metadata["loss_fn"])
+            else:
+                policy_loss_fn = self.policy_loss_fn
+
             # TODO: recompute advantages
-            policy_loss, clip_ratio = self.policy_loss_fn(
+            policy_loss, clip_ratio = policy_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -745,7 +752,13 @@ class PolicyWorkerBase(Worker):
             entropy_loss_term = torch.tensor(0.0)
 
         # kl loss
-        if self.cfg.trainer.algorithm.use_kl_loss:
+        # Check if KL inputs are actually provided (not just zeros)
+        # This handles cases where Tinker API doesn't provide base_action_log_probs
+        has_kl_inputs = (
+            base_action_log_probs is not None and not torch.all(base_action_log_probs == 0).item()
+        )
+
+        if self.cfg.trainer.algorithm.use_kl_loss and has_kl_inputs:
             kl_loss = compute_approx_kl(
                 action_log_probs,
                 base_action_log_probs,
