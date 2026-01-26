@@ -114,10 +114,10 @@ class LogitsProcessorMixin:
         def compute_chunk_logprobs(args):
             """Compute lm_head and log probabilities for a chunk of tokens."""
             chunk_hidden, chunk_targets, chunk_adapters = args
-            # Reshape to [chunk_size, 1, H] for lm_head (batch=chunk_size, seq=1)
-            chunk_hidden_3d = chunk_hidden[:, None, :]
-            # Compute logits: [chunk_size, 1, H] -> [chunk_size, 1, V] -> [chunk_size, V]
-            chunk_logits = lm_head(chunk_hidden_3d, chunk_adapters)[:, 0, :]
+            # Reshape chunk_hidden to [chunk_size, 1, H] for lm_head
+            # and compute chunk_logits: [chunk_size, 1, H] -> [chunk_size, 1, V] -> [chunk_size, V]
+            # TODO: Remove the conversion and make it so lm_head can operate on 2d tensors directly
+            chunk_logits = lm_head(chunk_hidden[:, None, :], chunk_adapters)[:, 0, :]
             return LogitsProcessorMixin.logits_to_logprobs(chunk_logits, chunk_targets)
 
         if self.config.gradient_checkpointing:
