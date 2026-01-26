@@ -341,10 +341,6 @@ class Qwen3Model(nnx.Module):
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
 
-        # Checkpointing: use scan so XLA compiles ONE loop body and reuses
-        # buffers during recomputation. Without checkpointing, activations are
-        # stored anyway, so scan's buffer reuse doesn't help and its weight
-        # stacking overhead makes it worse.
         if is_training and self.config.gradient_checkpointing:
             hidden_states, all_hidden_states = forward_layers_checkpointed(
                 self.layers,
