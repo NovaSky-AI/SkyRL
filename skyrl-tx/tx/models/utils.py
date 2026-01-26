@@ -7,7 +7,7 @@ from jax import numpy as jnp
 from tx.utils.generator import KVCache
 
 
-def forward_layers_checkpointed(
+def _forward_layers_checkpointed(
     layers: nnx.List,
     hidden_states: jax.Array,
     *,
@@ -57,7 +57,7 @@ def forward_layers_checkpointed(
     return final_hs, all_hidden_states
 
 
-def forward_layers(
+def _forward_layers_standard(
     layers: nnx.List,
     hidden_states: jax.Array,
     *,
@@ -67,16 +67,7 @@ def forward_layers(
     kv_cache: KVCache | None,
     output_hidden_states: bool,
 ) -> tuple[jax.Array, list[jax.Array], list[jax.Array], list[jax.Array]]:
-    """Standard forward pass through decoder layers.
-
-    Used for inference (with KV cache) and training without checkpointing.
-
-    Returns:
-        hidden_states: Final hidden states after all layers
-        all_hidden_states: List of hidden states from each layer (if output_hidden_states)
-        updated_keys: List of updated key caches
-        updated_values: List of updated value caches
-    """
+    """Standard forward pass through decoder layers."""
     all_hidden_states: list[jax.Array] = []
     updated_keys, updated_values = [], []
 
@@ -96,3 +87,47 @@ def forward_layers(
         updated_values.append(v)
 
     return hidden_states, all_hidden_states, updated_keys, updated_values
+
+
+def forward_layers(
+    layers: nnx.List,
+    hidden_states: jax.Array,
+    *,
+    attention_mask: jax.Array,
+    positions: jax.Array,
+    adapter_indices: jax.Array | None,
+    kv_cache: KVCache | None,
+    output_hidden_states: bool,
+    is_training: bool,
+    gradient_checkpointing: bool,
+) -> tuple[jax.Array, list[jax.Array], list[jax.Array], list[jax.Array]]:
+    """Forward pass through decoder layers with optional gradient checkpointing.
+
+    Chooses between checkpointed (scan-based) and standard (loop-based) paths.
+
+    Returns:
+        hidden_states: Final hidden states after all layers
+        all_hidden_states: List of hidden states from each layer (if output_hidden_states)
+        updated_keys: List of updated key caches (empty if checkpointing)
+        updated_values: List of updated value caches (empty if checkpointing)
+    """
+    if is_training and gradient_checkpointing:
+        hidden_states, all_hidden_states = _forward_layers_checkpointed(
+            layers,
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            output_hidden_states=output_hidden_states,
+        )
+        return hidden_states, all_hidden_states, [], []
+    else:
+        return _forward_layers_standard(
+            layers,
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+        )

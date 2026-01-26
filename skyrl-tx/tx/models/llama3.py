@@ -8,7 +8,7 @@ from tx.layers.attention import dot_product_attention
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
-from tx.models.utils import forward_layers, forward_layers_checkpointed
+from tx.models.utils import forward_layers
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -226,26 +226,17 @@ class Llama3Model(nnx.Module):
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
 
-        if is_training and self.config.gradient_checkpointing:
-            hidden_states, all_hidden_states = forward_layers_checkpointed(
-                self.layers,
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                output_hidden_states=output_hidden_states,
-            )
-            updated_keys, updated_values = [], []
-        else:
-            hidden_states, all_hidden_states, updated_keys, updated_values = forward_layers(
-                self.layers,
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache,
-                output_hidden_states=output_hidden_states,
-            )
+        hidden_states, all_hidden_states, updated_keys, updated_values = forward_layers(
+            self.layers,
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+            is_training=is_training,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+        )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
