@@ -1,9 +1,7 @@
 ---
 title: "FlashRL + SkyRL: Training with Quantized Rollouts"
-description: "FlashRL + SkyRL: Training with Quantized Rollouts"
 ---
 
-# FlashRL + SkyRL: Training with Quantized Rollouts
 
 In this example, we walk through how to train a model with quantized rollouts using [FlashRL](https://fengyao.notion.site/flash-rl) and SkyRL.
 
@@ -18,7 +16,9 @@ In this example, we walk through how to train a model with quantized rollouts us
 
 SkyRL now has a native integration with FlashRL. Currently, we support training with Int8 quantization as well as [online FP8 quantization](https://docs.vllm.ai/en/v0.9.2/features/quantization/fp8.html#online-dynamic-quantization) in vLLM. 
 
-> **Warning:**    FlashRL integration only supports single-turn training at the moment.
+<Callout type="warn">
+FlashRL integration only supports single-turn training at the moment.
+</Callout>
 
 ### How does it work?
 
@@ -48,9 +48,7 @@ DATA_DIR="$HOME/data/dapo" bash examples/algorithms/dapo/prepare_dapo_data.sh
 
 We highlight some important training parameters configured for FlashRL from our example configuration at `examples/flash_rl/run_dapo_repro_flashrl_32b_int8.sh`:
 
-```bash
-:caption: Training configuration at `examples/flash_rl/run_dapo_repro_flashrl_32b_int8.sh`
-
+```bash title="examples/flash_rl/run_dapo_repro_flashrl_32b_int8.sh"
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/dapo"
 
@@ -69,13 +67,10 @@ uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.int8 -m exam
 
 Here, we've configured training to use TIS with the importance sampling ratio cap of 8.0. `generator.sampling_params.logprobs=0` ensures that logprobs for the chosen tokens are returned by the inference engine, which is required for TIS. Note that for making sure the FlashRL patches are applied for vLLM, we use the `FLASHRL_CONFIG` environment variable in `examples/flash_rl/.env.int8`: 
 
-```bash
-:caption: Environment variables at `examples/flash_rl/.env.int8`
-
+```bash title="examples/flash_rl/.env.int8"
 FLASHRL_CONFIG=LiyuanLucasLiu/Qwen2.5-32B-quantized.w8a8/flashrl_config.yaml
 # FLASHRL_LOGGING_LEVEL=DEBUG <--- optional
 ...
-
 ```
 
 For a more lightweight example, we also provide scripts for training on Qwen2.5-0.5B-Instruct with Int8 rollouts at `examples/flash_rl/run_dapo_repro_flashrl_0.5b_int8.sh`.
@@ -93,20 +88,19 @@ For FP8, this is simply a string (`fp8_vllm`) while for Int8, this is a path to 
 
 For Qwen2.5-0.5B-Instruct, the `FLASHRL_CONFIG` is `LiyuanLucasLiu/Qwen2.5-0.5B-Instruct-quantized.w8a8-RedHatAI/flashrl_config.yaml` which contains the following:
 
-```yaml
-:caption: `LiyuanLucasLiu/Qwen2.5-0.5B-Instruct-quantized.w8a8-RedHatAI/flashrl_config.yaml`
-
+```yaml title="flashrl_config.yaml"
 configs:
   - distributed_executor_backend: external_launcher # ignored in SkyRL - We use the ray backend for vLLM
     fn: int8 # dictates the quantization type
     load_format: auto
     model: LiyuanLucasLiu/Qwen2-0.5B-Instruct-quantized.w8a8-RedHatAI # custom model path passed to vLLM at init - weights are loaded directly in int8
     profile: LiyuanLucasLiu/Qwen2-0.5B-Instruct-quantized.w8a8-RedHatAI/profile.pt # calibration profile for Qwen's weights, used during weight syncing
-
 ```
 
 While most parameters are self-explanatory, the `profile` parameter is used to specify the calibration profile for Qwen's weights. This is used during weight syncing, when the policy model sends weights in half precision (bfloat16) to the inference engine. This profile is used to quantize the weights in bfloat16 to int8 before loading.
 
-> **Warning:**    FlashRL integration is experimental. While generation times can improve for large models with quantization, we've observed that the time spent in weight syncing is much higher with FlashRL for FP8. This negates some of the benefits of FP8 inference. The slowdown is primarily due to slow weight quantization in vLLM's `process_weights_after_loading` function and we are working on improving this.
+<Callout type="warn">
+FlashRL integration is experimental. While generation times can improve for large models with quantization, we've observed that the time spent in weight syncing is much higher with FlashRL for FP8. This negates some of the benefits of FP8 inference. The slowdown is primarily due to slow weight quantization in vLLM's `process_weights_after_loading` function and we are working on improving this.
 
-   We recommend to use Int8 quantization over FP8 if possible.
+We recommend to use Int8 quantization over FP8 if possible.
+</Callout>

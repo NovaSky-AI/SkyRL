@@ -25,6 +25,22 @@ Timeout for initializing the NCCL process group for the worker, defaults to 10 m
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Inference Server
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_VLLM_DP_PORT_OFFSET = int(os.environ.get("SKYRL_VLLM_DP_PORT_OFFSET", 500))
+"""
+Offset for the data parallel port of the vLLM server.
+"""
+
+SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S = int(
+    os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", 600)
+)
+"""
+Timeout for waiting until the inference server is healthy.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runtime Environment Exports
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -1,9 +1,7 @@
 ---
 title: "DAPO"
-description: "DAPO"
 ---
 
-# DAPO
 
 The [DAPO](https://arxiv.org/abs/2503.14476) (Decoupled Clip and Dynamic Sampling Policy Optimization) algorithm consists of the following components on top of a GRPO baseline:
 
@@ -75,9 +73,7 @@ generator:
 To enable soft overlong punishment, you can create a custom trainer class and override the `RayPPOTrainer` `postprocess_generator_output` method to additionally apply soft overlong punishment to rewards.
 We provide an example of this in `examples/algorithms/dapo/main_dapo.py`, and show an overview of the implementation below:
 
-```python
-:caption: `skyrl_train/examples/algorithms/dapo/main_dapo.py`
-
+```python title="examples/algorithms/dapo/main_dapo.py"
 class DAPOTrainer(RayPPOTrainer):
   @torch.no_grad()
   def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
@@ -101,12 +97,9 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 To add the overlong buffer length and penalty factor parameters to the config, you can add the following lines to the `run_dapo_gsm8k.sh` script:
 
-```bash
-:caption: `skyrl_train/examples/algorithms/dapo/run_dapo_gsm8k.sh`
-
+```bash title="examples/algorithms/dapo/run_dapo_gsm8k.sh"
 +trainer.algorithm.overlong_buffer.len=512 \
 +trainer.algorithm.overlong_buffer.penalty_factor=1.0 \
-
 ```
 
 ### Launching a DAPO Training Run

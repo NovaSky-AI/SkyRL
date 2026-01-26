@@ -1,9 +1,7 @@
 ---
 title: "Configuration Overview"
-description: "Configuration Overview"
 ---
 
-# Configuration Overview
 
 ## Data Configuration
 
@@ -197,9 +195,9 @@ Some rules for configuring these parameters:
 - `world_size % (pp_size * ep_size * etp_size) == 0`
     - This means that `ep_size * etp_size` can scale independently of `tp_size * cp_size`, and can go across data parallel ranks.
 
-> **Warning:**   `optimizer_config_kwargs.use_precision_aware_optimizer=true` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820.
-
-  We recommend leaving this setting to `false`
+<Callout type="warn">
+`optimizer_config_kwargs.use_precision_aware_optimizer=true` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820. We recommend leaving this setting to `false`.
+</Callout>
 
 ## Optimizer Configuration
 
@@ -330,7 +328,9 @@ ref:
 - `ref.fsdp_config`: FSDP configuration, applicable if `trainer.strategy='fsdp'`.
 - `ref.sequence_parallel_size`: Sequence parallel size. We implement [Ulysses sequence parallelism](https://arxiv.org/abs/2309.14509)
 
-> **Note:**   The reference model is used only if the base model log probabilities are required either as a part of the training loss or as a part of the reward. Thus, `trainer.algorithm.use_kl_in_reward` or `trainer.algorithm.use_kl_loss` should be set to `true` to use the reference model. If both are `false`, then the reference model is not instantiated.
+<Callout type="info">
+The reference model is used only if the base model log probabilities are required either as a part of the training loss or as a part of the reward. Thus, `trainer.algorithm.use_kl_in_reward` or `trainer.algorithm.use_kl_loss` should be set to `true` to use the reference model. If both are `false`, then the reference model is not instantiated.
+</Callout>
 
 ## Algorithm Configuration
 

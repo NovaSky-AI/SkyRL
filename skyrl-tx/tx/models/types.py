@@ -5,13 +5,13 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import jax
-from transformers import PretrainedConfig
 
+from tx.models.configs import ModelConfig
 from tx.utils.generator import KVCache
 
 
 class ModelForCausalLM(Protocol):
-    config: PretrainedConfig
+    config: ModelConfig
 
 
 @jax.tree_util.register_dataclass

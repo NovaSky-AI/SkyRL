@@ -1,17 +1,15 @@
 ---
 title: "Implementing Custom Algorithms"
-description: "Implementing Custom Algorithms"
 ---
 
-# Implementing Custom Algorithms
 
 SkyRL-Train provides a registry system for easily implementing custom algorithms (advantage estimators, policy loss) without modifying the core codebase. 
-The API for the registry system can be found in the [registry API](../api/registry).
+The API for the registry system can be found in [skyrl_train/utils/ppo_utils.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/utils/ppo_utils.py).
 Example scripts of using the registry can be found at `examples/algorithms/`.
 
 Additionally for more control, you can subclass the `BasePPOExp` class from `skyrl_train/entrypoints/main_base.py` and override the `BasePPOExp.get_trainer` method to return a custom trainer class.
 This allows you to have full control over the training loop and implementing custom reward functions and output postprocessing.
-We provide an example of this for applying custom reward penalties in our [DAPO example](./dapo.mdx#creating-a-custom-trainer).
+We provide an example of this for applying custom reward penalties in our [DAPO example](./dapo#creating-a-custom-trainer).
 
 ### Registering a Custom Advantage Estimator
 
@@ -92,7 +90,7 @@ def skyrl_entrypoint(cfg: DictConfig):
 ### Creating a Custom Trainer
 
 To create a custom trainer for full control of your training loop, you can subclass the `BasePPOExp` class from `skyrl_train/entrypoints/main_base.py` and override the `BasePPOExp.get_trainer` method to return a custom trainer class.
-We show the outline of creating a custom trainer below, and you can find a full running example in our [DAPO example](./dapo.mdx#creating-a-custom-trainer).
+We show the outline of creating a custom trainer below, and you can find a full running example in our [DAPO example](./dapo#creating-a-custom-trainer).
 
 ```python
 class CustomTrainer(RayPPOTrainer):

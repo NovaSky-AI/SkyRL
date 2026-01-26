@@ -1,9 +1,7 @@
 ---
 title: "SkyAgent Overview"
-description: "SkyAgent Overview"
 ---
 
-# SkyAgent Overview
 
 SkyAgent is a generic agent layer for training and evaluating agents. It is a flexible frontend for building your own agents. 
 
@@ -15,7 +13,9 @@ SkyAgent is designed primarily for researchers to have a unified interface aroun
 4. Improve dispatching logic for a batch of trajectories easily
 5. And more ...
 
-> **Warning:**     ⚠️ SkyAgent is still under active development. We welcome any early feedback and contributions. 
+<Callout type="warn">
+SkyAgent is still under active development. We welcome any early feedback and contributions.
+</Callout> 
 
 ## Examples
 
@@ -48,9 +48,7 @@ The results of both `generate_trajectory` and `evaluate_trajectory` are stored i
 
 Here's a high-level diagram of the components involved in generating a trajectory:
 
-   :alt: Generate Trajectory
-   :align: center
-   :width: 80%
+![Generate Trajectory](/images/skyagent/generate_trajectory.png)
 
 ## Agent
 
@@ -64,13 +62,11 @@ The backend is the LLM backend for generating responses. For example, this can b
 
 The dispatcher handles the actual execution of a batch of trajectories efficiently. It takes in a batch of trajectories and executes `initialize_trajectory`, `generate_trajectory`, and `evaluate_trajectory` for each trajectory in certain concurrency. 
 
-For example, we provide a pipelined dispatcher that can run multiple trajectories in parallel with a maximum concurrency per stage (initialize, generate, evaluate) of `max_parallel_agents`. 
+For example, we provide a pipelined dispatcher that can run multiple trajectories in parallel with a maximum concurrency per stage (initialize, generate, evaluate) of `max_parallel_agents`.
 
-   :alt: SkyAgent Dispatcher
-   :align: center
-   :width: 80%
+![SkyAgent Dispatcher](/images/skyagent/dispatcher_skyagent.png)
 
-   Overview of the pipelined dispatcher with `max_parallel_agents=3`
+*Overview of the pipelined dispatcher with `max_parallel_agents=3`*
 
 ## Task
 

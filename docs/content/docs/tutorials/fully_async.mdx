@@ -1,9 +1,7 @@
 ---
 title: "(Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout"
-description: "(Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout"
 ---
 
-# (Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout
 
 SkyRL supports fully async training for any generator that implements the `GeneratorInterface`, including your **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
 
@@ -15,7 +13,9 @@ The core logic of fully async training lives in [fully_async_trainer.py](https:/
 
 **Overview of Fully Async Training in SkyRL**
 
-> **Note:**     The fully async training is currently only supported for Generators that use `/chat/completions`. We will support `.generate()` and `/completions` soon.
+<Callout type="info">
+The fully async training is currently only supported for Generators that use `/chat/completions`. We will support `.generate()` and `/completions` soon.
+</Callout>
 
 ## I. What is Fully Async Training?
 
@@ -246,9 +246,13 @@ Possible ways for handling such rare groups that violate the `S` bound:
 
 When saving a checkpoint, only trainer-consumed state is recorded. On resume, we set `accepted := consumed` (and do not restore those that were running or about-to-be-consumed in the buffer), which preserves the capacity invariant without reintroducing stale or partially generated work.
 
-> **Note:**     `AsyncStalenessManager` is a deliberate design choice. One could instead over-generate and drop groups that are too stale at training time. We prefer proactive admission control to avoid wasted compute and simplify buffer management. With very small `S`, the system may stall more often; increasing `S` trades off stricter on-policy-ness for higher throughput.
+<Callout type="info">
+`AsyncStalenessManager` is a deliberate design choice. One could instead over-generate and drop groups that are too stale at training time. We prefer proactive admission control to avoid wasted compute and simplify buffer management. With very small `S`, the system may stall more often; increasing `S` trades off stricter on-policy-ness for higher throughput.
+</Callout>
 
-> **Note:**     Our capacity formula uses `current_global_step` directly (no `+1`) because in SkyRL `current_global_step` denotes the version being worked on, whereas AReal's derivation counts completed versions. This matches the implementation in `fully_async_trainer.py`.
+<Callout type="info">
+Our capacity formula uses `current_global_step` directly (no `+1`) because in SkyRL `current_global_step` denotes the version being worked on, whereas AReal's derivation counts completed versions. This matches the implementation in `fully_async_trainer.py`.
+</Callout>
 
 ## IV. More Implementation Details
 

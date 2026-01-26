@@ -1,15 +1,13 @@
 ---
 title: "Multi-Turn GRPO Text2SQL with Async Rollouts"
-description: "Multi-Turn GRPO Text2SQL with Async Rollouts"
 ---
 
-# Multi-Turn GRPO Text2SQL with Async Rollouts
 
 In this example, we walk through how to train an effective multi-turn Text2SQL model (beating GPT-4o) with SkyRL using async rollouts.
 
 We provide an implementation of a multi-turn Text2SQL environment at :skyrl_gym_link:`skyrl_gym/envs/sql/env.py`.
 
-You can find the exact recipe for reproducing our prior [SkyRL-SQL-7B](https://novasky-ai.notion.site/skyrl-sql) release at [../recipes/skyrl-sql](../recipes/skyrl-sql).
+You can find the exact recipe for reproducing our prior [SkyRL-SQL-7B](https://novasky-ai.notion.site/skyrl-sql) release at [SkyRL-SQL Recipe](../recipes/skyrl-sql).
 
 ## Task Overview
 
@@ -76,9 +74,7 @@ unzip <path_to_file.zip>
 
 Now that we have our dataset and database files, let's walk through the some of the key training configurations.
 
-```bash
-:caption: Training configuration at `skyrl_train/examples/text_to_sql/run_skyrl_sql.sh`
-
+```bash title="examples/text_to_sql/run_skyrl_sql.sh"
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/sql"
 # path for .db files for environment interaction
@@ -175,5 +171,5 @@ And now watch your model start to learn to generate better SQL queries!
 
 Now that you've seen what's possible with multi-turn training with async rollouts, you might want to start building your own multi-turn environments!
 
-- [../tutorials/new_env](../tutorials/new_env): Learn how to build your own multi-turn environments!
-- [search](search): Learn how to train a multi-turn search agent with SkyRL!
+- [Creating a New Environment](../tutorials/new_env): Learn how to build your own multi-turn environments!
+- [Search Example](search): Learn how to train a multi-turn search agent with SkyRL!

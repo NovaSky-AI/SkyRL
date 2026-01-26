@@ -1,13 +1,14 @@
 ---
 title: "Quick Start: GRPO on GSM8K"
-description: "Quick Start: GRPO on GSM8K"
 ---
 
-# Quick Start: GRPO on GSM8K
+<Callout type="info">
+Make sure you've completed the [installation guide](installation) before proceeding.
+</Callout>
 
-First, follow the guide at [installation](installation) to get your environment set up.
+In this quickstart, we'll walk you through running GRPO training on the GSM8K dataset.
 
-In this quickstart, we'll walk you through running GRPO training on the GSM8K dataset. You'll prepare the dataset, configure your training parameters, and launch your first SkyRL training run.
+You'll prepare the dataset, configure your training parameters, and launch your first SkyRL training run.
 
 ## Dataset Preparation
 
@@ -70,6 +71,10 @@ Depending on your hardware setup, you may want to adjust a few parameters:
 
 2. **InferenceEngine Matching**: Ensure that `num_inference_engines * inference_engine_tensor_parallel_size` equals the total number of GPUs used for the policy model above.
 
+<Callout type="warn">
+Mismatched GPU counts between inference engines and policy model can cause training failures.
+</Callout>
+
 ## Launching Your Training Run
 
 Now for the exciting part! First, configure your WandB API key for logging:
@@ -96,6 +101,6 @@ The training progress will be logged to your terminal, showing you which part of
 
 Now that you've got the basics down, you might want to explore:
 
-- [../tutorials/new_env](../tutorials/new_env): Creating a new environment without touching the training loop
-- [../tutorials/one_step_off_async](../tutorials/one_step_off_async): Asynchronous off-by-one training in < 100 lines of code!
-- [../recipes/overview](../recipes/overview): A collection of end-to-end recipes with SkyRL.
+- [Creating a New Environment](../tutorials/new_env): Creating a new environment without touching the training loop
+- [Async Training](../tutorials/one_step_off_async): Asynchronous off-by-one training in < 100 lines of code!
+- [Recipes](../recipes/overview): A collection of end-to-end recipes with SkyRL.
