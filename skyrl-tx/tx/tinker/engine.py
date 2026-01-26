@@ -1,6 +1,7 @@
 """Background engine for processing training requests."""
 
 import argparse
+import math
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -269,6 +270,26 @@ class TinkerEngine:
 
         # Filter: only include ops that come before their model's barrier
         batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
+
+        # Limit total micro batches if configured
+        if self.config.max_micro_batches > 0 and isinstance(self.backend, JaxBackend):
+            micro_batch_size = self.backend.config.train_micro_batch_size
+            limited = []
+            total_micro_batches = 0
+            for op in batchable:
+                num_sequences = len(op.request_data.get("data", []))
+                if micro_batch_size > 0:
+                    # Gradient accumulation enabled: count actual micro batches
+                    num_micro_batches = math.ceil(num_sequences / micro_batch_size)
+                else:
+                    # Full batch mode: each request is processed as one unit
+                    num_micro_batches = 1
+                # Always include at least one request to avoid starvation
+                if limited and total_micro_batches + num_micro_batches > self.config.max_micro_batches:
+                    break
+                limited.append(op)
+                total_micro_batches += num_micro_batches
+            batchable = limited
 
         return {
             str(f.request_id): (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
