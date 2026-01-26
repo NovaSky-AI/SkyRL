@@ -87,10 +87,6 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=1024,
         description="Chunk size for cross-entropy loss computation. Reduces memory by avoiding full [B*T, V] logits materialization. Set to 0 to disable chunking.",
     )
-    loss_chunk_size: int = Field(
-        default=1024,
-        description="Chunk size for cross-entropy loss computation. Reduces memory by avoiding full [B*T, V] logits materialization. Set to 0 to disable chunking.",
-    )
     # Multi-node configuration
     coordinator_address: str | None = Field(
         default=None,
