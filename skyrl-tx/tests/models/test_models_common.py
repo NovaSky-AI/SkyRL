@@ -10,8 +10,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from tx.models.configs import Llama3Config, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
-from tx.tinker.types import SamplingParams
-from tx.utils.models import get_dtype, load_safetensors
+from tx.utils.models import load_safetensors
 
 
 @pytest.mark.parametrize(
@@ -22,59 +21,31 @@ from tx.utils.models import get_dtype, load_safetensors
     ],
     ids=["llama3", "qwen3"],
 )
-def test_skip_prompt_logits(model_name, config_cls, model_cls, mesh_axes):
-    """Test that skip_prompt_logits returns correct shape and values."""
+def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
+    """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
 
     inputs = ["The capital of France is", "Hello world"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
-    batch_size, seq_len = batch.input_ids.shape
 
     with tempfile.TemporaryDirectory() as tmp:
+        # Load HF model, get logits, save weights, then delete to free memory
+        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+        hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
+        hf_logits = hf_outputs.logits.detach().numpy()
         hf_model.save_pretrained(tmp, safe_serialization=True)
+        del hf_model, hf_outputs
 
+        # Load our model from saved weights
         base_config = AutoConfig.from_pretrained(model_name)
         config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
         mesh = jax.make_mesh((1, 1), mesh_axes)
         with jax.set_mesh(mesh):
-            model = model_cls(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
+            model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
 
-        # Get full logits
-        outputs_full = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
-        assert outputs_full.logits.shape == (batch_size, seq_len, config.vocab_size)
+        # Get our logits via compute_logits
+        outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
+        our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
 
-        # Get last token logits only
-        outputs_last = model(
-            batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), skip_prompt_logits=True
-        )
-        assert outputs_last.logits.shape == (
-            batch_size,
-            1,
-            config.vocab_size,
-        ), f"Expected shape ({batch_size}, 1, {config.vocab_size}), got {outputs_last.logits.shape}"
-
-        # Last token logits should match
-        assert np.allclose(outputs_full.logits[:, -1:, :], outputs_last.logits, rtol=1e-5, atol=1e-5)
-
-        # Test generation equivalence with and without prompt_logprobs
-        input_ids = jnp.array(batch.input_ids.numpy())
-        attention_mask = jnp.array(batch.attention_mask.numpy())
-        sampling_params = [SamplingParams(max_tokens=8, temperature=0.0, seed=42)] * batch_size
-
-        result_with = model.generate(input_ids, attention_mask, sampling_params=sampling_params, prompt_logprobs=True)
-        result_without = model.generate(
-            input_ids, attention_mask, sampling_params=sampling_params, prompt_logprobs=False
-        )
-
-        for i in range(batch_size):
-            assert (
-                result_with.generated_ids[i] == result_without.generated_ids[i]
-            ), f"Generated tokens should match for seq {i}"
-            assert (
-                result_with.stop_reasons[i] == result_without.stop_reasons[i]
-            ), f"Stop reasons should match for seq {i}"
-            assert np.allclose(
-                result_with.logprobs[i], result_without.logprobs[i]
-            ), f"Logprobs should match for seq {i}"
+        np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)

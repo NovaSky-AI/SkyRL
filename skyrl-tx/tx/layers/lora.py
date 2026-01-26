@@ -298,6 +298,11 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         adapter_index: Index of the adapter to initialize
         lora_config: LoraConfig object containing rank, alpha, seed, and training flags
     """
+    if lora_config.train_unembed and getattr(model.config, "tie_word_embeddings", False):
+        raise ValueError(
+            "train_unembed=True is incompatible with tie_word_embeddings=True. "
+            "Tied embeddings use embed_tokens.T which does not support LoRA."
+        )
     rngs = nnx.Rngs(lora_config.seed)
     state = nnx.state(model)
 

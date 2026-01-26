@@ -272,13 +272,6 @@ def validate_cfg(cfg: DictConfig):
     # fixed max response budget.
     algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
 
-    # TODO (erictang000): remove these after deprecation period
-    if algorithm_config.use_abs_kl:
-        logger.warning("`use_abs_kl` will be deprecated, overriding to use `kl_estimator_type='abs'` instead")
-        algorithm_config.kl_estimator_type = "abs"
-    elif algorithm_config.use_kl_estimator_k3:
-        logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
-        algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
     # TODO (erictang000): remove this after deprecation period
@@ -338,15 +331,6 @@ def validate_cfg(cfg: DictConfig):
             "fsdp2",
             "megatron",
         ), "LoRA enabled requires fsdp/fsdp2/megatron training backend"
-
-        if cfg.trainer.target_modules is not None:
-            logger.warning(
-                "`trainer.target_modules` is deprecated, use `trainer.policy.model.lora.target_modules` or `trainer.critic.model.lora.target_modules` instead"
-            )
-        if cfg.trainer.exclude_modules is not None:
-            logger.warning(
-                "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
-            )
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:

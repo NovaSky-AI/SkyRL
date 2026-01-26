@@ -81,10 +81,10 @@ We provide an example script in ``examples/fully_async``, where we train Qwen2.5
 
 We break down the usage into two simple steps.
 
-Step 1: Define your ``main_async.py``
+Step 1: Define your ``main_fully_async.py``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Following `examples/fully_async/main_async.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/main_async.py>`_, subclass the base entrypoint class ``BasePPOExp``:
+Following `examples/fully_async/main_fully_async.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/main_fully_async.py>`_, subclass the base entrypoint class ``BasePPOExp``:
 
 - Override ``get_trainer()`` to use fully async trainer class ``FullyAsyncRayPPOTrainer``
 - Override ``get_generator()`` to use your custom generator class. Note that currently we only support generators that use ``/chat/completions`` (hence the ``SkyRLGymHTTPGenerator`` used in the example).
@@ -92,11 +92,11 @@ Following `examples/fully_async/main_async.py <https://github.com/NovaSky-AI/Sky
 Step 2: Config knobs to tune for fully async training
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Following `examples/fully_async/async_run_gsm8k.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/async_run_gsm8k.sh>`_, update the training configuration to use your new entrypoint ``main_async.py``:
+Following `examples/fully_async/fully_async_run_gsm8k.sh <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/fully_async_run_gsm8k.sh>`_, update the training configuration to use your new entrypoint ``main_fully_async.py``:
 
 .. code-block:: bash
 
-    uv run --isolated --extra vllm -m examples.fully_async.main_async \
+    uv run --isolated --extra vllm -m examples.fully_async.main_fully_async \
     ...
 
 For fully async specifically, the following are the main knobs to tune:
