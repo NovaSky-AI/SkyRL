@@ -19,51 +19,6 @@ MODEL_PARAMS = [
 MODEL_IDS = ["llama3", "qwen3"]
 
 
-@pytest.mark.parametrize(
-    "model_name,config_cls,model_cls,mesh_axes",
-    [
-        ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
-        ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
-    ],
-    ids=["llama3", "qwen3"],
-)
-def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
-    """Test that model.compute_logits matches HuggingFace logits."""
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    inputs = ["The capital of France is", "Hello world"]
-    batch = tokenizer(inputs, return_tensors="pt", padding=True)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        # Load HF model, get logits, save weights, then delete to free memory
-        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-        hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
-        hf_logits = hf_outputs.logits.detach().numpy()
-        hf_model.save_pretrained(tmp, safe_serialization=True)
-        del hf_model, hf_outputs
-
-        # Load our model from saved weights
-        base_config = AutoConfig.from_pretrained(model_name)
-        config = config_cls(
-            base_config,
-            max_lora_adapters=1,
-            max_lora_rank=1,
-            shard_attention_heads=True,
-            loss_chunk_size=0,
-            gradient_checkpointing=False,
-        )
-        mesh = jax.make_mesh((1, 1), mesh_axes)
-        with jax.set_mesh(mesh):
-            model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model)
-
-        # Get our logits via compute_logits
-        outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
-        our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
-
-        np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
-
-
 def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
     """Load model from pre-saved weights directory."""
     base_config = AutoConfig.from_pretrained(model_name)
@@ -80,6 +35,32 @@ def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_ch
         model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
     load_safetensors(tmp_dir, config, model)
     return model
+
+
+@pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
+def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
+    """Test that model.compute_logits matches HuggingFace logits."""
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    inputs = ["The capital of France is", "Hello world"]
+    batch = tokenizer(inputs, return_tensors="pt", padding=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Load HF model, get logits, save weights, then delete to free memory
+        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+        hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
+        hf_logits = hf_outputs.logits.detach().numpy()
+        hf_model.save_pretrained(tmp, safe_serialization=True)
+        del hf_model, hf_outputs
+
+        # Load our model from saved weights
+        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes)
+
+        # Get our logits via compute_logits
+        outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
+        our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
+
+        np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
