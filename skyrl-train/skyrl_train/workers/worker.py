@@ -787,12 +787,20 @@ class PolicyWorkerBase(Worker):
                     elementwise_loss = elementwise_loss * loss_mask
 
             # Build per-sequence loss_fn_outputs (matches Tinker's ForwardBackwardOutput structure)
+            # Trim to actual response length per sample (Tinker expects variable-length arrays
+            # that align with the input weights, not padded to batch max)
             batch_size = action_log_probs.shape[0]
             loss_fn_outputs = []
             for i in range(batch_size):
+                # Get valid length for this sample from loss_mask
+                if loss_mask is not None:
+                    valid_len = int(loss_mask[i].sum().item())
+                else:
+                    valid_len = action_log_probs.shape[1]
+
                 loss_fn_outputs.append({
-                    "logprobs": action_log_probs[i].detach().cpu().tolist(),
-                    "elementwise_loss": elementwise_loss[i].detach().cpu().tolist(),
+                    "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
+                    "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
                 })
 
             status = {
