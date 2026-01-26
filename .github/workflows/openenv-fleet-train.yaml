@@ -191,7 +191,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Status:* Training started\n*WandB Run:* `${{ steps.cluster.outputs.wandb_run_name }}`\n*Dashboard:* <https://wandb.ai/thefleet/fleet-task-grpo/runs/${{ steps.cluster.outputs.wandb_run_name }}|View Run>" }
+                  "text": { "type": "mrkdwn", "text": "*Status:* Training started\n*WandB Run:* `${{ steps.cluster.outputs.wandb_run_name }}`\n*Dashboard:* <https://wandb.ai/thefleet/fleet-task-grpo|View Project>" }
                 },
                 {
                   "type": "context",
@@ -264,7 +264,7 @@ jobs:
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*WandB Run:* `${{ steps.cluster.outputs.wandb_run_name }}`\n*Dashboard:* <https://wandb.ai/thefleet/fleet-task-grpo/runs/${{ steps.cluster.outputs.wandb_run_name }}|View Run>" }
+                  "text": { "type": "mrkdwn", "text": "*WandB Run:* `${{ steps.cluster.outputs.wandb_run_name }}`\n*Dashboard:* <https://wandb.ai/thefleet/fleet-task-grpo|View Project>" }
                 },
                 {
                   "type": "context",
@@ -376,4 +376,4 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Links" >> $GITHUB_STEP_SUMMARY
           echo "- WandB Run: \`${{ steps.cluster.outputs.wandb_run_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- [WandB Dashboard](https://wandb.ai/thefleet/fleet-task-grpo/runs/${{ steps.cluster.outputs.wandb_run_name }})" >> $GITHUB_STEP_SUMMARY
+          echo "- [WandB Dashboard](https://wandb.ai/thefleet/fleet-task-grpo)" >> $GITHUB_STEP_SUMMARY
