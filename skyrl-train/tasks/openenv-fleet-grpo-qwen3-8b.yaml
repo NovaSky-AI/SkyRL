@@ -14,7 +14,7 @@ resources:
   disk_size: 200  # Needs space for: model (~16GB), optimizer (~32GB), Ray temp (~50GB), vLLM cache, checkpoints
   ports: 6479
   any_of:
-    # Prefer B200 (2x needed for 8B model)
+    # B200:2 only - H100:4 fails at vLLM init due to less VRAM per GPU
     - accelerators: B200:2
       cloud: lambda
     - accelerators: B200:2
@@ -22,15 +22,6 @@ resources:
     - accelerators: B200:2
       cloud: vast
     - accelerators: B200:2
-      cloud: primeintellect
-    # Fallback to H100 (4x needed for 8B model)
-    - accelerators: H100:4
-      cloud: lambda
-    - accelerators: H100:4
-      cloud: runpod
-    - accelerators: H100:4
-      cloud: vast
-    - accelerators: H100:4
       cloud: primeintellect
 
 num_nodes: 1
@@ -120,7 +111,7 @@ run: |
   export TMPDIR="$TMP_DIR"
 
   # Help PyTorch memory allocator handle fragmentation
-  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  export PYTORCH_ALLOC_CONF=expandable_segments:True
 
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
