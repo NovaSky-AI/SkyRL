@@ -21,6 +21,13 @@ from skyrl_gym.envs.base_text_env import (
 )
 from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
 
+# Reduce MCP client log noise (uses loguru for logging)
+try:
+    from loguru import logger as loguru_logger
+    loguru_logger.disable("mcp")
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # Global task cache to avoid reloading JSON for each env instance
