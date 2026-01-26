@@ -124,10 +124,7 @@ class LogitsProcessorMixin:
             chunk_hidden_3d = chunk_hidden[:, None, :]
             # Compute logits: [chunk_size, 1, H] -> [chunk_size, 1, V] -> [chunk_size, V]
             chunk_logits = lm_head(chunk_hidden_3d, chunk_adapters)[:, 0, :]
-            # Compute log probabilities
-            log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
-            target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
-            return (target_logits - log_sum_exp).squeeze(-1)
+            return LogitsProcessorMixin.logits_to_logprobs(chunk_logits, chunk_targets)
 
         if self.config.gradient_checkpointing:
             compute_chunk_logprobs = jax.checkpoint(compute_chunk_logprobs, policy=None)
