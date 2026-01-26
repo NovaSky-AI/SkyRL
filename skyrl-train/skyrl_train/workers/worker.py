@@ -798,10 +798,12 @@ class PolicyWorkerBase(Worker):
                 else:
                     valid_len = action_log_probs.shape[1]
 
-                loss_fn_outputs.append({
-                    "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                    "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
-                })
+                loss_fn_outputs.append(
+                    {
+                        "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
+                        "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                    }
+                )
 
             status = {
                 "loss": loss.item(),

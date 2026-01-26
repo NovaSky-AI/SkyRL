@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 import ray
 from ray import ObjectRef
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-import inspect
 
 
 @dataclass
@@ -121,9 +120,7 @@ class MeshDispatch(Dispatch):
     """
 
     @classmethod
-    def dispatch(
-        cls, actor_infos: List[ActorInfo], method: str, data: TrainingInputBatch, **kwargs
-    ) -> List[ObjectRef]:
+    def dispatch(cls, actor_infos: List[ActorInfo], method: str, data: TrainingInputBatch, **kwargs) -> List[ObjectRef]:
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
         object_refs = []
         dp_size = actor_infos[0].rank.dp_size
