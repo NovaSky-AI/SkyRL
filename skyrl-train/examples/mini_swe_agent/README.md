@@ -7,7 +7,7 @@ To start training, follow three simple steps:
 2) Configure your environment backend (Podman).
 3) Launch training!
 
-Start by following the SkyRL [installation instructions](https://skyrl.readthedocs.io/en/latest/getting-started/installation.html), then enter the `skyrl-train` directory:
+Start by following the SkyRL [installation instructions](https://docs.skyrl.ai/docs/getting-started/installation), then enter the `skyrl-train` directory:
 ```bash
 cd SkyRL/skyrl-train
 ```
@@ -78,4 +78,4 @@ Beyond the configuration for SkyRL in the training script, the task-specific con
 - Step limits for agent execution
 - Tool configurations for Mini-SWE-Agent
 
-For more details, refer to the [documentation](https://skyrl.readthedocs.io/en/latest/examples/mini_swe_agent.html).
+For more details, refer to the [documentation](https://docs.skyrl.ai/docs/examples/mini_swe_agent).

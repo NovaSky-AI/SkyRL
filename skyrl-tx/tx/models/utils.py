@@ -84,7 +84,7 @@ def forward_layers(
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        layer_kv = kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position)
+        layer_kv = kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
         hidden_states, (k, v) = layer(
             hidden_states,
             attention_mask=attention_mask,

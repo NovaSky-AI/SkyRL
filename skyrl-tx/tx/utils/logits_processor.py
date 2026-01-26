@@ -94,45 +94,35 @@ class LogitsProcessorMixin(ModelForCausalLM):
         flat_hidden = hidden_states.reshape(-1, H)  # [B*T, H]
         flat_target_ids = target_ids.reshape(-1)  # [B*T]
 
+        # Flatten and chunk adapter indices like hidden states and targets
+        if adapter_indices is None:
+            flat_adapter_indices = jnp.zeros(total_tokens, dtype=jnp.int32)
+        else:
+            flat_adapter_indices = jnp.repeat(adapter_indices, T)  # [B*T]
+
         # Pad to multiple of chunk_size for clean slicing
         num_chunks = (total_tokens + chunk_size - 1) // chunk_size
-        padded_size = num_chunks * chunk_size
-        pad_amount = padded_size - total_tokens
+        pad_amount = num_chunks * chunk_size - total_tokens
+        flat_hidden = jnp.pad(flat_hidden, ((0, pad_amount), (0, 0)))
+        flat_target_ids = jnp.pad(flat_target_ids, (0, pad_amount))
+        flat_adapter_indices = jnp.pad(flat_adapter_indices, (0, pad_amount))
 
-        if pad_amount > 0:
-            flat_hidden = jnp.pad(flat_hidden, ((0, pad_amount), (0, 0)))
-            flat_target_ids = jnp.pad(flat_target_ids, (0, pad_amount))
-
-        # Reshape into chunks: [num_chunks, chunk_size, H] and [num_chunks, chunk_size]
+        # Reshape into chunks: [num_chunks, chunk_size, ...]
         chunked_hidden = flat_hidden.reshape(num_chunks, chunk_size, H)
         chunked_targets = flat_target_ids.reshape(num_chunks, chunk_size)
-
-        # Precompute position offsets for adapter index lookup (reused buffer of chunk_size)
-        position_offsets = jnp.arange(chunk_size)
-        # Pad adapter_indices to avoid out-of-bounds when chunk spans past B
-        if adapter_indices is None:
-            adapter_indices = jnp.zeros(B, dtype=jnp.int32)
-        padded_adapter_indices = jnp.pad(adapter_indices, (0, 1))  # [B+1] for safe indexing
+        chunked_adapters = flat_adapter_indices.reshape(num_chunks, chunk_size)
 
         def compute_chunk_logprobs(args):
             """Compute lm_head and log probabilities for a chunk of tokens."""
-            chunk_idx, chunk_hidden, chunk_targets = args
-            # Compute adapter indices on-the-fly from chunk position
-            flat_positions = chunk_idx * chunk_size + position_offsets
-            batch_indices = flat_positions // T
-            chunk_adapters = padded_adapter_indices[batch_indices]  # [chunk_size]
-            # Reshape to [chunk_size, 1, H] for lm_head (batch=chunk_size, seq=1)
-            chunk_hidden_3d = chunk_hidden[:, None, :]
-            # Compute logits: [chunk_size, 1, H] -> [chunk_size, 1, V] -> [chunk_size, V]
-            chunk_logits = lm_head(chunk_hidden_3d, chunk_adapters)[:, 0, :]
-            # Compute log probabilities
-            log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
-            target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
-            return (target_logits - log_sum_exp).squeeze(-1)
+            chunk_hidden, chunk_targets, chunk_adapters = args
+            # Reshape chunk_hidden to [chunk_size, 1, H] for lm_head
+            # and compute chunk_logits: [chunk_size, 1, H] -> [chunk_size, 1, V] -> [chunk_size, V]
+            # TODO: Remove the conversion and make it so lm_head can operate on 2d tensors directly
+            chunk_logits = lm_head(chunk_hidden[:, None, :], chunk_adapters)[:, 0, :]
+            return LogitsProcessorMixin.logits_to_logprobs(chunk_logits, chunk_targets)
 
         if self.config.gradient_checkpointing:
             compute_chunk_logprobs = jax.checkpoint(compute_chunk_logprobs, policy=None)
 
-        chunk_indices = jnp.arange(num_chunks)
-        all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunk_indices, chunked_hidden, chunked_targets))
+        all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_hidden, chunked_targets, chunked_adapters))
         return all_logprobs.reshape(-1)[:total_tokens].reshape(B, T)

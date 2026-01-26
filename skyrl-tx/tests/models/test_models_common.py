@@ -14,7 +14,6 @@ from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.utils.models import load_safetensors
 
-
 MODEL_PARAMS = [
     ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
     ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
@@ -30,6 +29,24 @@ def create_model(model_name, config_cls, model_cls, mesh_axes):
     with jax.set_mesh(mesh):
         model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
     return model, config
+
+
+def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
+    """Load model from pre-saved weights directory."""
+    base_config = AutoConfig.from_pretrained(model_name)
+    config = config_cls(
+        base_config,
+        max_lora_adapters=1,
+        max_lora_rank=1,
+        shard_attention_heads=True,
+        loss_chunk_size=loss_chunk_size,
+        gradient_checkpointing=False,
+    )
+    mesh = jax.make_mesh((1, 1), mesh_axes)
+    with jax.set_mesh(mesh):
+        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+    load_safetensors(tmp_dir, config, model)
+    return model
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
@@ -109,43 +126,13 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
         del hf_model, hf_outputs
 
         # Load our model from saved weights
-        base_config = AutoConfig.from_pretrained(model_name)
-        config = config_cls(
-            base_config,
-            max_lora_adapters=1,
-            max_lora_rank=1,
-            shard_attention_heads=True,
-            loss_chunk_size=0,
-            gradient_checkpointing=False,
-        )
-        mesh = jax.make_mesh((1, 1), mesh_axes)
-        with jax.set_mesh(mesh):
-            model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model)
+        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes)
 
         # Get our logits via compute_logits
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
         our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
 
         np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
-
-
-def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
-    """Load model from pre-saved weights directory."""
-    base_config = AutoConfig.from_pretrained(model_name)
-    config = config_cls(
-        base_config,
-        max_lora_adapters=1,
-        max_lora_rank=1,
-        shard_attention_heads=True,
-        loss_chunk_size=loss_chunk_size,
-        gradient_checkpointing=False,
-    )
-    mesh = jax.make_mesh((1, 1), mesh_axes)
-    with jax.set_mesh(mesh):
-        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-    load_safetensors(tmp_dir, config, model)
-    return model
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)

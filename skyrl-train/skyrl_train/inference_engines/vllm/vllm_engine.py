@@ -6,7 +6,6 @@ if TYPE_CHECKING:
 from dataclasses import dataclass
 from http import HTTPStatus
 import ray
-import torch
 import asyncio
 import vllm
 from types import SimpleNamespace
@@ -24,7 +23,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.lora.request import LoRARequest
 from uuid import uuid4
-import warnings
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -66,70 +64,10 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         logger.info(f"creating LLM with bundle_indices={bundle_indices}")
 
 
-class WorkerWrap:
-    def test_rpc(self, *args, **kwargs):
-        """Test RPC call to worker"""
-        return args, kwargs
-
-    def init_weight_update_communicator(self, init_info: bytes):
-        """Init weight update communicator from init info.
-
-        Args:
-            init_info: Pickled bytes of WeightSyncInitInfo from the sender.
-        """
-        import pickle
-
-        assert torch.distributed.is_initialized(), "default torch process group must be initialized"
-
-        # Unpickle init_info to restore the original object type
-        assert isinstance(init_info, bytes), f"Expected bytes, got {type(init_info).__name__}"
-        init_info = pickle.loads(init_info)
-
-        strategy_cls = init_info.strategy_type()
-
-        if hasattr(self, "_weight_receiver") and self._weight_receiver is not None:
-            # TODO(haochen): we should get rid of this flag and override existing receiver.
-            if init_info.override_existing_receiver:
-                self._weight_receiver.teardown()
-                self._weight_receiver = None
-            else:
-                warnings.warn(
-                    "Detected an existing weight receiver. "
-                    "For overriding, use `generator.override_existing_update_group=enable`"
-                )
-                return
-
-        self._weight_receiver = strategy_cls.create_receiver(init_info)
-
-    def load_weights(self, request: bytes) -> None:
-        """Load weights using the receiver.
-
-        This method is called via collective_rpc from VLLMWeightLoader.
-
-        Args:
-            request: Pickled bytes of WeightUpdateRequest.
-        """
-        import pickle
-
-        # Unpickle request to restore the original object type
-        assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
-        request = pickle.loads(request)
-
-        weight_list = []
-        for name, tensor in self._weight_receiver.receive_weights(request):
-            weight_list.append((name, tensor))
-
-        self.model_runner.model.load_weights(weights=weight_list)
-
-        for weight in weight_list:
-            del weight
-
-    # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
-    def teardown_weight_receiver(self):
-        if not hasattr(self, "_weight_receiver") or self._weight_receiver is None:
-            warnings.warn("No weight receiver to teardown")
-            return
-        self._weight_receiver.teardown()
+# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
+# This alias preserves the old import path for existing scripts/configs.
+# TODO (Kourosh): Remove this alias once all references are updated.
+from skyrl_train.inference_servers.vllm_worker import WorkerWrap  # noqa: F401, E402
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):

@@ -1,19 +1,20 @@
+from typing import TYPE_CHECKING, Any, Dict, List
+
 import ray
 from packaging import version
 from ray.actor import ActorHandle
-from typing import Any, List, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.inference_engines.base import (
-    InferenceEngineInterface,
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
 )
-from skyrl_train.weight_sync import WeightUpdateRequest
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
+from skyrl_train.weight_sync import WeightUpdateRequest
 
 
 class RayWrappedInferenceEngine(InferenceEngineInterface):
@@ -36,6 +37,18 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         return await self.inference_engine_actor.generate.remote(input_batch=input_batch)
+
+    async def sample(
+        self,
+        prompt_token_ids: List[int],
+        num_samples: int,
+        sampling_params: Dict[str, Any],
+    ) -> InferenceEngineOutput:
+        return await self.inference_engine_actor.sample.remote(
+            prompt_token_ids=prompt_token_ids,
+            num_samples=num_samples,
+            sampling_params=sampling_params,
+        )
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.wake_up.remote(*args, **kwargs)
@@ -98,12 +111,20 @@ def create_ray_wrapped_inference_engines(
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
     instances.
     """
-    from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
     from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+    from skyrl_train.utils import (
+        get_all_env_variables,
+        get_ray_pg_ready_with_timeout,
+        ray_noset_visible_devices,
+    )
 
     if backend == "vllm":
         import vllm
-        from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
+
+        from skyrl_train.inference_engines.vllm.vllm_engine import (
+            AsyncVLLMRayActor,
+            VLLMRayActor,
+        )
 
         # if a dev version is being used, skip the version check
         if "dev" not in vllm.__version__:
@@ -250,7 +271,9 @@ def create_ray_wrapped_inference_engines(
 
                 before_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
                 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-                from skyrl_train.inference_engines.sglang.sglang_engine import SGLangRayActor
+                from skyrl_train.inference_engines.sglang.sglang_engine import (
+                    SGLangRayActor,
+                )
 
                 os.environ["CUDA_VISIBLE_DEVICES"] = before_cuda_visible_devices
 

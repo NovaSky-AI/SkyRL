@@ -2,7 +2,7 @@
 This file implements ``SkyRLGymGenerator``, an implementation of the `GeneratorInterface` that
 uses SkyRL-Gym as the environment.
 
-For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html
+For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 """
 
 import asyncio
@@ -146,7 +146,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             **self.generator_cfg.chat_template_kwargs,
         )
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
-        # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
+        # For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator#multi-turn-tokenization-and-ti-to
         if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
             last_eos_token_index = (
                 len(self.base_conversation_token_ids)
