@@ -842,8 +842,15 @@ class PolicyWorkerBase(Worker):
             if self.cfg.trainer.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
+        # Extract loss_fn_outputs before all_reduce (it's not a tensor/scalar)
+        loss_fn_outputs = status.pop("loss_fn_outputs", None)
+
         # All-reduce metrics across DP workers
         status = self.strategy.all_reduce(status)
+
+        # Add back loss_fn_outputs after all_reduce
+        if loss_fn_outputs is not None:
+            status["loss_fn_outputs"] = loss_fn_outputs
 
         return status
 
