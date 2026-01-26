@@ -316,6 +316,11 @@ class BasePPOExp:
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
+    from skyrl_train.utils.logging import setup_logging
+
+    # Set up logging with run name for log file organization
+    setup_logging(run_name=cfg.trainer.run_name)
+
     # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)
     exp.run()
@@ -323,6 +328,11 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
+    from skyrl_train.utils.logging import setup_logging
+
+    # Set up logging early to capture all logs
+    setup_logging(run_name=cfg.trainer.run_name)
+
     # validate the arguments
     validate_cfg(cfg)
 
