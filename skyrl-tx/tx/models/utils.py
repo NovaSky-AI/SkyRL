@@ -98,7 +98,7 @@ def forward_layers(
     adapter_indices: jax.Array | None,
     kv_cache: KVCache | None,
     output_hidden_states: bool,
-    is_training: bool,
+    training: bool,
     gradient_checkpointing: bool,
 ) -> tuple[jax.Array, list[jax.Array], list[jax.Array], list[jax.Array]]:
     """Forward pass through decoder layers with optional gradient checkpointing.
@@ -111,7 +111,7 @@ def forward_layers(
         updated_keys: List of updated key caches (empty if checkpointing)
         updated_values: List of updated value caches (empty if checkpointing)
     """
-    if is_training and gradient_checkpointing:
+    if training and gradient_checkpointing:
         hidden_states, all_hidden_states = _forward_layers_checkpointed(
             layers,
             hidden_states,

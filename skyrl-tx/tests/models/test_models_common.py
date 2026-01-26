@@ -60,12 +60,13 @@ class TestGradientCheckpointing:
 
         # Run without checkpointing
         config.gradient_checkpointing = False
-        out_no_ckpt = model(input_ids, attention_mask=attention_mask, is_training=True)
+        model.train()
+        out_no_ckpt = model(input_ids, attention_mask=attention_mask)
         logits_no_ckpt = model.compute_logits(out_no_ckpt.last_hidden_state)
 
         # Run with checkpointing
         config.gradient_checkpointing = True
-        out_ckpt = model(input_ids, attention_mask=attention_mask, is_training=True)
+        out_ckpt = model(input_ids, attention_mask=attention_mask)
         logits_ckpt = model.compute_logits(out_ckpt.last_hidden_state)
 
         np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-6)
@@ -79,10 +80,11 @@ class TestGradientCheckpointing:
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
         config.gradient_checkpointing = False
-        out_no_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True)
+        model.train()
+        out_no_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
 
         config.gradient_checkpointing = True
-        out_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True, is_training=True)
+        out_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
 
         assert len(out_no_ckpt.hidden_states) == len(out_ckpt.hidden_states)
         assert len(out_ckpt.hidden_states) == config.num_hidden_layers + 1
@@ -92,8 +94,8 @@ class TestGradientCheckpointing:
                 hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
             )
 
-    def test_is_training_false_uses_standard_path(self, model_name, config_cls, model_cls, mesh_axes):
-        """is_training=False should use standard path with KV cache support."""
+    def test_eval_mode_uses_standard_path(self, model_name, config_cls, model_cls, mesh_axes):
+        """eval() mode should use standard path with KV cache support."""
         model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
         config.gradient_checkpointing = True
 
@@ -101,7 +103,8 @@ class TestGradientCheckpointing:
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-        out = model(input_ids, attention_mask=attention_mask, is_training=False)
+        model.eval()
+        out = model(input_ids, attention_mask=attention_mask)
 
         # KV cache should be populated (checkpointed path returns empty)
         assert len(out.kv_cache.keys) == config.num_hidden_layers

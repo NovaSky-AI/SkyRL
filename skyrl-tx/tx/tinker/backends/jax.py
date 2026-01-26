@@ -245,12 +245,11 @@ class JaxBackendImpl(AbstractBackend):
             target_ids: jax.Array,
         ) -> jax.Array:
             """Forward pass and logprobs computation."""
-            model = nnx.merge(graphdef, lora_params, non_lora_params)
+            model = nnx.merge(graphdef, lora_params, non_lora_params).train()
             output = model(
                 input_ids,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
-                is_training=True,
             )
             return model.compute_logprobs(output.last_hidden_state, target_ids, adapter_indices)
 

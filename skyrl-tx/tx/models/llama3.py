@@ -190,6 +190,7 @@ class Llama3DecoderLayer(nnx.Module):
 
 
 class Llama3Model(nnx.Module):
+    training: bool = False
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
@@ -218,7 +219,6 @@ class Llama3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-        is_training: bool = False,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -234,7 +234,7 @@ class Llama3Model(nnx.Module):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
             output_hidden_states=output_hidden_states,
-            is_training=is_training,
+            training=self.training,
             gradient_checkpointing=self.config.gradient_checkpointing,
         )
 
@@ -274,6 +274,12 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
         """Return the lm_head callable for logits computation."""
         return self.lm_head
 
+    def train(self, **attributes):
+        return super().train(training=True, **attributes)
+
+    def eval(self, **attributes):
+        return super().eval(training=False, **attributes)
+
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to LoRA weights."""
@@ -288,7 +294,6 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -300,7 +305,6 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
-            is_training=is_training,
         )
 
         return CausalLMOutput(
