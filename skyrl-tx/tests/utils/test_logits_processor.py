@@ -1,34 +1,10 @@
 """Unit tests for LogitsProcessorMixin chunked logprobs computation."""
 
-from unittest.mock import MagicMock
-
-from flax import nnx
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
-
-
-class DummyLogitsModel(LogitsProcessorMixin, nnx.Module):
-    """Minimal model for testing logits processor.
-
-    Uses identity lm_head: logits = hidden_states (requires H == V).
-    When adapter_indices is provided, scales by (1 + adapter_index).
-    """
-
-    def __init__(self, vocab_size: int = 16, loss_chunk_size: int = 0):
-        self.config = MagicMock(loss_chunk_size=loss_chunk_size, gradient_checkpointing=False)
-        self.vocab_size = vocab_size
-
-    def get_lm_head(self) -> LMHead:
-        def lm_head(hidden_states, adapter_indices=None):
-            if adapter_indices is not None:
-                scale = (1 + adapter_indices[:, None, None]).astype(jnp.float32)
-                return hidden_states * scale
-            return hidden_states
-
-        return lm_head
+from tests.utils.test_generator import DummyModel
 
 
 def assert_chunked_matches_nonchunked(
@@ -39,8 +15,8 @@ def assert_chunked_matches_nonchunked(
     vocab_size: int = 16,
 ):
     """Assert chunked and non-chunked paths produce identical results."""
-    model_chunked = DummyLogitsModel(vocab_size=vocab_size, loss_chunk_size=chunk_size)
-    model_nonchunked = DummyLogitsModel(vocab_size=vocab_size, loss_chunk_size=0)
+    model_chunked = DummyModel(vocab_size=vocab_size, loss_chunk_size=chunk_size)
+    model_nonchunked = DummyModel(vocab_size=vocab_size, loss_chunk_size=0)
 
     logprobs_chunked = model_chunked.compute_logprobs(hidden_states, target_ids, adapter_indices)
     logprobs_nonchunked = model_nonchunked.compute_logprobs(hidden_states, target_ids, adapter_indices)
@@ -107,10 +83,10 @@ class TestChunkedLogprobs:
         hidden_states = jnp.arange(B * T * V, dtype=jnp.float32).reshape(B, T, V) / (B * T * V)
         target_ids = jnp.arange(B * T, dtype=jnp.int32).reshape(B, T) % V
 
-        model_no_ckpt = DummyLogitsModel(vocab_size=V, loss_chunk_size=chunk_size)
+        model_no_ckpt = DummyModel(vocab_size=V, loss_chunk_size=chunk_size)
         model_no_ckpt.config.gradient_checkpointing = False
 
-        model_ckpt = DummyLogitsModel(vocab_size=V, loss_chunk_size=chunk_size)
+        model_ckpt = DummyModel(vocab_size=V, loss_chunk_size=chunk_size)
         model_ckpt.config.gradient_checkpointing = True
 
         logprobs_no_ckpt = model_no_ckpt.compute_logprobs(hidden_states, target_ids)
