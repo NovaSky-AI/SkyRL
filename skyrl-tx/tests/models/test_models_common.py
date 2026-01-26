@@ -1,5 +1,3 @@
-"""Common tests for models."""
-
 import tempfile
 
 from flax import nnx
