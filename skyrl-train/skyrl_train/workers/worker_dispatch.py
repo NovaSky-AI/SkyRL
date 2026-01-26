@@ -186,6 +186,18 @@ class WorkerDispatch:
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")
+
+        # With DP>1, each rank returns loss_fn_outputs for its data chunk.
+        # Concatenate them in rank order to get the full batch's outputs.
+        # Scalar metrics (loss, lr) are already all-reduced, so use statuses[0] for those.
+        if len(statuses) > 1 and statuses[0] and "loss_fn_outputs" in statuses[0]:
+            all_loss_fn_outputs = []
+            for status in statuses:
+                all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
+            result = statuses[0]
+            result["loss_fn_outputs"] = all_loss_fn_outputs
+            return result
+
         return statuses[0]
 
     def optim_step(self, model: str) -> Optional[float]:
