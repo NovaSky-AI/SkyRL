@@ -13,7 +13,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 from loguru import logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
     PlacementGroup,
@@ -658,7 +658,12 @@ class PolicyWorkerBase(Worker):
         # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
-    def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
+    def forward_backward(
+        self,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
@@ -667,22 +672,43 @@ class PolicyWorkerBase(Worker):
 
         Args:
             data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
+            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
+                     If provided, overrides the config's policy_loss_type.
+            loss_fn_config: Optional config overrides for the loss function
+                           (e.g., {"clip_low_threshold": 0.9} for PPO)
 
         Returns:
             Aggregated metrics dict across all micro batches
         """
         micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
+        all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
-            metrics = self._forward_backward_micro(micro_batch)
+            metrics = self._forward_backward_micro(micro_batch, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
             self._micro_batches_accumulated += 1
+
+            # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
+            if "loss_fn_outputs" in metrics:
+                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics(dict(all_metrics))
+        result = reduce_metrics(dict(all_metrics))
 
-    def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
+        # Add back loss_fn_outputs (concatenated across micro-batches)
+        if all_loss_fn_outputs:
+            result["loss_fn_outputs"] = all_loss_fn_outputs
+
+        return result
+
+    def _forward_backward_micro(
+        self,
+        experience: Experience,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
         """
         Perform forward and backward pass for one micro batch.
 
@@ -690,6 +716,8 @@ class PolicyWorkerBase(Worker):
 
         Args:
             experience: Experience object for one micro batch
+            loss_fn: Optional loss function name to use instead of config default
+            loss_fn_config: Optional config overrides for the loss function
 
         Returns:
             All-reduced metrics dict for this micro batch
@@ -709,6 +737,21 @@ class PolicyWorkerBase(Worker):
         loss_mask = experience.loss_mask
         rollout_action_logprobs = experience.rollout_logprobs
 
+        # Determine which loss function to use
+        resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.trainer.algorithm.policy_loss_type
+        if loss_fn is not None:
+            # Use the provided loss function (Tinker API style)
+            current_loss_fn = PolicyLossRegistry.get(loss_fn)
+        else:
+            # Fall back to config default
+            current_loss_fn = self.policy_loss_fn
+
+        # Build config for loss function, applying any overrides
+        loss_config = self.cfg.trainer.algorithm
+        if loss_fn_config is not None:
+            # Create a copy of the config and apply overrides
+            loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
+
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             # actor loss
@@ -723,53 +766,81 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
-            policy_loss, clip_ratio = self.policy_loss_fn(
+            policy_loss, clip_ratio = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
-                config=self.cfg.trainer.algorithm,
+                config=loss_config,
                 loss_mask=loss_mask,
                 rollout_logprobs=rollout_action_logprobs,
             )
 
-        # entropy loss
-        with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
-            # batch_size, seqlen
-            entropy_BS = output["entropy"]
-            entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
-            entropy = masked_mean(entropy_BS, loss_mask)
+        # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
+        if resolved_loss_name == "cross_entropy":
+            loss = policy_loss
+            self.strategy.backward(loss, self.model, self.optimizer)
 
-        if self.cfg.trainer.algorithm.use_entropy_loss:
-            entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
+            # Compute elementwise loss for Tinker API (per-token NLL)
+            with torch.no_grad():
+                elementwise_loss = -action_log_probs
+                if loss_mask is not None:
+                    elementwise_loss = elementwise_loss * loss_mask
+
+            # Build per-sequence loss_fn_outputs (matches Tinker's ForwardBackwardOutput structure)
+            batch_size = action_log_probs.shape[0]
+            loss_fn_outputs = []
+            for i in range(batch_size):
+                loss_fn_outputs.append({
+                    "logprobs": action_log_probs[i].detach().cpu().tolist(),
+                    "elementwise_loss": elementwise_loss[i].detach().cpu().tolist(),
+                })
+
+            status = {
+                "loss": loss.item(),
+                "response_length": num_actions,
+                "lr": self.scheduler.get_last_lr()[0],
+                "loss_fn_outputs": loss_fn_outputs,
+            }
         else:
-            entropy_loss_term = torch.tensor(0.0)
+            # RL path: add optional KL/entropy terms
+            # entropy loss
+            with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
+                # batch_size, seqlen
+                entropy_BS = output["entropy"]
+                entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
+                entropy = masked_mean(entropy_BS, loss_mask)
 
-        # kl loss
-        if self.cfg.trainer.algorithm.use_kl_loss:
-            kl_loss = compute_approx_kl(
-                action_log_probs,
-                base_action_log_probs,
-                loss_mask=loss_mask,
-                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
-            )
-            kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
-        else:
-            kl_loss = torch.tensor(0.0)
-        kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
+            if self.cfg.trainer.algorithm.use_entropy_loss:
+                entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
+            else:
+                entropy_loss_term = torch.tensor(0.0)
 
-        loss = policy_loss + kl_loss_term - entropy_loss_term
-        self.strategy.backward(loss, self.model, self.optimizer)
+            # kl loss
+            if self.cfg.trainer.algorithm.use_kl_loss:
+                kl_loss = compute_approx_kl(
+                    action_log_probs,
+                    base_action_log_probs,
+                    loss_mask=loss_mask,
+                    kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+                )
+                kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
+            else:
+                kl_loss = torch.tensor(0.0)
+            kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
-        status = {
-            "final_loss": loss.item(),
-            "policy_loss": policy_loss.item(),
-            "ppo_clip_ratio": clip_ratio,
-            "policy_entropy": entropy.item(),
-            "response_length": num_actions,
-            "policy_lr": self.scheduler.get_last_lr()[0],
-        }
-        if self.cfg.trainer.algorithm.use_kl_loss:
-            status["policy_kl"] = kl_loss.item()
+            loss = policy_loss + kl_loss_term - entropy_loss_term
+            self.strategy.backward(loss, self.model, self.optimizer)
+
+            status = {
+                "final_loss": loss.item(),
+                "policy_loss": policy_loss.item(),
+                "ppo_clip_ratio": clip_ratio,
+                "policy_entropy": entropy.item(),
+                "response_length": num_actions,
+                "policy_lr": self.scheduler.get_last_lr()[0],
+            }
+            if self.cfg.trainer.algorithm.use_kl_loss:
+                status["policy_kl"] = kl_loss.item()
 
         # All-reduce metrics across DP workers
         status = self.strategy.all_reduce(status)

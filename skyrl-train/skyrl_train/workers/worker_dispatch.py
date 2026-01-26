@@ -9,7 +9,7 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import ray
 from omegaconf import DictConfig
@@ -153,11 +153,31 @@ class WorkerDispatch:
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
 
-    def forward_backward(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
-        """Run forward/backward pass. Needs model + optimizer."""
+    def forward_backward(
+        self,
+        model: str,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """Run forward/backward pass. Needs model + optimizer.
+
+        Args:
+            model: Model identifier ("policy", "critic", or "ref")
+            data: Training batch data
+            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
+                     If provided, overrides the config's policy_loss_type.
+            loss_fn_config: Optional config overrides for the loss function
+                           (e.g., {"clip_low_threshold": 0.9} for PPO)
+
+        Returns:
+            Dictionary of training metrics
+        """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data)
+        refs = self._actor_groups[model].async_run_ray_method(
+            "mesh", "forward_backward", data, loss_fn=loss_fn, loss_fn_config=loss_fn_config
+        )
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")
