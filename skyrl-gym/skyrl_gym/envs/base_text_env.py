@@ -53,7 +53,12 @@ class BaseTextEnv(Env[ConversationType, str]):
         """
         for group in self.tool_groups:
             if group.name == tool_group_name:
-                return group.execute_tool(tool_name, *tool_input)  # tool_input must be tuple or list
+                if isinstance(tool_input, dict):
+                    return group.execute_tool(tool_name, **tool_input)
+                elif isinstance(tool_input, (tuple, list)):
+                    return group.execute_tool(tool_name, *tool_input)
+                else:
+                    return group.execute_tool(tool_name, tool_input)
 
         raise ValueError(f"ToolGroup '{tool_group_name}' not found.")
 

@@ -36,3 +36,8 @@ register(
     id="searchcode",
     entry_point="skyrl_gym.envs.searchcode.env:SearchCodeEnv",
 )
+
+register(
+    id="rlm_ex",
+    entry_point="skyrl_gym.envs.rlm.env:RLMExecutorEnv",
+)
