@@ -240,7 +240,6 @@ class Llama3Model(nnx.Module):
                 output_hidden_states=output_hidden_states,
             )
             updated_keys, updated_values = [], []
-            new_cache_position = input_ids.shape[1]
         else:
             hidden_states, all_hidden_states, updated_keys, updated_values = forward_layers(
                 self.layers,
@@ -251,7 +250,6 @@ class Llama3Model(nnx.Module):
                 kv_cache=kv_cache,
                 output_hidden_states=output_hidden_states,
             )
-            new_cache_position = kv_cache.cache_position + 1 if kv_cache else input_ids.shape[1]
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
