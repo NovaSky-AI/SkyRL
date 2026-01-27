@@ -9,7 +9,7 @@ from tx.layers.rotary_embedding import apply_rope_interleave
 from tx.layers.util import Param, prepare_routing
 from tx.layers.layernorm import RMSNorm
 from tx.models.configs import DeepseekV3Config
-from tx.models.types import CausalLMOutput, ModelOutput
+from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
@@ -523,7 +523,7 @@ class DeepseekV3Model(nnx.Module):
         )
 
 
-class DeepseekV3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
+class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProcessorMixin):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
