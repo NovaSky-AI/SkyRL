@@ -348,11 +348,7 @@ class DeepseekV3MoE(nnx.Module):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.num_experts_per_tok = config.num_experts_per_tok
         self.n_group = config.n_group
-        self.topk_group = config.topk_group
-        self.norm_topk_prob = config.norm_topk_prob
-        self.routed_scaling_factor = config.routed_scaling_factor
 
         self.gate = DeepseekV3TopkRouter(config, dtype=dtype, rngs=rngs)
         self.experts = DeepseekV3NaiveMoe(config, dtype=dtype, rngs=rngs)
@@ -373,7 +369,7 @@ class DeepseekV3MoE(nnx.Module):
         top2, _ = jax.lax.top_k(scores_grouped, 2)
         group_scores = jnp.sum(top2, axis=-1)
 
-        _, top_group_indices = jax.lax.top_k(group_scores, self.topk_group)
+        _, top_group_indices = jax.lax.top_k(group_scores, self.config.topk_group)
 
         mask = jnp.ones((num_tokens, self.n_group), dtype=bool)
         batch_indices = jnp.arange(num_tokens)[:, None]
@@ -383,15 +379,15 @@ class DeepseekV3MoE(nnx.Module):
         scores_with_bias = jnp.where(mask, 0.0, scores_grouped)
         scores_with_bias = scores_with_bias.reshape(num_tokens, num_experts)
 
-        _, top_k_index = jax.lax.top_k(scores_with_bias, self.num_experts_per_tok)
+        _, top_k_index = jax.lax.top_k(scores_with_bias, self.config.num_experts_per_tok)
 
         # Get weights from original scores
         top_k_weights = jnp.take_along_axis(scores, top_k_index, axis=-1)
 
-        if self.norm_topk_prob:
+        if self.config.norm_topk_prob:
             top_k_weights = top_k_weights / jnp.sum(top_k_weights, axis=-1, keepdims=True)
 
-        top_k_weights = top_k_weights * self.routed_scaling_factor
+        top_k_weights = top_k_weights * self.config.routed_scaling_factor
 
         return top_k_weights.astype(router_logits.dtype), top_k_index
 
