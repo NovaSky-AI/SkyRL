@@ -735,6 +735,7 @@ class PolicyWorkerBase(Worker):
         num_actions = experience.num_actions
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
+        action_mask = experience.action_mask
         rollout_action_logprobs = experience.rollout_logprobs
 
         # Determine which loss function to use
