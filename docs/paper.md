@@ -66,8 +66,6 @@ This ensures the training data contains only valid, solvable tasks with working 
 | Environment | Checkpoint 0 pass@k | Best pass@k | Best Step |
 |-------------|---------------------|-------------|-----------|
 | outlook | | | |
-| booking | | | |
-| github | | | |
 
 ### Training Environments
 
@@ -77,6 +75,11 @@ This ensures the training data contains only valid, solvable tasks with working 
 | github | | | |
 | reddit | | | |
 | ticketmaster | | | |
+| fira | | | |
+| zillow | | | |
+| hubspot | | | |
+| google-maps | | | |
+| dropbox | | | |
 
 ## 4. TODO
 
