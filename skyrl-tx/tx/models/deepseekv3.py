@@ -197,18 +197,17 @@ class DeepseekV3MLP(nnx.Module):
 
     def __init__(
         self,
-        dim: int,
-        inter_dim: int,
-        *,
         config: DeepseekV3Config,
+        *,
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
+        override_intermediate_size: int | None = None,
     ) -> None:
-        self.dim = dim
-        self.inter_dim = inter_dim
+        self.config = config
+        intermediate_size = override_intermediate_size or config.intermediate_size
         self.gate_proj = LoRALinear(
-            dim,
-            inter_dim,
+            config.hidden_size,
+            intermediate_size,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -218,8 +217,8 @@ class DeepseekV3MLP(nnx.Module):
             rngs=rngs,
         )
         self.up_proj = LoRALinear(
-            dim,
-            inter_dim,
+            config.hidden_size,
+            intermediate_size,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -229,8 +228,8 @@ class DeepseekV3MLP(nnx.Module):
             rngs=rngs,
         )
         self.down_proj = LoRALinear(
-            inter_dim,
-            dim,
+            intermediate_size,
+            config.hidden_size,
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -359,7 +358,7 @@ class DeepseekV3MoE(nnx.Module):
         self.experts = DeepseekV3NaiveMoe(config, dtype=dtype, rngs=rngs)
 
         inter_dim = config.moe_intermediate_size * config.n_shared_experts
-        self.shared_experts = DeepseekV3MLP(config.hidden_size, inter_dim, config=config, dtype=dtype, rngs=rngs)
+        self.shared_experts = DeepseekV3MLP(config, dtype=dtype, rngs=rngs, override_intermediate_size=inter_dim)
 
     def _compute_routing(self, router_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
         num_tokens = router_logits.shape[0]
@@ -433,9 +432,7 @@ class DeepseekV3DecoderLayer(nnx.Module):
         if layer_idx >= config.first_k_dense_replace:
             self.mlp = DeepseekV3MoE(config, dtype=dtype, rngs=rngs)
         else:
-            self.mlp = DeepseekV3MLP(
-                config.hidden_size, config.intermediate_size, config=config, dtype=dtype, rngs=rngs
-            )
+            self.mlp = DeepseekV3MLP(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
