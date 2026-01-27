@@ -793,7 +793,7 @@ class PolicyWorkerBase(Worker):
             batch_size = action_log_probs.shape[0]
             loss_fn_outputs = []
             for i in range(batch_size):
-                # Determine valid length without depending on weighted masks.
+                # Prefer a binary action mask for length; fall back to loss_mask.
                 if action_mask is not None:
                     valid_len = int(action_mask[i].sum().item())
                 elif loss_mask is not None:
@@ -801,10 +801,11 @@ class PolicyWorkerBase(Worker):
                 else:
                     valid_len = action_log_probs.shape[1]
 
+                start = max(action_log_probs.shape[1] - valid_len, 0)
                 loss_fn_outputs.append(
                     {
-                        "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                        "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                        "logprobs": action_log_probs[i, start:].detach().cpu().tolist(),
+                        "elementwise_loss": elementwise_loss[i, start:].detach().cpu().tolist(),
                     }
                 )
 

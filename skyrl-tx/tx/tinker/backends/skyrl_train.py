@@ -136,10 +136,7 @@ class SkyRLTrainBackend(AbstractBackend):
             sequences.append([0] * pad_len + list(seq))
             attention_masks.append([0] * pad_len + [1] * len(seq))
             action_pad = max_response_len - len(weights)
-            # Use the full per-token weights, left-padded to the batch max.
             loss_masks.append([0.0] * action_pad + [float(w) for w in weights])
-            # Provide a binary valid-token mask so SkyRL-Train can trim outputs
-            # without depending on weighted masks.
             response_masks.append([0] * action_pad + [1] * len(weights))
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
@@ -174,8 +171,13 @@ class SkyRLTrainBackend(AbstractBackend):
             loss_fn_outputs = []
             for i in range(start_idx, end_idx):
                 raw_output = data["loss_fn_outputs"][i]
+                seq_len = len(prepared_batch.all_token_weights[i])
                 logprobs = list(raw_output.get("logprobs", []))
                 elementwise_loss = list(raw_output.get("elementwise_loss", []))
+                if len(logprobs) != seq_len:
+                    logprobs = ([0.0] * max(seq_len - len(logprobs), 0)) + logprobs[-seq_len:]
+                if len(elementwise_loss) != seq_len:
+                    elementwise_loss = ([0.0] * max(seq_len - len(elementwise_loss), 0)) + elementwise_loss[-seq_len:]
                 loss_fn_outputs.append(
                     {
                         "elementwise_loss": {
