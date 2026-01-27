@@ -267,7 +267,7 @@ class DeepseekV3TopkRouter(nnx.Module):
 
     def __call__(self, hidden_states: jax.Array) -> jax.Array:
         hidden_states = hidden_states.reshape(-1, self.config.hidden_size)
-        router_logits = hidden_states.astype(jnp.float32) @ self.weight.value.astype(jnp.float32)
+        router_logits = hidden_states.astype(jnp.float32) @ self.weight[...].astype(jnp.float32)
         return router_logits
 
 
@@ -368,7 +368,7 @@ class DeepseekV3MoE(nnx.Module):
         num_experts = router_logits.shape[1]
 
         scores = nnx.sigmoid(router_logits)
-        scores_with_bias = scores + self.gate.e_score_correction_bias.value
+        scores_with_bias = scores + self.gate.e_score_correction_bias[...]
 
         experts_per_group = num_experts // self.n_group
         scores_grouped = scores_with_bias.reshape(num_tokens, self.n_group, experts_per_group)
