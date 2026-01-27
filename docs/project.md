@@ -63,30 +63,30 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 ### Held-Out Environment
 
-| Environment | Checkpoint 0 pass@k | Best pass@k | Best Step |
-|-------------|---------------------|-------------|-----------|
-| outlook | | | |
+| Environment | Checkpoint 0 pass@k | Best pass@k | Best Step | Avg Turns |
+|-------------|---------------------|-------------|-----------|-----------|
+| outlook | | | | |
 
 ### Held-Out Tasks (from training environments)
 
-| Environment | Checkpoint 0 pass@k | Best pass@k | Best Step |
-|-------------|---------------------|-------------|-----------|
-| github | | | |
-| booking | | | |
+| Environment | Checkpoint 0 pass@k | Best pass@k | Best Step | Avg Turns |
+|-------------|---------------------|-------------|-----------|-----------|
+| github | | | | |
+| booking | | | | |
 
 ### Training Environments
 
-| Environment | Checkpoint 0 pass@k | Best pass@k | Best Step |
-|-------------|---------------------|-------------|-----------|
-| booking | | | |
-| github | | | |
-| reddit | | | |
-| ticketmaster | | | |
-| fira | | | |
-| zillow | | | |
-| hubspot | | | |
-| google-maps | | | |
-| dropbox | | | |
+| Environment | Checkpoint 0 pass@k | Best pass@k | Best Step | Avg Turns |
+|-------------|---------------------|-------------|-----------|-----------|
+| booking | | | | |
+| github | | | | |
+| reddit | | | | |
+| ticketmaster | | | | |
+| fira | | | | |
+| zillow | | | | |
+| hubspot | | | | |
+| google-maps | | | | |
+| dropbox | | | | |
 
 ## 4. TODO
 
