@@ -156,13 +156,19 @@ def create_ray_wrapped_inference_engines(
             }
 
             rope_engine_kwargs = {}
-            # rope_scaling and rope_theta must be passed via hf_overrides for vLLM >= 0.8.3
-            # as they are HuggingFace model config parameters, not engine args
+            # rope_scaling and rope_theta must be passed via hf_overrides.rope_parameters
+            # for vLLM >= 0.8.3. See: https://docs.vllm.ai/en/latest/examples/offline_inference/context_extension/
             # Use .get() since OmegaConf DictConfig in struct mode doesn't support .pop()
             hf_overrides = dict(engine_init_kwargs.get("hf_overrides", {}) or {})
-            if rope_scaling:
-                hf_overrides["rope_scaling"] = rope_scaling
-                if "max_model_len" not in engine_init_kwargs:
+            if rope_scaling or rope_theta is not None:
+                # Convert to regular dict to avoid OmegaConf struct mode issues in vLLM
+                # vLLM expects rope_parameters, not rope_scaling
+                rope_parameters = dict(rope_scaling) if rope_scaling else {}
+                if rope_theta is not None:
+                    rope_parameters["rope_theta"] = rope_theta
+                hf_overrides["rope_parameters"] = rope_parameters
+
+                if rope_scaling and "max_model_len" not in engine_init_kwargs:
                     rope_factor = rope_scaling.get("factor", None)
                     rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
                     assert rope_factor is not None, "Please provide rope scaling `factor` to compute model max length"
@@ -170,8 +176,6 @@ def create_ray_wrapped_inference_engines(
                         rope_max_pos is not None
                     ), "Please provide rope `original_max_position_embeddings` to compute model max length"
                     rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
-            if rope_theta is not None:
-                hf_overrides["rope_theta"] = rope_theta
             if hf_overrides:
                 rope_engine_kwargs["hf_overrides"] = hf_overrides
 
