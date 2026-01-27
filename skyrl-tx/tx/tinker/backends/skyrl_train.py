@@ -117,31 +117,45 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_input_ids:
             return TrainingInputBatch({})
 
-        max_len = max(len(seq) for seq in prepared_batch.all_input_ids)
-        num_actions_per_example = [sum(1 for w in weights if w > 0) for weights in prepared_batch.all_token_weights]
-        max_num_actions = max(num_actions_per_example, default=0)
+        # SkyRL-Train shifts internally, so provide the full sequence length by
+        # appending the last target token to each already-shifted input.
+        full_sequences = []
+        for input_ids, targets in zip(prepared_batch.all_input_ids, prepared_batch.all_targets):
+            if targets:
+                full_sequences.append(list(input_ids) + [targets[-1]])
+            else:
+                full_sequences.append(list(input_ids))
 
-        sequences, attention_masks, loss_masks = [], [], []
+        max_seq_len = max(len(seq) for seq in full_sequences)
+        max_response_len = max(len(weights) for weights in prepared_batch.all_token_weights)
 
-        for seq, num_actions in zip(prepared_batch.all_input_ids, num_actions_per_example):
-            pad_len = max_len - len(seq)
+        sequences, attention_masks, loss_masks, response_masks = [], [], [], []
+
+        for seq, weights in zip(full_sequences, prepared_batch.all_token_weights):
+            pad_len = max_seq_len - len(seq)
             sequences.append([0] * pad_len + list(seq))
             attention_masks.append([0] * pad_len + [1] * len(seq))
-            action_pad = max_num_actions - num_actions
-            loss_masks.append([0] * action_pad + [1] * num_actions)
+            action_pad = max_response_len - len(weights)
+            # Use the full per-token weights, left-padded to the batch max.
+            loss_masks.append([0.0] * action_pad + [float(w) for w in weights])
+            # Provide a binary valid-token mask so SkyRL-Train can trim outputs
+            # without depending on weighted masks.
+            response_masks.append([0] * action_pad + [1] * len(weights))
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
-        loss_mask_tensor = torch.tensor(loss_masks, dtype=torch.long)
+        loss_mask_tensor = torch.tensor(loss_masks, dtype=torch.float32)
+        response_mask_tensor = torch.tensor(response_masks, dtype=torch.long)
 
         batch = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,
                 "attention_mask": attention_mask_tensor,
                 "loss_mask": loss_mask_tensor,
+                "response_mask": response_mask_tensor,
             }
         )
-        batch.metadata = {"response_length": max_num_actions}
+        batch.metadata = {"response_length": max_response_len}
         return batch
 
     def forward_backward(
@@ -160,22 +174,17 @@ class SkyRLTrainBackend(AbstractBackend):
             loss_fn_outputs = []
             for i in range(start_idx, end_idx):
                 raw_output = data["loss_fn_outputs"][i]
-                # Convert raw lists to TensorData format expected by the API
-                logprobs = raw_output.get("logprobs", [])
-                elementwise_loss = raw_output.get("elementwise_loss", [])
-                seq_len = len(prepared_batch.all_input_ids[i])
-                # SkyRL-Train returns response-only outputs; align to full sequence length.
-                elementwise_loss = ([0.0] * max(seq_len - len(elementwise_loss), 0)) + list(elementwise_loss)[-seq_len:]
-                logprobs = ([0.0] * max(seq_len - len(logprobs), 0)) + list(logprobs)[-seq_len:]
+                logprobs = list(raw_output.get("logprobs", []))
+                elementwise_loss = list(raw_output.get("elementwise_loss", []))
                 loss_fn_outputs.append(
                     {
                         "elementwise_loss": {
-                            "data": list(elementwise_loss),
+                            "data": elementwise_loss,
                             "dtype": "float32",
                             "shape": [len(elementwise_loss)],
                         },
                         "logprobs": {
-                            "data": list(logprobs),
+                            "data": logprobs,
                             "dtype": "float32",
                             "shape": [len(logprobs)],
                         },

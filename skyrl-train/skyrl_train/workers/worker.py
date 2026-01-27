@@ -792,8 +792,10 @@ class PolicyWorkerBase(Worker):
             batch_size = action_log_probs.shape[0]
             loss_fn_outputs = []
             for i in range(batch_size):
-                # Get valid length for this sample from loss_mask
-                if loss_mask is not None:
+                # Determine valid length without depending on weighted masks.
+                if action_mask is not None:
+                    valid_len = int(action_mask[i].sum().item())
+                elif loss_mask is not None:
                     valid_len = int(loss_mask[i].sum().item())
                 else:
                     valid_len = action_log_probs.shape[1]
