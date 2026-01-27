@@ -23,6 +23,7 @@ try:  # Optional dependency: keep other backends importable without ray/skyrl-tr
     from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
     from skyrl_train.utils import get_ray_pg_ready_with_timeout
     from skyrl_train.config.utils import get_default_config
+    from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 
     SKYRL_TRAIN_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only in non-ray installs
@@ -34,6 +35,7 @@ except ImportError:  # pragma: no cover - exercised only in non-ray installs
     PolicyWorker = Any
     get_ray_pg_ready_with_timeout = None
     get_default_config = None
+    SKYRL_RAY_PG_TIMEOUT_IN_S = None
     SKYRL_TRAIN_AVAILABLE = False
 
 
@@ -83,7 +85,7 @@ class SkyRLTrainBackend(AbstractBackend):
         num_gpus = self._cfg.trainer.placement.policy_num_gpus_per_node
 
         pg = placement_group([{"GPU": num_gpus, "CPU": 1}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
         self._actor_group = PPORayActorGroup(
             cfg=self._cfg,
@@ -91,8 +93,8 @@ class SkyRLTrainBackend(AbstractBackend):
             num_gpus_per_node=num_gpus,
             ray_actor_type=PolicyWorker,
             pg=pg,
-            num_gpus_per_actor=0.2 if pg else 1,
-            colocate_all=True,
+            num_gpus_per_actor=1,
+            colocate_all=False,
             sequence_parallel_size=self._cfg.trainer.policy.sequence_parallel_size,
             record_memory=self._cfg.trainer.policy.record_memory,
         )
