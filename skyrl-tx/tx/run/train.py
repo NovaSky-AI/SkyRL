@@ -19,8 +19,9 @@ app = typer.Typer()
 
 def loss_fn(model, batch):
     output = model(batch["text"], attention_mask=batch["attention_mask"])
-    loss = optax.softmax_cross_entropy_with_integer_labels(logits=output.logits, labels=batch["target"])
-    return loss.mean(), output.logits
+    logits = model.compute_logits(output.last_hidden_state)
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=batch["target"])
+    return loss.mean(), logits
 
 
 @nnx.jit
@@ -82,7 +83,7 @@ def train(
     loader = get_loader(loader_name)
 
     model_class = get_model_class(base_config)
-    mesh = jax.make_mesh((1, 1, tp_size), ("fsdp", "ep", "tp"))
+    mesh = jax.make_mesh((1, 1, tp_size), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
     with jax.set_mesh(mesh):
         model = model_class(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
         optimizer = nnx.Optimizer(model, get_optimizer(optimizer_name, optimizer_args), wrt=nnx.Param)

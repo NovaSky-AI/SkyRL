@@ -7,8 +7,10 @@ from transformers import LlamaConfig
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
+from tx.layers.attention import dot_product_attention
+from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.types import CausalLMOutput, ModelOutput
-from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
+from tx.utils.generator import GeneratorMixin, KVCache
 
 
 class Llama3Attention(nnx.Module):
@@ -81,7 +83,7 @@ class Llama3Attention(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
 
@@ -96,21 +98,12 @@ class Llama3Attention(nnx.Module):
 
         # Handle KV cache
         if kv_cache is not None:
-            k_cache, v_cache, cache_position = kv_cache
-            k = jax.lax.dynamic_update_slice(k_cache, k, (0, cache_position, 0, 0))
-            v = jax.lax.dynamic_update_slice(v_cache, v, (0, cache_position, 0, 0))
+            k, v = KVCache.update_layer(kv_cache, k, v, positions)
 
         updated_cache = (k, v)
 
-        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
-        attn_output = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            scale=1.0 / self.head_dim**0.5,
-            mask=attention_mask[:, None, None, :].astype(bool),
-            is_causal=kv_cache is None,
-        )
+        is_causal = kv_cache is None
+        attn_output = dot_product_attention(q, k, v, attention_mask, is_causal, self.head_dim)
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
         return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
@@ -174,7 +167,7 @@ class Llama3DecoderLayer(nnx.Module):
         attention_mask: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
-        kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -242,7 +235,7 @@ class Llama3Model(nnx.Module):
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
+                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
             )
             updated_keys.append(k)
             updated_values.append(v)
@@ -251,23 +244,22 @@ class Llama3Model(nnx.Module):
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        # Increment cache_position if cache exists, or use sequence length for new cache
-        new_cache_position = kv_cache.cache_position + 1 if kv_cache is not None else input_ids.shape[1]
-
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache(keys=updated_keys, values=updated_values, cache_position=new_cache_position),
+            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
 
-class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
+class Llama3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
-        if not self.config.tie_word_embeddings:
+        if config.tie_word_embeddings:
+            self.lm_head = self.model.embed_tokens.T
+        else:
             self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
@@ -279,6 +271,10 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
             )
+
+    def get_lm_head(self) -> LMHead:
+        """Return the lm_head callable for logits computation."""
+        return self.lm_head
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
@@ -296,7 +292,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         kv_cache: KVCache | None = None,
     ) -> CausalLMOutput:
         if positions is None:
-            positions = compute_positions(attention_mask)
+            positions = jnp.arange(attention_mask.shape[1])[None, :]
 
         outputs = self.model(
             input_ids,
@@ -306,14 +302,8 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = outputs.last_hidden_state
-        if self.config.tie_word_embeddings:
-            logits = hidden_states @ self.model.embed_tokens.embedding.value.T
-        else:
-            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
         return CausalLMOutput(
-            logits=logits,
             last_hidden_state=outputs.last_hidden_state,
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,

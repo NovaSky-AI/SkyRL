@@ -16,13 +16,13 @@ dependencies = [
     "rich>=14.1.0",
     "safetensors>=0.6.2",
     "tokenizers>=0.21.2",
-    "transformers>=4.56.1",
+    "transformers>=4.56.1,<5",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
-    "jax>=0.8",
+    "jax>=0.8,<1.0",
 ]
 
 [project.optional-dependencies]
