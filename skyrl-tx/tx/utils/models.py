@@ -113,7 +113,7 @@ def load_safetensors(
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         if "experts" in path:
-            num_experts = getattr(config, "num_experts", getattr(config, "n_routed_experts"))
+            num_experts = getattr(config, "num_experts", None) or getattr(config, "n_routed_experts")
             tensors[key] = np.stack([tensors[get_expert_key(path, i)].T for i in range(num_experts)], axis=0)
         else:
             tensors[key] = tensors[key] if "embed_tokens" in path else tensors[key].T
