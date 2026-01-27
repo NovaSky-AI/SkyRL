@@ -208,13 +208,6 @@ trainer:
 
 generator:
   model_name: ${trainer.policy.model.path}
-  # served_model_name: The model name to use for HTTP endpoint validation. If set, this name
-  # must be used in the `model` field of /chat/completions and /completions requests instead
-  # of the model path. This is useful when:
-  # - The model path differs from the desired API model name (e.g., local paths vs API names)
-  # - Using LiteLLM or other clients that expect a specific model name format
-  # If null (default), the model path (trainer.policy.model.path) is used for validation.
-  served_model_name: null
   model_dtype: "bfloat16" # should match dtype for inference engine
   run_engines_locally: true
   num_inference_engines: 1
@@ -247,6 +240,13 @@ generator:
   enable_http_endpoint: false
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
+  # served_model_name: The model name to use for HTTP endpoint validation. If set, this name
+  # must be used in the `model` field of /chat/completions and /completions requests instead
+  # of the model path. This is useful when:
+  # - The model path differs from the desired API model name (e.g., local paths vs API names)
+  # - Using LiteLLM or other clients that expect a specific model name format
+  # If null (default), the model path (trainer.policy.model.path) is used for validation.
+  served_model_name: null
   max_turns: 1
 
   # chat template configuration for SkyRLGymGenerator.

@@ -867,9 +867,9 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         }
 
         response = requests.post(f"{base_url}/chat/completions", json=payload)
-        assert response.status_code == HTTPStatus.OK, (
-            f"Request with served_model_name failed: {response.status_code}, {response.json()}"
-        )
+        assert (
+            response.status_code == HTTPStatus.OK
+        ), f"Request with served_model_name failed: {response.status_code}, {response.json()}"
         data = response.json()
         assert "choices" in data and len(data["choices"]) > 0
         assert data["choices"][0]["message"]["content"] is not None
@@ -882,9 +882,9 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
             "max_tokens": 50,
         }
         response = requests.post(f"{base_url}/chat/completions", json=payload_with_path)
-        assert response.status_code == HTTPStatus.BAD_REQUEST, (
-            f"Request with model path should fail when served_model_name is set: {response.status_code}"
-        )
+        assert (
+            response.status_code == HTTPStatus.BAD_REQUEST
+        ), f"Request with model path should fail when served_model_name is set: {response.status_code}"
         error_data = response.json()
         assert "Model name mismatch" in error_data["error"]["message"]
 
@@ -897,9 +897,9 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
             "max_tokens": 50,
         }
         response = requests.post(f"{base_url}/completions", json=completions_payload)
-        assert response.status_code == HTTPStatus.OK, (
-            f"Completions request with served_model_name failed: {response.status_code}, {response.json()}"
-        )
+        assert (
+            response.status_code == HTTPStatus.OK
+        ), f"Completions request with served_model_name failed: {response.status_code}, {response.json()}"
 
     finally:
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
