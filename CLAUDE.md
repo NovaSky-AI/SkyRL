@@ -7,6 +7,11 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
 
 **Always check learnings/ before asking questions about SkyRL training mechanics.**
 
+## Project Documentation
+
+- `docs/paper.md` - Blog post notes: dataset evolution, baseline results, issues identified, fixes implemented, future directions
+- `docs/model_issues.md` - Detailed analysis of eval trajectories and model failure modes
+
 ## Critical Rules - DO NOT VIOLATE
 
 1. **NEVER push to main** - Always create a branch and open a PR for review.
