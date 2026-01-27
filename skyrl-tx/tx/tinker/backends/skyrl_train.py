@@ -87,13 +87,14 @@ class SkyRLTrainBackend(AbstractBackend):
 
         self._actor_group = PPORayActorGroup(
             cfg=self._cfg,
-            num_nodes=1,
+            num_nodes=self._cfg.trainer.placement.policy_num_nodes,
             num_gpus_per_node=num_gpus,
             ray_actor_type=PolicyWorker,
             pg=pg,
-            num_gpus_per_actor=0.75 if num_gpus == 1 else 1.0,
-            colocate_all=False,
-            sequence_parallel_size=1,
+            num_gpus_per_actor=0.2 if pg else 1,
+            colocate_all=True,
+            sequence_parallel_size=self._cfg.trainer.policy.sequence_parallel_size,
+            record_memory=self._cfg.trainer.policy.record_memory,
         )
         ray.get(self._actor_group.async_init_model(self.base_model))
         self._dispatch = WorkerDispatch(self._cfg, policy_actor_group=self._actor_group)
