@@ -1,7 +1,9 @@
+from typing import cast
 from unittest.mock import MagicMock
 
 from flax import nnx
 import jax.numpy as jnp
+from tx.models.configs import ModelConfig
 from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
 from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch, apply_top_p_batch
@@ -31,6 +33,10 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
         return self.lm_head
+
+    def get_model_config(self) -> ModelConfig:
+        """Return the model configuration required by LogitsProcessorMixin."""
+        return cast(ModelConfig, self.config)
 
     def __call__(
         self,
