@@ -76,17 +76,17 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 ### Training Environments
 
-| Environment | Checkpoint 0 pass@4 | Best pass@4 | Best Step | Avg Turns |
-|-------------|---------------------|-------------|-----------|-----------|
-| booking | - | 100% | 2 | 3.0 |
-| github | - | 100% | 6 | 8.5 |
-| reddit | - | 100% | 1 | 4.0 |
-| ticketmaster | - | 0% | - | 10.0 |
-| fira | - | - | - | - |
-| zillow | - | 100% | 15 | 27.0 |
-| hubspot | - | - | - | - |
-| google-maps | - | - | - | - |
-| dropbox | - | - | - | - |
+| Environment | Best pass@4 | Best Step | Avg Turns |
+|-------------|-------------|-----------|-----------|
+| booking | 100% | 2 | 3.0 |
+| github | 100% | 6 | 8.5 |
+| reddit | 100% | 1 | 4.0 |
+| ticketmaster | 0% | - | 10.0 |
+| fira | - | - | - |
+| zillow | 100% | 15 | 27.0 |
+| hubspot | - | - | - |
+| google-maps | - | - | - |
+| dropbox | - | - | - |
 
 *Run: `fleet_tool_use_3f4033b8` | Step 19 (running) | [WandB](https://wandb.ai/thefleet/fleet-task-grpo/runs/mk6nr5ij)*
 
