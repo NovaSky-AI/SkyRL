@@ -90,6 +90,7 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 ## 4. TODO
 
+- [ ] **Hillclimbing on tool-use eval set**: Iterate on model/training to improve eval performance
 - [ ] **Scaling dataset**: Increase training samples to demonstrate performance improvement with data scale
 - [ ] **Trace analysis**: Compare trajectories before and after training to measure behavioral changes
 - [ ] **Kimi K2.5 training**: Train on Kimi K2.5 model
