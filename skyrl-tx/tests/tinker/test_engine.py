@@ -91,15 +91,17 @@ class TestMaxMicroBatches:
         """Create a ForwardBackwardInput request data with the given number of sequences."""
         data = []
         for _ in range(num_sequences):
-            data.append({
-                "model_input": {"chunks": [{"tokens": [1, 2, 3]}]},
-                "loss_fn_inputs": {
-                    "target_tokens": {"data": [2, 3, 4]},
-                    "weights": {"data": [1.0, 1.0, 1.0]},
-                    "advantages": {"data": [0.0, 0.0, 0.0]},
-                    "logprobs": {"data": [0.0, 0.0, 0.0]},
-                },
-            })
+            data.append(
+                {
+                    "model_input": {"chunks": [{"tokens": [1, 2, 3]}]},
+                    "loss_fn_inputs": {
+                        "target_tokens": {"data": [2, 3, 4]},
+                        "weights": {"data": [1.0, 1.0, 1.0]},
+                        "advantages": {"data": [0.0, 0.0, 0.0]},
+                        "logprobs": {"data": [0.0, 0.0, 0.0]},
+                    },
+                }
+            )
         return {"data": data, "loss_fn": "cross_entropy"}
 
     @staticmethod
@@ -108,7 +110,11 @@ class TestMaxMicroBatches:
         config = EngineConfig(
             base_model=BASE_MODEL,
             checkpoints_base=AnyPath(""),
-            backend_config={"max_lora_adapters": 4, "max_lora_rank": 32, "train_micro_batch_size": train_micro_batch_size},
+            backend_config={
+                "max_lora_adapters": 4,
+                "max_lora_rank": 32,
+                "train_micro_batch_size": train_micro_batch_size,
+            },
             max_micro_batches=max_micro_batches,
             database_url="sqlite:///:memory:",
         )
@@ -120,12 +126,14 @@ class TestMaxMicroBatches:
         """Add FORWARD_BACKWARD requests with the given sequence counts."""
         with Session(engine.db_engine) as session:
             for num_sequences in sequence_counts:
-                session.add(FutureDB(
-                    request_type=types.RequestType.FORWARD_BACKWARD,
-                    model_id="model1",
-                    request_data=self._make_request_data(num_sequences),
-                    status=RequestStatus.PENDING,
-                ))
+                session.add(
+                    FutureDB(
+                        request_type=types.RequestType.FORWARD_BACKWARD,
+                        model_id="model1",
+                        request_data=self._make_request_data(num_sequences),
+                        status=RequestStatus.PENDING,
+                    )
+                )
             session.commit()
 
     @pytest.mark.parametrize(
