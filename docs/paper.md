@@ -78,12 +78,17 @@ This ensures the training data contains only valid, solvable tasks with working 
 | reddit | | | |
 | ticketmaster | | | |
 
-## 4. Future Directions
+## 4. TODO
+
+- [ ] **Scaling training samples**: Increase dataset size for better generalization
+- [ ] **Trace analysis**: Compare trajectories before and after training to measure behavioral changes
+
+## 5. Future Directions
 
 - **Browser use (computer_use modality)**: Train on browser-based tasks with visual grounding
 - **Combined training**: Joint training on `tool_use` + `computer_use` for generalist agents
 
-## 5. References
+## 6. References
 
 - SkyRL repo: https://github.com/fleet-ai/SkyRL
 - OpenEnv repo: https://github.com/fleet-ai/OpenEnv
