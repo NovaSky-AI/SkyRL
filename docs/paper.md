@@ -1,4 +1,4 @@
-# SkyRL Fleet Training: Tool-Use Agent Development
+# SkyRL Fleet Training: Tool-Use and Browser-Use Agent Development
 
 ## 1. Overview
 
@@ -93,6 +93,7 @@ This ensures the training data contains only valid, solvable tasks with working 
 - [ ] **Scaling training samples**: Increase dataset size for better generalization
 - [ ] **Trace analysis**: Compare trajectories before and after training to measure behavioral changes
 - [ ] **Kimi K2.5 training**: Train on Kimi K2.5 model
+- [ ] **OpenEnv browseComp integration**: Integrate with OpenEnv browseComp for browser-use tasks
 
 ## 5. Future Directions
 
