@@ -148,8 +148,37 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
     @property
     def T(self):
         """Return a callable that projects hidden states back to vocabulary space."""
-        # TODO: Apply lora adapters here as well
-        return lambda hidden_states, adapter_indices=None: hidden_states @ self.embedding[...].T
+        def _unembed(hidden_states: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+            base_out = hidden_states @ self.embedding[...].T
+
+            if self.max_lora_adapters == 0 or adapter_indices is None:
+                return base_out
+
+            if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
+                raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
+
+            batch_size, seq_len, hidden_dim = hidden_states.shape
+            assert hidden_dim == self.embedding[...].shape[1]
+            assert adapter_indices.shape[0] == batch_size
+
+            hidden_flat = hidden_states.reshape(-1, hidden_dim)
+            adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
+
+            hidden_sorted, group_sizes, unsort_indices, _ = prepare_routing(
+                hidden_flat, adapter_indices_expanded, self.max_lora_adapters
+            )
+
+            # Apply LoRA using ragged_dot: x @ B^T @ A^T
+            lora_B_T = jnp.swapaxes(self.lora_B[...], -1, -2)
+            intermediate = jax.lax.ragged_dot(hidden_sorted, lora_B_T, group_sizes)
+            lora_A_T = jnp.swapaxes(self.lora_A[...], -1, -2)
+            lora_output_sorted = jax.lax.ragged_dot(intermediate, lora_A_T, group_sizes)
+
+            lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
+            lora_output = lora_output * self.lora_scaling[...][adapter_indices, None, None]
+            return base_out + lora_output
+
+        return _unembed
 
 
 class LoRALinear(LoRAMixin, nnx.Linear):
@@ -302,11 +331,6 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         adapter_index: Index of the adapter to initialize
         lora_config: LoraConfig object containing rank, alpha, seed, and training flags
     """
-    if lora_config.train_unembed and getattr(model.config, "tie_word_embeddings", False):
-        raise ValueError(
-            "train_unembed=True is incompatible with tie_word_embeddings=True. "
-            "Tied embeddings use embed_tokens.T which does not support LoRA."
-        )
     rngs = nnx.Rngs(lora_config.seed)
     state = nnx.state(model)
 
