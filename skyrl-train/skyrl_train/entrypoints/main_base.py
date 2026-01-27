@@ -85,6 +85,8 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         engine_kwargs["rope_scaling"] = rope_scaling
     if (rope_theta := cfg.generator.get("rope_theta", None)) is not None:
         engine_kwargs["rope_theta"] = rope_theta
+    if (served_model_name := cfg.generator.get("served_model_name", None)) is not None:
+        engine_kwargs["served_model_name"] = served_model_name
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
