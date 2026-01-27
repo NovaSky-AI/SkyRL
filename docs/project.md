@@ -90,18 +90,14 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 ## 4. TODO
 
-- [ ] **Scaling training samples**: Increase dataset size for better generalization
+- [ ] **Scaling dataset**: Increase training samples to demonstrate performance improvement with data scale
 - [ ] **Trace analysis**: Compare trajectories before and after training to measure behavioral changes
 - [ ] **Kimi K2.5 training**: Train on Kimi K2.5 model
 - [ ] **OpenEnv browseComp integration**: Integrate with OpenEnv browseComp for browser-use tasks
+- [ ] **Browser use (computer_use modality)**: Train on browser-based tasks with visual grounding
+- [ ] **Combined training**: Joint training on `tool_use` + `computer_use` for generalist agents
 
-## 5. Future Directions
-
-- **Scaling dataset**: Increase training samples to demonstrate performance improvement with data scale
-- **Browser use (computer_use modality)**: Train on browser-based tasks with visual grounding
-- **Combined training**: Joint training on `tool_use` + `computer_use` for generalist agents
-
-## 6. References
+## 5. References
 
 - SkyRL repo: https://github.com/fleet-ai/SkyRL
 - OpenEnv repo: https://github.com/fleet-ai/OpenEnv
