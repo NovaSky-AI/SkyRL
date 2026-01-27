@@ -85,6 +85,7 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 - [ ] **Scaling training samples**: Increase dataset size for better generalization
 - [ ] **Trace analysis**: Compare trajectories before and after training to measure behavioral changes
+- [ ] **Kimi K2.5 training**: Train on Kimi K2.5 model
 
 ## 5. Future Directions
 
