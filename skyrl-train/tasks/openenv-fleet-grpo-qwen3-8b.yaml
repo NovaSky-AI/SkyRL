@@ -42,8 +42,10 @@ envs:
   MODALITY: "tool_use"
   # Training parameters
   MAX_TURNS: 50
-  MAX_INPUT_LENGTH: 24000  # Max context at each turn (Qwen3-8B has 32K)
-  MAX_GENERATE_LENGTH: 4096
+  # Context budget: Using YaRN (factor=2.0) to extend Qwen3-8B from 32K to 65K context
+  # GitHub env needs ~26K tokens for 100 tools, so 48K allows multi-turn growth
+  MAX_INPUT_LENGTH: 48000
+  MAX_GENERATE_LENGTH: 8192  # Increased from 4096 to allow thinking + tool calls
   NUM_EPOCHS: 20
   RUN_ID: ""
   # Optional: limit number of tasks for testing
@@ -88,7 +90,7 @@ setup: |
   # Download dataset from S3
   mkdir -p $HOME/data/fleet
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
-  S3_PATH="s3://${S3_DATASET_BUCKET}/v0.1/openenv/all_${MODALITY}.json"
+  S3_PATH="s3://${S3_DATASET_BUCKET}/v0.2/openenv/all_${MODALITY}.json"
   echo "Downloading dataset from $S3_PATH..."
   aws s3 cp "$S3_PATH" "$TASKS_FILE"
   TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['tasks']))")
@@ -149,6 +151,9 @@ run: |
     environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="Qwen/Qwen3-8B" \
+    trainer.rope_scaling.rope_type=yarn \
+    trainer.rope_scaling.factor=2.0 \
+    trainer.rope_scaling.original_max_position_embeddings=32768 \
     trainer.placement.colocate_all=true \
     trainer.strategy=fsdp2 \
     trainer.placement.policy_num_gpus_per_node=$TOTAL_GPUS \
@@ -160,10 +165,10 @@ run: |
     trainer.eval_before_train=true \
     trainer.eval_interval=10 \
     trainer.update_epochs_per_batch=1 \
-    trainer.train_batch_size=8 \
-    trainer.policy_mini_batch_size=8 \
-    trainer.micro_forward_batch_size_per_gpu=2 \
-    trainer.micro_train_batch_size_per_gpu=2 \
+    trainer.train_batch_size=4 \
+    trainer.policy_mini_batch_size=4 \
+    trainer.micro_forward_batch_size_per_gpu=1 \
+    trainer.micro_train_batch_size_per_gpu=1 \
     trainer.ckpt_interval=10 \
     trainer.max_prompt_length=512 \
     generator.max_input_length=$MAX_INPUT_LENGTH \

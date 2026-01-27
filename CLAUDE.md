@@ -11,11 +11,18 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
 
 1. **NEVER push to main** - Always create a branch and open a PR for review.
 
-2. **Always run pre-commit before creating a PR** - Format code before committing:
+2. **Always run black before commits** - Format Python code before every commit:
+   ```bash
+   black skyrl-train/integrations/fleet/
+   ```
+
+   Or run full pre-commit before creating a PR:
    ```bash
    uv pip install pre-commit
    pre-commit run --all-files --config .pre-commit-config.yaml
    ```
+
+   If pre-commit reformats files, stage them and commit again.
 
 3. **DO NOT use Fleet SDK directly** - Use OpenEnv as the abstraction layer. The integration should go through OpenEnv, not call Fleet SDK APIs directly.
    - Fleet SDK repo: `/Users/deniz/repos/fleet-sdk`
