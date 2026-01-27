@@ -97,11 +97,11 @@ class HFModelWrapper(nn.Module):
 
             model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
 
-            rope_scaling_kwargs = {}
+            # Set rope_scaling on config (not as kwarg to from_pretrained)
             if rope_scaling:
-                rope_scaling_kwargs["rope_scaling"] = rope_scaling
+                model_config.rope_scaling = dict(rope_scaling) if hasattr(rope_scaling, "keys") else rope_scaling
             if rope_theta:
-                rope_scaling_kwargs["rope_theta"] = rope_theta
+                model_config.rope_theta = rope_theta
 
             self.model = model_class.from_pretrained(
                 pretrain_or_model,
@@ -111,7 +111,6 @@ class HFModelWrapper(nn.Module):
                 quantization_config=nf4_config,
                 torch_dtype=torch.bfloat16 if bf16 else torch.float32,
                 device_map=device_map,
-                **rope_scaling_kwargs,
             )
 
             # gpt oss
