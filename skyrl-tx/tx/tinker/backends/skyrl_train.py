@@ -82,19 +82,20 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{self._model_id}' already exists. Only one model supported.")
 
         self._cfg = _build_config(self.base_model, self.config, lora_config)
+        num_nodes = self._cfg.trainer.placement.policy_num_nodes
         num_gpus = self._cfg.trainer.placement.policy_num_gpus_per_node
 
-        pg = placement_group([{"GPU": num_gpus, "CPU": num_gpus}], strategy="PACK")
+        pg = placement_group([{"GPU": 1, "CPU": 1}] * num_nodes * num_gpus, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
         self._actor_group = PPORayActorGroup(
             cfg=self._cfg,
-            num_nodes=self._cfg.trainer.placement.policy_num_nodes,
+            num_nodes=num_nodes,
             num_gpus_per_node=num_gpus,
             ray_actor_type=PolicyWorker,
             pg=pg,
             num_gpus_per_actor=1,
-            colocate_all=False,
+            colocate_all=True,
             sequence_parallel_size=self._cfg.trainer.policy.sequence_parallel_size,
             record_memory=self._cfg.trainer.policy.record_memory,
         )
