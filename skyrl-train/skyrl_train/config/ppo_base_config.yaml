@@ -231,12 +231,22 @@ generator:
   # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
   fully_sharded_loras: false
+  # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only)
+  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger
+  enable_ray_prometheus_stats: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
   enable_http_endpoint: false
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
+  # served_model_name: The model name to use for HTTP endpoint validation. If set, this name
+  # must be used in the `model` field of /chat/completions and /completions requests instead
+  # of the model path. This is useful when:
+  # - The model path differs from the desired API model name (e.g., local paths vs API names)
+  # - Using LiteLLM or other clients that expect a specific model name format
+  # If null (default), the model path (trainer.policy.model.path) is used for validation.
+  served_model_name: null
   max_turns: 1
 
   # chat template configuration for SkyRLGymGenerator.

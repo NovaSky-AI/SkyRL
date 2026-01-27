@@ -46,7 +46,7 @@ def test_qwen3_generate():
         base_config = PretrainedConfig.from_pretrained(model_name)
         config = Qwen3Config(base_config, max_lora_adapters=2, max_lora_rank=32, shard_attention_heads=True)
 
-        mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
+        mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)
@@ -146,7 +146,7 @@ def test_qwen3_generate_speed():
 
     with tempfile.TemporaryDirectory() as tmp:
         hf_model.save_pretrained(tmp, safe_serialization=True)
-        mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
+        mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=nnx.Rngs(0))
         load_safetensors(tmp, config, model)

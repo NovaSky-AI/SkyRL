@@ -10,7 +10,7 @@ from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
 from tx.models.utils import forward_layers
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
-from tx.models.types import CausalLMOutput, ModelOutput
+from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
 
 
@@ -249,7 +249,7 @@ class Llama3Model(nnx.Module):
         )
 
 
-class Llama3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
+class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProcessorMixin):
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config

@@ -816,3 +816,92 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
         if server_thread.is_alive():
             server_thread.join(timeout=5)
+
+
+@pytest.mark.vllm
+def test_http_endpoint_served_model_name(ray_init_fixture):
+    """
+    Test that `generator.served_model_name` allows using a different model name in requests
+    than the actual model path.
+
+    This is useful when:
+    - The model path is a local path or HuggingFace path that differs from the desired API model name
+    - Using LiteLLM or other clients that expect a specific model name format
+    - Harbor deployments where the served model name differs from the underlying model path
+
+    See: https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
+    """
+    # Use a custom served model name that differs from the actual model path
+    SERVED_MODEL_NAME = "my-custom-model-alias"
+
+    try:
+        # 1. Set up engine with served_model_name
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
+        cfg.trainer.placement.colocate_all = True
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+        # Set the served_model_name to be different from the model path
+        cfg.generator.served_model_name = SERVED_MODEL_NAME
+
+        client, _ = init_inference_engines(
+            cfg=cfg,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
+            model=MODEL_QWEN2_5,
+            num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,  # since we do not explicitly sync weights
+        )
+
+        server_thread, server_port = set_up_http_server(client)
+        base_url = f"http://{SERVER_HOST}:{server_port}/v1"
+
+        # 2. Test that requests with the served_model_name work
+        messages = [{"role": "user", "content": "Hello, who are you?"}]
+        payload = {
+            "model": SERVED_MODEL_NAME,  # Use the served model name, not the path
+            "messages": messages,
+            "max_tokens": 50,
+        }
+
+        response = requests.post(f"{base_url}/chat/completions", json=payload)
+        assert (
+            response.status_code == HTTPStatus.OK
+        ), f"Request with served_model_name failed: {response.status_code}, {response.json()}"
+        data = response.json()
+        assert "choices" in data and len(data["choices"]) > 0
+        assert data["choices"][0]["message"]["content"] is not None
+
+        # 3. Test that requests with the original model path should now fail
+        # (since we're serving under a different name)
+        payload_with_path = {
+            "model": MODEL_QWEN2_5,  # Use the actual model path
+            "messages": messages,
+            "max_tokens": 50,
+        }
+        response = requests.post(f"{base_url}/chat/completions", json=payload_with_path)
+        assert (
+            response.status_code == HTTPStatus.BAD_REQUEST
+        ), f"Request with model path should fail when served_model_name is set: {response.status_code}"
+        error_data = response.json()
+        assert "Model name mismatch" in error_data["error"]["message"]
+
+        # 4. Test /completions endpoint as well
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
+        text_prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        completions_payload = {
+            "model": SERVED_MODEL_NAME,
+            "prompt": text_prompt,
+            "max_tokens": 50,
+        }
+        response = requests.post(f"{base_url}/completions", json=completions_payload)
+        assert (
+            response.status_code == HTTPStatus.OK
+        ), f"Completions request with served_model_name failed: {response.status_code}, {response.json()}"
+
+    finally:
+        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread.is_alive():
+            server_thread.join(timeout=5)

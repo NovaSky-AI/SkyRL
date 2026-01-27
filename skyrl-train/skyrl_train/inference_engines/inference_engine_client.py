@@ -52,7 +52,14 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         self.engines = engines
         self.tokenizer = tokenizer
-        self.model_name = full_config.trainer.policy.model.path
+        # Use served_model_name if provided, otherwise fall back to model path.
+        # served_model_name allows using a different model name for HTTP endpoint validation
+        # than the actual model path. See ppo_base_config.yaml for details.
+        served_model_name = full_config.generator.get("served_model_name", None)
+        if served_model_name is not None:
+            self.model_name = served_model_name
+        else:
+            self.model_name = full_config.trainer.policy.model.path
         self.backend = full_config.generator.backend
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
