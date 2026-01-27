@@ -156,8 +156,11 @@ def create_ray_wrapped_inference_engines(
             }
 
             rope_engine_kwargs = {}
+            # rope_scaling and rope_theta must be passed via hf_overrides for vLLM >= 0.8.3
+            # as they are HuggingFace model config parameters, not engine args
+            hf_overrides = engine_init_kwargs.pop("hf_overrides", {})
             if rope_scaling:
-                rope_engine_kwargs["rope_scaling"] = rope_scaling
+                hf_overrides["rope_scaling"] = rope_scaling
                 if "max_model_len" not in engine_init_kwargs:
                     rope_factor = rope_scaling.get("factor", None)
                     rope_max_pos = rope_scaling.get("original_max_position_embeddings", None)
@@ -167,7 +170,9 @@ def create_ray_wrapped_inference_engines(
                     ), "Please provide rope `original_max_position_embeddings` to compute model max length"
                     rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
             if rope_theta is not None:
-                rope_engine_kwargs["rope_theta"] = rope_theta
+                hf_overrides["rope_theta"] = rope_theta
+            if hf_overrides:
+                rope_engine_kwargs["hf_overrides"] = hf_overrides
 
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
