@@ -61,20 +61,24 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 ## 3. Results
 
-### Held-Out Environment
+### Run: `mk6nr5ij` ([WandB](https://wandb.ai/thefleet/fleet-task-grpo/runs/mk6nr5ij))
+
+**Status**: Step 19 (running)
+
+#### Held-Out Environment
 
 | Environment | Checkpoint 0 pass@3 | Best pass@3 | Best Step | Avg Turns |
 |-------------|---------------------|-------------|-----------|-----------|
 | outlook | 36.8% | 36.8% | 0 | - |
 
-### Held-Out Tasks (from training environments)
+#### Held-Out Tasks (from training environments)
 
 | Environment | Checkpoint 0 pass@3 | Best pass@3 | Best Step | Avg Turns |
 |-------------|---------------------|-------------|-----------|-----------|
 | github | 42.1% | 47.4% | 10 | 8.5 |
 | booking | 52.6% | 63.2% | 10 | 3.0 |
 
-### Training Environments
+#### Training Environments
 
 | Environment | Best pass@4 | Best Step | Avg Turns |
 |-------------|-------------|-----------|-----------|
@@ -88,7 +92,7 @@ This ensures the training data contains only valid, solvable tasks with working 
 | google-maps | - | - | - |
 | dropbox | - | - | - |
 
-*Run: `fleet_tool_use_3f4033b8` | Step 19 (running) | [WandB](https://wandb.ai/thefleet/fleet-task-grpo/runs/mk6nr5ij)*
+---
 
 ## 4. TODO
 
