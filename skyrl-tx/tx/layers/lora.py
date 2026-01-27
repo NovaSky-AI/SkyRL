@@ -318,7 +318,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         # Following Thinking Machines' approach: divide rank by num_experts
         # to keep total LoRA parameters similar to non-MoE models
         if "experts" in normalized_path:
-            num_experts = getattr(model.config, "num_experts", None) or getattr(model.config, "n_routed_experts", 1)
+            num_experts = model.config.get_num_experts()
             effective_rank = max(1, lora_config.rank // num_experts)
 
         if not filter_lora(lora_config, normalized_path):
