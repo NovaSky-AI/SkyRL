@@ -93,7 +93,7 @@ class SkyRLTrainBackend(AbstractBackend):
             num_gpus_per_node=num_gpus,
             ray_actor_type=PolicyWorker,
             pg=pg,
-            num_gpus_per_actor=1,
+            num_gpus_per_actor=0.75,
             colocate_all=False,
             sequence_parallel_size=self._cfg.trainer.policy.sequence_parallel_size,
             record_memory=self._cfg.trainer.policy.record_memory,
