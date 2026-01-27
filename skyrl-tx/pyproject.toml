@@ -104,4 +104,4 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 [tool.uv.sources]
 # For now, just always use the current main branch, later it will be better to pin it to a released version. For development, you
 # can set it to your own development branch.
-skyrl-train = { git = "https://github.com/pcmoritz/SkyRL", rev = "3cf9c781c5e733a5bb035efc6b4d2f83cac7cc8c", subdirectory = "skyrl-train" }
+skyrl-train = { git = "https://github.com/pcmoritz/SkyRL", rev = "6d117dd65139fa335d87efa31f056208b123280d", subdirectory = "skyrl-train" }
