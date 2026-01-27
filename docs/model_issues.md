@@ -10,6 +10,34 @@ Analysis of eval trajectories from `s3://skyrl-trajectories/evals/fleet_tool_use
 
 ## Changelog
 
+### v0.2.2 (2025-01-27) - Run `mk6nr5ij` Analysis
+
+**Comparison: Baseline (2.9% success) → Current (43.4% pass@3)**
+
+| Issue | Baseline | Current | Status |
+|-------|----------|---------|--------|
+| **Issue 0**: GitHub no env response | 88% no response, 1.1 tool calls | 14.3 avg tool calls | ✅ FIXED |
+| **Issue 1**: Excessive thinking | 81% token budget on thinking | 6K tokens (success) vs 11K (failure) | ⚠️ IMPROVED |
+| **Issue 2**: Cannot signal done | 40% booking stuck | max_turns=6 (booking), tasks completing | ✅ FIXED |
+| **Issue 3**: Tool repetition | 56% booking, 20x repeats | - | ❓ NEEDS ANALYSIS |
+| **Issue 4**: Hitting max turns | 90% hit 50 turns | booking max=6, reddit max=5 | ✅ IMPROVED |
+
+**Per-Environment Improvement:**
+
+| Environment | Baseline | Current pass@3 | Delta |
+|-------------|----------|----------------|-------|
+| GitHub | 0% | 42.1% | **+42.1%** |
+| Booking | ~5% | 52.6% | **+47.6%** |
+| Outlook | ~5% | 36.8% | **+31.8%** |
+| Overall | 2.9% | 43.4% | **+40.5%** |
+
+**Key Observations:**
+- GitHub environment is now responding (14.3 avg tool calls vs 1.1)
+- Tasks completing before max turns (booking max=6, not 50)
+- Successful trajectories use fewer tokens (6K vs 11K for failures)
+
+---
+
 ### v0.2.1 (2025-01-27)
 
 **Infrastructure fix: rope_scaling for vLLM 0.13.0 and HuggingFace**
