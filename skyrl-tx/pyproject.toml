@@ -91,6 +91,8 @@ version = {attr = "tx.__version__"}
 [project.scripts]
 tx = "tx.run.main:app"
 
+# The following is for supporting the skyrl-train dependency
+
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
@@ -100,4 +102,6 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [tool.uv.sources]
+# For now, just always use the current main branch, later it will be better to pin it to a released version. For development, you
+# can set it to your own development branch.
 skyrl-train = { git = "https://github.com/pcmoritz/SkyRL", rev = "3cf9c781c5e733a5bb035efc6b4d2f83cac7cc8c", subdirectory = "skyrl-train" }
