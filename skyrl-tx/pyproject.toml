@@ -30,10 +30,6 @@ gpu = [
     "jax[cuda12]>=0.7.2",
 ]
 
-jax = [
-    "jax[cuda12]>=0.7.2",
-]
-
 tpu = [
     "jax[tpu]>=0.7.2",
 ]
@@ -60,7 +56,18 @@ azure = [
     "cloudpathlib[azure]",
 ]
 
+# The extras "jax" and "skyrl_train" are the dependencies the
+# engine needs for --backend="jax" and --backend="skyrl_train"
+# respectively.
+
+jax = [
+    "jax[cuda12]>=0.7.2",
+]
+
 skyrl_train = [
+    # We currently need the extra pin on the python version
+    # here since skyrl-train pins on python version 3.12,
+    # hopefully in the future we can remove that.
     "skyrl-train[vllm]; python_version == '3.12'",
 ]
 

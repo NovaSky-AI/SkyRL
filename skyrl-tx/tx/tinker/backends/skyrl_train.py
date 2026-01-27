@@ -106,11 +106,7 @@ class SkyRLTrainBackend(AbstractBackend):
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:
             raise ValueError(f"Model {model_id} not found")
-        self._dispatch = None
-        self._actor_group = None
-        self._model_id = None
-        self._model_metadata = None
-        self._cfg = None
+        raise NotImplementedError("Deleting models not yet implemented")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""
