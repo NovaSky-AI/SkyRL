@@ -32,7 +32,7 @@ Training an 8B parameter model (Qwen3-8B) on Fleet tool-use tasks using SkyRL's 
 **Summary**: 3,485 tasks (3,409 train / 76 eval)
 - 95% with env_variables (`CURRENT_DATE`, `LOGGED_IN_USER`, `LOGGED_IN_NAME`)
 - Held-out environment: `outlook`
-- Fixes applied: see [model_issues.md](model_issues.md)
+- Fixes: YaRN rope_scaling (65K context), system prompt improvements (see [model_issues.md](model_issues.md))
 
 | Environment | Train | Eval | Total |
 |-------------|-------|------|-------|
