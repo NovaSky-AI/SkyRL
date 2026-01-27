@@ -100,23 +100,23 @@ class SkyRLTrainBackend(AbstractBackend):
             return TrainingInputBatch({})
 
         max_len = max(len(seq) for seq in prepared_batch.all_input_ids)
+        num_actions_per_example = [
+            sum(1 for w in weights if w > 0) for weights in prepared_batch.all_token_weights
+        ]
+        max_num_actions = max(num_actions_per_example, default=0)
+
         sequences, attention_masks, loss_masks = [], [], []
 
-        for seq, weights in zip(prepared_batch.all_input_ids, prepared_batch.all_token_weights):
+        for seq, num_actions in zip(prepared_batch.all_input_ids, num_actions_per_example):
             pad_len = max_len - len(seq)
             sequences.append([0] * pad_len + list(seq))
             attention_masks.append([0] * pad_len + [1] * len(seq))
-            loss_masks.append([0.0] * pad_len + list(weights))
-
-        response_length = max(sum(1 for w in weights if w > 0) for weights in prepared_batch.all_token_weights)
+            action_pad = max_num_actions - num_actions
+            loss_masks.append([0] * action_pad + [1] * num_actions)
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
         loss_mask_tensor = torch.tensor(loss_masks, dtype=torch.long)
-
-        # Slice loss_mask to only include the last response_length positions
-        # since skyrl_train computes loss only on the response portion
-        loss_mask_tensor = loss_mask_tensor[:, -response_length:]
 
         batch = TrainingInputBatch(
             {
@@ -125,7 +125,7 @@ class SkyRLTrainBackend(AbstractBackend):
                 "loss_mask": loss_mask_tensor,
             }
         )
-        batch.metadata = {"response_length": response_length}
+        batch.metadata = {"response_length": max_num_actions}
         return batch
 
     def forward_backward(
