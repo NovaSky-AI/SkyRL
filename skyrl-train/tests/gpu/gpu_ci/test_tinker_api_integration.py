@@ -8,18 +8,20 @@ verifying the integration contract between skyrl-tx API and skyrl-train inferenc
 uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_tinker_api_integration.py -m "vllm" -v
 """
 
-import pytest
 import asyncio
 from dataclasses import dataclass
 from typing import Literal
-from transformers import AutoTokenizer
+
 import hydra
-
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.entrypoints.main_base import config_dir
+import pytest
 from omegaconf import DictConfig
+from transformers import AutoTokenizer
 
+from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+    create_ray_wrapped_inference_engines,
+)
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -320,3 +322,84 @@ def test_tinker_stop_tokens(ray_init_fixture, backend: str, tp_size: int):
 
     # The output should not contain "6" or higher (stopped at 5)
     # Note: This is a soft check since LLM output isn't guaranteed
+
+
+@pytest.mark.parametrize(
+    "backend,tp_size",
+    [
+        pytest.param("vllm", 1, marks=pytest.mark.vllm),
+    ],
+    ids=["vllm_tp1"],
+)
+def test_multi_engine_load_balancing(ray_init_fixture, backend: str, tp_size: int):
+    """Test that sample() works with multiple inference engines using random load-balancing."""
+    cfg = get_test_config()
+    cfg.generator.backend = backend
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
+    # Create 2 engines with TP=1 each (uses 2 GPUs total)
+    engines = create_ray_wrapped_inference_engines(
+        num_inference_engines=2,  # Multiple engines for load-balancing
+        tensor_parallel_size=tp_size,
+        pipeline_parallel_size=1,
+        data_parallel_size=1,
+        model_dtype="bfloat16",
+        pretrain=MODEL,
+        seed=42,
+        vllm_v1_disable_multiproc=True,
+        enable_prefix_caching=True,
+        enforce_eager=True,
+        shared_pg=None,
+        gpu_memory_utilization=0.8,
+        inference_engine_enable_sleep=False,
+        async_engine=True,
+        max_num_batched_tokens=32768,
+        max_num_seqs=1024,
+        tokenizer=tokenizer,
+        backend=backend,
+    )
+    llm_client = InferenceEngineClient(engines, tokenizer, cfg)
+
+    # Create Tinker-style input
+    prompt_text = "What is 2 + 2?"
+    messages = [{"role": "user", "content": prompt_text}]
+    prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+
+    tinker_input = ModelInput.from_tokens(prompt_tokens)
+    tinker_params = TinkerSamplingParams(
+        temperature=0.7,
+        max_tokens=32,
+        seed=42,
+        top_k=-1,
+        top_p=1.0,
+    )
+
+    # Convert to skyrl-train format
+    converted_tokens = extract_prompt_tokens(tinker_input)
+    converted_params = convert_sampling_params(tinker_params)
+
+    # Call sample() multiple times - should succeed with random load-balancing across engines
+    async def run_samples():
+        results = []
+        for i in range(5):
+            result = await llm_client.sample(
+                prompt_token_ids=converted_tokens,
+                num_samples=2,
+                sampling_params=converted_params,
+            )
+            results.append(result)
+        return results
+
+    results = asyncio.run(run_samples())
+
+    # Verify all requests succeeded
+    assert len(results) == 5, "Should complete 5 sample requests"
+    for i, result in enumerate(results):
+        tinker_output = convert_to_sample_output(result)
+        assert len(tinker_output.sequences) == 2, f"Request {i} should have 2 samples"
+        for seq in tinker_output.sequences:
+            assert len(seq.tokens) > 0, f"Request {i} sequences should have tokens"
+            assert seq.stop_reason in ("length", "stop"), f"Request {i} should have valid stop reason"
+
+    print(f"\nSuccessfully completed 5 requests with 2 samples each across {len(engines)} engines")
