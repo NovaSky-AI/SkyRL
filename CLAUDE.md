@@ -11,7 +11,9 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
 
 1. **NEVER push to main** - Always create a branch and open a PR for review.
 
-2. **Always run black before commits** - Format Python code before every commit:
+2. **Always push to origin (fleet-ai/SkyRL)** - Never push to upstream (NovaSky-AI/SkyRL). When creating PRs, use `--repo fleet-ai/SkyRL`.
+
+3. **Always run black before commits** - Format Python code before every commit:
    ```bash
    black skyrl-train/integrations/fleet/
    ```
@@ -24,12 +26,12 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
 
    If pre-commit reformats files, stage them and commit again.
 
-3. **DO NOT use Fleet SDK directly** - Use OpenEnv as the abstraction layer. The integration should go through OpenEnv, not call Fleet SDK APIs directly.
+4. **DO NOT use Fleet SDK directly** - Use OpenEnv as the abstraction layer. The integration should go through OpenEnv, not call Fleet SDK APIs directly.
    - Fleet SDK repo: `/Users/deniz/repos/fleet-sdk`
    - OpenEnv repo: `/Users/deniz/repos/OpenEnv`
    - Use OpenEnv's `FleetTaskEnv` from `envs.fleet_env.task_env` for Fleet task integration
 
-4. **Always look at API documentation** - Do not guess flags or API parameters. Read the actual documentation first.
+5. **Always look at API documentation** - Do not guess flags or API parameters. Read the actual documentation first.
    - Check the local fleet-sdk and OpenEnv repos for documentation
    - Look at existing examples in those repos
 

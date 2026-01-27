@@ -151,9 +151,9 @@ run: |
     environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="Qwen/Qwen3-8B" \
-    trainer.rope_scaling.rope_type=yarn \
-    trainer.rope_scaling.factor=2.0 \
-    trainer.rope_scaling.original_max_position_embeddings=32768 \
+    ++trainer.rope_scaling.rope_type=yarn \
+    ++trainer.rope_scaling.factor=2.0 \
+    ++trainer.rope_scaling.original_max_position_embeddings=32768 \
     trainer.placement.colocate_all=true \
     trainer.strategy=fsdp2 \
     trainer.placement.policy_num_gpus_per_node=$TOTAL_GPUS \
