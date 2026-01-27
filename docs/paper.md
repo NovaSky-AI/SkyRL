@@ -61,11 +61,18 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 ## 3. Results
 
-### Held-Out Environment Performance
+### Held-Out Environment
 
 | Environment | Checkpoint 0 pass@k | Best pass@k | Best Step |
 |-------------|---------------------|-------------|-----------|
 | outlook | | | |
+
+### Held-Out Tasks (from training environments)
+
+| Environment | Checkpoint 0 pass@k | Best pass@k | Best Step |
+|-------------|---------------------|-------------|-----------|
+| github | | | |
+| booking | | | |
 
 ### Training Environments
 
