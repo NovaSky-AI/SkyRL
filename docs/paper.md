@@ -96,6 +96,7 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 ## 5. Future Directions
 
+- **Scaling dataset**: Increase training samples to demonstrate performance improvement with data scale
 - **Browser use (computer_use modality)**: Train on browser-based tasks with visual grounding
 - **Combined training**: Joint training on `tool_use` + `computer_use` for generalist agents
 
