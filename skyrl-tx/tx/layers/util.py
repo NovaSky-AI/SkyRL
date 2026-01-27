@@ -3,6 +3,23 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh, PartitionSpec
+import os
+import logging
+
+# Cutile integration (Phase 1)
+USE_CUTILE_LORA = os.environ.get("TX_USE_CUTILE_LORA", "0") == "1"
+_cutile_ragged_dot = None
+
+if USE_CUTILE_LORA:
+    try:
+        from tx.kernels.cutile_lora import cutile_ragged_dot as _cutile_ragged_dot
+
+        logger = logging.getLogger(__name__)
+        logger.info("Cutile LoRA enabled (TX_USE_CUTILE_LORA=1)")
+    except ImportError as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Cutile LoRA requested but not available: {e}")
+        USE_CUTILE_LORA = False
 
 
 def ragged_dot(
@@ -17,7 +34,20 @@ def ragged_dot(
 
     When group_offset is specified, rhs contains groups [offset, offset + g_local).
     Tokens outside this range are routed to boundary groups and masked to zero.
+
+    Phase 1 Cutile Integration:
+    - If TX_USE_CUTILE_LORA=1 and group_offset is None, uses cutile kernels
+    - Falls back to JAX ragged_dot otherwise
     """
+    # Phase 1: Cutile only for single-GPU (no group_offset)
+    if USE_CUTILE_LORA and _cutile_ragged_dot is not None and group_offset is None:
+        try:
+            return _cutile_ragged_dot(lhs, rhs, group_sizes, precision, preferred_element_type)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Cutile failed, falling back to ragged_dot: {e}")
+            # Fall through to JAX implementation
+
     if group_offset is None:
         return lax.ragged_dot(
             lhs,

@@ -91,8 +91,8 @@ class LoRAMixin:
             intermediate = self.lora_A[...][adapter_indices_sorted, x_sorted, :]
         else:
             # Linear path: x @ A
-            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A[...], group_sizes)
-        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
+            intermediate = ragged_dot(x_sorted, self.lora_A[...], group_sizes)
+        lora_output_sorted = ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
         lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
