@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 from pydantic import BaseModel
+from transformers import AutoTokenizer
 
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
@@ -69,6 +70,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._actor_group: PPORayActorGroup | None = None
         self._dispatch: WorkerDispatch | None = None
         self._cfg = None
+        self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
 
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
@@ -127,7 +129,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         for seq, weights in zip(full_sequences, prepared_batch.all_token_weights):
             pad_len = max_seq_len - len(seq)
-            sequences.append([0] * pad_len + list(seq))
+            sequences.append([self._tokenizer.pad_token_id] * pad_len + list(seq))
             attention_masks.append([0] * pad_len + [1] * len(seq))
             action_pad = max_response_len - len(weights)
             loss_masks.append([0.0] * action_pad + [float(w) for w in weights])
