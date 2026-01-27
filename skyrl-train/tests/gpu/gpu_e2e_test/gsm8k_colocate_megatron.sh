@@ -8,4 +8,4 @@ bash examples/megatron/run_megatron.sh \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=4 \
   trainer.project_name=\"gsm8k_ci_megatron\" \
-  trainer.run_name=\"gsm8k_megatron_colocate\"
+  trainer.run_name=\"run_$(date +%Y%m%d%H)\"

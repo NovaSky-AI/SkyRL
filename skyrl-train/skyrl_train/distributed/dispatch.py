@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 import ray
 from ray import ObjectRef
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-import inspect
 
 
 @dataclass
@@ -121,7 +120,7 @@ class MeshDispatch(Dispatch):
     """
 
     @classmethod
-    def dispatch(cls, actor_infos: List[ActorInfo], method: str, data: TrainingInputBatch) -> List[ObjectRef]:
+    def dispatch(cls, actor_infos: List[ActorInfo], method: str, data: TrainingInputBatch, **kwargs) -> List[ObjectRef]:
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
         object_refs = []
         dp_size = actor_infos[0].rank.dp_size
@@ -134,7 +133,7 @@ class MeshDispatch(Dispatch):
         for actor_info in actor_infos:
             # index into tensordict to get the correct data to send
             data_to_send = data_chunks[actor_info.rank.dp]
-            object_refs.append(getattr(actor_info.handle, method).remote(data_to_send))
+            object_refs.append(getattr(actor_info.handle, method).remote(data_to_send, **kwargs))
         return object_refs
 
     @classmethod
@@ -159,24 +158,20 @@ class MeshDispatch(Dispatch):
 
     @classmethod
     def validate_dispatch_args(cls, *args, **kwargs) -> Tuple[Tuple, Dict[str, Any]]:
-        sig = inspect.signature(cls.dispatch)
-        # pass dummy actor_infos and method_name
-        bound_args = sig.bind([], "dummy", *args, **kwargs)
-        bound_args.apply_defaults()
+        # Extract data from either positional arg or kwarg
+        if args:
+            data = args[0]
+            remaining_kwargs = kwargs
+        elif "data" in kwargs:
+            data = kwargs.pop("data")
+            remaining_kwargs = kwargs
+        else:
+            raise ValueError("MeshDispatch requires 'data' as first positional argument or keyword argument")
 
-        # Check if there are any extra arguments
-        if len(bound_args.arguments) > 3:  #  data, actor_infos, method_name
-            # remove actor_infos and method_name - not added by user
-            bound_args.arguments.pop("actor_infos")
-            bound_args.arguments.pop("method")
-            raise ValueError(f"MeshDispatch only accepts 'data' as an argument, got extra args: {bound_args.arguments}")
-
-        data = bound_args.arguments.get("data")
         if not isinstance(data, TrainingInputBatch):
-            raise ValueError(f"For MeshDispatch, `data` entry should be a `TrainingInput`, got {data}")
-        args = (data,)
-        kwargs = {}
-        return args, kwargs
+            raise ValueError(f"For MeshDispatch, `data` entry should be a `TrainingInputBatch`, got {type(data)}")
+        # Pass through data as positional arg, and any other kwargs (e.g., loss_fn, loss_fn_config)
+        return (data,), remaining_kwargs
 
 
 class PassThroughDispatch(Dispatch):

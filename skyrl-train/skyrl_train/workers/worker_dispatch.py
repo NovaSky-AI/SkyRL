@@ -9,7 +9,7 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import ray
 from omegaconf import DictConfig
@@ -153,14 +153,51 @@ class WorkerDispatch:
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
 
-    def forward_backward(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
-        """Run forward/backward pass. Needs model + optimizer."""
+    def forward_backward(
+        self,
+        model: str,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """Run forward/backward pass. Needs model + optimizer.
+
+        Args:
+            model: Model identifier ("policy", "critic", or "ref")
+            data: Training batch data
+            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
+                     If provided, overrides the config's policy_loss_type.
+            loss_fn_config: Optional config overrides for the loss function
+                           (e.g., {"clip_low_threshold": 0.9} for PPO)
+
+        Returns:
+            Dictionary of training metrics
+        """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data)
+        # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
+        kwargs = {}
+        if loss_fn is not None:
+            kwargs["loss_fn"] = loss_fn
+        if loss_fn_config is not None:
+            kwargs["loss_fn_config"] = loss_fn_config
+
+        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data, **kwargs)
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")
+
+        # With DP>1, each rank returns loss_fn_outputs for its data chunk.
+        # Concatenate them in rank order to get the full batch's outputs.
+        # Scalar metrics (loss, lr) are already all-reduced, so use statuses[0] for those.
+        if len(statuses) > 1 and statuses[0] and "loss_fn_outputs" in statuses[0]:
+            all_loss_fn_outputs = []
+            for status in statuses:
+                all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
+            result = statuses[0]
+            result["loss_fn_outputs"] = all_loss_fn_outputs
+            return result
+
         return statuses[0]
 
     def optim_step(self, model: str) -> Optional[float]:

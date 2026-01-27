@@ -57,7 +57,7 @@ class Experience:
     """
 
     sequences: Integer[torch.Tensor, "batch seq_len"]
-    action_log_probs: Float[torch.Tensor, "batch response_len"]
+    action_log_probs: Optional[Float[torch.Tensor, "batch response_len"]]
     base_action_log_probs: Optional[Float[torch.Tensor, "batch response_len"]]
     values: Optional[Float[torch.Tensor, "batch response_len"]]
     returns: Optional[Float[torch.Tensor, "batch response_len"]]
@@ -74,7 +74,8 @@ class Experience:
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:
         self.sequences = to(self.sequences, device)
-        self.action_log_probs = to(self.action_log_probs, device)
+        if self.action_log_probs is not None:
+            self.action_log_probs = to(self.action_log_probs, device)
         if self.base_action_log_probs is not None:
             self.base_action_log_probs = to(self.base_action_log_probs, device)
         if self.values is not None:
@@ -94,7 +95,8 @@ class Experience:
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)
-        self.action_log_probs = pin_memory(self.action_log_probs)
+        if self.action_log_probs is not None:
+            self.action_log_probs = pin_memory(self.action_log_probs)
         if self.base_action_log_probs is not None:
             self.base_action_log_probs = pin_memory(self.base_action_log_probs)
         if self.values is not None:

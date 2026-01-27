@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 from flax import nnx
 import jax.numpy as jnp
 from tx.models.types import CausalLMOutput
@@ -13,7 +15,8 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
     When adapter_indices is provided, it scales logits by (1 + adapter_index).
     """
 
-    def __init__(self, vocab_size: int = 16):
+    def __init__(self, vocab_size: int = 16, loss_chunk_size: int = 0):
+        self.config = MagicMock(loss_chunk_size=loss_chunk_size, gradient_checkpointing=False)
         self.vocab_size = vocab_size
 
         def lm_head(hidden_states, adapter_indices=None):

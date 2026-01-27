@@ -471,6 +471,7 @@ class PolicyLossType(StrEnum):
     CLIP_COV = "clip_cov"
     KL_COV = "kl_cov"
     SAPO = "sapo"
+    CROSS_ENTROPY = "cross_entropy"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -500,6 +501,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
+            "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -876,6 +878,48 @@ def compute_policy_loss_kl_cov(
 
     # NOTE (sumanthrh): Since the pg clip ratio is not applicable for KL-COV so we just use 0.0
     return pg_loss, 0.0
+
+
+@register_policy_loss(PolicyLossType.CROSS_ENTROPY)
+def cross_entropy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: DictConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, float]:
+    """
+    Cross-entropy loss for supervised fine-tuning (SFT).
+
+    This loss function computes the negative log-likelihood of the target tokens,
+    ignoring the old_log_probs and advantages which are only used for RL.
+
+    The loss is computed as: -log_probs * loss_mask, summed over all tokens.
+    This matches Tinker's cross_entropy semantics where the loss is a simple sum.
+
+    Args:
+        log_probs: Log probabilities from the model for each token
+        old_log_probs: Ignored (only used for RL losses)
+        advantages: Ignored (only used for RL losses)
+        config: Algorithm configuration
+        loss_mask: Mask indicating which tokens to include in loss (1=include, 0=ignore)
+        rollout_logprobs: Ignored (only used for RL losses)
+
+    Returns:
+        Tuple of (loss, clip_ratio) where clip_ratio is always 0.0 for SFT
+    """
+    # Simple negative log-likelihood: -log p(token)
+    elementwise_loss = -log_probs
+
+    # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
+    if loss_mask is not None:
+        loss = (elementwise_loss * loss_mask).sum()
+    else:
+        loss = elementwise_loss.sum()
+
+    # No clipping in cross-entropy loss
+    return loss, 0.0
 
 
 def reduce_loss(

@@ -9,6 +9,7 @@ from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils import validate_cfg
 
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
@@ -59,6 +60,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
         "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+        "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -247,6 +249,24 @@ class BasePPOExp:
             config=self.cfg,
         )
 
+    def get_inference_client(self) -> InferenceEngineInterface:
+        """Setup and return the inference engine client.
+
+        This is a hook method that can be overridden by subclasses to customize
+        inference engine creation (e.g., FlashRL, custom backends).
+
+        Returns:
+            InferenceEngineInterface: The inference engine client.
+        """
+        if self.cfg.generator.run_engines_locally:
+            inference_engines = create_ray_wrapped_inference_engines_from_config(
+                self.cfg, self.colocate_pg, self.tokenizer
+            )
+        else:
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
+
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+
     def _setup_trainer(self):
         """Setup and return the trainer.
 
@@ -270,20 +290,14 @@ class BasePPOExp:
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
 
-        tokenizer = self.tokenizer
-        if self.cfg.generator.run_engines_locally:
-            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
-        else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
+        inference_engine_client = self.get_inference_client()
 
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
-
-        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
 
         trainer = self.get_trainer(
             cfg=self.cfg,
             tracker=tracker,
-            tokenizer=tokenizer,
+            tokenizer=self.tokenizer,
             train_dataset=self.train_dataset,
             eval_dataset=self.eval_dataset,
             inference_engine_client=inference_engine_client,
