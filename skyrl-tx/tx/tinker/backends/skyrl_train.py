@@ -119,12 +119,10 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # SkyRL-Train shifts internally, so provide the full sequence length by
         # appending the last target token to each already-shifted input.
-        full_sequences = []
-        for input_ids, targets in zip(prepared_batch.all_input_ids, prepared_batch.all_targets):
-            if targets:
-                full_sequences.append(list(input_ids) + [targets[-1]])
-            else:
-                full_sequences.append(list(input_ids))
+        full_sequences = [
+            list(input_ids) + ([targets[-1]] if targets else [])
+            for input_ids, targets in zip(prepared_batch.all_input_ids, prepared_batch.all_targets)
+        ]
 
         max_seq_len = max(len(seq) for seq in full_sequences)
         max_response_len = max(len(weights) for weights in prepared_batch.all_token_weights)
@@ -171,13 +169,8 @@ class SkyRLTrainBackend(AbstractBackend):
             loss_fn_outputs = []
             for i in range(start_idx, end_idx):
                 raw_output = data["loss_fn_outputs"][i]
-                seq_len = len(prepared_batch.all_token_weights[i])
                 logprobs = list(raw_output.get("logprobs", []))
                 elementwise_loss = list(raw_output.get("elementwise_loss", []))
-                if len(logprobs) != seq_len:
-                    logprobs = ([0.0] * max(seq_len - len(logprobs), 0)) + logprobs[-seq_len:]
-                if len(elementwise_loss) != seq_len:
-                    elementwise_loss = ([0.0] * max(seq_len - len(elementwise_loss), 0)) + elementwise_loss[-seq_len:]
                 loss_fn_outputs.append(
                     {
                         "elementwise_loss": {
