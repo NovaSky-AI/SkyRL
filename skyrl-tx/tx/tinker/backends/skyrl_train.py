@@ -4,21 +4,36 @@ Uses SkyRL-Train infrastructure for supervised training with cross-entropy loss.
 Currently supports a single model only.
 """
 
-import ray
+from typing import Any
+
 import torch
 from pydantic import BaseModel
-from ray.util.placement_group import placement_group
 
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.utils.log import logger
 
-from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
-from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.config.utils import get_default_config
+try:  # Optional dependency: keep other backends importable without ray/skyrl-train.
+    import ray
+    from ray.util.placement_group import placement_group
+    from skyrl_train.training_batch import TrainingInputBatch
+    from skyrl_train.workers.worker import PPORayActorGroup
+    from skyrl_train.workers.worker_dispatch import WorkerDispatch
+    from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
+    from skyrl_train.utils import get_ray_pg_ready_with_timeout
+    from skyrl_train.config.utils import get_default_config
+
+    SKYRL_TRAIN_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only in non-ray installs
+    ray = None
+    placement_group = None
+    TrainingInputBatch = Any
+    PPORayActorGroup = Any
+    WorkerDispatch = Any
+    PolicyWorker = Any
+    get_ray_pg_ready_with_timeout = None
+    get_default_config = None
+    SKYRL_TRAIN_AVAILABLE = False
 
 
 class SkyRLTrainBackendConfig(BaseModel, extra="forbid"):
@@ -41,6 +56,11 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.warning("=" * 80)
         logger.warning("SkyRLTrainBackend is currently EXPERIMENTAL!")
         logger.warning("=" * 80)
+
+        if not SKYRL_TRAIN_AVAILABLE or ray is None:
+            raise ImportError(
+                "SkyRLTrainBackend requires `ray`. Install the appropriate extras (e.g. `--extra skyrl_train`)."
+            )
 
         self.base_model = base_model
         self.config = config
