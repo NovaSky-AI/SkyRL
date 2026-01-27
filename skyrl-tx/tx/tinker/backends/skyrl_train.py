@@ -137,22 +137,32 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         batch = self._to_training_batch(prepared_batch)
-        metrics = self._dispatch.forward_backward("policy", batch, loss_fn=loss_fn)
-
-        # Get the loss from metrics and distribute per token
-        loss = float(metrics.get("loss", float("nan")))
+        data = self._dispatch.forward_backward("policy", batch, loss_fn=loss_fn)
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
             loss_fn_outputs = []
             for i in range(start_idx, end_idx):
+                raw_output = data["loss_fn_outputs"][i]
+                # Convert raw lists to TensorData format expected by the API
+                logprobs = raw_output.get("logprobs", [])
+                elementwise_loss = raw_output.get("elementwise_loss", [])
                 seq_len = len(prepared_batch.all_input_ids[i])
+                # SkyRL-Train returns response-only outputs; align to full sequence length.
+                elementwise_loss = ([0.0] * max(seq_len - len(elementwise_loss), 0)) + list(elementwise_loss)[-seq_len:]
+                logprobs = ([0.0] * max(seq_len - len(logprobs), 0)) + list(logprobs)[-seq_len:]
                 loss_fn_outputs.append(
                     {
-                        # TODO: elementwise_loss needs to be implemented
-                        "elementwise_loss": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
-                        # TODO: logprobs needs to be implemented
-                        "logprobs": {"data": [loss] * seq_len, "dtype": "float32", "shape": [seq_len]},
+                        "elementwise_loss": {
+                            "data": list(elementwise_loss),
+                            "dtype": "float32",
+                            "shape": [len(elementwise_loss)],
+                        },
+                        "logprobs": {
+                            "data": list(logprobs),
+                            "dtype": "float32",
+                            "shape": [len(logprobs)],
+                        },
                     }
                 )
             results[request_id] = types.ForwardBackwardOutput(
