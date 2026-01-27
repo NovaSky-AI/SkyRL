@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from omegaconf import DictConfig
@@ -20,6 +21,14 @@ from skyrl_gym.envs.base_text_env import (
     ConversationType,
 )
 from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
+
+# Reduce MCP client log noise (uses loguru for logging)
+try:
+    from loguru import logger as loguru_logger
+
+    loguru_logger.disable("mcp")
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +145,7 @@ class FleetTaskEnv(BaseTextEnv):
         self.openenv_task_env: Optional[OpenEnvFleetTaskEnv] = None
         self.chat_history: ConversationType = []
         self.turns = 0
+        self.tool_calls = 0
         self.tools: List[Dict[str, Any]] = []
 
     def _normalize_task_config(self) -> Dict[str, Any]:
@@ -181,21 +191,25 @@ class FleetTaskEnv(BaseTextEnv):
 
         # Reset state
         self.turns = 0
+        self.tool_calls = 0
 
         # Get tools from observation (cached from __init__)
         self.tools = obs.get("tools", [])
-        if self.tools:
-            logger.info(f"Task {self.task_key}: loaded {len(self.tools)} tools")
-        else:
-            logger.warning(f"Task {self.task_key}: no tools found in observation")
+        if not self.tools:
+            raise RuntimeError(f"Task {self.task_key}: no tools found in observation. Fleet env requires tools.")
+        logger.info(f"Task {self.task_key}: loaded {len(self.tools)} tools")
 
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
 
         # Build system prompt with tool definitions
-        if self.tools:
-            tools_json = json.dumps(self.tools, indent=2)
-            system_content = f"""You are a helpful agent. Complete the task by calling tools.
+        tools_json = json.dumps(self.tools, indent=2)
+        # Include current date so model uses correct year for date-related tasks
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        system_content = f"""You are a helpful agent. Complete the task by calling tools.
+
+## Current Date
+Today's date is {current_date}. When dates are mentioned without a year, assume the current year ({datetime.now().year}) or a future date.
 
 ## Available Tools
 {tools_json}
@@ -203,12 +217,19 @@ class FleetTaskEnv(BaseTextEnv):
 ## Tool Call Format
 <tool_call>{{"name": "tool_name", "arguments": {{"param": "value"}}}}</tool_call>
 
-## Important
-You MUST call tools to complete the task. Only include <done> AFTER you have successfully completed the task using the tools above. Do not say <done> until you have actually performed the required actions."""
-        else:
-            system_content = (
-                """You are a helpful agent. Complete the task. Only include <done> AFTER you have completed the task."""
-            )
+## Error Handling
+If a tool call returns an error:
+- Read the error message carefully
+- Do NOT repeat the same call with identical arguments
+- Change your approach: use different parameters, try a different tool, or break the task into smaller steps
+
+## Response Format
+EVERY response MUST end with exactly ONE of:
+1. A tool call: <tool_call>...</tool_call> - to perform an action
+2. Done signal: <done> - ONLY when the task is fully complete
+
+NEVER respond with just a message. NEVER say "feel free to ask" or offer further help.
+If the task is complete, say <done>. Otherwise, make a tool call."""
 
         # Build conversation with system prompt
         system_message = {"role": "system", "content": system_content}
@@ -248,6 +269,7 @@ You MUST call tools to complete the task. Only include <done> AFTER you have suc
 
         # Execute tool call if present via OpenEnv
         if tool_call and self.openenv_task_env:
+            self.tool_calls += 1
             # Build action dict for OpenEnv
             openenv_action = {
                 "tool": tool_call["name"],
@@ -332,27 +354,59 @@ You MUST call tools to complete the task. Only include <done> AFTER you have suc
             "task_key": self.task_key,
             "env_key": self.task_config.get("env_key") or self.task_config.get("env_id"),
             "turns": self.turns,
+            "tool_calls": self.tool_calls,
         }
 
     @staticmethod
     def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate metrics across episodes."""
+        """Aggregate metrics across episodes with per-env breakdown."""
         if not metrics:
             return {}
 
-        total_turns = sum(m.get("turns", 0) for m in metrics)
-
         # Group by env_key
-        env_counts: Dict[str, int] = {}
+        env_data: Dict[str, Dict[str, List[int]]] = {}
         for m in metrics:
             env_key = m.get("env_key", "unknown")
-            env_counts[env_key] = env_counts.get(env_key, 0) + 1
+            if env_key not in env_data:
+                env_data[env_key] = {"turns": [], "tool_calls": []}
+            env_data[env_key]["turns"].append(m.get("turns", 0))
+            env_data[env_key]["tool_calls"].append(m.get("tool_calls", 0))
 
-        return {
-            "avg_turns": total_turns / len(metrics),
-            "total_episodes": len(metrics),
-            "env_distribution": env_counts,
-        }
+        result: Dict[str, Any] = {}
+        total_turns = 0
+        total_tool_calls = 0
+        total_episodes = 0
+
+        # Per-env_key metrics
+        for env_key, data in env_data.items():
+            turns_list = data["turns"]
+            tool_calls_list = data["tool_calls"]
+
+            avg_turns = sum(turns_list) / len(turns_list)
+            avg_tool_calls = sum(tool_calls_list) / len(tool_calls_list)
+            # Tool calls per turn (avoid div by zero)
+            total_env_turns = sum(turns_list)
+            total_env_tool_calls = sum(tool_calls_list)
+            tool_calls_per_turn = total_env_tool_calls / total_env_turns if total_env_turns > 0 else 0
+
+            result[f"{env_key}/avg_turns"] = avg_turns
+            result[f"{env_key}/min_turns"] = min(turns_list)
+            result[f"{env_key}/max_turns"] = max(turns_list)
+            result[f"{env_key}/avg_tool_calls"] = avg_tool_calls
+            result[f"{env_key}/tool_calls_per_turn"] = tool_calls_per_turn
+            result[f"{env_key}/num_episodes"] = len(turns_list)
+
+            total_turns += total_env_turns
+            total_tool_calls += total_env_tool_calls
+            total_episodes += len(turns_list)
+
+        # Overall metrics
+        result["avg_turns"] = total_turns / total_episodes if total_episodes > 0 else 0
+        result["avg_tool_calls"] = total_tool_calls / total_episodes if total_episodes > 0 else 0
+        result["tool_calls_per_turn"] = total_tool_calls / total_turns if total_turns > 0 else 0
+        result["total_episodes"] = total_episodes
+
+        return result
 
 
 def clear_caches():

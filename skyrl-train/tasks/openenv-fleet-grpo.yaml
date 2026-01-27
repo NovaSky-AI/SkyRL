@@ -92,7 +92,7 @@ setup: |
   # Download dataset from S3
   mkdir -p $HOME/data/fleet
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
-  S3_PATH="s3://${S3_DATASET_BUCKET}/v0.1/openenv/all_${MODALITY}.json"
+  S3_PATH="s3://${S3_DATASET_BUCKET}/v0.2/openenv/all_${MODALITY}.json"
   echo "Downloading dataset from $S3_PATH..."
   aws s3 cp "$S3_PATH" "$TASKS_FILE"
   TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['tasks']))")
