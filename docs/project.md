@@ -92,7 +92,7 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 - [ ] **Hillclimbing on tool-use eval set**: Iterate on model/training to improve eval performance
 - [ ] **Scaling dataset**: Increase training samples to demonstrate performance improvement with data scale
-- [ ] **Trace analysis**: Compare trajectories before and after training to measure behavioral changes
+- [ ] **Trace analysis**: Compare trajectories before and after training to measure behavioral changes (`s3://skyrl-trajectories/evals/`)
 - [ ] **Kimi K2.5 training**: Train on Kimi K2.5 model
 - [ ] **OpenEnv browseComp integration**: Integrate with OpenEnv browseComp for browser-use tasks
 - [ ] **Browser use (computer_use modality)**: Train on browser-based tasks with visual grounding
