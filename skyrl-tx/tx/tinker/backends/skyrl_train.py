@@ -72,9 +72,6 @@ class SkyRLTrainBackend(AbstractBackend):
         self._cfg = None
         self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
 
-        if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
-
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
 
@@ -85,7 +82,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._cfg = _build_config(self.base_model, self.config, lora_config)
         num_gpus = self._cfg.trainer.placement.policy_num_gpus_per_node
 
-        pg = placement_group([{"GPU": num_gpus, "CPU": 4}], strategy="PACK")
+        pg = placement_group([{"GPU": num_gpus, "CPU": 1}], strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
         self._actor_group = PPORayActorGroup(
