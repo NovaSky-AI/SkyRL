@@ -250,7 +250,6 @@ class DeepseekV3TopkRouter(nnx.Module):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.n_routed_experts = config.n_routed_experts
 
         self.weight = Param(
             config.hidden_size,
