@@ -10,6 +10,19 @@ Analysis of eval trajectories from `s3://skyrl-trajectories/evals/fleet_tool_use
 
 ## Changelog
 
+### v0.2.1 (2025-01-27)
+
+**Infrastructure fix: rope_scaling for vLLM 0.13.0 and HuggingFace**
+
+| Fix | Issue | Change |
+|-----|-------|--------|
+| vLLM rope_scaling | vLLM 0.13.0 removed direct `rope_scaling` param | Pass via `hf_overrides["rope_parameters"]` per [vLLM docs](https://docs.vllm.ai/en/latest/examples/offline_inference/context_extension/) |
+| HuggingFace rope_scaling | HF models reject `rope_scaling` as kwarg | Set `model_config.rope_scaling` instead of passing to `from_pretrained()` |
+
+**PR:** [NovaSky-AI/SkyRL#976](https://github.com/NovaSky-AI/SkyRL/pull/976)
+
+---
+
 ### v0.2 (2026-01-26)
 
 **Dataset:** `s3://fleet-internal-datasets/v0.2/openenv/all_tool_use.json`
