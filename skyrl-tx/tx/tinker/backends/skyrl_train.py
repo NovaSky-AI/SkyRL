@@ -4,11 +4,9 @@ Uses SkyRL-Train infrastructure for supervised training with cross-entropy loss.
 Currently supports a single model only.
 """
 
-from pathlib import Path
-
 import ray
 import torch
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from ray.util.placement_group import placement_group
 
 from tx.tinker import types
@@ -100,9 +98,7 @@ class SkyRLTrainBackend(AbstractBackend):
             return TrainingInputBatch({})
 
         max_len = max(len(seq) for seq in prepared_batch.all_input_ids)
-        num_actions_per_example = [
-            sum(1 for w in weights if w > 0) for weights in prepared_batch.all_token_weights
-        ]
+        num_actions_per_example = [sum(1 for w in weights if w > 0) for weights in prepared_batch.all_token_weights]
         max_num_actions = max(num_actions_per_example, default=0)
 
         sequences, attention_masks, loss_masks = [], [], []
