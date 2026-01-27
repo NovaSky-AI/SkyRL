@@ -89,4 +89,4 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [tool.uv.sources]
-skyrl-train = { git = "https://github.com/tyler-griggs/SkyRL", rev = "5fa7d148fda71cfbc4429198270e2f884c5b3a1a", subdirectory = "skyrl-train" }
+skyrl-train = { git = "https://github.com/NovaSky-AI/SkyRL", rev = "3683cebef13e399cd02bcdb51b50e4e2e709e81c", subdirectory = "skyrl-train" }
