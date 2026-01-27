@@ -65,28 +65,30 @@ This ensures the training data contains only valid, solvable tasks with working 
 
 | Environment | Checkpoint 0 pass@k | Best pass@k | Best Step | Avg Turns |
 |-------------|---------------------|-------------|-----------|-----------|
-| outlook | | | | |
+| outlook | - | 21.1% (pass@3) | 19 | - |
 
 ### Held-Out Tasks (from training environments)
 
 | Environment | Checkpoint 0 pass@k | Best pass@k | Best Step | Avg Turns |
 |-------------|---------------------|-------------|-----------|-----------|
-| github | | | | |
-| booking | | | | |
+| github | - | 47.4% (pass@3) | 19 | 8.5 |
+| booking | - | 63.2% (pass@3) | 19 | 3.0 |
 
 ### Training Environments
 
 | Environment | Checkpoint 0 pass@k | Best pass@k | Best Step | Avg Turns |
 |-------------|---------------------|-------------|-----------|-----------|
-| booking | | | | |
-| github | | | | |
-| reddit | | | | |
-| ticketmaster | | | | |
-| fira | | | | |
-| zillow | | | | |
-| hubspot | | | | |
-| google-maps | | | | |
-| dropbox | | | | |
+| booking | - | 50% (pass@4) | 19 | 3.0 |
+| github | - | 0% (pass@4) | 19 | 8.5 |
+| reddit | - | 100% (pass@4) | 19 | 4.0 |
+| ticketmaster | - | 0% (pass@4) | 19 | 10.0 |
+| fira | - | - | - | - |
+| zillow | - | 100% (pass@4) | 19 | 27.0 |
+| hubspot | - | - | - | - |
+| google-maps | - | - | - | - |
+| dropbox | - | - | - | - |
+
+*Run: `fleet_tool_use_3f4033b8` (step 19, still running)*
 
 ## 4. TODO
 
