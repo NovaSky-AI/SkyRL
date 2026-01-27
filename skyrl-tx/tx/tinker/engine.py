@@ -1,6 +1,8 @@
 """Background engine for processing training requests."""
 
 import argparse
+import signal
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -797,6 +799,14 @@ class TinkerEngine:
             # Poll every 100ms
             time.sleep(0.1)
 
+    def shutdown(self):
+        """Gracefully shutdown the engine and release resources."""
+        logger.info("Shutting down TinkerEngine...")
+        if self._ray_process_manager is not None:
+            self._ray_process_manager.shutdown()
+            self._ray_process_manager = None
+        logger.info("TinkerEngine shutdown complete")
+
     def run(self):
         """Entry point to start the engine."""
         logger.info("Starting background engine...")
@@ -817,8 +827,21 @@ def main():
     # Create EngineConfig from parsed arguments
     config = EngineConfig.model_validate(vars(args))
 
-    # Initialize and run the engine
-    TinkerEngine(config).run()
+    # Initialize the engine
+    engine = TinkerEngine(config)
+
+    # Register signal handlers for graceful shutdown
+    def handle_shutdown_signal(signum, frame):
+        signal_name = signal.Signals(signum).name
+        logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+        engine.shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+
+    # Run the engine
+    engine.run()
 
 
 if __name__ == "__main__":

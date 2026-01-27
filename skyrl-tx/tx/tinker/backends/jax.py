@@ -1479,7 +1479,6 @@ def start_ray_workers(
     # Initialize Ray if not already initialized (needed for auto-detect)
     if not ray.is_initialized():
         ray.init(
-            include_dashboard=True,
             dashboard_host="0.0.0.0",
             dashboard_port=8265,
         )

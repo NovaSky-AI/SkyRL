@@ -76,9 +76,6 @@ async def lifespan(app: FastAPI):
 
     background_engine = await asyncio.create_subprocess_exec(*cmd)
     app.state.background_engine = background_engine
-    logger.info(
-        f"Started background engine with PID {background_engine.pid}: {' '.join(cmd)}"
-    )
 
     shutting_down = False
 
