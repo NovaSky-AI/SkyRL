@@ -82,11 +82,15 @@ def get_rope(
                 mscale = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
 
     if rope_type in ("deepseek_yarn", "yarn"):
+
         def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
             return apply_rope_interleave(inputs, positions, head_dim, rope_theta)
+
     elif rope_type == "default":
+
         def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
             return apply_rope(inputs, positions, head_dim, rope_theta)
+
     else:
         raise ValueError(f"Unsupported rope_type: {rope_type}")
 
