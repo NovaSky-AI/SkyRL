@@ -146,7 +146,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
+              "channel": "#fleet-training-runs-test",
               "text": "🚀 Tinker Training Run Started",
               "blocks": [
                 {
@@ -208,7 +208,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
+              "channel": "#fleet-training-runs-test",
               "thread_ts": "${{ steps.slack_start.outputs.ts }}",
               "text": "✅ Tinker Training Completed",
               "blocks": [
@@ -246,7 +246,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
+              "channel": "#fleet-training-runs-test",
               "thread_ts": "${{ steps.slack_start.outputs.ts }}",
               "text": "❌ Tinker Training Failed",
               "blocks": [
