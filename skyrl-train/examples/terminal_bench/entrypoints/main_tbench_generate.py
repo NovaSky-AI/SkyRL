@@ -59,7 +59,7 @@ class TerminalBenchGenerateExp(BasePPOExp):
 
     def run(self):
         generator = self._setup_generator()
-        
+
         prompts = []
         trajectory_ids = []
         for item in self.train_dataset:

@@ -18,6 +18,7 @@ from harbor.trial.trial import Trial
 # after N attemptes, we skip this prompt altogether.
 MAX_NUM_RETRIES_PER_TRIAL = 2
 
+
 @dataclass
 class TerminalBenchAgentOutput:
     response_ids: List[int]
@@ -27,6 +28,7 @@ class TerminalBenchAgentOutput:
     prompt_ids: List[int]
     trajectory_id: TrajectoryID
     summarization_count: Optional[int] = None
+
 
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
@@ -61,14 +63,18 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.override_storage_mb = terminal_bench_cfg.get("override_storage_mb")
         self.override_cpus = terminal_bench_cfg.get("override_cpus")
 
-        logger.info(f"TerminalBenchGenerator initialized with overrides: memory={self.override_memory_mb}, storage={self.override_storage_mb}, cpus={self.override_cpus}")
+        logger.info(
+            f"TerminalBenchGenerator initialized with overrides: memory={self.override_memory_mb}, storage={self.override_storage_mb}, cpus={self.override_cpus}"
+        )
 
         # Read custom chat template
         custom_chat_template_path = generator_cfg.engine_init_kwargs.get("chat_template", None)
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()
-            logger.info(f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}")
+            logger.info(
+                f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}"
+            )
         else:
             self.custom_chat_template_content = None
 
@@ -107,11 +113,15 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Calculate rollout metrics for successful outputs
         if len(successful_outputs) > 0:
             rollout_metrics = get_rollout_metrics(
-                [output.response_ids for output in successful_outputs], 
+                [output.response_ids for output in successful_outputs],
                 [output.reward for output in successful_outputs],
             )
-            rollout_metrics["generate/trajectories_summarized"] = sum(1 for output in successful_outputs if output.summarization_count > 0)
-            rollout_metrics["generate/trajectories_truncated"] = sum(1 for output in successful_outputs if output.stop_reason == "length")
+            rollout_metrics["generate/trajectories_summarized"] = sum(
+                1 for output in successful_outputs if output.summarization_count > 0
+            )
+            rollout_metrics["generate/trajectories_truncated"] = sum(
+                1 for output in successful_outputs if output.stop_reason == "length"
+            )
         else:
             rollout_metrics = {}
         rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
@@ -150,7 +160,9 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         if self.agent_name == "terminus":
             assert self.generator_cfg.served_model_name is not None, "served_model_name must be set"
-            assert "/" not in self.generator_cfg.served_model_name, "served_model_name must not contain '/', as Harbor expects hosted_vllm model names with exactly one '/', being hosted_vllm/{model_name}"
+            assert (
+                "/" not in self.generator_cfg.served_model_name
+            ), "served_model_name must not contain '/', as Harbor expects hosted_vllm model names with exactly one '/', being hosted_vllm/{model_name}"
             model_alias = self.generator_cfg.served_model_name
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
@@ -206,21 +218,25 @@ class TerminalBenchGenerator(GeneratorInterface):
                     continue
 
                 reward = results.verifier_result.rewards["reward"]
-                chat_history = results.agent_result.metadata['all_messages']
-                summarization_count = results.agent_result.metadata['summarization_count']
+                chat_history = results.agent_result.metadata["all_messages"]
+                summarization_count = results.agent_result.metadata["summarization_count"]
                 if len(chat_history) > 1 and chat_history[0]["role"] == "user":
                     successful = True
                     logger.info(f"{prefix} successful: Results: {results.agent_result.metadata}")
                     break
                 else:
-                    logger.warning(f"{prefix} failed: Agent {self.agent_name} did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}")
+                    logger.warning(
+                        f"{prefix} failed: Agent {self.agent_name} did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}"
+                    )
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
 
         if not successful:
             # We make loss mask 0 so it does not contribute to model updates
-            logger.warning(f"Trajectory {trajectory_id} failed after {MAX_NUM_RETRIES_PER_TRIAL} attempts, will set loss mask to [0].")
+            logger.warning(
+                f"Trajectory {trajectory_id} failed after {MAX_NUM_RETRIES_PER_TRIAL} attempts, will set loss mask to [0]."
+            )
             return TerminalBenchAgentOutput(
                 response_ids=[0],
                 reward=0,

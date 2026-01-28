@@ -59,7 +59,7 @@ uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypo
   generator.n_samples_per_prompt=8 \
   generator.eval_n_samples_per_prompt=4 \
   generator.gpu_memory_utilization=0.8 \
-  trainer.logger=console \
+  trainer.logger=wandb \
   trainer.project_name=harbor \
   trainer.run_name=codecontest \
   trainer.resume_mode=latest \
