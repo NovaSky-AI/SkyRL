@@ -7,7 +7,7 @@ from skyrl_train.distributed.strategy import DistributedStrategy
 
 def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     """
-    Reduce metrics from a list of entries per key.
+    Reduce scalar metrics from a list of entries per key by averaging.
     """
     reduced_metrics = dict()
     for k, v in metrics.items():
@@ -71,16 +71,16 @@ class BatchIterator:
         # TODO: this conversion is hidden right now, might need to be surfaced in worker explicitly.
         exp = Experience(
             sequences=batch["sequences"],
-            action_log_probs=batch["action_log_probs"],
-            base_action_log_probs=batch["base_action_log_probs"],
-            values=batch["values"],
-            returns=batch["returns"],
-            advantages=batch["advantages"],
-            attention_mask=batch["attention_mask"],
-            loss_mask=batch["loss_mask"],
-            action_mask=batch["response_mask"],
+            action_log_probs=batch.get("action_log_probs"),
+            base_action_log_probs=batch.get("base_action_log_probs"),
+            values=batch.get("values"),
+            returns=batch.get("returns"),
+            advantages=batch.get("advantages"),
+            attention_mask=batch.get("attention_mask"),
+            loss_mask=batch.get("loss_mask"),
+            action_mask=batch.get("response_mask"),
             num_actions=batch.metadata["response_length"],  # int
-            rollout_logprobs=batch["rollout_logprobs"] if "rollout_logprobs" in batch else None,
+            rollout_logprobs=batch.get("rollout_logprobs"),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
             info={},

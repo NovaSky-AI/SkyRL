@@ -106,6 +106,8 @@ def create_ray_wrapped_inference_engines(
     engine_init_kwargs: Dict[str, Any] = {},
     rope_scaling: Dict[str, Any] = {},
     rope_theta: float | None = None,
+    enable_ray_prometheus_stats: bool = False,
+    served_model_name: str | None = None,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
@@ -190,6 +192,13 @@ def create_ray_wrapped_inference_engines(
             if rope_theta is not None:
                 rope_engine_kwargs["rope_theta"] = rope_theta
 
+            other_kwargs = {}
+
+            # served_model_name allows using a different model name for HTTP endpoint validation
+            # than the actual model path. See generator.served_model_name in ppo_base_config.yaml.
+            if served_model_name is not None:
+                other_kwargs["served_model_name"] = served_model_name
+
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
 
@@ -242,10 +251,12 @@ def create_ray_wrapped_inference_engines(
                     max_num_batched_tokens=max_num_batched_tokens,
                     max_num_seqs=max_num_seqs,
                     max_logprobs=1,  # only need chosen-token logprobs
+                    enable_ray_prometheus_stats=enable_ray_prometheus_stats,
                     **dp_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,
                     **rope_engine_kwargs,
+                    **other_kwargs,
                 )
                 inference_engine_actors.append(engine)
         elif backend == "sglang":

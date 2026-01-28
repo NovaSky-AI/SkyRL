@@ -372,6 +372,9 @@ def init_inference_engines(
     else:
         pg, sleep = None, False
 
+    # Extract served_model_name from config if set
+    served_model_name = cfg.generator.get("served_model_name", None)
+
     tokenizer = AutoTokenizer.from_pretrained(model)
     eps = create_ray_wrapped_inference_engines(
         num_inference_engines=num_inference_engines,
@@ -393,6 +396,7 @@ def init_inference_engines(
         sleep_level=sleep_level,
         enable_lora=enable_lora,
         engine_init_kwargs=engine_init_kwargs,
+        served_model_name=served_model_name,
     )
     client = InferenceEngineClient(eps, tokenizer, cfg)
     if sleep:

@@ -1,18 +1,24 @@
 """Mixin for logits computation in causal language models."""
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Callable
 
 import jax
 import jax.numpy as jnp
+from tx.models.configs import ModelConfig
 
 
 # lm_head: (hidden_states, adapter_indices) -> logits
 LMHead = Callable[[jax.Array, jax.Array | None], jax.Array]
 
 
-class LogitsProcessorMixin:
+class LogitsProcessorMixin(ABC):
     """Mixin providing logits/logprobs computation for causal language models."""
+
+    @abstractmethod
+    def get_model_config(self) -> ModelConfig:
+        """Return the model configuration."""
+        ...
 
     @abstractmethod
     def get_lm_head(self) -> LMHead:
@@ -51,7 +57,7 @@ class LogitsProcessorMixin:
         Returns:
             Log probabilities for target tokens [B, T].
         """
-        chunk_size = self.config.loss_chunk_size
+        chunk_size = self.get_model_config().loss_chunk_size
         if chunk_size > 0:
             return self._compute_chunked_logprobs(hidden_states, target_ids, chunk_size, adapter_indices)
         else:
@@ -120,7 +126,7 @@ class LogitsProcessorMixin:
             chunk_logits = lm_head(chunk_hidden[:, None, :], chunk_adapters)[:, 0, :]
             return LogitsProcessorMixin.logits_to_logprobs(chunk_logits, chunk_targets)
 
-        if self.config.gradient_checkpointing:
+        if self.get_model_config().gradient_checkpointing:
             compute_chunk_logprobs = jax.checkpoint(compute_chunk_logprobs, policy=None)
 
         all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_hidden, chunked_targets, chunked_adapters))

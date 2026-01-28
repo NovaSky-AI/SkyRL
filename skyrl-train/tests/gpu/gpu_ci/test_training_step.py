@@ -132,3 +132,59 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
 
     finally:
         ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg):
+    """
+    Test SFT path: forward_backward with loss_fn="cross_entropy" returns loss_fn_outputs.
+    Uses DP=2 to verify each rank returns outputs for its data chunk.
+    """
+    cfg.trainer.use_sample_packing = False
+    cfg.trainer.strategy = "fsdp2"
+    validate_cfg(cfg)
+
+    try:
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        batch_size = dp_size * 2  # Ensure multiple samples per DP rank
+        samples_per_rank = batch_size // dp_size
+        num_actions = 4
+        dummy_batch = make_dummy_training_batch(batch_size=batch_size, num_actions=num_actions)
+
+        # Call forward_backward with loss_fn="cross_entropy"
+        results = ray.get(
+            actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch, loss_fn="cross_entropy")
+        )
+
+        # Each DP rank returns its chunk's results
+        all_loss_fn_outputs = []
+        for result in results:
+            assert isinstance(result, dict)
+            assert "loss" in result
+            assert "loss_fn_outputs" in result, "SFT path should return loss_fn_outputs"
+
+            loss_fn_outputs = result["loss_fn_outputs"]
+            assert isinstance(loss_fn_outputs, list)
+            assert len(loss_fn_outputs) == samples_per_rank, f"Expected {samples_per_rank} outputs per rank"
+            all_loss_fn_outputs.extend(loss_fn_outputs)
+
+        # Verify total outputs match batch size
+        assert len(all_loss_fn_outputs) == batch_size, f"Expected {batch_size} total outputs"
+
+        # Verify structure of each output
+        for i, output in enumerate(all_loss_fn_outputs):
+            assert "logprobs" in output, f"Output {i} missing logprobs"
+            assert "elementwise_loss" in output, f"Output {i} missing elementwise_loss"
+            # Verify trimmed to valid length (loss_mask is all 1s, so should equal num_actions)
+            assert len(output["logprobs"]) == num_actions
+
+    finally:
+        ray.shutdown()
