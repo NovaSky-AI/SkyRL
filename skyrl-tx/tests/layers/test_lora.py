@@ -59,9 +59,7 @@ def test_lora_embed_transposed():
             expected_lora_contribution = h @ lora_B_T @ lora_A_T  # (seq_len, vocab_size)
             expected_total = expected_base[i] + expected_lora_contribution
 
-            assert jnp.allclose(lora_output[i], expected_total, atol=1e-5), (
-                f"LoRA math incorrect for batch {i}"
-            )
+            assert jnp.allclose(lora_output[i], expected_total, atol=1e-5), f"LoRA math incorrect for batch {i}"
 
 
 def test_lora_embed_forward_and_transposed_consistency():
