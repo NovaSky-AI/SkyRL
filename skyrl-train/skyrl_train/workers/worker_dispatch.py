@@ -218,7 +218,13 @@ class WorkerDispatch:
         return statuses[0]
 
     def forward_backward_from_staged(
-        self, model: str, data_ref: "ObjectRef", start_idx: int, end_idx: int
+        self,
+        model: str,
+        data_ref: "ObjectRef",
+        start_idx: int,
+        end_idx: int,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
         """
         Run forward/backward pass using pre-staged data from object store.
@@ -237,6 +243,13 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
+        # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
+        kwargs = {}
+        if loss_fn is not None:
+            kwargs["loss_fn"] = loss_fn
+        if loss_fn_config is not None:
+            kwargs["loss_fn_config"] = loss_fn_config
+
         # Use specialized dispatch that passes ObjectRef + indices instead of data
         refs = MeshDispatch.dispatch_from_staged(
             self._actor_groups[model].actor_infos,
@@ -244,6 +257,7 @@ class WorkerDispatch:
             data_ref=data_ref,
             start_idx=start_idx,
             end_idx=end_idx,
+            **kwargs,
         )
         statuses = ray.get(refs)
 

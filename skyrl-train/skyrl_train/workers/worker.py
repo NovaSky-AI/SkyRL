@@ -721,6 +721,8 @@ class PolicyWorkerBase(Worker):
             data: TrainingInputBatch via the ray object store
             start_idx: Start index for this worker's slice
             end_idx: End index for this worker's slice
+            loss_fn: Optional loss function name to use instead of config default
+            loss_fn_config: Optional config overrides for the loss function
 
         Returns:
             Aggregated metrics dict across all micro batches
