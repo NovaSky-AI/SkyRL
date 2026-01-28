@@ -422,9 +422,10 @@ Algorithm Configuration
 
         # separate from sequence_mask_metric and tis_ratio_type 
         # if any off_policy_correction is enabled, masks out sequences with any token having importance ratio
-        # far outside an acceptable range (low and high thresholds)
-        outlier_token_is_threshold_low: 1e-4
-        outlier_token_is_threshold_high: 100
+        # far outside an acceptable range (low and high thresholds) - set to null to disable
+        # suggested values: 1e-4 for low and 100 for high
+        outlier_token_is_threshold_low: null
+        outlier_token_is_threshold_high: null
 
       # clip-cov parameters (only used when policy_loss_type: "clip_cov")
       clip_cov:
@@ -535,8 +536,8 @@ Off Policy Correction Configuration
     geo_mask_low: 0.99
     product_mask_high: 2.0
     product_mask_low: 0.5
-    outlier_token_is_threshold_low: 1e-4
-    outlier_token_is_threshold_high: 100
+    outlier_token_is_threshold_low: null
+    outlier_token_is_threshold_high: null
 
 - ``algorithm.off_policy_correction.tis_ratio_type``: Type of importance sampling ratio to use for ppo loss correction. Options include: ``null``, ``token``, ``sequence``.
 - ``algorithm.off_policy_correction.token_tis_ratio_clip_high``: Cap parameter for "token" tis_ratio_type.
@@ -546,8 +547,8 @@ Off Policy Correction Configuration
 - ``algorithm.off_policy_correction.geo_mask_low``: Low threshold for "geometric" sequence_mask_metric.
 - ``algorithm.off_policy_correction.product_mask_high``: High threshold for "product" sequence_mask_metric.
 - ``algorithm.off_policy_correction.product_mask_low``: Low threshold for "product" sequence_mask_metric.
-- ``algorithm.off_policy_correction.outlier_token_is_threshold_low``: Low threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds).
-- ``algorithm.off_policy_correction.outlier_token_is_threshold_high``: High threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds).
+- ``algorithm.off_policy_correction.outlier_token_is_threshold_low``: Low threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to ``null`` to disable. Suggested values: ``1e-4``.
+- ``algorithm.off_policy_correction.outlier_token_is_threshold_high``: High threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to ``null`` to disable. Suggested values: ``100``.
 
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -562,7 +563,7 @@ It can be helpful to understand the final loss formulation to see how the differ
       advantages: torch.Tensor,
       config: DictConfig, # trainer.algorithm config
       loss_mask: Optional[torch.Tensor] = None,
-  ) -> Tuple[torch.Tensor, LossMetrics]:
+  ) -> Tuple[torch.Tensor, dict]:
 
       ratio = (log_probs - old_log_probs).exp()
       surr1 = ratio * advantages
@@ -575,7 +576,7 @@ It can be helpful to understand the final loss formulation to see how the differ
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
       loss = reduce_loss(loss, loss_mask, config.loss_reduction)
-      return loss, LossMetrics(clip_ratio=clip_ratio)
+      return loss, {"clip_ratio": clip_ratio}
 
 
 Generator Configuration

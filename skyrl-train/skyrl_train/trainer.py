@@ -52,9 +52,9 @@ from skyrl_train.utils.ppo_utils import (
     FixedKLController,
     compute_approx_kl,
     get_kl_controller,
-    masked_mean,
     normalize_advantages_dict,
 )
+from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,

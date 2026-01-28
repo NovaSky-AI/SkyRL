@@ -154,9 +154,10 @@ trainer:
 
       # separate from sequence_mask_metric and tis_ratio_type 
       # if any off_policy_correction is enabled, masks out sequences with any token having importance ratio
-      # far outside an acceptable range (low and high thresholds)
-      outlier_token_is_threshold_low: 1e-4
-      outlier_token_is_threshold_high: 100
+      # far outside an acceptable range (low and high thresholds) - set to null to disable
+      # suggested values: 1e-4 for low and 100 for high
+      outlier_token_is_threshold_low: null
+      outlier_token_is_threshold_high: null
 
     # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
     sapo:

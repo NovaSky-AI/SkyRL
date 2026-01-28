@@ -9,7 +9,8 @@ from megatron.core.distributed import finalize_model_grads
 
 from skyrl_train.distributed.megatron.model_utils import from_parallel_logits_to_logprobs, vocab_parallel_entropy
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.utils.ppo_utils import compute_approx_kl, masked_mean
+from skyrl_train.utils.ppo_utils import compute_approx_kl
+from skyrl_train.utils.torch_utils import masked_mean
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     make_batch_generator,

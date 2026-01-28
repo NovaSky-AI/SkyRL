@@ -10,7 +10,6 @@ from skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
     register_policy_loss,
     reduce_loss,
-    LossMetrics,
 )
 from skyrl_train.training_batch import TrainingInputBatch
 
@@ -54,7 +53,7 @@ def compute_importance_sampling_policy_loss(
 
     loss = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", config.max_seq_len)
     # return loss and a dummy clip ratio value as we aren't clipping here
-    return loss, LossMetrics(clip_ratio=0.0)
+    return loss, {"clip_ratio": 0.0}
 
 
 class OnPolicyDistillationExp(BasePPOExp):

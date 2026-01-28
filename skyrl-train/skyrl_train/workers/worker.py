@@ -51,9 +51,9 @@ from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
-    masked_mean,
     ppo_critic_loss,
 )
+from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 

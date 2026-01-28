@@ -17,7 +17,6 @@ from skyrl_train.utils.ppo_utils import (
     AdvantageEstimatorRegistry,
     register_advantage_estimator,
     PolicyLossRegistry,
-    LossMetrics,
     register_policy_loss,
     compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
@@ -377,7 +376,7 @@ def test_policy_loss_registry_specific():
 
     @register_policy_loss("test_policy_decorator")
     def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
-        return torch.tensor(1.5), LossMetrics(clip_ratio=0.3)
+        return torch.tensor(1.5), {"clip_ratio": 0.3}
 
     # Test decorator worked
     assert "test_policy_decorator" in PolicyLossRegistry.list_available()
@@ -414,10 +413,10 @@ def test_registry_cross_ray_process():
 
         # Create test functions
         def test_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(2.0), LossMetrics(clip_ratio=0.5)
+            return torch.tensor(2.0), {"clip_ratio": 0.5}
 
         def test_policy_loss_2(log_probs, old_log_probs, advantages, config, loss_mask=None):
-            return torch.tensor(3.0), LossMetrics(clip_ratio=0.6)
+            return torch.tensor(3.0), {"clip_ratio": 0.6}
 
         def test_advantage_estimator(**kwargs):
             rewards = kwargs["token_level_rewards"]

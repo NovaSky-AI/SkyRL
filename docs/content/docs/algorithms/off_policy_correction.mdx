@@ -1,0 +1,116 @@
+---
+title: "Off Policy Correction in SkyRL"
+---
+
+SkyRL provides built-in utilities for correcting off-policy drift from trainer/inference mismatch and AsyncRL. This guide covers:
+
+1. **Sources of off-policy drift** — why training and inference policies diverge
+2. **Algorithmic corrections** — importance sampling and sequence masking techniques
+3. **Configuration in SkyRL** — how to enable these corrections in your training runs
+
+# Setup
+For common RL objectives (i.e. PPO/GRPO variants), we typically seek to optimize a token-wise objective of the form:
+
+$$
+\mathcal{L}_{\text{GRPO}}(\theta) = -\mathbb{E}_{x \sim q} \left[ \min \left( \frac{p_\theta(x)}{q(x)} \cdot A(x), \, \text{clip}\left( \frac{p_\theta(x)}{q(x)}, 1-\epsilon_{\text{low}}, 1+\epsilon_{\text{high}} \right) \cdot A(x) \right) \right]
+$$
+
+where:
+- $x \sim q$ — samples drawn from the sampling policy $q$
+- $p_\theta(x)$ — probability under the current policy being optimized
+- $q(x)$ — probability under the sampling policy used during rollout
+- $A(x)$ — advantage estimate, typically computed as group-relative rewards (with the std norm being optional per Dr. GRPO):
+
+$$
+A(x) = \frac{r(x) - \text{mean}(r)}{\text{std}(r)}
+$$
+
+- $\frac{p_\theta(x)}{q(x)}$ — the PPO importance sampling ratio, correcting for distributional shift between the sampling policy and the current policy when taking multiple mini batch steps for a single training batch
+- $\epsilon_{\text{low}}, \epsilon_{\text{high}}$ — clipping bounds (can be asymmetric)
+
+In most RL frameworks there are two options for representing $q$
+- $q = \mu_{\theta_{\text{old}}}$, where $\mu$ is the actual sampling policy via the inference engine
+- $q = \pi_{\theta_{\text{old}}}$, where $\pi$ is the trainer policy (same weights, but potentially different parallelism/kernels)
+
+By default in SkyRL (and in most RL frameworks) $q = \pi_{\theta_{\text{old}}}$ is used as an approximation of the rollout policy $\mu_{\theta_{\text{old}}}$.
+This requires recomputing the logprobs of responses under the training policy by taking a forward pass using the training weights prior to updating the weights for a given training step.
+However, the goal is still to most accurately estimate the importance sampling ratio using $\mu_{\theta_{\text{old}}}$
+
+$$ 
+\frac{p_\theta(x)}{q(x)} = \frac{\pi_{\theta}(x)}{\mu_{\theta_{\text{old}}}(x)}
+$$
+
+# Off-policy drift in RL
+
+We can quantify off policy drift from this ideal $\frac{\pi_{\theta}(x)}{\mu_{\theta_{\text{old}}}(x)}$ by considering the following expansion:
+
+$$
+\frac{p(x)}{q(x)} = \frac{\pi_{\theta}(x)}{\mu_{\theta_{\text{old}}}(x)} = \frac{\pi_{\theta_{\text{old}}}(x)}{\mu_{\theta_{\text{old}}}(x)} * \frac{\pi_{\theta}(x)}{\pi_{\theta_{\text{old}}}(x)}
+$$
+
+The first term:
+
+$$ 
+\frac{\pi_{\theta_{\text{old}}}(x)}{\mu_{\theta_{\text{old}}}(x)}
+$$
+
+corresponds to the off policy drift from **training vs inference mismatch**.
+
+While the second term: 
+
+$$ 
+\frac{\pi_{\theta}(x)}{\pi_{\theta_{\text{old}}}(x)}
+$$
+
+corresponds to the off policy drift from **policy staleness**. 
+
+Next, we discuss how each of these commonly occur in RL training
+
+## Training vs Inference Engine Mismatch
+Training vs inference mismatch
+
+$$ 
+\frac{\pi_{\theta_{\text{old}}}(x)}{\mu_{\theta_{\text{old}}}(x)}
+$$
+
+occurs due to discrepancies between the computed logprobs when using a different training backend (FSDP, Megatron) and inference engine (i.e. vLLM). These discrepancies include:
+
+- **Kernel Mismatch:** Optimized kernels for inference engines are often not [batch invariant](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/), 
+causing $\mu_{\theta_{\text{old}}}(x)$ to differ from $\pi_{\theta_{\text{old}}}(x)$. This can be fixed by enabling batch invariant kernels at the cost of slower inference.
+- **Inconsistent Expert Routing:** Experts that are routed to by the trainer and the inference engine may not line up, causing mismatch in computed logprobs. This can be fixed by introducing routing replay, which 
+fixes the expert routing in the training engine to use the expert routing from the inference engine ([Zheng et. al 2025](https://arxiv.org/pdf/2507.180), [Ma et al. 2025](https://arxiv.org/pdf/2510.11370)).
+- **Different Parallelisms:** Kernel mismatch and numeric drift can be exacerbated by different parallelisms being configured in training backends like FSDP and Megatron compared to inference engines like vLLM.
+For example, [Yao et. al 2025](https://fengyao.notion.site/off-policy-rl) show that enabling ulysses style sequence parallelism on the trainer greatly increases the trainer/inference mismatch.
+
+
+
+## Policy staleness
+Policy staleness
+
+$$ 
+\frac{\pi_{\theta}(x)}{\pi_{\theta_{\text{old}}}(x)}
+$$
+
+is caused by the following factors:
+- **Async RL:** When doing [fully asynchronous RL](/docs/tutorials/fully_async), each training batch can consist of trajectories which were partially (or even fully) computed using stale 
+policies. To mitigate this, the max staleness of trajectories can be tuned to prevent trajectories that are too old from being used during training.
+- **Mini Batching:** Breaking down a training step into multiple mini batches for multiple gradient steps per training batch is common for increasing training efficiency for online RL. 
+Mini batching results in off-policy updates, which can be clamped within an acceptable range in the common dual clip formulation of the PPO loss. Tuning the number of mini batches per training batch
+can impact convergence of RL runs, and impact whether corrections like routing replay and masking are needed.
+
+# Algorithmic Off Policy Correction
+
+In the previous section, we described some reasons that off policy drift can occur, and some ways to mitigate these drifts (i.e. batch invariant kernels, routing replay). However,
+these solutions come with tradeoffs (slower inference for batch invariant kernels, additional bias for routing replay), and are not sufficient to solve all sources of drift, like from fully async RL.
+
+Recent works ([Liu et. al 2025](https://yingru.notion.site/When-Speed-Kills-Stability-Demystifying-RL-Collapse-from-the-Training-Inference-Mismatch-271211a558b7808d8b12d403fd15edda), [Yao et. al 2025](https://fengyao.notion.site/off-policy-rl))
+have proposed additional techniques for off policy correction. 
+
+
+# Metrics and Monitoring
+
+# References
+- [Mathematical Formulations of Rollout Correction Methods in verl](https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md)
+- [When Speed Kills Stability: Demystifying RL Collapse from the Training-Inference Mismatch](https://yingru.notion.site/When-Speed-Kills-Stability-Demystifying-RL-Collapse-from-the-Training-Inference-Mismatch-271211a558b7808d8b12d403fd15edda)
+- [Your Efficient RL Framework Secretly Brings You Off-Policy RL Training](https://fengyao.notion.site/off-policy-rl)
+- [Stabilizing Reinforcement Learning with LLMs: Formulation and Practices](https://arxiv.org/pdf/2512.01374)
