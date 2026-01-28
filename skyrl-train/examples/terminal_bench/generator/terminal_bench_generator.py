@@ -158,12 +158,13 @@ class TerminalBenchGenerator(GeneratorInterface):
             override_storage_mb=self.override_storage_mb,
         )
 
+        assert self.generator_cfg.served_model_name is not None, "served_model_name must be set"
+        assert (
+            "/" not in self.generator_cfg.served_model_name
+        ), "served_model_name must not contain '/', as Harbor expects hosted_vllm model names with exactly one '/', being hosted_vllm/{model_name}"
+        model_alias = self.generator_cfg.served_model_name
+
         if self.agent_name == "terminus":
-            assert self.generator_cfg.served_model_name is not None, "served_model_name must be set"
-            assert (
-                "/" not in self.generator_cfg.served_model_name
-            ), "served_model_name must not contain '/', as Harbor expects hosted_vllm model names with exactly one '/', being hosted_vllm/{model_name}"
-            model_alias = self.generator_cfg.served_model_name
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
                 trials_dir=Path(self.trials_dir),
