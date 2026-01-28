@@ -1,5 +1,5 @@
 """
-uv  run --isolated --extra dev pytest tests/cpu/distributed/test_dispatch.py
+uv run --isolated --extra dev pytest tests/cpu/distributed/test_dispatch.py
 """
 
 from skyrl_train.training_batch import TrainingInputBatch
