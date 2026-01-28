@@ -44,9 +44,10 @@ import random
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
+from pydantic import BaseModel
 import tinker
 import torch
 import wandb
@@ -71,6 +72,26 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("mcp").setLevel(logging.WARNING)
+
+
+class RolloutOutput(BaseModel):
+    """Output from a single rollout collection."""
+
+    prompt_ids: List[int]
+    response_ids: List[int]
+    logprobs: List[float]
+    loss_mask: List[int]
+    reward: float
+    task_key: str
+    env_key: str
+    turns: int
+    tool_calls: int
+    stop_reason: str
+    duration: float
+    error: Optional[str] = None
+
+    class Config:
+        frozen = True
 
 
 def set_seed(seed: int):
@@ -256,17 +277,17 @@ def prepare_training_data(
         Tuple of (training_datums, truncated_count)
     """
     # Apply DAPO overlong filtering (zero out loss mask if response doesn't end with EOS)
-    all_response_ids = [r["response_ids"] for r in rollouts]
-    all_loss_masks = [r["loss_mask"] for r in rollouts]
+    all_response_ids = [r.response_ids for r in rollouts]
+    all_loss_masks = [r.loss_mask for r in rollouts]
     filtered_loss_masks = apply_overlong_filtering(all_loss_masks, all_response_ids, tokenizer.eos_token_id)
 
     training_datums = []
     truncated_count = 0
 
     for idx, rollout in enumerate(rollouts):
-        prompt_ids = rollout["prompt_ids"]
-        response_ids = rollout["response_ids"]
-        logprobs = rollout["logprobs"]
+        prompt_ids = rollout.prompt_ids
+        response_ids = rollout.response_ids
+        logprobs = rollout.logprobs
         loss_mask_data = filtered_loss_masks[idx]
 
         full_sequence = prompt_ids + response_ids
@@ -436,19 +457,19 @@ async def collect_fleet_rollout(
             total_reward = step_output["reward"]
             done = step_output["done"]
 
-        return {
-            "prompt_ids": prompt_ids,
-            "response_ids": all_response_ids,
-            "logprobs": all_logprobs,
-            "loss_mask": loss_mask,
-            "reward": total_reward,
-            "task_key": task_key,
-            "env_key": env_key,
-            "turns": env.turns,
-            "tool_calls": env.tool_calls,
-            "stop_reason": stop_reason,
-            "duration": time.time() - rollout_start,
-        }
+        return RolloutOutput(
+            prompt_ids=prompt_ids,
+            response_ids=all_response_ids,
+            logprobs=all_logprobs,
+            loss_mask=loss_mask,
+            reward=total_reward,
+            task_key=task_key,
+            env_key=env_key,
+            turns=env.turns,
+            tool_calls=env.tool_calls,
+            stop_reason=stop_reason,
+            duration=time.time() - rollout_start,
+        )
 
     finally:
         env.close()
@@ -463,39 +484,48 @@ async def collect_batch_rollouts(
     max_generate_length: int = 2048,
     max_input_length: int = 30720,
     n_samples_per_prompt: int = 1,
+    max_concurrent: int = 4,
 ) -> List[Dict[str, Any]]:
-    """Collect rollouts for a batch of tasks in parallel."""
+    """Collect rollouts for a batch of tasks with limited concurrency.
+
+    Args:
+        max_concurrent: Maximum number of concurrent Fleet environment connections.
+            Fleet MCP connections can timeout if too many are opened simultaneously.
+    """
+    # Semaphore to limit concurrent Fleet environment connections
+    semaphore = asyncio.Semaphore(max_concurrent)
 
     async def collect_single_rollout(task_config: Dict[str, Any], index: int) -> tuple:
-        """Wrapper to collect a single rollout with error handling."""
-        rollout_start = time.time()
-        try:
-            rollout = await collect_fleet_rollout(
-                task_config=task_config,
-                tasks_file=tasks_file,
-                sampling_client=sampling_client,
-                tokenizer=tokenizer,
-                max_turns=max_turns,
-                max_generate_length=max_generate_length,
-                max_input_length=max_input_length,
-            )
-            return index, rollout
-        except Exception as e:
-            logger.error(f"Failed to collect rollout for {task_config.get('task_key')}: {e}")
-            return index, {
-                "prompt_ids": [],
-                "response_ids": [],
-                "logprobs": [],
-                "loss_mask": [],
-                "reward": 0.0,
-                "task_key": task_config.get("task_key"),
-                "env_key": task_config.get("env_key", "unknown"),
-                "turns": 0,
-                "tool_calls": 0,
-                "stop_reason": "error",
-                "error": str(e),
-                "duration": time.time() - rollout_start,
-            }
+        """Wrapper to collect a single rollout with error handling and concurrency limit."""
+        async with semaphore:
+            rollout_start = time.time()
+            try:
+                rollout = await collect_fleet_rollout(
+                    task_config=task_config,
+                    tasks_file=tasks_file,
+                    sampling_client=sampling_client,
+                    tokenizer=tokenizer,
+                    max_turns=max_turns,
+                    max_generate_length=max_generate_length,
+                    max_input_length=max_input_length,
+                )
+                return index, rollout
+            except Exception as e:
+                logger.error(f"Failed to collect rollout for {task_config.get('task_key')}: {e}")
+                return index, RolloutOutput(
+                    prompt_ids=[],
+                    response_ids=[],
+                    logprobs=[],
+                    loss_mask=[],
+                    reward=0.0,
+                    task_key=task_config.get("task_key", "unknown"),
+                    env_key=task_config.get("env_key", "unknown"),
+                    turns=0,
+                    tool_calls=0,
+                    stop_reason="error",
+                    error=str(e),
+                    duration=time.time() - rollout_start,
+                )
 
     # Create all rollout tasks (batch_size * n_samples_per_prompt)
     tasks = []
@@ -506,12 +536,13 @@ async def collect_batch_rollouts(
             index += 1
 
     total = len(tasks)
+    logger.info(f"  Collecting {total} rollouts (max {max_concurrent} concurrent)...")
     rollouts = [None] * total
     completed = 0
     last_logged = 0
     log_interval = max(1, total // 4)  # Log at ~25%, 50%, 75%, 100%
 
-    # Run all rollouts in parallel with progress logging
+    # Run rollouts with limited concurrency via semaphore
     for coro in asyncio.as_completed(tasks):
         idx, rollout = await coro
         rollouts[idx] = rollout
@@ -735,7 +766,7 @@ async def main(
             continue
 
         # Compute GRPO advantages
-        rewards = [r["reward"] for r in valid_rollouts]
+        rewards = [r.reward for r in valid_rollouts]
         advantages = compute_advantages_grpo(rewards, group_size=n_samples_per_prompt, normalize=True)
 
         # Compute all rollout metrics
@@ -804,7 +835,7 @@ async def main(
                 all_eval_rollouts.extend([r for r in eval_rollouts if not r.get("error")])
 
             if all_eval_rollouts:
-                eval_rewards = [r["reward"] for r in all_eval_rollouts]
+                eval_rewards = [r.reward for r in all_eval_rollouts]
                 eval_pass_at_1 = compute_pass_at_n(all_eval_rollouts, 1)
                 eval_per_env = compute_per_env_metrics(all_eval_rollouts, 1)
 
