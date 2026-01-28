@@ -900,9 +900,9 @@ class PolicyWorkerBase(Worker):
 
     def get_lr(self) -> float:
         """
-        Get current learning rate from scheduler.
+        Get current learning rate from optimizer.
         """
-        return self.scheduler.get_last_lr()[0]
+        return self.optimizer.param_groups[0]["lr"]
 
     def set_lr(self, learning_rate: float) -> None:
         """
@@ -1117,9 +1117,9 @@ class CriticWorkerBase(Worker):
 
     def get_lr(self) -> float:
         """
-        Get current learning rate from scheduler.
+        Get current learning rate from optimizer.
         """
-        return self.scheduler.get_last_lr()[0]
+        return self.optimizer.param_groups[0]["lr"]
 
     def set_lr(self, learning_rate: float) -> None:
         """
