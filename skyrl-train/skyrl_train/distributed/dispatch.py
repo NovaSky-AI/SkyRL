@@ -199,7 +199,7 @@ class MeshDispatch(Dispatch):
             worker_end = worker_start + chunk_size
             object_refs.append(
                 getattr(actor_info.handle, method).remote(
-                    data_ref=data_ref, start_idx=worker_start, end_idx=worker_end, **kwargs
+                    data=data_ref, start_idx=worker_start, end_idx=worker_end, **kwargs
                 )
             )
         return object_refs
