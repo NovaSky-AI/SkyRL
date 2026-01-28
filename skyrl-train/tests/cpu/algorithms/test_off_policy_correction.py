@@ -3,12 +3,18 @@ Tests for off policy correction utilities.
 
 uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_off_policy_correction.py
 """
+
 import pytest
 import torch
 from omegaconf import DictConfig
 
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry
-from skyrl_train.utils.off_policy_correction_utils import compute_tis_ratio, compute_sequence_mask, compute_outlier_token_mask, compute_off_policy_correction
+from skyrl_train.utils.off_policy_correction_utils import (
+    compute_tis_ratio,
+    compute_sequence_mask,
+    compute_outlier_token_mask,
+    compute_off_policy_correction,
+)
 
 
 def test_compute_tis_ratio_token_level():

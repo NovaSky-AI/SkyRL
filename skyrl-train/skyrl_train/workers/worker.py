@@ -843,7 +843,7 @@ class PolicyWorkerBase(Worker):
 
             loss = policy_loss + kl_loss_term - entropy_loss_term
             self.strategy.backward(loss, self.model, self.optimizer)
-            
+
             status = {
                 "final_loss": loss.item(),
                 "policy_loss": policy_loss.item(),
