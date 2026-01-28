@@ -60,20 +60,21 @@ class LoRAMixin:
                 rngs=rngs,
             )
 
-    def _compute_lora_intermediate(
+    def _apply_lora_weight(
         self,
+        lora_weight: jax.Array,
         x_sorted: jax.Array,
         adapter_indices_sorted: jax.Array,
         group_sizes: jax.Array,
     ) -> jax.Array:
-        """Compute intermediate LoRA output. Default is linear case: x @ A.
+        """Apply a LoRA weight matrix to input. Default is linear case: x @ weight.
 
         Subclasses (e.g., LoRAEmbed) override this for different computation patterns.
         """
-        assert self.lora_A[...].ndim == 3
+        assert lora_weight.ndim == 3
         assert x_sorted.ndim == 2  # (tokens, in_features)
-        assert x_sorted.shape[1] == self.lora_A[...].shape[1]
-        return jax.lax.ragged_dot(x_sorted, self.lora_A[...], group_sizes)
+        assert x_sorted.shape[1] == lora_weight.shape[1]
+        return jax.lax.ragged_dot(x_sorted, lora_weight, group_sizes)
 
     def apply_lora(
         self,
@@ -98,8 +99,8 @@ class LoRAMixin:
             x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
         )
 
-        # Apply LoRA: x @ A @ B
-        intermediate = self._compute_lora_intermediate(x_sorted, adapter_indices_sorted, group_sizes)
+        # Apply LoRA: x @ A @ B (or A[x] @ B for embeddings)
+        intermediate = self._apply_lora_weight(self.lora_A[...], x_sorted, adapter_indices_sorted, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
@@ -149,16 +150,17 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             rngs=rngs,
         )
 
-    def _compute_lora_intermediate(
+    def _apply_lora_weight(
         self,
+        lora_weight: jax.Array,
         x_sorted: jax.Array,
         adapter_indices_sorted: jax.Array,
         group_sizes: jax.Array,
     ) -> jax.Array:
-        """For embeddings, lookup in A instead of matmul: A[adapter, token_id, :]."""
-        assert self.lora_A[...].ndim == 3
+        """For embeddings, lookup in weight instead of matmul: weight[adapter, token_id, :]."""
+        assert lora_weight.ndim == 3
         assert x_sorted.ndim == 1  # (tokens,) integer indices
-        return self.lora_A[...][adapter_indices_sorted, x_sorted, :]
+        return lora_weight[adapter_indices_sorted, x_sorted, :]
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
         base_out = super().__call__(x)
