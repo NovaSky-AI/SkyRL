@@ -1,11 +1,10 @@
-import math
 from flax import nnx
 import jax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
-from tx.layers.rotary_embedding import apply_rope_interleave
+from tx.layers.rotary_embedding import get_rope
 from tx.layers.util import Param, prepare_routing
 from tx.layers.layernorm import RMSNorm
 from tx.models.configs import DeepseekV3Config
@@ -112,19 +111,8 @@ class DeepseekV3Attention(nnx.Module):
             rngs=rngs,
         )
 
-        self.scaling = self.qk_head_dim ** (-0.5)
-
-        rope_params = config.rope_scaling
-        # HF has both fields, which are set to same on initialization.
-        rope_type = rope_params.get("rope_type") or rope_params.get("type", "default")
-        if rope_type != "default":
-            mscale_all_dim = rope_params.get("mscale_all_dim", 0)
-            scaling_factor = rope_params.get("factor", 1.0)
-            if mscale_all_dim:
-                mscale = 1.0
-                if scaling_factor > 1.0:
-                    mscale = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
-                self.scaling = self.scaling * mscale * mscale
+        self.rope_fn, mscale = get_rope(self.qk_rope_head_dim, config.rope_theta, config.rope_scaling)
+        self.scaling = self.qk_head_dim ** (-0.5) * mscale * mscale
 
     def __call__(
         self,
@@ -162,8 +150,8 @@ class DeepseekV3Attention(nnx.Module):
         k_pass = k_pass.reshape(B, T, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_pass, v = jnp.split(k_pass, [self.qk_nope_head_dim], axis=-1)
 
-        q_rot = apply_rope_interleave(q_rot, positions, self.qk_rope_head_dim, self.config.rope_theta)
-        k_rot = apply_rope_interleave(k_rot, positions, self.qk_rope_head_dim, self.config.rope_theta)
+        q_rot = self.rope_fn(q_rot, positions)
+        k_rot = self.rope_fn(k_rot, positions)
 
         # Expand k_rot to all heads
         k_rot = jnp.broadcast_to(k_rot, (B, T, self.num_heads, self.qk_rope_head_dim))

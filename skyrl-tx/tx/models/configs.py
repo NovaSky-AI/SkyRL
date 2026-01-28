@@ -46,8 +46,7 @@ class ModelConfig(PretrainedConfig):
         self.gradient_checkpointing = gradient_checkpointing
 
     def get_num_experts(self):
-        num_experts = getattr(self, "num_experts", None) or getattr(self, "n_routed_experts", None)
-        return num_experts or 1
+        return getattr(self, "num_experts", None) or getattr(self, "n_routed_experts", None)
 
 
 # Model-specific aliases for clarity and backwards compatibility
