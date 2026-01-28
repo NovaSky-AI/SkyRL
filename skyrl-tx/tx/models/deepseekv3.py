@@ -129,15 +129,8 @@ class DeepseekV3Attention(nnx.Module):
         if self.q_lora_rank is None:
             q_states = self.q_proj(x, adapter_indices=adapter_indices)
         else:
-            q_states = self.q_b_proj(
-                self.q_a_layernorm(
-                    self.q_a_proj(
-                        x,
-                        adapter_indices=adapter_indices,
-                    )
-                ),
-                adapter_indices=adapter_indices,
-            )
+            y = self.q_a_proj(x, adapter_indices=adapter_indices)
+            q_states = self.q_b_proj(self.q_a_layernorm(y), adapter_indices=adapter_indices)
 
         q_states = q_states.reshape(B, T, self.num_heads, self.qk_head_dim)
         q_pass, q_rot = jnp.split(q_states, [self.qk_nope_head_dim], axis=-1)
