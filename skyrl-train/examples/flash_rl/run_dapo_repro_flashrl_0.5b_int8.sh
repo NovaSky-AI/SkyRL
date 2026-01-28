@@ -31,6 +31,8 @@ EVAL_TOP_P=0.7
 CLIP_RATIO_C=10.0
 MAX_RESPONSE_LENGTH=4096
 
+TIS_TYPE=token
+TIS_IMP_RATIO_CAP=2.0
 uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.0.5b_int8 --with vllm@https://github.com/NovaSky-AI/SkyRL/releases/download/skyrl_train-v0.1.0/vllm-0.1.dev7509+gcc487699a.d20250821-cp312-cp312-linux_x86_64.whl --with transformers==4.53.3 -- python -m examples.flash_rl.main_dapo_flashrl \
   data.train_data="['$DATA_DIR/dapo-math-17k-cleaned.parquet']" \
   data.val_data="['$DATA_DIR/aime-2024-cleaned.parquet']" \
@@ -50,8 +52,8 @@ uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.0.5b_int8 --
   trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
-  trainer.algorithm.use_tis=true \
-  trainer.algorithm.tis_imp_ratio_cap=2.0 \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
+  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \

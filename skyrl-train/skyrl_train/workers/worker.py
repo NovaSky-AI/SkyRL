@@ -24,7 +24,6 @@ from ray.util.placement_group import (
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
-
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -52,11 +51,11 @@ from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
-    masked_mean,
     ppo_critic_loss,
 )
+from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.utils import configure_ray_worker_logging
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 
 _SET_AFFINITY = False
 
@@ -767,7 +766,7 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
-            policy_loss, clip_ratio = current_loss_fn(
+            policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -848,19 +847,19 @@ class PolicyWorkerBase(Worker):
             status = {
                 "final_loss": loss.item(),
                 "policy_loss": policy_loss.item(),
-                "ppo_clip_ratio": clip_ratio,
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
             }
+            for k, v in loss_metrics.items():
+                status["loss_metrics/" + k] = v
             if self.cfg.trainer.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
-        # Extract loss_fn_outputs before all_reduce (it's not a tensor/scalar)
         loss_fn_outputs = status.pop("loss_fn_outputs", None)
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         # Add back loss_fn_outputs after all_reduce
         if loss_fn_outputs is not None:
@@ -891,12 +890,6 @@ class PolicyWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """
@@ -1071,7 +1064,7 @@ class CriticWorkerBase(Worker):
         }
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
@@ -1098,12 +1091,6 @@ class CriticWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """

@@ -387,6 +387,46 @@ Algorithm Configuration
       # dual clip parameters
       clip_ratio_c: 3.0
 
+      # To be deprecated in favor of off_policy_correction.tis_ratio_type = "token"
+      # and "token_tis_ratio_clip_high"
+      use_tis: false 
+      tis_imp_ratio_cap: -1.0
+
+      # references
+      # - https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
+      # - https://fengyao.notion.site/off-policy-rl
+      off_policy_correction:
+        # type of importance sampling ratio to use for ppo loss correction
+        # here importance sampling ratio refers to exp(logprobs_{policy_old} - logprobs_{rollout_policy})
+        tis_ratio_type: null # null, "token", "sequence"
+
+        # used if tis_ratio_type = "token", 1.5-5.0 is recommended for "token" tis_ratio_type
+        token_tis_ratio_clip_high: 2.0
+        # used if tis_ratio_type = "sequence", 2.0-10.0 is recommended for "sequence" tis_ratio_type
+        sequence_tis_ratio_clip_high: 5.0
+
+        # method of masking out sequences with cumulative importance sampling ratios outside the cap
+        # "product" masks out sequences with product of importance ratios outside the cap
+        # "geometric" masks out sequences with geometric mean of importance ratios outside the cap
+        sequence_mask_metric: null # null, "product", "geometric"
+
+        # used if sequence_mask_metric = "geometric"
+        # values around 0.99-1.01 are recommended for "geometric" sequence_mask_metric - MoE models may need larger allowed ranges due to higher mismatch
+        geo_mask_high: 1.01
+        geo_mask_low: 0.99
+
+        # used if sequence_mask_metric = "product"
+        # values around 0.5-2.0 are recommended for "product" sequence_mask_metric
+        product_mask_high: 2.0
+        product_mask_low: 0.5
+
+        # separate from sequence_mask_metric and tis_ratio_type 
+        # if any off_policy_correction is enabled, masks out sequences with any token having importance ratio
+        # far outside an acceptable range (low and high thresholds) - set to null to disable
+        # suggested values: 1e-4 for low and 100 for high
+        outlier_token_is_threshold_low: null
+        outlier_token_is_threshold_high: null
+
       # clip-cov parameters (only used when policy_loss_type: "clip_cov")
       clip_cov:
         clip_ratio: 0.0002 # fraction of tokens to clip based on covariance
@@ -411,10 +451,6 @@ Algorithm Configuration
         type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
         max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
         min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
-      
-      # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
-      use_tis: false 
-      tis_imp_ratio_cap: -1.0
 
       # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
       sapo:
@@ -462,8 +498,8 @@ Algorithm Configuration
   - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
   - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
-- ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
-- ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
+- ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. This flag is to be deprecated, use ``off_policy_correction.tis_ratio_type = "token"`` instead.
+- ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS. This flag is to be deprecated, use ``off_policy_correction.token_tis_ratio_clip_high`` instead.
 - ``algorithm.clip_cov``: Clip-Cov parameters (only used when ``policy_loss_type`` is ``clip_cov``):
 
   - ``clip_ratio``: Fraction of tokens to clip based on covariance values.
@@ -485,6 +521,35 @@ Algorithm Configuration
   - ``tau_pos``: Temperature for gating function for tokens with positive advantages.
   - ``tau_neg``: Temperature for gating function for tokens with negative (or zero) advantages.
 
+Off Policy Correction Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- ``algorithm.off_policy_correction``: Off policy correction configuration. See the full configuration below
+
+.. code-block:: yaml
+
+  off_policy_correction:
+    tis_ratio_type: null # null, "token", "sequence"
+    token_tis_ratio_clip_high: 2.0
+    sequence_tis_ratio_clip_high: 5.0
+    sequence_mask_metric: null # null, "product", "geometric"
+    geo_mask_high: 1.01
+    geo_mask_low: 0.99
+    product_mask_high: 2.0
+    product_mask_low: 0.5
+    outlier_token_is_threshold_low: null
+    outlier_token_is_threshold_high: null
+
+- ``algorithm.off_policy_correction.tis_ratio_type``: Type of importance sampling ratio to use for ppo loss correction. Options include: ``null``, ``token``, ``sequence``.
+- ``algorithm.off_policy_correction.token_tis_ratio_clip_high``: Cap parameter for "token" tis_ratio_type.
+- ``algorithm.off_policy_correction.sequence_tis_ratio_clip_high``: Cap parameter for "sequence" tis_ratio_type.
+- ``algorithm.off_policy_correction.sequence_mask_metric``: Method of masking out sequences with cumulative importance sampling ratios outside the cap. Options include: ``null``, ``product``, ``geometric``.
+- ``algorithm.off_policy_correction.geo_mask_high``: High threshold for "geometric" sequence_mask_metric.
+- ``algorithm.off_policy_correction.geo_mask_low``: Low threshold for "geometric" sequence_mask_metric.
+- ``algorithm.off_policy_correction.product_mask_high``: High threshold for "product" sequence_mask_metric.
+- ``algorithm.off_policy_correction.product_mask_low``: Low threshold for "product" sequence_mask_metric.
+- ``algorithm.off_policy_correction.outlier_token_is_threshold_low``: Low threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to ``null`` to disable. Suggested values: ``1e-4``.
+- ``algorithm.off_policy_correction.outlier_token_is_threshold_high``: High threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to ``null`` to disable. Suggested values: ``100``.
+
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -498,7 +563,7 @@ It can be helpful to understand the final loss formulation to see how the differ
       advantages: torch.Tensor,
       config: DictConfig, # trainer.algorithm config
       loss_mask: Optional[torch.Tensor] = None,
-  ) -> torch.Tensor:
+  ) -> Tuple[torch.Tensor, dict]:
 
       ratio = (log_probs - old_log_probs).exp()
       surr1 = ratio * advantages
@@ -511,7 +576,7 @@ It can be helpful to understand the final loss formulation to see how the differ
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
       loss = reduce_loss(loss, loss_mask, config.loss_reduction)
-      return loss, clip_ratio
+      return loss, {"clip_ratio": clip_ratio}
 
 
 Generator Configuration

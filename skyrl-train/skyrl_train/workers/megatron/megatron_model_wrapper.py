@@ -9,7 +9,8 @@ from megatron.core.distributed import finalize_model_grads
 
 from skyrl_train.distributed.megatron.model_utils import from_parallel_logits_to_logprobs, vocab_parallel_entropy
 from skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl_train.utils.ppo_utils import compute_approx_kl, masked_mean
+from skyrl_train.utils.ppo_utils import compute_approx_kl
+from skyrl_train.utils.torch_utils import masked_mean
 
 from skyrl_train.distributed.megatron.megatron_utils import (
     make_batch_generator,
@@ -219,7 +220,7 @@ class MegatronModelWrapper:
             action_log_probs = token_logprobs[:, -num_actions:]
 
             # policy loss should be calculated based on the selected token logprobs
-            policy_loss, clip_ratio = self.policy_loss_fn(
+            policy_loss, loss_metrics = self.policy_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -256,9 +257,10 @@ class MegatronModelWrapper:
                 "final_loss": loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
-                "ppo_clip_ratio": clip_ratio,
                 "policy_kl": kl_loss.detach().item(),
             }
+            for k, v in loss_metrics.items():
+                metrics["loss_metrics/" + k] = v
             return loss, metrics
 
         def forward_step(batch_iter, model):

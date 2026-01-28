@@ -28,7 +28,7 @@ set -x
 : "${MAX_STALENESS_STEPS:=4}"
 : "${NUM_PARALLEL_GENERATION_WORKERS:=$(( MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
 
-USE_TIS=true
+TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
 RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-useTIS_${USE_TIS}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
@@ -39,8 +39,8 @@ uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_fully_
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
+  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \

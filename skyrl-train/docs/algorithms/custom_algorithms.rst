@@ -54,8 +54,8 @@ Similarly, you can register custom policy loss functions:
    def compute_reinforce_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
        # Your custom policy loss implementation (like REINFORCE)
        loss = (-log_probs * advantages).mean()
-       # return loss and clip ratio
-       return loss, 0.0
+       # return loss and loss metrics
+       return loss, {"clip_ratio": 0.0}
 
 Registry Ray Distribution
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
