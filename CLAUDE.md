@@ -14,7 +14,7 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
 
 ## Critical Rules - DO NOT VIOLATE
 
-1. **NEVER push to main** - Always create a branch and open a PR for review.
+1. **NEVER push to main** - Always create a branch and open a PR for review. Do NOT merge PRs - the user will review and merge them.
 
 2. **Always push to origin (fleet-ai/SkyRL)** - Never push to upstream (NovaSky-AI/SkyRL). When creating PRs, use `--repo fleet-ai/SkyRL`.
 
