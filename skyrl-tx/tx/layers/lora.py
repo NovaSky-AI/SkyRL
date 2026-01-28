@@ -81,6 +81,8 @@ class LoRAMixin:
         x: jax.Array,
         base_output: jax.Array,
         adapter_indices: jax.Array | None,
+        *,
+        transposed: bool = False,
     ) -> jax.Array:
         if self.max_lora_adapters == 0 or adapter_indices is None:
             return base_output
@@ -99,9 +101,17 @@ class LoRAMixin:
             x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
         )
 
-        # Apply LoRA: x @ A @ B (or A[x] @ B for embeddings)
-        intermediate = self._apply_lora_weight(self.lora_A[...], x_sorted, adapter_indices_sorted, group_sizes)
-        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
+        # Apply LoRA computation
+        if transposed:
+            # x @ B.T @ A.T (always linear matmul - can't lookup with continuous hidden states)
+            lora_B_T = self.lora_B[...].transpose((0, 2, 1))
+            lora_A_T = self.lora_A[...].transpose((0, 2, 1))
+            intermediate = jax.lax.ragged_dot(x_sorted, lora_B_T, group_sizes)
+            lora_output_sorted = jax.lax.ragged_dot(intermediate, lora_A_T, group_sizes)
+        else:
+            # x @ A @ B (or A[x] @ B for embeddings via _apply_lora_weight override)
+            intermediate = self._apply_lora_weight(self.lora_A[...], x_sorted, adapter_indices_sorted, group_sizes)
+            lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
         lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
@@ -169,8 +179,12 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
     @property
     def T(self):
         """Return a callable that projects hidden states back to vocabulary space."""
-        # TODO: Apply lora adapters here as well
-        return lambda hidden_states, adapter_indices=None: hidden_states @ self.embedding[...].T
+
+        def project(hidden_states: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+            base_out = hidden_states @ self.embedding[...].T
+            return self.apply_lora(hidden_states, base_out, adapter_indices, transposed=True)
+
+        return project
 
 
 class LoRALinear(LoRAMixin, nnx.Linear):
@@ -323,11 +337,6 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         adapter_index: Index of the adapter to initialize
         lora_config: LoraConfig object containing rank, alpha, seed, and training flags
     """
-    if lora_config.train_unembed and getattr(model.config, "tie_word_embeddings", False):
-        raise ValueError(
-            "train_unembed=True is incompatible with tie_word_embeddings=True. "
-            "Tied embeddings use embed_tokens.T which does not support LoRA."
-        )
     rngs = nnx.Rngs(lora_config.seed)
     state = nnx.state(model)
 
