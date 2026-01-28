@@ -1,20 +1,29 @@
 ### Terminal-Bench integration (WIP)
 
-Integration with Terminal-Bench is a work in progress. For now, training tasks are hard-coded as "hello-world" in the prototype. The next TODO is to support specifying a training set of Terminal-Bench tasks.
+Integration with Terminal-Bench is a work in progress.
 
-This integration requires the `harbor` repo (ie, the new and improved terminal bench):
+Tracked here: https://github.com/NovaSky-AI/SkyRL/issues/866
+
+But you can already run:
+
+OpenThoughts-Agent first release's RL job with:
+
 ```bash
 cd SkyRL/skyrl-train
-git clone https://github.com/laude-institute/harbor.git
+bash examples/terminal_bench/run_otagent.sh
 ```
 
+Training on code-contest with Qwen3-8B as the base model:
 
-- **Training**:
 ```bash
-bash examples/terminal_bench/run_tbench.sh
+cd SkyRL/skyrl-train
+bash examples/terminal_bench/run_codecontest.sh
 ```
 
-- **Generation only**: launch the generator/serving process. This entrypoint is primarily for rapid debugging to avoid the trainer setup overhead.
+Generation-only for debugging
 ```bash
+cd SkyRL/skyrl-train
 bash examples/terminal_bench/run_tbench_gen.sh
 ```
+
+Currently, you'd have to have [Daytona](https://app.daytona.io/) access to host the containers.
