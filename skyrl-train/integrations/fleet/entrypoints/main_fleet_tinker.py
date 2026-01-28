@@ -458,43 +458,48 @@ async def collect_batch_rollouts(
     max_input_length: int = 30720,
     n_samples_per_prompt: int = 1,
 ) -> List[Dict[str, Any]]:
-    """Collect rollouts for a batch of tasks."""
-    rollouts = []
+    """Collect rollouts for a batch of tasks in parallel."""
 
+    async def collect_single_rollout(task_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Wrapper to collect a single rollout with error handling."""
+        rollout_start = time.time()
+        try:
+            return await collect_fleet_rollout(
+                task_config=task_config,
+                tasks_file=tasks_file,
+                sampling_client=sampling_client,
+                tokenizer=tokenizer,
+                max_turns=max_turns,
+                max_generate_length=max_generate_length,
+                max_input_length=max_input_length,
+            )
+        except Exception as e:
+            logger.error(f"Failed to collect rollout for {task_config.get('task_key')}: {e}")
+            return {
+                "prompt_ids": [],
+                "response_ids": [],
+                "logprobs": [],
+                "loss_mask": [],
+                "reward": 0.0,
+                "task_key": task_config.get("task_key"),
+                "env_key": task_config.get("env_key", "unknown"),
+                "turns": 0,
+                "tool_calls": 0,
+                "stop_reason": "error",
+                "error": str(e),
+                "duration": time.time() - rollout_start,
+            }
+
+    # Create all rollout tasks (batch_size * n_samples_per_prompt)
+    tasks = []
     for task_config in batch:
         for _ in range(n_samples_per_prompt):
-            rollout_start = time.time()
-            try:
-                rollout = await collect_fleet_rollout(
-                    task_config=task_config,
-                    tasks_file=tasks_file,
-                    sampling_client=sampling_client,
-                    tokenizer=tokenizer,
-                    max_turns=max_turns,
-                    max_generate_length=max_generate_length,
-                    max_input_length=max_input_length,
-                )
-                rollouts.append(rollout)
-            except Exception as e:
-                logger.error(f"Failed to collect rollout for {task_config.get('task_key')}: {e}")
-                rollouts.append(
-                    {
-                        "prompt_ids": [],
-                        "response_ids": [],
-                        "logprobs": [],
-                        "loss_mask": [],
-                        "reward": 0.0,
-                        "task_key": task_config.get("task_key"),
-                        "env_key": task_config.get("env_key", "unknown"),
-                        "turns": 0,
-                        "tool_calls": 0,
-                        "stop_reason": "error",
-                        "error": str(e),
-                        "duration": time.time() - rollout_start,
-                    }
-                )
+            tasks.append(collect_single_rollout(task_config))
 
-    return rollouts
+    # Run all rollouts in parallel
+    rollouts = await asyncio.gather(*tasks)
+
+    return list(rollouts)
 
 
 def collate_fn(batch):
