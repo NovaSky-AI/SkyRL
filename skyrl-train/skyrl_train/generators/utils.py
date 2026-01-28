@@ -152,10 +152,11 @@ def get_generation_prompt_ids(tokenizer, chat_template: Optional[str] = None) ->
     Returns:
         List[int]: Token IDs for the generation prompt (e.g., "<|im_start|>assistant\n" for Qwen).
     """
-    template_kwargs = {"chat_template": chat_template} if chat_template else {}
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True, **template_kwargs)
+    empty_user = tokenizer.apply_chat_template(
+        [{"role": "user", "content": ""}], tokenize=True, chat_template=chat_template
+    )
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, **template_kwargs
+        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=chat_template
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -439,12 +440,11 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "I am a user."},
     ]
-    template_kwargs = {"chat_template": chat_template} if chat_template else {}
     base_conversation_token_ids = tokenizer.apply_chat_template(
         base_conversation,
         add_generation_prompt=False,
         tokenize=True,
-        **template_kwargs,
+        chat_template=chat_template,
     )
 
     full_conversation = base_conversation + messages
@@ -452,7 +452,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer, chat_template:
         full_conversation,
         add_generation_prompt=False,
         tokenize=True,
-        **template_kwargs,
+        chat_template=chat_template,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
