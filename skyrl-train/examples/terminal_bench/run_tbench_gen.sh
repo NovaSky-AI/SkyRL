@@ -45,5 +45,5 @@ uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypo
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   trainer.train_batch_size=$NUM_GPUS \
   trainer.policy_mini_batch_size=$NUM_GPUS \
-  trainer.logger="$LOGGER" \
+  trainer.logger=console \
   $@
