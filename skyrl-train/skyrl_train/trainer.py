@@ -1019,6 +1019,29 @@ class RayPPOTrainer:
 
         return data
 
+    def _normalize_minibatch_advantages(self, data: TrainingInputBatch) -> TrainingInputBatch:
+        """Normalize the advantages in the mini-batch.
+
+        This normalization results in calculating the correct minibatch loss for the
+        given loss reduction type when reducing the loss with a sum.
+        """
+        advantages = data["advantages"]
+        loss_mask = data["loss_mask"]
+
+        # NOTE: Do not modify the tensor in place!
+        # Otherwise subsequent epochs will keep dividing the same tensor.
+
+        # Option 1: token mean
+        if self.cfg.trainer.algorithm.loss_reduction == "token_mean":
+            data["advantages"] = advantages / loss_mask.sum()
+
+        # Option 2: sequence mean
+        elif self.cfg.trainer.algorithm.loss_reduction == "sequence_mean":
+            batch_size = len(data)
+            data["advantages"] = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True))
+
+        return data
+
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Execute training step for FSDP strategy using forward_backward + optim_step.
@@ -1044,13 +1067,21 @@ class RayPPOTrainer:
             mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
+        num_mini_batches = len(data) // mini_batch_size
+
+        # iterate over mini-batches to do mini batch level normalization
+        for local_step in range(num_mini_batches):
+            start_idx = local_step * mini_batch_size
+            end_idx = (local_step + 1) * mini_batch_size
+            mini_batch = data[start_idx:end_idx]
+            mini_batch = self._normalize_minibatch_advantages(mini_batch)
+            data[start_idx:end_idx] = mini_batch
 
         # Stage full batch in object store ONCE to avoid repeated serialization
         data_ref = self.dispatch.stage_data(data)
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            num_mini_batches = len(data) // mini_batch_size
             for local_step in range(num_mini_batches):
                 start_idx = local_step * mini_batch_size
                 end_idx = (local_step + 1) * mini_batch_size

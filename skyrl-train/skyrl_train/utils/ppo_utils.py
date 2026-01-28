@@ -192,6 +192,7 @@ def ppo_critic_loss(
         clipfrac = None
         loss = (values - returns) ** 2
 
+    # TODO: We separately run into the "mean of means" problem here.
     loss = masked_mean(loss, loss_mask, dim=-1).mean()
     return 0.5 * loss, clipfrac
 
@@ -592,7 +593,13 @@ def ppo_policy_loss(
         tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
         loss = loss * tis_imp_ratio
 
-    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    # NOTE: We scaled the advantages to handle the loss normalization in the trainer.
+    # So we just need to sum the token-level losses here.
+    if loss_mask is not None:
+        loss = loss * loss_mask
+    loss = loss.sum()
+    # loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+
     return loss, clip_ratio
 
 
