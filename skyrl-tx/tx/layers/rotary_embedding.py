@@ -69,9 +69,8 @@ def get_rope(
         and returns RoPE-applied outputs, and mscale is the attention magnitude
         scale factor for YaRN-style scaling.
     """
-    rope_type = "default"
-    if rope_scaling is not None:
-        rope_type = rope_scaling.get("rope_type") or rope_scaling.get("type", "default")
+    rope_scaling = rope_scaling or {}
+    rope_type = rope_scaling.get("rope_type", "default")
 
     match rope_type:
         case "deepseek_yarn" | "yarn":
