@@ -137,7 +137,7 @@ class MeshDispatch(Dispatch):
         for actor_info in actor_infos:
             # Pass ObjectRef instead of data - workers will fetch from object store
             chunk_ref = chunk_refs[actor_info.rank.dp]
-            object_refs.append(getattr(actor_info.handle, method).remote(data=chunk_ref, **kwargs))
+            object_refs.append(getattr(actor_info.handle, method).remote(chunk_ref, **kwargs))
         return object_refs
 
     @classmethod
@@ -199,7 +199,7 @@ class MeshDispatch(Dispatch):
             worker_end = worker_start + chunk_size
             object_refs.append(
                 getattr(actor_info.handle, method).remote(
-                    data=data_ref, start_idx=worker_start, end_idx=worker_end, **kwargs
+                    data_ref, start_idx=worker_start, end_idx=worker_end, **kwargs
                 )
             )
         return object_refs

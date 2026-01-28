@@ -220,7 +220,7 @@ class WorkerDispatch:
     def forward_backward_from_staged(
         self,
         model: str,
-        data_ref: "ObjectRef",
+        data_ref: ObjectRef,
         start_idx: int,
         end_idx: int,
         loss_fn: Optional[str] = None,
