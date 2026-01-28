@@ -215,11 +215,7 @@ class WorkerDispatch:
         bypassing the scheduler. Useful for external learning rate schedules.
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
-        ray.get(
-            self._actor_groups[model].async_run_ray_method(
-                "pass_through", "set_lr", learning_rate=learning_rate
-            )
-        )
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
 
     # TODO(tgriggs): Remove this when Megatron supports forward_backward and optim_step.
     def ppo_train(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
