@@ -506,10 +506,7 @@ algorithm:
 
 ### Off Policy Correction Configuration
 
-References:
-# - https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
-# - https://fengyao.notion.site/off-policy-rl
-- `algorithm.off_policy_correction`: Off policy correction configuration. See the full configuration below:
+- `algorithm.off_policy_correction`: Off policy correction configuration. See the full configuration below, and see the guide for [Off Policy Correction in SkyRL](/docs/algorithms/off_policy_correction) for more details:
 
 ```yaml
 off_policy_correction:
@@ -535,6 +532,7 @@ off_policy_correction:
 - `algorithm.off_policy_correction.product_mask_low`: Low threshold for `product` sequence_mask_metric.
 - `algorithm.off_policy_correction.outlier_token_is_threshold_low`: Low threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to `null` to disable. Suggested values: `1e-4`.
 - `algorithm.off_policy_correction.outlier_token_is_threshold_high`: High threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to `null` to disable. Suggested values: `100`.
+
 
 ### Policy Loss Formulation
 
