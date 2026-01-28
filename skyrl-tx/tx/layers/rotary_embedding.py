@@ -56,7 +56,7 @@ def get_rope(
             "rope_type" field determines the RoPE variant to use.
 
     Returns:
-        A tuple of (rope_fn, mscale) where rope_fn takes (inputs, positions)
+        A tuple of (rotary_emb, mscale) where rotary_emb takes (inputs, positions)
         and returns RoPE-applied outputs, and mscale is the attention magnitude
         scale factor for YaRN-style scaling.
     """
@@ -67,16 +67,16 @@ def get_rope(
         case "deepseek_yarn":
             mscale = yarn_get_mscale(rope_scaling["factor"], rope_scaling["mscale_all_dim"])
 
-            def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
+            def rotary_emb(inputs: jax.Array, positions: jax.Array) -> jax.Array:
                 return apply_rope(inputs, positions, head_dim, rope_theta, interleave=True)
 
         case "default":
             mscale = 1.0
 
-            def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
+            def rotary_emb(inputs: jax.Array, positions: jax.Array) -> jax.Array:
                 return apply_rope(inputs, positions, head_dim, rope_theta)
 
         case _:
             raise ValueError(f"Unsupported rope_type: {rope_type}")
 
-    return rope_fn, mscale
+    return rotary_emb, mscale

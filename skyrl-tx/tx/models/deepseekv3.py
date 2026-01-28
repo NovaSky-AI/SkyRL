@@ -111,7 +111,7 @@ class DeepseekV3Attention(nnx.Module):
             rngs=rngs,
         )
 
-        self.rope_fn, mscale = get_rope(self.qk_rope_head_dim, config.rope_theta, config.rope_scaling)
+        self.rotary_emb, mscale = get_rope(self.qk_rope_head_dim, config.rope_theta, config.rope_scaling)
         self.scaling = self.qk_head_dim ** (-0.5) * mscale * mscale
 
     def __call__(
@@ -150,8 +150,8 @@ class DeepseekV3Attention(nnx.Module):
         k_pass = k_pass.reshape(B, T, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
         k_pass, v = jnp.split(k_pass, [self.qk_nope_head_dim], axis=-1)
 
-        q_rot = self.rope_fn(q_rot, positions)
-        k_rot = self.rope_fn(k_rot, positions)
+        q_rot = self.rotary_emb(q_rot, positions)
+        k_rot = self.rotary_emb(k_rot, positions)
 
         # Expand k_rot to all heads
         k_rot = jnp.broadcast_to(k_rot, (B, T, self.num_heads, self.qk_rope_head_dim))
