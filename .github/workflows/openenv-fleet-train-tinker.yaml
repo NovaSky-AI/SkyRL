@@ -47,7 +47,7 @@ env:
 
 jobs:
   train:
-    runs-on: ubuntu-latest-4-cores  # Larger runner for better MCP connection handling
+    runs-on: ubuntu-latest
     timeout-minutes: 720  # 12 hours max
 
     steps:

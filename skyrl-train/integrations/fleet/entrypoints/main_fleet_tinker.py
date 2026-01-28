@@ -485,7 +485,7 @@ async def collect_batch_rollouts(
     max_generate_length: int = 2048,
     max_input_length: int = 30720,
     n_samples_per_prompt: int = 1,
-    max_concurrent: int = 4,
+    max_concurrent: int = 2,
 ) -> List[Dict[str, Any]]:
     """Collect rollouts for a batch of tasks with limited concurrency.
 
