@@ -16,6 +16,7 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
+from tx.models.configs import ModelConfig
 from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
@@ -92,7 +93,7 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
 
 def load_safetensors(
     checkpoint_dir: str | os.PathLike,
-    config: PretrainedConfig,
+    config: ModelConfig,
     model: nnx.Module,
     skip_lora: bool = True,
     prefix: str = "",
@@ -126,7 +127,7 @@ def load_safetensors(
 
 
 def save_safetensors(
-    config: PretrainedConfig,
+    config: ModelConfig,
     model: nnx.Module,
     filename: Path,
     prefix: str = "",
@@ -141,7 +142,7 @@ def save_safetensors(
             continue
         key = get_param_key(path, prefix=prefix)
         if "experts" in path:
-            for i in range(config.num_experts):
+            for i in range(config.get_num_experts()):
                 tensors[get_expert_key(path, i)] = param[i, :, :].T
             continue
         if "q_proj" in path or "k_proj" in path or "v_proj" in path:
