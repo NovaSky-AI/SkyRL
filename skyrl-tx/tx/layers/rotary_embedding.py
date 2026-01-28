@@ -70,28 +70,28 @@ def get_rope(
         scale factor for YaRN-style scaling.
     """
     rope_type = "default"
-    mscale = 1.0
-
     if rope_scaling is not None:
         rope_type = rope_scaling.get("rope_type") or rope_scaling.get("type", "default")
 
-        if rope_type != "default":
+    match rope_type:
+        case "deepseek_yarn" | "yarn":
             mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
             scaling_factor = rope_scaling["factor"]
             if mscale_all_dim and scaling_factor > 1.0:
                 mscale = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
+            else:
+                mscale = 1.0
 
-    if rope_type in ("deepseek_yarn", "yarn"):
+            def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
+                return apply_rope_interleave(inputs, positions, head_dim, rope_theta)
 
-        def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
-            return apply_rope_interleave(inputs, positions, head_dim, rope_theta)
+        case "default":
+            mscale = 1.0
 
-    elif rope_type == "default":
+            def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
+                return apply_rope(inputs, positions, head_dim, rope_theta)
 
-        def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
-            return apply_rope(inputs, positions, head_dim, rope_theta)
-
-    else:
-        raise ValueError(f"Unsupported rope_type: {rope_type}")
+        case _:
+            raise ValueError(f"Unsupported rope_type: {rope_type}")
 
     return rope_fn, mscale
