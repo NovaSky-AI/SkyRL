@@ -17,7 +17,11 @@ def test_lora_embed_transposed():
     # Use realistic alpha/rank scaling values (e.g., alpha=16, rank=4 -> scale=4.0)
     lora_scaling_val = jnp.array([4.0, 2.0], dtype=jnp.float32)
 
-    mesh = jax.make_mesh((1,), ("dp",))
+    mesh = jax.make_mesh(
+        (1,),
+        ("dp",),
+        axis_types=(jax.sharding.AxisType.Auto,),
+    )
     with jax.set_mesh(mesh):
         embed = LoRAEmbed(
             num_embeddings=vocab_size,
@@ -79,7 +83,11 @@ def test_lora_embed_forward_and_transposed_consistency():
     # Use a non-trivial scaling value to ensure it's properly tested
     lora_scaling_val = jnp.array([2.5], dtype=jnp.float32)
 
-    mesh = jax.make_mesh((1,), ("dp",))
+    mesh = jax.make_mesh(
+        (1,),
+        ("dp",),
+        axis_types=(jax.sharding.AxisType.Auto,),
+    )
     with jax.set_mesh(mesh):
         embed = LoRAEmbed(
             num_embeddings=vocab_size,
