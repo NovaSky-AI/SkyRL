@@ -904,6 +904,16 @@ class PolicyWorkerBase(Worker):
         """
         return self.scheduler.get_last_lr()[0]
 
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        This directly updates the optimizer's param_groups, bypassing the scheduler.
+        Useful for external learning rate schedules (e.g., from Tinker).
+        """
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
+
     def barrier(self) -> None:
         """
         Synchronization barrier across all workers.
@@ -1110,6 +1120,16 @@ class CriticWorkerBase(Worker):
         Get current learning rate from scheduler.
         """
         return self.scheduler.get_last_lr()[0]
+
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        This directly updates the optimizer's param_groups, bypassing the scheduler.
+        Useful for external learning rate schedules (e.g., from Tinker).
+        """
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
 
     def barrier(self) -> None:
         """

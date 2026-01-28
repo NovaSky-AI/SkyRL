@@ -200,8 +200,14 @@ class SkyRLTrainBackend(AbstractBackend):
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         if model_id != self._model_id:
             raise ValueError(f"Model {model_id} not found")
+
+        # Apply learning rate from AdamParams before optimizer step
+        # Note: beta1, beta2, eps are fixed at optimizer creation and cannot be changed dynamically
+        adam_params = request_data.adam_params
+        self._dispatch.set_lr("policy", adam_params.learning_rate)
+
         grad_norm = self._dispatch.optim_step("policy")
-        logger.info(f"grad_norm: {grad_norm}")
+        logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
         return types.OptimStepOutput()
 
     def sample(
