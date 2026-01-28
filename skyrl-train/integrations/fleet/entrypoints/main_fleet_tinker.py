@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 from pydantic import BaseModel
+from tqdm import tqdm
 import tinker
 import torch
 import wandb
@@ -706,7 +707,8 @@ async def main(
             break
 
     # Training loop
-    for step in range(resume_from_step, max_steps):
+    pbar = tqdm(range(resume_from_step, max_steps), desc="Training", unit="step")
+    for step in pbar:
         step_start = time.time()
         metrics = {"step": step, "epoch": step // steps_per_epoch}
 
@@ -810,9 +812,12 @@ async def main(
 
         # Log metrics
         wandb.log(metrics, step=step)
-        logger.info(
-            f"Step {step}: pass@{n_samples_per_prompt}={metrics[f'reward/avg_pass_at_{n_samples_per_prompt}']:.3f}, "
-            f"reward={metrics['reward/avg_raw_reward']:.3f}, time={metrics['time/total']:.1f}s"
+        pbar.set_postfix(
+            {
+                f"pass@{n_samples_per_prompt}": f"{metrics[f'reward/avg_pass_at_{n_samples_per_prompt}']:.3f}",
+                "reward": f"{metrics['reward/avg_raw_reward']:.3f}",
+                "time": f"{metrics['time/total']:.1f}s",
+            }
         )
 
         # Evaluation
