@@ -6,7 +6,7 @@ combined with Fleet environments via OpenEnv for rollout collection.
 
 Usage:
     python -m integrations.fleet.entrypoints.main_fleet_tinker \
-        --model-name Qwen/Qwen2.5-1.5B-Instruct \
+        --model-name Qwen/Qwen3-VL-30B-A3B-Instruct \
         --tasks-file /path/to/tasks.json \
         --dataset-file /path/to/train.parquet \
         --eval-dataset-file /path/to/validation.parquet
@@ -483,7 +483,7 @@ async def save_checkpoint(
 
 
 async def main(
-    model_name: str = "Qwen/Qwen2.5-1.5B-Instruct",
+    model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct",
     tasks_file: str = None,
     dataset_file: str = None,
     eval_dataset_file: str = None,
@@ -774,7 +774,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Fleet Task Training with Tinker")
-    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-VL-30B-A3B-Instruct")
     parser.add_argument("--tasks-file", type=str, required=True, help="Path to tasks JSON file")
     parser.add_argument("--dataset-file", type=str, required=True, help="Path to training parquet")
     parser.add_argument("--eval-dataset-file", type=str, default=None, help="Path to eval parquet")
