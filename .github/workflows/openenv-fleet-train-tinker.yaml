@@ -47,7 +47,7 @@ env:
 
 jobs:
   train:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-4-cores  # Larger runner for better MCP connection handling
     timeout-minutes: 720  # 12 hours max
 
     steps:
@@ -93,7 +93,9 @@ jobs:
           TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
           RUN_ID=$(head -c 4 /dev/urandom | xxd -p)
           MODALITY="${{ inputs.modality }}"
-          RUN_NAME="tinker_${MODALITY}_${RUN_ID}_${TIMESTAMP}"
+          # Convert underscores to dashes (tool_use -> tool-use)
+          MODALITY_DASH=$(echo "$MODALITY" | tr '_' '-')
+          RUN_NAME="fleet-${MODALITY_DASH}-${RUN_ID}-${TIMESTAMP}"
           echo "name=$RUN_NAME" >> $GITHUB_OUTPUT
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
           echo "Generated run name: $RUN_NAME"
