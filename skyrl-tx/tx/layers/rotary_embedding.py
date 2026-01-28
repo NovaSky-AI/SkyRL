@@ -7,7 +7,9 @@ import jax
 from jax import numpy as jnp
 
 
-def apply_rope(inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta: float) -> jax.Array:
+def apply_rope(
+    inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta: float, interleave: bool = False
+) -> jax.Array:
     """Apply Rotary Position Embeddings (RoPE).
 
     Args:
@@ -15,6 +17,8 @@ def apply_rope(inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta:
         position_ids: Position indices of shape [B, T]
         head_dim: Dimension of each attention head
         theta: Base for the geometric progression (rope_theta)
+        interleave: If True, use interleaved slicing (x[..., ::2], x[..., 1::2])
+            instead of splitting the last dimension in half.
 
     Returns:
         Tensor with RoPE applied, same shape as inputs
@@ -23,32 +27,13 @@ def apply_rope(inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta:
     timescale = jnp.pow(theta, fraction)
     x = (position_ids[..., None] / timescale[None, None, :])[..., None, :]
     sin, cos = jnp.sin(x), jnp.cos(x)
-    a, b = jnp.split(inputs, 2, axis=-1)
-    return jnp.concatenate([a * cos - b * sin, b * cos + a * sin], axis=-1).astype(inputs.dtype)
 
+    if interleave:
+        a, b = inputs[..., ::2], inputs[..., 1::2]
+    else:
+        a, b = jnp.split(inputs, 2, axis=-1)
 
-def apply_rope_interleave(inputs: jax.Array, position_ids: jax.Array, head_dim: int, theta: float) -> jax.Array:
-    """Apply interleaved Rotary Position Embeddings (RoPE).
-
-    Args:
-        inputs: Input tensor of shape [B, T, num_heads, head_dim]
-        position_ids: Position indices of shape [B, T]
-        head_dim: Dimension of each attention head
-        theta: Base for the geometric progression (rope_theta)
-
-    Returns:
-        Tensor with RoPE applied, same shape as inputs, in grouped order
-    """
-    fraction = 2 * jnp.arange(0, head_dim // 2, dtype=jnp.float32) / head_dim
-    timescale = jnp.pow(theta, fraction)
-
-    x = (position_ids[..., None] / timescale[None, None, :])[..., None, :]
-    sin, cos = jnp.sin(x), jnp.cos(x)
-
-    x1 = inputs[..., ::2]
-    x2 = inputs[..., 1::2]
-
-    return jnp.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1).astype(inputs.dtype)
+    return jnp.concatenate([a * cos - b * sin, a * sin + b * cos], axis=-1).astype(inputs.dtype)
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -83,7 +68,7 @@ def get_rope(
             mscale = yarn_get_mscale(rope_scaling["factor"], rope_scaling["mscale_all_dim"])
 
             def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
-                return apply_rope_interleave(inputs, positions, head_dim, rope_theta)
+                return apply_rope(inputs, positions, head_dim, rope_theta, interleave=True)
 
         case "default":
             mscale = 1.0
