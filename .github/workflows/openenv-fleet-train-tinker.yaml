@@ -28,7 +28,7 @@ on:
       max_steps:
         description: "Maximum training steps"
         type: string
-        default: "200"
+        default: "50"
       batch_size:
         description: "Batch size"
         type: string
@@ -145,25 +145,29 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
-              "text": "🚀 Tinker Training Run Started",
+              "channel": "#fleet-training-runs-test",
+              "text": "🚀 Training Run Started",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "🚀 Tinker Training Run Started" }
+                  "text": { "type": "plain_text", "text": "🚀 Training Run Started" }
                 },
                 {
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
                     { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
-                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
-                    { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" }
+                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" }
                   ]
                 },
                 {
                   "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Backend:* Tinker (hosted)\n*Max Steps:* ${{ inputs.max_steps }}\n*Batch Size:* ${{ inputs.batch_size }}" }
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" },
+                    { "type": "mrkdwn", "text": "*Max Steps:*\n`${{ inputs.max_steps }}`" },
+                    { "type": "mrkdwn", "text": "*Batch Size:*\n`${{ inputs.batch_size }}`" }
+                  ]
                 },
                 {
                   "type": "context",
@@ -207,20 +211,20 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
+              "channel": "#fleet-training-runs-test",
               "thread_ts": "${{ steps.slack_start.outputs.ts }}",
-              "text": "✅ Tinker Training Completed",
+              "text": "✅ Training Completed",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "✅ Tinker Training Completed" }
+                  "text": { "type": "plain_text", "text": "✅ Training Completed" }
                 },
                 {
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
                     { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
-                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Status:*\n`COMPLETED`" }
                   ]
                 },
@@ -245,20 +249,20 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs",
+              "channel": "#fleet-training-runs-test",
               "thread_ts": "${{ steps.slack_start.outputs.ts }}",
-              "text": "❌ Tinker Training Failed",
+              "text": "❌ Training Failed",
               "blocks": [
                 {
                   "type": "header",
-                  "text": { "type": "plain_text", "text": "❌ Tinker Training Failed" }
+                  "text": { "type": "plain_text", "text": "❌ Training Failed" }
                 },
                 {
                   "type": "section",
                   "fields": [
                     { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
                     { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
-                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
                     { "type": "mrkdwn", "text": "*Status:*\n`FAILED`" }
                   ]
                 },
@@ -270,6 +274,40 @@ jobs:
                   "type": "context",
                   "elements": [
                     { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }}" }
+                  ]
+                }
+              ]
+            }
+
+      - name: Notify Slack - Training Cancelled
+        if: cancelled() && steps.slack_start.outputs.ts
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs-test",
+              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
+              "text": "⚠️ Training Cancelled",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "⚠️ Training Cancelled" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
+                    { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
+                    { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
+                    { "type": "mrkdwn", "text": "*Status:*\n`CANCELLED`" }
+                  ]
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>" }
                   ]
                 }
               ]

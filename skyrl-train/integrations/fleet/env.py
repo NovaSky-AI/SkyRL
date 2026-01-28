@@ -22,13 +22,16 @@ from skyrl_gym.envs.base_text_env import (
 )
 from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
 
-# Reduce MCP client log noise (uses loguru for logging)
+# Reduce MCP client log noise
+# - loguru: some MCP libs use loguru
+# - standard logging: mcp.client.streamable_http uses standard logging
 try:
     from loguru import logger as loguru_logger
 
     loguru_logger.disable("mcp")
 except ImportError:
     pass
+logging.getLogger("mcp").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 

@@ -65,7 +65,8 @@ from skyrl_train.generators.utils import apply_overlong_filtering
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARN)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("mcp").setLevel(logging.WARNING)
 
 
 def set_seed(seed: int):
