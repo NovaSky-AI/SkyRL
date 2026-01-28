@@ -162,9 +162,9 @@ class FleetTaskEnv(BaseTextEnv):
 
         return config
 
-    def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
+    async def init_async(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         """
-        Initialize the Fleet environment and return initial observation.
+        Initialize the Fleet environment and return initial observation (async version).
 
         Creates Fleet environment via OpenEnv's FleetTaskEnv and returns the task prompt.
         OpenEnv's FleetTaskEnv.__init__() creates the Fleet env and fetches tools.
@@ -187,7 +187,7 @@ class FleetTaskEnv(BaseTextEnv):
             raise RuntimeError(f"Failed to create OpenEnv FleetTaskEnv: {e}") from e
 
         # Reset episode state (tools are already cached from __init__)
-        obs = asyncio.run(self.openenv_task_env.reset_async())
+        obs = await self.openenv_task_env.reset_async()
 
         # Reset state
         self.turns = 0
@@ -245,9 +245,17 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
 
         return self.chat_history.copy(), metadata
 
-    def step(self, action: str) -> BaseTextEnvStepOutput:
+    def init(self, prompt: ConversationType) -> Tuple[ConversationType, Dict[str, Any]]:
         """
-        Execute one step in the Fleet environment.
+        Initialize the Fleet environment and return initial observation (sync wrapper).
+
+        For async contexts, use init_async() instead.
+        """
+        return asyncio.run(self.init_async(prompt))
+
+    async def step_async(self, action: str) -> BaseTextEnvStepOutput:
+        """
+        Execute one step in the Fleet environment (async version).
 
         Parses the action for tool calls, executes via OpenEnv's FleetTaskEnv,
         and returns observation. Reward is computed by the verifier on completion.
@@ -279,7 +287,7 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
 
             try:
                 # Use async step method
-                obs, reward, done, info = asyncio.run(self.openenv_task_env.step_async(openenv_action))
+                obs, reward, done, info = await self.openenv_task_env.step_async(openenv_action)
                 tool_result = obs.get("observation")
                 if "tool_error" in info:
                     error = info["tool_error"]
@@ -289,7 +297,7 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
             # Agent signaled done without tool call
             openenv_action = {"done": True}
             try:
-                obs, reward, done, info = asyncio.run(self.openenv_task_env.step_async(openenv_action))
+                obs, reward, done, info = await self.openenv_task_env.step_async(openenv_action)
             except Exception as e:
                 error = str(e)
 
@@ -338,6 +346,14 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
             done=episode_done,
             metadata=metadata,
         )
+
+    def step(self, action: str) -> BaseTextEnvStepOutput:
+        """
+        Execute one step in the Fleet environment (sync wrapper).
+
+        For async contexts, use step_async() instead.
+        """
+        return asyncio.run(self.step_async(action))
 
     def close(self):
         """Close the Fleet environment and cleanup resources."""

@@ -40,6 +40,12 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
    - Check the local fleet-sdk and OpenEnv repos for documentation
    - Look at existing examples in those repos
 
+6. **Tinker integration must mimic SkyRL's skyrl_gym_generator** - Any development in Tinker code (`integrations/fleet/entrypoints/main_fleet_tinker.py`) must follow the same patterns as `skyrl_train/generators/skyrl_gym_generator.py`:
+   - Use same parameter names: `max_input_length`, `max_generate_length`, `max_sequence_length`
+   - Use same context length handling: check `if len(input_ids) > max_input_length` to end rollout
+   - Use DAPO overlong filtering: truncate sequences > `max_sequence_length` and zero out loss mask
+   - Match metrics naming: `pass_at_n`, per-environment metrics, etc.
+
 ## Project Context
 
 - This is SkyRL, a reinforcement learning training framework

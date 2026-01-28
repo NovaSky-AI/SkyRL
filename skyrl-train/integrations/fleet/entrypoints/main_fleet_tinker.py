@@ -44,7 +44,7 @@ import random
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 import tinker
@@ -56,38 +56,16 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 
-# Use OpenEnv's FleetTaskEnv directly for async compatibility
-# (SkyRL's wrapper uses asyncio.run() which can't be called from async context)
-from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
+# Use SkyRL's FleetTaskEnv wrapper (now supports async via init_async/step_async)
+from omegaconf import OmegaConf
+from integrations.fleet.env import FleetTaskEnv
+
+# Import SkyRL's overlong filtering for parity
+from skyrl_train.generators.utils import apply_overlong_filtering
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARN)
-
-# Global task cache to avoid reloading JSON for each env instance
-_TASK_CACHE: Dict[str, Dict[str, Any]] = {}
-
-
-def load_tasks_from_json(tasks_file: str) -> Dict[str, Any]:
-    """Load tasks from JSON file with caching."""
-    if tasks_file not in _TASK_CACHE:
-        expanded_path = os.path.expanduser(tasks_file)
-        if not os.path.exists(expanded_path):
-            raise FileNotFoundError(f"Tasks file not found: {expanded_path}")
-
-        with open(expanded_path, "r") as f:
-            data = json.load(f)
-
-        if isinstance(data, list):
-            tasks = data
-        elif isinstance(data, dict) and "tasks" in data:
-            tasks = data["tasks"]
-        else:
-            raise ValueError(f"Invalid JSON format in {tasks_file}")
-
-        _TASK_CACHE[tasks_file] = {t.get("key") or t.get("task_key"): t for t in tasks}
-
-    return _TASK_CACHE[tasks_file]
 
 
 def set_seed(seed: int):
@@ -191,53 +169,143 @@ def compute_per_env_metrics(rollouts: List[Dict[str, Any]], n_samples_per_prompt
     return metrics
 
 
-def build_system_prompt(tools: List[Dict]) -> str:
-    """Build system prompt with tool definitions (matching SkyRL's FleetTaskEnv)."""
-    tools_json = json.dumps(tools, indent=2)
-    current_date = datetime.now().strftime("%Y-%m-%d")
+def compute_rollout_metrics(
+    rollouts: List[Dict[str, Any]],
+    valid_rollouts: List[Dict[str, Any]],
+    rewards: List[float],
+    advantages: List[float],
+    n_samples_per_prompt: int,
+) -> Dict[str, Any]:
+    """
+    Compute all rollout metrics (matching SkyRL's pattern).
 
-    return f"""You are a helpful agent. Complete the task by calling tools.
+    Args:
+        rollouts: All rollouts (including failed ones)
+        valid_rollouts: Only valid rollouts
+        rewards: Rewards for valid rollouts
+        advantages: GRPO advantages for valid rollouts
+        n_samples_per_prompt: Number of samples per prompt
 
-## Current Date
-Today's date is {current_date}. When dates are mentioned without a year, assume the current year ({datetime.now().year}) or a future date.
+    Returns:
+        Dict of metrics for wandb logging
+    """
+    metrics = {}
 
-## Available Tools
-{tools_json}
+    # Core reward metrics
+    pass_at_n = compute_pass_at_n(valid_rollouts, n_samples_per_prompt)
+    mean_positive = np.mean([r for r in rewards if r > 0]) if any(r > 0 for r in rewards) else 0.0
 
-## Tool Call Format
-<tool_call>{{"name": "tool_name", "arguments": {{"param": "value"}}}}</tool_call>
+    metrics[f"reward/avg_pass_at_{n_samples_per_prompt}"] = pass_at_n
+    metrics["reward/avg_raw_reward"] = np.mean(rewards)
+    metrics["reward/mean_positive_reward"] = mean_positive
+    metrics["advantage/mean"] = np.mean(advantages)
+    metrics["advantage/std"] = np.std(advantages)
+    metrics["rollouts/valid"] = len(valid_rollouts)
+    metrics["rollouts/total"] = len(rollouts)
 
-## Error Handling
-If a tool call returns an error:
-- Read the error message carefully
-- Do NOT repeat the same call with identical arguments
-- Change your approach: use different parameters, try a different tool, or break the task into smaller steps
+    # Per-environment metrics
+    per_env_metrics = compute_per_env_metrics(valid_rollouts, n_samples_per_prompt)
+    metrics.update(per_env_metrics)
 
-## Response Format
-EVERY response MUST end with exactly ONE of:
-1. A tool call: <tool_call>...</tool_call> - to perform an action
-2. Done signal: <done> - ONLY when the task is fully complete
+    # Per-environment rollout stats (turns, tool_calls, duration)
+    rollout_stats = defaultdict(list)
+    for r in valid_rollouts:
+        env_key = r.get("env_key", "unknown").replace("/", "_")
+        rollout_stats[f"rollout/{env_key}/turns"].append(r.get("turns", 0))
+        rollout_stats[f"rollout/{env_key}/tool_calls"].append(r.get("tool_calls", 0))
+        rollout_stats[f"rollout/{env_key}/duration"].append(r.get("duration", 0.0))
 
-NEVER respond with just a message. NEVER say "feel free to ask" or offer further help.
-If the task is complete, say <done>. Otherwise, make a tool call."""
+    for key, values in rollout_stats.items():
+        metrics[key] = np.mean(values)
+
+    # Overall rollout duration stats
+    durations = [r.get("duration", 0.0) for r in valid_rollouts]
+    metrics["rollout/avg_duration"] = np.mean(durations)
+    metrics["rollout/max_duration"] = np.max(durations)
+    metrics["rollout/min_duration"] = np.min(durations)
+
+    return metrics
 
 
-def parse_tool_call(action: str) -> Optional[Dict[str, Any]]:
-    """Parse tool call from LLM response."""
-    import re
+def prepare_training_data(
+    rollouts: List[Dict[str, Any]],
+    advantages: List[float],
+    tokenizer: AutoTokenizer,
+    max_sequence_length: int,
+) -> tuple:
+    """
+    Prepare training data from rollouts (matching SkyRL's generate_batched pattern).
 
-    for tag in ["tool_call", "function_call"]:
-        match = re.search(rf"<{tag}>(.*?)</{tag}>", action, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(1).strip())
-                name = parsed.get("name") or parsed.get("tool")
-                args = parsed.get("arguments") or parsed.get("params", {})
-                if name:
-                    return {"name": name, "arguments": args}
-            except json.JSONDecodeError:
-                pass
-    return None
+    Applies:
+    1. DAPO overlong filtering (zero loss mask if response doesn't end with EOS)
+    2. Sequence truncation for max_sequence_length
+    3. Builds Tinker Datum objects for training
+
+    Args:
+        rollouts: List of rollout dicts with prompt_ids, response_ids, logprobs, loss_mask
+        advantages: GRPO advantages for each rollout
+        tokenizer: Tokenizer for EOS token ID
+        max_sequence_length: Maximum sequence length for training
+
+    Returns:
+        Tuple of (training_datums, truncated_count)
+    """
+    # Apply DAPO overlong filtering (zero out loss mask if response doesn't end with EOS)
+    all_response_ids = [r["response_ids"] for r in rollouts]
+    all_loss_masks = [r["loss_mask"] for r in rollouts]
+    filtered_loss_masks = apply_overlong_filtering(all_loss_masks, all_response_ids, tokenizer.eos_token_id)
+
+    training_datums = []
+    truncated_count = 0
+
+    for idx, rollout in enumerate(rollouts):
+        prompt_ids = rollout["prompt_ids"]
+        response_ids = rollout["response_ids"]
+        logprobs = rollout["logprobs"]
+        loss_mask_data = filtered_loss_masks[idx]
+
+        full_sequence = prompt_ids + response_ids
+        prompt_len = len(prompt_ids)
+
+        # Truncate sequences exceeding model's max length for Tinker API
+        if len(full_sequence) > max_sequence_length:
+            truncated_count += 1
+            full_sequence = full_sequence[:max_sequence_length]
+            response_len = len(full_sequence) - prompt_len
+            response_ids = response_ids[:response_len]
+            logprobs = logprobs[:response_len] if logprobs else []
+            loss_mask_data = loss_mask_data[:response_len]
+
+        # Target tokens (shifted by 1)
+        target_tokens = full_sequence[1:]
+
+        # Logprobs (0 for prompt, actual for response)
+        full_logprobs = [0.0] * prompt_len + logprobs
+        full_logprobs = full_logprobs[1:]
+
+        # Loss mask (0 for prompt, actual for response)
+        full_mask = [0] * prompt_len + loss_mask_data
+        full_mask = full_mask[1:]
+
+        # Advantages (apply only where loss mask is 1)
+        advantage_value = advantages[idx]
+        full_advantages = torch.zeros(len(full_sequence))
+        for i in range(prompt_len, len(full_sequence)):
+            if i - 1 < len(full_mask) and full_mask[i - 1] > 0:
+                full_advantages[i] = advantage_value
+        full_advantages = full_advantages[1:]
+
+        datum = types.Datum(
+            model_input=types.ModelInput.from_ints(tokens=full_sequence[:-1]),
+            loss_fn_inputs={
+                "target_tokens": TensorData.from_torch(torch.tensor(target_tokens)),
+                "logprobs": TensorData.from_torch(torch.tensor(full_logprobs)),
+                "advantages": TensorData.from_torch(full_advantages),
+            },
+        )
+        training_datums.append(datum)
+
+    return training_datums, truncated_count
 
 
 def tokenize_chat(tokenizer: AutoTokenizer, chat_history: List[Dict], add_generation_prompt: bool = True) -> List[int]:
@@ -273,55 +341,26 @@ async def collect_fleet_rollout(
     """
     Collect a single trajectory using Fleet environment and Tinker inference.
 
-    Uses OpenEnv's FleetTaskEnv directly with async methods for compatibility.
+    Uses SkyRL's FleetTaskEnv wrapper with async methods for environment interaction.
 
     Args:
         max_generate_length: Max tokens per generation step.
         max_input_length: Max context length before ending rollout (matching SkyRL).
     """
-    api_key = os.environ.get("FLEET_API_KEY")
-    if not api_key:
-        raise ValueError("FLEET_API_KEY environment variable must be set")
+    rollout_start = time.time()
 
-    # Load full task config from JSON
-    tasks = load_tasks_from_json(tasks_file)
     task_key = task_config.get("task_key") or task_config.get("key")
-    full_task_config = tasks.get(task_key)
-    if not full_task_config:
-        raise ValueError(f"Task '{task_key}' not found in {tasks_file}")
 
-    # Normalize task config for OpenEnv
-    normalized_config = full_task_config.copy()
-    if "key" in normalized_config and "task_key" not in normalized_config:
-        normalized_config["task_key"] = normalized_config["key"]
-    if "env_id" in normalized_config and "env_key" not in normalized_config:
-        normalized_config["env_key"] = normalized_config["env_id"]
+    # Create SkyRL FleetTaskEnv wrapper
+    env_config = OmegaConf.create({"tasks_file": tasks_file, "ttl_seconds": 600})
+    extras = {"task_key": task_key, "max_turns": max_turns}
 
-    env_key = normalized_config.get("env_key", "unknown")
-
-    # Create OpenEnv FleetTaskEnv directly (async-compatible)
-    env = OpenEnvFleetTaskEnv(
-        task_config=normalized_config,
-        api_key=api_key,
-        ttl_seconds=600,
-        max_steps=max_turns,
-    )
-
-    turns = 0
-    tool_calls = 0
+    env = FleetTaskEnv(env_config=env_config, extras=extras)
 
     try:
-        # Reset environment (async)
-        obs = await env.reset_async()
-        tools = obs.get("tools", [])
-        task_prompt = normalized_config.get("prompt", "")
-
-        # Build chat history with system prompt
-        system_prompt = build_system_prompt(tools)
-        chat_history = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task_prompt},
-        ]
+        # Initialize environment (async) - builds system prompt, gets tools
+        chat_history, metadata = await env.init_async([])
+        env_key = metadata.get("env_key", "unknown")
 
         # Tokenize initial prompt
         prompt_ids = tokenize_chat(tokenizer, chat_history, add_generation_prompt=True)
@@ -333,11 +372,9 @@ async def collect_fleet_rollout(
         total_reward = 0.0
         stop_reason = "stop"
 
-        while not done and turns < max_turns:
-            turns += 1
-
-            # Prepare input for Tinker
-            input_ids = tokenize_chat(tokenizer, chat_history, add_generation_prompt=True)
+        while not done and env.turns < max_turns:
+            # Prepare input for Tinker (use env's chat_history)
+            input_ids = tokenize_chat(tokenizer, env.chat_history, add_generation_prompt=True)
 
             # Check context length limit (matching SkyRL's skyrl_gym_generator.py:274)
             if len(input_ids) > max_input_length:
@@ -365,13 +402,13 @@ async def collect_fleet_rollout(
                 break
 
             sequence = result.sequences[0]
-            output_ids = sequence.tokens  # SampledSequence uses 'tokens', not 'token_ids'
+            output_ids = sequence.tokens
             output_logprobs = sequence.logprobs if sequence.logprobs else []
 
             # Decode output
             output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
 
-            # Collect trajectory data
+            # Collect trajectory data (assistant response tokens - trainable)
             all_response_ids.extend(output_ids)
             if output_logprobs:
                 all_logprobs.extend(output_logprobs)
@@ -379,52 +416,19 @@ async def collect_fleet_rollout(
                 all_logprobs.extend([0.0] * len(output_ids))
             loss_mask.extend([1] * len(output_ids))
 
-            # Update chat history with assistant response
-            chat_history.append({"role": "assistant", "content": output_text})
+            # Step environment with LLM output (handles tool parsing, chat history, etc.)
+            step_output = await env.step_async(output_text)
 
-            # Parse tool call and step environment
-            tool_call = parse_tool_call(output_text)
-            agent_done = "<done>" in output_text.lower()
+            # Get observation content for tokenization (masked out for loss)
+            if step_output.observations:
+                obs_content = step_output.observations[0].get("content", "")
+                obs_ids = tokenizer.encode(obs_content, add_special_tokens=False)
+                all_response_ids.extend(obs_ids)
+                all_logprobs.extend([0.0] * len(obs_ids))
+                loss_mask.extend([0] * len(obs_ids))
 
-            if tool_call:
-                tool_calls += 1
-                action = {
-                    "tool": tool_call["name"],
-                    "params": tool_call.get("arguments", {}),
-                    "done": agent_done,
-                }
-            else:
-                action = {"done": agent_done}
-
-            # Step environment (async)
-            step_obs, reward, done, info = await env.step_async(action)
-
-            # Add observation to chat history
-            tool_result = step_obs.get("observation", {})
-            if tool_result:
-                if isinstance(tool_result, dict):
-                    obs_content = f"Tool result:\n{json.dumps(tool_result, indent=2)}"
-                else:
-                    obs_content = f"Tool result:\n{tool_result}"
-            elif agent_done:
-                obs_content = "Task marked as complete."
-            elif not tool_call:
-                obs_content = (
-                    'No tool call found. Use <tool_call>{"name": "...", "arguments": {...}}</tool_call> format.'
-                )
-            else:
-                obs_content = "Action executed."
-
-            chat_history.append({"role": "user", "content": obs_content})
-
-            # Add observation tokens (masked out for loss)
-            obs_ids = tokenizer.encode(obs_content, add_special_tokens=False)
-            all_response_ids.extend(obs_ids)
-            all_logprobs.extend([0.0] * len(obs_ids))
-            loss_mask.extend([0] * len(obs_ids))
-
-            total_reward = reward
-            done = done or agent_done
+            total_reward = step_output.reward
+            done = step_output.done
 
         return {
             "prompt_ids": prompt_ids,
@@ -434,9 +438,10 @@ async def collect_fleet_rollout(
             "reward": total_reward,
             "task_key": task_key,
             "env_key": env_key,
-            "turns": turns,
-            "tool_calls": tool_calls,
+            "turns": env.turns,
+            "tool_calls": env.tool_calls,
             "stop_reason": stop_reason,
+            "duration": time.time() - rollout_start,
         }
 
     finally:
@@ -458,6 +463,7 @@ async def collect_batch_rollouts(
 
     for task_config in batch:
         for _ in range(n_samples_per_prompt):
+            rollout_start = time.time()
             try:
                 rollout = await collect_fleet_rollout(
                     task_config=task_config,
@@ -484,6 +490,7 @@ async def collect_batch_rollouts(
                         "tool_calls": 0,
                         "stop_reason": "error",
                         "error": str(e),
+                        "duration": time.time() - rollout_start,
                     }
                 )
 
@@ -536,6 +543,7 @@ async def main(
     max_turns: int = 50,
     max_generate_length: int = 2048,
     max_input_length: int = 30720,
+    max_sequence_length: int = 32768,
     n_samples_per_prompt: int = 4,
     save_every: int = 10,
     eval_every: int = 20,
@@ -581,6 +589,7 @@ async def main(
             "max_turns": max_turns,
             "max_generate_length": max_generate_length,
             "max_input_length": max_input_length,
+            "max_sequence_length": max_sequence_length,
             "n_samples_per_prompt": n_samples_per_prompt,
         },
     )
@@ -676,8 +685,23 @@ async def main(
 
         metrics["time/rollout"] = time.time() - rollout_start
 
-        # Filter valid rollouts
-        valid_rollouts = [r for r in rollouts if r.get("response_ids") and not r.get("error")]
+        # Filter valid rollouts and log invalid ones
+        valid_rollouts = []
+        invalid_rollouts = []
+        for r in rollouts:
+            if r.get("response_ids") and not r.get("error"):
+                valid_rollouts.append(r)
+            else:
+                invalid_rollouts.append(r)
+
+        if invalid_rollouts:
+            for r in invalid_rollouts:
+                task_key = r.get("task_key", "unknown")
+                error = r.get("error", "no response_ids")
+                stop_reason = r.get("stop_reason", "unknown")
+                logger.warning(f"Step {step}: Invalid rollout for {task_key}: {error} (stop_reason={stop_reason})")
+            metrics["rollouts/invalid"] = len(invalid_rollouts)
+
         if not valid_rollouts:
             logger.warning(f"Step {step}: No valid rollouts, skipping")
             continue
@@ -686,71 +710,31 @@ async def main(
         rewards = [r["reward"] for r in valid_rollouts]
         advantages = compute_advantages_grpo(rewards, group_size=n_samples_per_prompt, normalize=True)
 
-        # Compute metrics matching SkyRL
-        pass_at_n = compute_pass_at_n(valid_rollouts, n_samples_per_prompt)
-        mean_positive = np.mean([r for r in rewards if r > 0]) if any(r > 0 for r in rewards) else 0.0
+        # Compute all rollout metrics
+        rollout_metrics = compute_rollout_metrics(
+            rollouts=rollouts,
+            valid_rollouts=valid_rollouts,
+            rewards=rewards,
+            advantages=advantages,
+            n_samples_per_prompt=n_samples_per_prompt,
+        )
+        metrics.update(rollout_metrics)
 
-        metrics[f"reward/avg_pass_at_{n_samples_per_prompt}"] = pass_at_n
-        metrics["reward/avg_raw_reward"] = np.mean(rewards)
-        metrics["reward/mean_positive_reward"] = mean_positive
-        metrics["advantage/mean"] = np.mean(advantages)
-        metrics["advantage/std"] = np.std(advantages)
-        metrics["rollouts/valid"] = len(valid_rollouts)
-        metrics["rollouts/total"] = len(rollouts)
+        # Prepare training data (DAPO filtering + truncation + datum creation)
+        training_datums, truncated_count = prepare_training_data(
+            rollouts=valid_rollouts,
+            advantages=advantages,
+            tokenizer=tokenizer,
+            max_sequence_length=max_sequence_length,
+        )
 
-        # Per-environment metrics
-        per_env_metrics = compute_per_env_metrics(valid_rollouts, n_samples_per_prompt)
-        metrics.update(per_env_metrics)
+        if truncated_count > 0:
+            logger.info(f"Step {step}: Truncated {truncated_count} overlong sequences")
+            metrics["rollouts/truncated_overlong"] = truncated_count
 
-        # Log rollout metrics (turns, tool_calls per env)
-        rollout_metrics = defaultdict(list)
-        for r in valid_rollouts:
-            env_key = r.get("env_key", "unknown").replace("/", "_")
-            rollout_metrics[f"rollout/{env_key}/turns"].append(r.get("turns", 0))
-            rollout_metrics[f"rollout/{env_key}/tool_calls"].append(r.get("tool_calls", 0))
-
-        for key, values in rollout_metrics.items():
-            metrics[key] = np.mean(values)
-
-        # Prepare training data
-        training_datums = []
-        for idx, rollout in enumerate(valid_rollouts):
-            prompt_ids = rollout["prompt_ids"]
-            response_ids = rollout["response_ids"]
-            logprobs = rollout["logprobs"]
-            loss_mask_data = rollout["loss_mask"]
-
-            full_sequence = prompt_ids + response_ids
-            prompt_len = len(prompt_ids)
-
-            # Target tokens (shifted by 1)
-            target_tokens = full_sequence[1:]
-
-            # Logprobs (0 for prompt, actual for response)
-            full_logprobs = [0.0] * prompt_len + logprobs
-            full_logprobs = full_logprobs[1:]
-
-            # Loss mask (0 for prompt, actual for response)
-            full_mask = [0] * prompt_len + loss_mask_data
-            full_mask = full_mask[1:]
-
-            # Advantages
-            advantage_value = advantages[idx]
-            full_advantages = torch.zeros(len(full_sequence))
-            for i in range(prompt_len, len(full_sequence)):
-                if i - 1 < len(full_mask) and full_mask[i - 1] > 0:
-                    full_advantages[i] = advantage_value
-            full_advantages = full_advantages[1:]
-
-            datum = types.Datum(
-                model_input=types.ModelInput.from_ints(tokens=full_sequence[:-1]),
-                loss_fn_inputs={
-                    "target_tokens": TensorData.from_torch(torch.tensor(target_tokens)),
-                    "logprobs": TensorData.from_torch(torch.tensor(full_logprobs)),
-                    "advantages": TensorData.from_torch(full_advantages),
-                },
-            )
-            training_datums.append(datum)
+        if not training_datums:
+            logger.warning(f"Step {step}: No valid training sequences after filtering, skipping")
+            continue
 
         # Training step
         logger.info(f"Step {step}: Training on {len(training_datums)} sequences...")
@@ -768,7 +752,7 @@ async def main(
         # Log metrics
         wandb.log(metrics, step=step)
         logger.info(
-            f"Step {step}: pass@{n_samples_per_prompt}={pass_at_n:.3f}, "
+            f"Step {step}: pass@{n_samples_per_prompt}={metrics[f'reward/avg_pass_at_{n_samples_per_prompt}']:.3f}, "
             f"reward={metrics['reward/avg_raw_reward']:.3f}, time={metrics['time/total']:.1f}s"
         )
 
@@ -835,6 +819,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-turns", type=int, default=50)
     parser.add_argument("--max-generate-length", type=int, default=2048, help="Max tokens per generation")
     parser.add_argument("--max-input-length", type=int, default=30720, help="Max context length before ending rollout")
+    parser.add_argument("--max-sequence-length", type=int, default=32768, help="Max sequence length for training")
     parser.add_argument("--n-samples-per-prompt", type=int, default=4)
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--eval-every", type=int, default=20)
@@ -859,6 +844,7 @@ if __name__ == "__main__":
             max_turns=args.max_turns,
             max_generate_length=args.max_generate_length,
             max_input_length=args.max_input_length,
+            max_sequence_length=args.max_sequence_length,
             n_samples_per_prompt=args.n_samples_per_prompt,
             save_every=args.save_every,
             eval_every=args.eval_every,
