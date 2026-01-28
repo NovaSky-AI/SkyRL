@@ -351,8 +351,8 @@ async def collect_fleet_rollout(
                 break
 
             sequence = result.sequences[0]
-            output_ids = sequence.token_ids
-            output_logprobs = sequence.logprobs if hasattr(sequence, "logprobs") else []
+            output_ids = sequence.tokens  # SampledSequence uses 'tokens', not 'token_ids'
+            output_logprobs = sequence.logprobs if sequence.logprobs else []
 
             # Decode output
             output_text = tokenizer.decode(output_ids, skip_special_tokens=True)
