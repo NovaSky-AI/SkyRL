@@ -51,8 +51,8 @@ def _build_config(base_model: str, config: SkyRLTrainBackendConfig, lora_config:
     cfg.trainer.policy.model.path = base_model
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
-    cfg.trainer.policy.optim.scheduler = "constant"
-    cfg.trainer.policy.optim.num_warmup_steps = 0
+    cfg.trainer.policy.optimizer_config.scheduler = "constant"
+    cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
 
     return cfg
 
