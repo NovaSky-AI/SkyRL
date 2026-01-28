@@ -4,6 +4,8 @@ from typing import TypedDict, Dict, Any, List, Optional, Generic, TypeVar
 import torch
 from jaxtyping import Float, Integer
 import pickle
+import io
+import numpy as np
 
 DictType = TypeVar("DictType")
 
@@ -137,8 +139,6 @@ class TensorBatch(dict, Generic[DictType]):
         Uses fast numpy-based serialization when possible, with fallback to torch.save
         for dtypes not supported by numpy (e.g., bfloat16).
         """
-        import io
-
         self.contiguous()
         if self._device is not None:
             assert self._device == torch.device("cpu"), "Tensors must be on CPU before serialization"
@@ -177,9 +177,6 @@ class TensorBatch(dict, Generic[DictType]):
 
         Handles both numpy-based format (fast path) and torch format (fallback for bfloat16 etc).
         """
-        import io
-        import numpy as np
-
         for key, value in state["batch_dict"].items():
             if value is None:
                 self[key] = None

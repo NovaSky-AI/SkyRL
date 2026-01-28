@@ -7,8 +7,7 @@ from huggingface_hub import snapshot_download
 
 import os
 from datetime import timedelta
-from typing import List, Dict, Any, Optional, Union
-from ray import ObjectRef
+from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
 from omegaconf import OmegaConf
@@ -29,7 +28,7 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype
-from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 from skyrl_train.workers.worker import (
@@ -520,17 +519,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
 
-    def ppo_train(self, train_data: Union["TrainingInputBatch", ObjectRef]) -> "TrainingOutputBatch":
+    def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         """
         Overrides `PolicyWorkerBase.ppo_train` for megatron.
 
         Since we want megatron to handle gradient accumulation over micro batches, we directly pass mini batches into the
         worker MegatronModelWrapper.forward_backward_mini_batch method.
         """
-        # Resolve ObjectRef if needed (MeshDispatch uses ray.put for efficiency)
-        if isinstance(train_data, ObjectRef):
-            train_data = ray.get(train_data)
-
         dataloader = BatchIterator(
             train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
         )

@@ -1032,7 +1032,7 @@ class CriticWorkerBase(Worker):
         Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
 
         Args:
-            data: TrainingInputBatch (already DP-sharded by MeshDispatch)
+            data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
 
         Returns:
             Aggregated metrics dict across all micro batches

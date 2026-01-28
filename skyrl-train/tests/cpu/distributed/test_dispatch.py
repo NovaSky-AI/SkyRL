@@ -1,3 +1,7 @@
+"""
+uv  run --isolated --extra dev pytest tests/cpu/distributed/test_dispatch.py
+"""
+
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.distributed.dispatch import (
     MeshDispatch,
@@ -25,13 +29,13 @@ class RayActor:
         data["a"] += self.rank
         return data
 
-    def do_work_from_staged(self, data_ref: TrainingInputBatch, start_idx: int, end_idx: int):
+    def do_work_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int):
         """
         Method compatible with dispatch_from_staged.
         Ray auto-resolves ObjectRef to actual data, so we receive TrainingInputBatch directly.
         """
         # Slice the data to get this worker's portion
-        data = data_ref[start_idx:end_idx]
+        data = data[start_idx:end_idx]
         # Apply same transformation as do_work
         data["a"] = data["a"] + self.rank
         return data
