@@ -71,10 +71,8 @@ jobs:
           uv pip install -e .
           # Install tinker SDK
           uv pip install "tinker>=0.8.0"
-          # Install OpenEnv for Fleet environment (deniz/fleet_client branch has FleetTaskEnv)
-          uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
-          # Install Fleet SDK for verifier execution
-          uv pip install fleet-python
+          # Install OpenEnv with [fleet] extra for MCP support (includes mcp and fleet-python)
+          uv pip install "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
 
       - name: Configure AWS credentials
         run: |
