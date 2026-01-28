@@ -22,9 +22,9 @@ on:
         description: "Model to train"
         type: choice
         options:
-          - Qwen/Qwen3-VL-30B-A3B-Instruct
           - Qwen/Qwen3-8B
-        default: Qwen/Qwen3-VL-30B-A3B-Instruct
+          - Qwen/Qwen3-VL-30B-A3B-Instruct
+        default: Qwen/Qwen3-8B
       max_steps:
         description: "Maximum training steps"
         type: string
@@ -105,7 +105,8 @@ jobs:
           mkdir -p ./data
           aws s3 cp "s3://${{ env.TASKS_BUCKET }}/${{ env.TASKS_PREFIX }}/${TASKS_FILE}" ./data/tasks.json
           echo "Downloaded tasks to ./data/tasks.json"
-          echo "Task count: $(cat ./data/tasks.json | python -c 'import json,sys; d=json.load(sys.stdin); print(len(d) if isinstance(d,list) else len(d.get(\"tasks\",[])))')"
+          TASK_COUNT=$(python -c "import json; d=json.load(open('./data/tasks.json')); print(len(d) if isinstance(d,list) else len(d.get('tasks',[])))")
+          echo "Task count: $TASK_COUNT"
 
       - name: Prepare dataset
         working-directory: skyrl-train
