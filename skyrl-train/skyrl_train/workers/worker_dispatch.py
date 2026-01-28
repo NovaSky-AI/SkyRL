@@ -19,6 +19,7 @@ from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_disp
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.workers.worker import PPORayActorGroup
+from skyrl_train.distributed.dispatch import MeshDispatch
 
 
 @dataclass
@@ -154,15 +155,15 @@ class WorkerDispatch:
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
 
-    def stage_training_data(self, data: TrainingInputBatch) -> "ObjectRef":
+    def stage_data(self, data: TrainingInputBatch) -> ObjectRef:
         """
-        Put training data in Ray object store for efficient access during training loop.
+        Put training data in Ray object store for efficient access.
 
-        Call this once before the training loop to avoid repeated serialization
-        when iterating over mini-batches.
+        Call this once to avoid repeated serialization when dispatching
+        data to workers
 
         Args:
-            data: Full training batch to stage
+            data: Full training batch to stage in the ray object store
 
         Returns:
             ObjectRef to the staged data
@@ -227,15 +228,13 @@ class WorkerDispatch:
 
         Args:
             model: Model name ("policy" or "critic")
-            data_ref: ObjectRef to staged TrainingInputBatch (from stage_training_data)
+            data_ref: ObjectRef to staged TrainingInputBatch (from stage_data)
             start_idx: Start index for mini-batch slice
             end_idx: End index for mini-batch slice
 
         Returns:
             Aggregated metrics dict from training
         """
-        from skyrl_train.distributed.dispatch import MeshDispatch
-
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
         # Use specialized dispatch that passes ObjectRef + indices instead of data

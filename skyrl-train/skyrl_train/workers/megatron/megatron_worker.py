@@ -316,14 +316,10 @@ class MegatronWorker:
         )
         return model
 
-    def forward(self, data: Union["TrainingInputBatch", ObjectRef]):
+    def forward(self, data: TrainingInputBatch):
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
-        # Resolve ObjectRef if needed (MeshDispatch uses ray.put for efficiency)
-        if isinstance(data, ObjectRef):
-            data = ray.get(data)
-
         # Run in micro batches grouped into a single mini-batch
         micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)

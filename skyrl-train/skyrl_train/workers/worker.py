@@ -6,7 +6,7 @@ from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type
 
 import ray
 import torch
@@ -660,7 +660,7 @@ class PolicyWorkerBase(Worker):
 
     def forward_backward(
         self,
-        data: Union[TrainingInputBatch, ObjectRef],
+        data: TrainingInputBatch,
         loss_fn: Optional[str] = None,
         loss_fn_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, float]:
@@ -671,7 +671,7 @@ class PolicyWorkerBase(Worker):
         Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
 
         Args:
-            data: TrainingInputBatch or ObjectRef to one (already DP-sharded by WorkerDispatch/MeshDispatch)
+            data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
             loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
                      If provided, overrides the config's policy_loss_type.
             loss_fn_config: Optional config overrides for the loss function
@@ -680,10 +680,6 @@ class PolicyWorkerBase(Worker):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        # Resolve ObjectRef if needed (MeshDispatch uses ray.put for efficiency)
-        if isinstance(data, ObjectRef):
-            data = ray.get(data)
-
         micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
@@ -709,7 +705,7 @@ class PolicyWorkerBase(Worker):
 
     def forward_backward_from_staged(
         self,
-        data_ref: Union[ObjectRef, TrainingInputBatch],
+        data: TrainingInputBatch,
         start_idx: int,
         end_idx: int,
         loss_fn: Optional[str] = None,
@@ -722,21 +718,15 @@ class PolicyWorkerBase(Worker):
         repeated serialization during the training loop.
 
         Args:
-            data_ref: ObjectRef to full TrainingInputBatch (Ray may auto-resolve to actual data)
+            data: TrainingInputBatch via the ray object store
             start_idx: Start index for this worker's slice
             end_idx: End index for this worker's slice
 
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        # Ray auto-resolves ObjectRefs when passed to remote methods,
-        # so we may receive the actual data instead of an ObjectRef
-        if isinstance(data_ref, ObjectRef):
-            full_data = ray.get(data_ref)
-        else:
-            full_data = data_ref
         # Slice to get this worker's portion
-        data = full_data[start_idx:end_idx]
+        data = data[start_idx:end_idx]
         # Delegate to regular forward_backward
         return self.forward_backward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
 
@@ -1034,7 +1024,7 @@ class CriticWorkerBase(Worker):
         # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
-    def forward_backward(self, data: Union[TrainingInputBatch, ObjectRef]) -> Dict[str, float]:
+    def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
@@ -1042,15 +1032,11 @@ class CriticWorkerBase(Worker):
         Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
 
         Args:
-            data: TrainingInputBatch or ObjectRef to one (already DP-sharded by MeshDispatch)
+            data: TrainingInputBatch (already DP-sharded by MeshDispatch)
 
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        # Resolve ObjectRef if needed (MeshDispatch uses ray.put for efficiency)
-        if isinstance(data, ObjectRef):
-            data = ray.get(data)
-
         micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
 
@@ -1062,9 +1048,7 @@ class CriticWorkerBase(Worker):
 
         return reduce_metrics(dict(all_metrics))
 
-    def forward_backward_from_staged(
-        self, data_ref: Union[ObjectRef, TrainingInputBatch], start_idx: int, end_idx: int
-    ) -> Dict[str, float]:
+    def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
         """
         Perform forward/backward using pre-staged data from object store.
 
@@ -1072,21 +1056,15 @@ class CriticWorkerBase(Worker):
         repeated serialization during the training loop.
 
         Args:
-            data_ref: ObjectRef to full TrainingInputBatch (Ray may auto-resolve to actual data)
+            data: TrainingInputBatch via the ray object store
             start_idx: Start index for this worker's slice
             end_idx: End index for this worker's slice
 
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        # Ray auto-resolves ObjectRefs when passed to remote methods,
-        # so we may receive the actual data instead of an ObjectRef
-        if isinstance(data_ref, ObjectRef):
-            full_data = ray.get(data_ref)
-        else:
-            full_data = data_ref
         # Slice to get this worker's portion
-        data = full_data[start_idx:end_idx]
+        data = data[start_idx:end_idx]
         # Delegate to regular forward_backward
         return self.forward_backward(data)
 

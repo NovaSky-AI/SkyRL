@@ -1046,7 +1046,7 @@ class RayPPOTrainer:
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
         # Stage full batch in object store ONCE to avoid repeated serialization
-        data_ref = self.dispatch.stage_training_data(data)
+        data_ref = self.dispatch.stage_data(data)
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):

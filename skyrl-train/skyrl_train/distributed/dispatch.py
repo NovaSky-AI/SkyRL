@@ -162,12 +162,7 @@ class MeshDispatch(Dispatch):
 
     @classmethod
     def dispatch_from_staged(
-        cls,
-        actor_infos: List[ActorInfo],
-        method: str,
-        data_ref: ObjectRef,
-        start_idx: int,
-        end_idx: int,
+        cls, actor_infos: List[ActorInfo], method: str, data_ref: ObjectRef, start_idx: int, end_idx: int, **kwargs
     ) -> List[ObjectRef]:
         """
         Dispatch to workers using pre-staged data from object store.
@@ -181,6 +176,7 @@ class MeshDispatch(Dispatch):
             data_ref: ObjectRef to full TrainingInputBatch in object store
             start_idx: Start index for mini-batch slice (before DP chunking)
             end_idx: End index for mini-batch slice (before DP chunking)
+            **kwargs: Additional keyword arguments to pass to the method
 
         Returns:
             List of ObjectRefs for worker results
@@ -202,7 +198,9 @@ class MeshDispatch(Dispatch):
             worker_start = start_idx + dp_rank * chunk_size
             worker_end = worker_start + chunk_size
             object_refs.append(
-                getattr(actor_info.handle, method).remote(data_ref=data_ref, start_idx=worker_start, end_idx=worker_end)
+                getattr(actor_info.handle, method).remote(
+                    data_ref=data_ref, start_idx=worker_start, end_idx=worker_end, **kwargs
+                )
             )
         return object_refs
 
