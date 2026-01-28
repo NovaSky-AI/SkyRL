@@ -240,6 +240,26 @@ def parse_tool_call(action: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def tokenize_chat(tokenizer: AutoTokenizer, chat_history: List[Dict], add_generation_prompt: bool = True) -> List[int]:
+    """
+    Tokenize chat history and ensure we get a plain list of token IDs.
+
+    apply_chat_template can return different types depending on the tokenizer:
+    - List[int] for some tokenizers
+    - BatchEncoding dict with 'input_ids' key for others
+
+    Tinker's ModelInput.from_ints() requires a plain list of integers.
+    """
+    result = tokenizer.apply_chat_template(chat_history, add_generation_prompt=add_generation_prompt, tokenize=True)
+    # Handle BatchEncoding (dict-like) vs plain list
+    if hasattr(result, "input_ids"):
+        return list(result.input_ids)
+    elif isinstance(result, dict) and "input_ids" in result:
+        return list(result["input_ids"])
+    else:
+        return list(result)
+
+
 async def collect_fleet_rollout(
     task_config: Dict[str, Any],
     tasks_file: str,
@@ -299,7 +319,7 @@ async def collect_fleet_rollout(
         ]
 
         # Tokenize initial prompt
-        prompt_ids = tokenizer.apply_chat_template(chat_history, add_generation_prompt=True, tokenize=True)
+        prompt_ids = tokenize_chat(tokenizer, chat_history, add_generation_prompt=True)
 
         all_response_ids = []
         all_logprobs = []
@@ -311,7 +331,7 @@ async def collect_fleet_rollout(
             turns += 1
 
             # Prepare input for Tinker
-            input_ids = tokenizer.apply_chat_template(chat_history, add_generation_prompt=True, tokenize=True)
+            input_ids = tokenize_chat(tokenizer, chat_history, add_generation_prompt=True)
 
             # Generate with Tinker
             sampling_params = types.SamplingParams(
