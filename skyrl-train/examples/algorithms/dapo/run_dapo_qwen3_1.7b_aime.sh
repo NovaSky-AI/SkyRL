@@ -69,7 +69,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
   trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
+  trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
@@ -94,7 +94,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_aime" \
-  trainer.run_name="dapo_qwen3_1.7b_base" \
+  trainer.run_name="dapo_qwen3_1.7b_base_6a9ab8" \
   trainer.export_path="$HOME/exports/dapo_qwen3_1.7b_base" \
   trainer.hf_save_interval=10 \
   trainer.resume_mode=latest \

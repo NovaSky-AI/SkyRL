@@ -4,7 +4,6 @@ from typing import TypedDict, Dict, Any, List, Optional, Generic, TypeVar
 import torch
 from jaxtyping import Float, Integer
 import pickle
-import io
 
 DictType = TypeVar("DictType")
 
@@ -133,15 +132,25 @@ class TensorBatch(dict, Generic[DictType]):
         return self._device
 
     def __getstate__(self):
-        """Serialize the `TensorBatch` object for pickle protocol"""
+        """Serialize the `TensorBatch` object for pickle protocol.
+
+        Uses fast numpy-based serialization instead of torch.save for better performance.
+        """
         self.contiguous()
         if self._device is not None:
             assert self._device == torch.device("cpu"), "Tensors must be on CPU before serialization"
         batch_dict = {}
         for key, value in self.items():
-            buffer = io.BytesIO()
-            torch.save(value, buffer)
-            batch_dict[key] = buffer.getvalue()
+            if value is None:
+                batch_dict[key] = None
+            else:
+                # Fast serialization: direct memory copy via numpy
+                arr = value.numpy()
+                batch_dict[key] = {
+                    "data": arr.tobytes(),
+                    "shape": arr.shape,
+                    "dtype": str(arr.dtype),
+                }
 
         return {
             "batch_dict": batch_dict,
@@ -151,10 +160,21 @@ class TensorBatch(dict, Generic[DictType]):
         }
 
     def __setstate__(self, state):
-        """Deserialize the `TensorBatch` object and load it into memory"""
+        """Deserialize the `TensorBatch` object and load it into memory.
+
+        Uses fast numpy-based deserialization instead of torch.load for better performance.
+        """
+        import numpy as np
+
         for key, value in state["batch_dict"].items():
-            buffer = io.BytesIO(value)
-            self[key] = torch.load(buffer)
+            if value is None:
+                self[key] = None
+            else:
+                # Fast deserialization: reconstruct from bytes
+                arr = np.frombuffer(value["data"], dtype=np.dtype(value["dtype"]))
+                arr = arr.reshape(value["shape"])
+                # Convert to tensor (makes a copy, which is needed since frombuffer is read-only)
+                self[key] = torch.from_numpy(arr.copy())
 
         self._batch_size = state["batch_size"]
         self._device = state["device"]

@@ -1026,6 +1026,9 @@ class RayPPOTrainer:
         The trainer loops over epochs and mini-batches. Workers handle micro-batching
         internally for gradient accumulation (memory efficiency).
 
+        Uses staged data approach: the full batch is put in Ray object store once,
+        and workers fetch + slice locally to avoid repeated serialization.
+
         Args:
             model: Model name ("policy" or "critic")
             data: Training data batch
@@ -1042,15 +1045,18 @@ class RayPPOTrainer:
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
+        # Stage full batch in object store ONCE to avoid repeated serialization
+        data_ref = self.dispatch.stage_training_data(data)
+
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             num_mini_batches = len(data) // mini_batch_size
             for local_step in range(num_mini_batches):
                 start_idx = local_step * mini_batch_size
                 end_idx = (local_step + 1) * mini_batch_size
-                mini_batch = data[start_idx:end_idx]
 
-                status = self.dispatch.forward_backward(model, mini_batch)
+                # Workers fetch from object store and slice locally
+                status = self.dispatch.forward_backward_from_staged(model, data_ref, start_idx, end_idx)
                 for k, v in status.items():
                     all_metrics[k].append(v)
 
