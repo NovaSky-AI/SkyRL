@@ -8,7 +8,29 @@ should not parse the thinking content and pass in all generated text as part of 
 
 The motivation is to not strip thinking tokens and keep the chat history in multi-turn training strictly appending, making the training on-policy without performing step-wise training.
 
-Specifically, we change from
+Besides, unlike the official Qwen3, this template does not add an empty thinking block when no thinking tokens are present:
+
+```python
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+messages = [
+    {"role": "user", "content": "Hi"},
+    {"role": "assistant", "content": "Hello"},
+]
+
+# Default Qwen3 template: adds empty thinking block
+default_output = tokenizer.apply_chat_template(messages, tokenize=False)
+# Result: "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nHello<|im_end|>\n"
+
+# Custom qwen3_acc_thinking template: no thinking block added
+with open("qwen3_acc_thinking.jinja2") as f:
+    custom_template = f.read()
+custom_output = tokenizer.apply_chat_template(messages, tokenize=False, chat_template=custom_template)
+# Result: "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello<|im_end|>\n"
+```
+
+Specifically for the chat template, we change from
 
 ```jinja2
     {%- elif message.role == "assistant" %}
