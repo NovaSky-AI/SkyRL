@@ -60,6 +60,21 @@ class LoRAMixin:
                 rngs=rngs,
             )
 
+    def _compute_lora_intermediate(
+        self,
+        x_sorted: jax.Array,
+        adapter_indices_sorted: jax.Array,
+        group_sizes: jax.Array,
+    ) -> jax.Array:
+        """Compute intermediate LoRA output. Default is linear case: x @ A.
+
+        Subclasses (e.g., LoRAEmbed) override this for different computation patterns.
+        """
+        assert self.lora_A[...].ndim == 3
+        assert x_sorted.ndim == 2  # (tokens, in_features)
+        assert x_sorted.shape[1] == self.lora_A[...].shape[1]
+        return jax.lax.ragged_dot(x_sorted, self.lora_A[...], group_sizes)
+
     def apply_lora(
         self,
         x: jax.Array,
@@ -73,8 +88,6 @@ class LoRAMixin:
             raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         (batch_size, seq_len, *dims) = x.shape
-        assert len(self.lora_A.shape) == 3
-        assert len(dims) == 0 if isinstance(self, nnx.Embed) else tuple(dims) == self.lora_A[...].shape[1:-1]
         assert adapter_indices.shape[0] == batch_size
 
         x_flat = x.reshape(-1, *dims)
@@ -85,13 +98,8 @@ class LoRAMixin:
             x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
         )
 
-        # Apply LoRA using ragged_dot: x @ A @ B
-        if isinstance(self, nnx.Embed):
-            # Embedding path: A[x]
-            intermediate = self.lora_A[...][adapter_indices_sorted, x_sorted, :]
-        else:
-            # Linear path: x @ A
-            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A[...], group_sizes)
+        # Apply LoRA: x @ A @ B
+        intermediate = self._compute_lora_intermediate(x_sorted, adapter_indices_sorted, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
@@ -140,6 +148,17 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             dtype=param_dtype,
             rngs=rngs,
         )
+
+    def _compute_lora_intermediate(
+        self,
+        x_sorted: jax.Array,
+        adapter_indices_sorted: jax.Array,
+        group_sizes: jax.Array,
+    ) -> jax.Array:
+        """For embeddings, lookup in A instead of matmul: A[adapter, token_id, :]."""
+        assert self.lora_A[...].ndim == 3
+        assert x_sorted.ndim == 1  # (tokens,) integer indices
+        return self.lora_A[...][adapter_indices_sorted, x_sorted, :]
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
         base_out = super().__call__(x)
