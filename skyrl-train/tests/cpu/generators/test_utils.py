@@ -608,6 +608,12 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         # - `<|im_start|>assistant\n` is the generation prompt (mask 0)
         # - `b<|im_end|>` is the assistant generated content (mask 1)
         # - `\n` is after EOS (mask 0)
+        expected_response_str = "<|im_start|>assistant\nb<|im_end|>\n"
+        expected_response_ids = qwen_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen_tokenizer.decode(response_ids)}"
+
         generation_prompt_ids = get_generation_prompt_ids(qwen_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
 
@@ -626,6 +632,12 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         # - `<|start_header_id|>assistant<|end_header_id|>\n\n` is the generation prompt (mask 0)
         # - `b<|eot_id|>` is the assistant generated content (mask 1)
         # - No tokens after EOS for Llama
+        expected_response_str = "<|start_header_id|>assistant<|end_header_id|>\n\nb<|eot_id|>"
+        expected_response_ids = llama_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {llama_tokenizer.decode(response_ids)}"
+
         generation_prompt_ids = get_generation_prompt_ids(llama_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
 
@@ -640,6 +652,13 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ]
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen3_tokenizer)
+
+        # For Qwen3: `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
+        expected_response_str = "<|im_start|>assistant\n" + thinking_content + "<|im_end|>\n"
+        expected_response_ids = qwen3_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen3_tokenizer.decode(response_ids)}"
 
         generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
@@ -664,6 +683,17 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ]
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen_tokenizer)
+
+        # For Qwen2.5 multi-turn.
+        expected_response_str = (
+            "<|im_start|>assistant\nb<|im_end|>\n"  # First assistant
+            "<|im_start|>user\n1<|im_end|>\n"  # User
+            "<|im_start|>assistant\nb<|im_end|>\n"  # Second assistant
+        )
+        expected_response_ids = qwen_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen_tokenizer.decode(response_ids)}"
 
         generation_prompt_ids = get_generation_prompt_ids(qwen_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
@@ -694,6 +724,17 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, llama_tokenizer)
 
+        # For Llama multi-turn.
+        expected_response_str = (
+            "<|start_header_id|>assistant<|end_header_id|>\n\nb<|eot_id|>"  # First assistant
+            "<|start_header_id|>user<|end_header_id|>\n\n1<|eot_id|>"  # User
+            "<|start_header_id|>assistant<|end_header_id|>\n\nb<|eot_id|>"  # Second assistant
+        )
+        expected_response_ids = llama_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {llama_tokenizer.decode(response_ids)}"
+
         generation_prompt_ids = get_generation_prompt_ids(llama_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
 
@@ -718,6 +759,18 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ]
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen3_tokenizer)
+
+        # For Qwen3 multi-turn.
+        # (Note: Qwen3 adds empty thinking block for assistant messages)
+        expected_response_str = (
+            "<|im_start|>assistant\n<think>\n\n</think>\n\nb<|im_end|>\n"  # First assistant
+            "<|im_start|>user\n1<|im_end|>\n"  # User
+            "<|im_start|>assistant\n<think>\n\n</think>\n\nb<|im_end|>\n"  # Second assistant
+        )
+        expected_response_ids = qwen3_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen3_tokenizer.decode(response_ids)}"
 
         # Verify our assumptions about token structure
         generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer)
@@ -761,6 +814,17 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ]
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen3_tokenizer)
+
+        # For Qwen3 multi-turn with thinking.
+        expected_response_str = (
+            "<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n"  # First assistant
+            "<|im_start|>user\n1<|im_end|>\n"  # User
+            "<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n"  # Second assistant
+        )
+        expected_response_ids = qwen3_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen3_tokenizer.decode(response_ids)}"
 
         # Verify our assumptions about token structure
         generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer)
