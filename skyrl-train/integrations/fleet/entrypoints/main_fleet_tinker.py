@@ -341,7 +341,8 @@ async def collect_fleet_rollout(
             )
 
             result = sampling_client.sample(
-                [types.ModelInput.from_ints(tokens=input_ids)],
+                prompt=types.ModelInput.from_ints(tokens=input_ids),
+                num_samples=1,
                 sampling_params=sampling_params,
             ).result()
 
