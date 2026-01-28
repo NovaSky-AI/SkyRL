@@ -51,6 +51,12 @@ def apply_rope_interleave(inputs: jax.Array, position_ids: jax.Array, head_dim: 
     return jnp.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1).astype(inputs.dtype)
 
 
+def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
+    if scale <= 1:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
+
+
 def get_rope(
     head_dim: int,
     rope_theta: float,
@@ -73,13 +79,8 @@ def get_rope(
     rope_type = rope_scaling.get("rope_type", "default")
 
     match rope_type:
-        case "deepseek_yarn" | "yarn":
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
-            scaling_factor = rope_scaling["factor"]
-            if mscale_all_dim and scaling_factor > 1.0:
-                mscale = 0.1 * mscale_all_dim * math.log(scaling_factor) + 1.0
-            else:
-                mscale = 1.0
+        case "deepseek_yarn":
+            mscale = yarn_get_mscale(rope_scaling["factor"], rope_scaling["mscale_all_dim"])
 
             def rope_fn(inputs: jax.Array, positions: jax.Array) -> jax.Array:
                 return apply_rope_interleave(inputs, positions, head_dim, rope_theta)
