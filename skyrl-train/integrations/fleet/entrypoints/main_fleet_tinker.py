@@ -266,13 +266,18 @@ async def collect_fleet_rollout(
     sampling_client: tinker.SamplingClient,
     tokenizer: AutoTokenizer,
     max_turns: int = 50,
-    max_tokens: int = 2048,
+    max_generate_length: int = 2048,
+    max_input_length: int = 30720,
     temperature: float = 1.0,
 ) -> Dict[str, Any]:
     """
     Collect a single trajectory using Fleet environment and Tinker inference.
 
     Uses OpenEnv's FleetTaskEnv directly with async methods for compatibility.
+
+    Args:
+        max_generate_length: Max tokens per generation step.
+        max_input_length: Max context length before ending rollout (matching SkyRL).
     """
     api_key = os.environ.get("FLEET_API_KEY")
     if not api_key:
@@ -326,6 +331,7 @@ async def collect_fleet_rollout(
         loss_mask = []
         done = False
         total_reward = 0.0
+        stop_reason = "stop"
 
         while not done and turns < max_turns:
             turns += 1
@@ -333,9 +339,17 @@ async def collect_fleet_rollout(
             # Prepare input for Tinker
             input_ids = tokenize_chat(tokenizer, chat_history, add_generation_prompt=True)
 
+            # Check context length limit (matching SkyRL's skyrl_gym_generator.py:274)
+            if len(input_ids) > max_input_length:
+                logger.info(
+                    f"Context length ({len(input_ids)}) exceeds max_input_length ({max_input_length}), ending rollout"
+                )
+                stop_reason = "length"
+                break
+
             # Generate with Tinker
             sampling_params = types.SamplingParams(
-                max_tokens=max_tokens,
+                max_tokens=max_generate_length,
                 temperature=temperature,
                 top_p=1.0,
             )
@@ -422,6 +436,7 @@ async def collect_fleet_rollout(
             "env_key": env_key,
             "turns": turns,
             "tool_calls": tool_calls,
+            "stop_reason": stop_reason,
         }
 
     finally:
@@ -434,6 +449,8 @@ async def collect_batch_rollouts(
     sampling_client: tinker.SamplingClient,
     tokenizer: AutoTokenizer,
     max_turns: int = 50,
+    max_generate_length: int = 2048,
+    max_input_length: int = 30720,
     n_samples_per_prompt: int = 1,
 ) -> List[Dict[str, Any]]:
     """Collect rollouts for a batch of tasks."""
@@ -448,6 +465,8 @@ async def collect_batch_rollouts(
                     sampling_client=sampling_client,
                     tokenizer=tokenizer,
                     max_turns=max_turns,
+                    max_generate_length=max_generate_length,
+                    max_input_length=max_input_length,
                 )
                 rollouts.append(rollout)
             except Exception as e:
@@ -463,6 +482,7 @@ async def collect_batch_rollouts(
                         "env_key": task_config.get("env_key", "unknown"),
                         "turns": 0,
                         "tool_calls": 0,
+                        "stop_reason": "error",
                         "error": str(e),
                     }
                 )
@@ -514,6 +534,8 @@ async def main(
     lora_rank: int = 16,
     max_steps: int = 200,
     max_turns: int = 50,
+    max_generate_length: int = 2048,
+    max_input_length: int = 30720,
     n_samples_per_prompt: int = 4,
     save_every: int = 10,
     eval_every: int = 20,
@@ -557,6 +579,8 @@ async def main(
             "learning_rate": learning_rate,
             "lora_rank": lora_rank,
             "max_turns": max_turns,
+            "max_generate_length": max_generate_length,
+            "max_input_length": max_input_length,
             "n_samples_per_prompt": n_samples_per_prompt,
         },
     )
@@ -645,6 +669,8 @@ async def main(
             sampling_client=sampling_client,
             tokenizer=tokenizer,
             max_turns=max_turns,
+            max_generate_length=max_generate_length,
+            max_input_length=max_input_length,
             n_samples_per_prompt=n_samples_per_prompt,
         )
 
@@ -759,6 +785,8 @@ async def main(
                     sampling_client=sampling_client,
                     tokenizer=tokenizer,
                     max_turns=max_turns,
+                    max_generate_length=max_generate_length,
+                    max_input_length=max_input_length,
                     n_samples_per_prompt=1,
                 )
                 all_eval_rollouts.extend([r for r in eval_rollouts if not r.get("error")])
@@ -805,6 +833,8 @@ if __name__ == "__main__":
     parser.add_argument("--lora-rank", type=int, default=16)
     parser.add_argument("--max-steps", type=int, default=200)
     parser.add_argument("--max-turns", type=int, default=50)
+    parser.add_argument("--max-generate-length", type=int, default=2048, help="Max tokens per generation")
+    parser.add_argument("--max-input-length", type=int, default=30720, help="Max context length before ending rollout")
     parser.add_argument("--n-samples-per-prompt", type=int, default=4)
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--eval-every", type=int, default=20)
@@ -827,6 +857,8 @@ if __name__ == "__main__":
             lora_rank=args.lora_rank,
             max_steps=args.max_steps,
             max_turns=args.max_turns,
+            max_generate_length=args.max_generate_length,
+            max_input_length=args.max_input_length,
             n_samples_per_prompt=args.n_samples_per_prompt,
             save_every=args.save_every,
             eval_every=args.eval_every,
