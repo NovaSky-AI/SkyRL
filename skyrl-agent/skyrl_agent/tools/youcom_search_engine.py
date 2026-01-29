@@ -124,7 +124,7 @@ class YouComSearchEngine(BaseTool):
                 break
             except requests.exceptions.RequestException as re:
                 if i == 4:
-                    return f"YouSearchEngine search timeout for query '{query}'. Please try again later."
+                    return f"YouSearchEngine search encountered error {re} for query '{query}'."
                 continue
 
         if response.status_code != 200:
