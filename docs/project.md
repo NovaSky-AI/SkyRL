@@ -27,7 +27,36 @@ Training an 8B parameter model (Qwen3-8B) on Fleet tool-use tasks using SkyRL's 
 | zillow | 76 | 0 | 76 |
 | **TOTAL** | **3,522** | **81** | **3,603** |
 
-### v0.2 (Current)
+### v0.3 (Current)
+
+**Summary**: ~3,485 tasks (~3,304 train / ~181 eval)
+- 10% eval ratio, capped at 30 samples per env
+- No held-out environments (all envs split normally)
+- ticketmaster now has ~22 eval tasks for trace analysis
+
+| Environment | Train | Eval | Total |
+|-------------|-------|------|-------|
+| booking | ~1,059 | ~30 | 1,089 |
+| dropbox | 1 | 0 | 1 |
+| fira | ~46 | ~5 | 51 |
+| github | ~1,835 | ~30 | 1,865 |
+| google-maps | 7 | 0 | 7 |
+| hubspot | ~9 | ~1 | 10 |
+| outlook | ~17 | ~2 | 19 |
+| reddit | ~169 | ~19 | 188 |
+| ticketmaster | ~200 | ~22 | 222 |
+| zillow | ~30 | ~3 | 33 |
+| **TOTAL** | **~3,304** | **~181** | **3,485** |
+
+**Changes from v0.2:**
+- Increased eval_ratio: 2% → 10%
+- Added MAX_EVAL_SAMPLES: 30 per env (caps large envs)
+- Lowered MIN_EVAL_SAMPLES: 5 → 1
+- Removed outlook from held-out (now split like other envs)
+
+---
+
+### v0.2
 
 **Summary**: 3,485 tasks (3,409 train / 76 eval)
 - 95% with env_variables (`CURRENT_DATE`, `LOGGED_IN_USER`, `LOGGED_IN_NAME`)

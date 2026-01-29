@@ -12,8 +12,15 @@ Usage:
 Split Strategy:
     - Stratified by environment (each env maintains train/eval ratio)
     - Hash-based deterministic assignment (same task always goes to same split)
-    - Minimum 5 eval samples per env (otherwise all go to train)
-    - Held-out eval envs: instacart (computer_use), outlook (tool_use)
+    - 10% eval ratio, capped at 30 samples per env (MAX_EVAL_SAMPLES)
+    - Minimum 1 eval sample per env (otherwise all go to train)
+    - Held-out eval envs: instacart (computer_use only)
+
+v0.3 Changes:
+    - Increased eval_ratio from 2% to 10%
+    - Added MAX_EVAL_SAMPLES=30 cap per environment
+    - Lowered MIN_EVAL_SAMPLES from 5 to 1
+    - Result: ticketmaster now gets ~22 eval samples for trace analysis
 """
 
 import argparse
@@ -27,12 +34,16 @@ from datasets import Dataset
 
 # Held-out environments for eval only (not used in train)
 HELD_OUT_ENVS = {
-    "tool_use": ["outlook"],
+    "tool_use": [],  # v0.3: all envs split normally (outlook now included in train)
     "computer_use": ["instacart"],
 }
 
 # Minimum number of samples required to create an eval split for an env
-MIN_EVAL_SAMPLES = 5
+MIN_EVAL_SAMPLES = 1
+
+# Maximum number of eval samples per environment (v0.3)
+# Ensures small envs like ticketmaster get eval traces without blowing up eval set size
+MAX_EVAL_SAMPLES = 30
 
 
 def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
@@ -49,7 +60,7 @@ def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
         raise ValueError("Invalid JSON format: expected array or object with 'tasks' key")
 
 
-def hash_to_split(task_key: str, eval_ratio: float = 0.02) -> str:
+def hash_to_split(task_key: str, eval_ratio: float = 0.10) -> str:
     """Deterministically assign task to train or eval based on hash.
 
     Uses MD5 hash of task_key to get a deterministic float in [0, 1).
@@ -65,7 +76,7 @@ def prepare_fleet_dataset(
     tasks_json: str,
     output_dir: str,
     modality: Optional[str] = "tool_use",
-    eval_ratio: float = 0.02,
+    eval_ratio: float = 0.10,  # v0.3: increased from 0.02 to ensure ticketmaster gets eval samples
     env_filter: Optional[str] = None,
     max_tasks: Optional[int] = None,
 ):
@@ -137,11 +148,11 @@ def prepare_fleet_dataset(
             print(f"  {env_key}: {len(env_tasks)} -> EVAL only (held-out)")
             continue
 
-        # Calculate expected eval size
-        expected_eval_size = int(len(env_tasks) * eval_ratio)
+        # Calculate target eval size: use ratio but cap at MAX_EVAL_SAMPLES
+        target_eval_size = min(int(len(env_tasks) * eval_ratio), MAX_EVAL_SAMPLES)
 
         # If not enough samples for eval, put all in train
-        if expected_eval_size < MIN_EVAL_SAMPLES:
+        if target_eval_size < MIN_EVAL_SAMPLES:
             env_train_count = 0
             for task in env_tasks:
                 record = _task_to_record(task, env_key)
@@ -152,7 +163,10 @@ def prepare_fleet_dataset(
             print(f"  {env_key}: {len(env_tasks)} -> all TRAIN (< {MIN_EVAL_SAMPLES} eval samples)")
             continue
 
-        # Stratified split using hash
+        # Compute effective eval ratio to achieve target_eval_size (capped at MAX_EVAL_SAMPLES)
+        effective_eval_ratio = target_eval_size / len(env_tasks)
+
+        # Stratified split using hash with effective ratio
         env_train = 0
         env_eval = 0
         for task in env_tasks:
@@ -161,7 +175,7 @@ def prepare_fleet_dataset(
             if not record:
                 continue
 
-            split = hash_to_split(task_key, eval_ratio)
+            split = hash_to_split(task_key, effective_eval_ratio)
             if split == "eval":
                 eval_records.append(record)
                 env_eval += 1
@@ -253,8 +267,8 @@ def main():
     parser.add_argument(
         "--eval-ratio",
         type=float,
-        default=0.02,
-        help="Fraction of data for evaluation (default: 0.02)",
+        default=0.10,
+        help="Fraction of data for evaluation (default: 0.10)",
     )
     parser.add_argument(
         "--env-filter",
