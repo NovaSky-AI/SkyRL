@@ -266,8 +266,10 @@ class SkyRLTrainBackend(AbstractBackend):
                 tokenizer=self._tokenizer
             )
 
-            # Create tar.gz archive
-            with tarfile.open(output_path, "w:gz") as tar:
+            # Create tar archive (uncompressed for speed)
+            # FSDP checkpoints are already large (6-7GB). Gzip compression adds
+            # 5-10 minutes of single-threaded CPU time that blocks training.
+            with tarfile.open(output_path, "w") as tar:
                 tar.add(ckpt_dir, arcname=".")
 
         logger.info(f"Saved checkpoint for {model_id} to {output_path}")
@@ -281,9 +283,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-        # Extract tar.gz to temp directory
+        # Extract tar to temp directory (auto-detects compression)
         with tempfile.TemporaryDirectory() as temp_dir:
-            with tarfile.open(checkpoint_path, "r:gz") as tar:
+            with tarfile.open(checkpoint_path, "r") as tar:
                 tar.extractall(temp_dir)
 
             # Load checkpoint (includes optimizer and scheduler states)
@@ -314,8 +316,8 @@ class SkyRLTrainBackend(AbstractBackend):
                 tokenizer=self._tokenizer
             )
 
-            # Create tar.gz archive
-            with tarfile.open(output_path, "w:gz") as tar:
+            # Create tar archive (uncompressed for speed)
+            with tarfile.open(output_path, "w") as tar:
                 tar.add(hf_dir, arcname=".")
 
         logger.info(f"Saved sampler checkpoint for {model_id} to {output_path}")
