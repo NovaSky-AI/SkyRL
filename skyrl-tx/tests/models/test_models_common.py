@@ -45,49 +45,42 @@ def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_ch
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
 class TestGradientCheckpointing:
 
-    def test_output_matches_non_checkpointed(self, model_name, config_cls, model_cls, mesh_axes):
-        """Forward pass should produce identical outputs with/without checkpointing."""
-        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
-
+    def _forward(self, model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing, **forward_kwargs):
+        """Create model, run forward pass, and return (model, config, out)."""
         batch_size, seq_len = 2, 8
+        model, config = create_model(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=gradient_checkpointing)
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-
-        # Run without checkpointing
-        config.gradient_checkpointing = False
         model.train()
-        out_no_ckpt = model(input_ids, attention_mask=attention_mask)
-        logits_no_ckpt = model.compute_logits(out_no_ckpt.last_hidden_state)
+        out = model(input_ids, attention_mask=attention_mask, **forward_kwargs)
+        return model, config, out
 
-        # Run with checkpointing
-        config.gradient_checkpointing = True
-        out_ckpt = model(input_ids, attention_mask=attention_mask)
-        logits_ckpt = model.compute_logits(out_ckpt.last_hidden_state)
+    def test_output_matches_non_checkpointed(self, model_name, config_cls, model_cls, mesh_axes):
+        """Forward pass should produce identical outputs with/without checkpointing."""
+        model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False)
+        logits_no_ckpt = model.compute_logits(out.last_hidden_state)
+        del model, out
+
+        model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True)
+        logits_ckpt = model.compute_logits(out.last_hidden_state)
+        del model, out
 
         np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-6)
 
     def test_hidden_states_length_matches(self, model_name, config_cls, model_cls, mesh_axes):
         """Both paths should return same number of hidden states."""
-        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
+        _, config, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False, output_hidden_states=True)
+        hidden_states_no_ckpt = out.hidden_states
+        num_hidden_layers = config.num_hidden_layers
+        del out
 
-        batch_size, seq_len = 2, 8
-        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
-        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+        _, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True, output_hidden_states=True)
+        hidden_states_ckpt = out.hidden_states
+        del out
 
-        config.gradient_checkpointing = False
-        model.train()
-        out_no_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
-
-        config.gradient_checkpointing = True
-        out_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
-
-        assert len(out_no_ckpt.hidden_states) == len(out_ckpt.hidden_states)
-        assert len(out_ckpt.hidden_states) == config.num_hidden_layers + 1
-
-        for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(out_no_ckpt.hidden_states, out_ckpt.hidden_states)):
-            np.testing.assert_allclose(
-                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
-            )
+        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == num_hidden_layers + 1
+        for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
+            np.testing.assert_allclose(hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}")
 
     def test_eval_mode_uses_standard_path(self, model_name, config_cls, model_cls, mesh_axes):
         """eval() mode should use standard path with KV cache support."""
