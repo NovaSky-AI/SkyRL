@@ -13,11 +13,13 @@ from typing import Any, Dict, List, Optional
 
 import ray
 from omegaconf import DictConfig
+from ray import ObjectRef
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.workers.worker import PPORayActorGroup
+from skyrl_train.distributed.dispatch import MeshDispatch
 
 
 @dataclass
@@ -153,6 +155,21 @@ class WorkerDispatch:
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
 
+    def stage_data(self, data: TrainingInputBatch) -> ObjectRef:
+        """
+        Put training data in Ray object store for efficient access.
+
+        Call this once to avoid repeated serialization when dispatching
+        data to workers
+
+        Args:
+            data: Full training batch to stage in the ray object store
+
+        Returns:
+            ObjectRef to the staged data
+        """
+        return ray.put(data)
+
     def forward_backward(
         self,
         model: str,
@@ -200,6 +217,53 @@ class WorkerDispatch:
 
         return statuses[0]
 
+    def forward_backward_from_staged(
+        self,
+        model: str,
+        data_ref: ObjectRef,
+        start_idx: int,
+        end_idx: int,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """
+        Run forward/backward pass using pre-staged data from object store.
+
+        Workers fetch the full batch from object store and slice locally,
+        avoiding repeated serialization for each mini-batch.
+
+        Args:
+            model: Model name ("policy" or "critic")
+            data_ref: ObjectRef to staged TrainingInputBatch (from stage_data)
+            start_idx: Start index for mini-batch slice
+            end_idx: End index for mini-batch slice
+
+        Returns:
+            Aggregated metrics dict from training
+        """
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
+
+        # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
+        kwargs = {}
+        if loss_fn is not None:
+            kwargs["loss_fn"] = loss_fn
+        if loss_fn_config is not None:
+            kwargs["loss_fn_config"] = loss_fn_config
+
+        # Use specialized dispatch that passes ObjectRef + indices instead of data
+        refs = MeshDispatch.dispatch_from_staged(
+            self._actor_groups[model].actor_infos,
+            "forward_backward_from_staged",
+            data_ref=data_ref,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            **kwargs,
+        )
+        statuses = ray.get(refs)
+
+        self._save_memory_snapshot(model, "forward_backward")
+        return statuses[0]
+
     def optim_step(self, model: str) -> Optional[float]:
         """Run optimizer step. Model should already be on GPU from forward_backward."""
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
@@ -207,6 +271,15 @@ class WorkerDispatch:
 
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
+
+    def set_lr(self, model: str, learning_rate: float) -> None:
+        """Set learning rate for model's optimizer.
+
+        This directly updates the optimizer's param_groups on all workers,
+        bypassing the scheduler. Useful for external learning rate schedules.
+        """
+        self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
+        ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
 
     # TODO(tgriggs): Remove this when Megatron supports forward_backward and optim_step.
     def ppo_train(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:

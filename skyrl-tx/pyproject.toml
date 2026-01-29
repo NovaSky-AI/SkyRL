@@ -56,6 +56,21 @@ azure = [
     "cloudpathlib[azure]",
 ]
 
+# The extras "jax" and "skyrl_train" are the dependencies the
+# engine needs for --backend="jax" and --backend="skyrl_train"
+# respectively.
+
+jax = [
+    "jax[cuda12]>=0.7.2",
+]
+
+skyrl_train = [
+    # We currently need the extra pin on the python version
+    # here since skyrl-train pins on python version 3.12,
+    # hopefully in the future we can remove that.
+    "skyrl-train[vllm]; python_version == '3.12'",
+]
+
 dev = [
     "mkdocs",
     "mkdocs-material",
@@ -75,3 +90,18 @@ version = {attr = "tx.__version__"}
 
 [project.scripts]
 tx = "tx.run.main:app"
+
+# The following is for supporting the skyrl-train dependency
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{requirement = "torch", match-runtime = true}]
+transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
+transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+
+[tool.uv.sources]
+# For now, just always use the current main branch, later it will be better to pin it to a released version. For development, you
+# can set it to your own development branch.
+skyrl-train = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-train" }

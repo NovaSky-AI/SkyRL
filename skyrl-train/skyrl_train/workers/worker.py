@@ -703,6 +703,35 @@ class PolicyWorkerBase(Worker):
 
         return result
 
+    def forward_backward_from_staged(
+        self,
+        data: TrainingInputBatch,
+        start_idx: int,
+        end_idx: int,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """
+        Perform forward/backward using pre-staged data from object store.
+
+        Fetches the full batch from object store and slices locally to avoid
+        repeated serialization during the training loop.
+
+        Args:
+            data: TrainingInputBatch via the ray object store
+            start_idx: Start index for this worker's slice
+            end_idx: End index for this worker's slice
+            loss_fn: Optional loss function name to use instead of config default
+            loss_fn_config: Optional config overrides for the loss function
+
+        Returns:
+            Aggregated metrics dict across all micro batches
+        """
+        # Slice to get this worker's portion
+        data = data[start_idx:end_idx]
+        # Delegate to regular forward_backward
+        return self.forward_backward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
+
     def _forward_backward_micro(
         self,
         experience: Experience,
@@ -735,6 +764,7 @@ class PolicyWorkerBase(Worker):
         num_actions = experience.num_actions
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
+        action_mask = experience.action_mask
         rollout_action_logprobs = experience.rollout_logprobs
 
         # Determine which loss function to use
@@ -792,16 +822,19 @@ class PolicyWorkerBase(Worker):
             batch_size = action_log_probs.shape[0]
             loss_fn_outputs = []
             for i in range(batch_size):
-                # Get valid length for this sample from loss_mask
-                if loss_mask is not None:
+                # Prefer a binary action mask for length; fall back to loss_mask.
+                if action_mask is not None:
+                    valid_len = int(action_mask[i].sum().item())
+                elif loss_mask is not None:
                     valid_len = int(loss_mask[i].sum().item())
                 else:
                     valid_len = action_log_probs.shape[1]
 
+                start = max(action_log_probs.shape[1] - valid_len, 0)
                 loss_fn_outputs.append(
                     {
-                        "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
-                        "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
+                        "logprobs": action_log_probs[i, start:].detach().cpu().tolist(),
+                        "elementwise_loss": elementwise_loss[i, start:].detach().cpu().tolist(),
                     }
                 )
 
@@ -896,9 +929,19 @@ class PolicyWorkerBase(Worker):
 
     def get_lr(self) -> float:
         """
-        Get current learning rate from scheduler.
+        Get current learning rate from optimizer.
         """
-        return self.scheduler.get_last_lr()[0]
+        return self.optimizer.param_groups[0]["lr"]
+
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        This directly updates the optimizer's param_groups, bypassing the scheduler.
+        Useful for external learning rate schedules (e.g., from Tinker).
+        """
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
 
     def barrier(self) -> None:
         """
@@ -1017,6 +1060,26 @@ class CriticWorkerBase(Worker):
 
         return reduce_metrics(dict(all_metrics))
 
+    def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
+        """
+        Perform forward/backward using pre-staged data from object store.
+
+        Fetches the full batch from object store and slices locally to avoid
+        repeated serialization during the training loop.
+
+        Args:
+            data: TrainingInputBatch via the ray object store
+            start_idx: Start index for this worker's slice
+            end_idx: End index for this worker's slice
+
+        Returns:
+            Aggregated metrics dict across all micro batches
+        """
+        # Slice to get this worker's portion
+        data = data[start_idx:end_idx]
+        # Delegate to regular forward_backward
+        return self.forward_backward(data)
+
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
         Perform forward and backward pass for one micro batch.
@@ -1103,9 +1166,19 @@ class CriticWorkerBase(Worker):
 
     def get_lr(self) -> float:
         """
-        Get current learning rate from scheduler.
+        Get current learning rate from optimizer.
         """
-        return self.scheduler.get_last_lr()[0]
+        return self.optimizer.param_groups[0]["lr"]
+
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        This directly updates the optimizer's param_groups, bypassing the scheduler.
+        Useful for external learning rate schedules (e.g., from Tinker).
+        """
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
 
     def barrier(self) -> None:
         """

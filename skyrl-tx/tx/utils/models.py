@@ -18,6 +18,7 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
+from tx.models.configs import ModelConfig
 from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
@@ -64,12 +65,15 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
     import tx.models.llama3
     import tx.models.qwen3
+    import tx.models.deepseekv3
 
     for architecture in config.architectures or []:
         if hasattr(tx.models.llama3, architecture):
             return getattr(tx.models.llama3, architecture)
         if hasattr(tx.models.qwen3, architecture):
             return getattr(tx.models.qwen3, architecture)
+        if hasattr(tx.models.deepseekv3, architecture):
+            return getattr(tx.models.deepseekv3, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
@@ -115,7 +119,7 @@ def _get_hf_key(path: tuple) -> str:
 
 def load_safetensors(
     checkpoint_dir: str | os.PathLike,
-    config: PretrainedConfig,
+    config: ModelConfig,
     model: nnx.Module,
     num_layers: int,
     skip_lora: bool = True,
@@ -219,7 +223,7 @@ def load_safetensors(
 
 
 def save_safetensors(
-    config: PretrainedConfig,
+    config: ModelConfig,
     model: nnx.Module,
     filename: Path,
     num_layers: int,

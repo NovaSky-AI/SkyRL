@@ -80,6 +80,22 @@ class LoRAMixin:
                 rngs=rngs,
             )
 
+    def _apply_lora_weight(
+        self,
+        lora_weight: jax.Array,
+        x_sorted: jax.Array,
+        adapter_indices_sorted: jax.Array,
+        group_sizes: jax.Array,
+    ) -> jax.Array:
+        """Apply a LoRA weight matrix to input. Default is linear case: x @ weight.
+
+        Subclasses (e.g., LoRAEmbed) override this for different computation patterns.
+        """
+        assert lora_weight.ndim == 3
+        assert x_sorted.ndim == 2  # (tokens, in_features)
+        assert x_sorted.shape[1] == lora_weight.shape[1]
+        return jax.lax.ragged_dot(x_sorted, lora_weight, group_sizes)
+
     def apply_lora(
         self,
         x: jax.Array,
@@ -93,8 +109,6 @@ class LoRAMixin:
             raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         (batch_size, seq_len, *dims) = x.shape
-        assert len(self.lora_A.shape) == 3
-        assert len(dims) == 0 if isinstance(self, nnx.Embed) else tuple(dims) == self.lora_A[...].shape[1:-1]
         assert adapter_indices.shape[0] == batch_size
 
         x_flat = x.reshape(-1, *dims)
@@ -105,13 +119,8 @@ class LoRAMixin:
             x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
         )
 
-        # Apply LoRA using ragged_dot: x @ A @ B
-        if isinstance(self, nnx.Embed):
-            # Embedding path: A[x]
-            intermediate = self.lora_A[...][adapter_indices_sorted, x_sorted, :]
-        else:
-            # Linear path: x @ A
-            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A[...], group_sizes)
+        # Apply LoRA: x @ A @ B (or A[x] @ B for embeddings)
+        intermediate = self._apply_lora_weight(self.lora_A[...], x_sorted, adapter_indices_sorted, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
@@ -160,6 +169,18 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             dtype=param_dtype,
             rngs=rngs,
         )
+
+    def _apply_lora_weight(
+        self,
+        lora_weight: jax.Array,
+        x_sorted: jax.Array,
+        adapter_indices_sorted: jax.Array,
+        group_sizes: jax.Array,
+    ) -> jax.Array:
+        """For embeddings, lookup in weight instead of matmul: weight[adapter, token_id, :]."""
+        assert lora_weight.ndim == 3
+        assert x_sorted.ndim == 1  # (tokens,) integer indices
+        return lora_weight[adapter_indices_sorted, x_sorted, :]
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
         base_out = super().__call__(x)
@@ -338,7 +359,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         # Following Thinking Machines' approach: divide rank by num_experts
         # to keep total LoRA parameters similar to non-MoE models
         if "experts" in normalized_path:
-            effective_rank = max(1, lora_config.rank // model.config.num_experts)
+            effective_rank = max(1, lora_config.rank // model.config.get_num_experts())
 
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0

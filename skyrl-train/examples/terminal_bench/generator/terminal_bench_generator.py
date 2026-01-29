@@ -1,17 +1,20 @@
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional
+from loguru import logger
 from uuid import uuid4
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
-from pathlib import Path
-from harbor.models.trial.config import TrialConfig, AgentConfig, TaskConfig, EnvironmentConfig
-from harbor.models.environment_type import EnvironmentType
-from harbor.models.agent.name import AgentName
+from omegaconf import DictConfig, OmegaConf
 from harbor.trial.trial import Trial
+from harbor.models.trial.config import TrialConfig
+
+# We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
+# after N attemptes, we skip this prompt altogether.
+MAX_NUM_RETRIES_PER_TRIAL = 2
 
 
 @dataclass
@@ -21,7 +24,8 @@ class TerminalBenchAgentOutput:
     stop_reason: str
     loss_mask: List[int]
     prompt_ids: List[int]
-    rollout_logprobs: Optional[List[float]]
+    trajectory_id: TrajectoryID
+    summarization_count: Optional[int] = None
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -44,38 +48,94 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
 
-        # TerminalBench config
-        self.trials_dir = terminal_bench_cfg.trials_dir
-        self.agent_name = terminal_bench_cfg.agent_name
-        self.max_episodes = terminal_bench_cfg.max_episodes
+        # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
+        # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
+        self._harbor_config_template = OmegaConf.to_container(terminal_bench_cfg, resolve=True)
 
-        if self.generator_cfg.chat_template.name_or_path is not None:
-            raise NotImplementedError("TerminalBenchGenerator doesn't support custom chat template")
+        # Set model_name and api_base once (constant across all trials)
+        assert generator_cfg.served_model_name is not None, "served_model_name must be set"
+        assert (
+            "/" not in generator_cfg.served_model_name
+        ), "served_model_name must not contain '/', Harbor expects hosted_vllm/{model_name}"
+        self._harbor_config_template.setdefault("agent", {})[
+            "model_name"
+        ] = f"hosted_vllm/{generator_cfg.served_model_name}"
+        self._harbor_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
+
+        logger.info(
+            f"TerminalBenchGenerator initialized with Harbor config. "
+            f"Agent: {self._harbor_config_template.get('agent', {}).get('name')}, "
+            f"Trials dir: {self._harbor_config_template.get('trials_dir', 'trials')}"
+        )
+
+        # Read custom chat template
+        custom_chat_template_path = generator_cfg.engine_init_kwargs.get("chat_template", None)
+        if custom_chat_template_path:
+            with open(custom_chat_template_path, "r") as f:
+                self.custom_chat_template_content = f.read()
+            logger.info(
+                f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}"
+            )
+        else:
+            self.custom_chat_template_content = None
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        prompts = input_batch["prompts"]
         tasks = []
-        for prompt in prompts:
+        for i in range(len(input_batch["prompts"])):
             tasks.append(
                 self.terminal_bench_agent_loop(
-                    prompt=prompt,
+                    prompt=input_batch["prompts"][i],
+                    trajectory_id=input_batch["trajectory_ids"][i],
                 )
             )
 
-        all_outputs = await asyncio.gather(*tasks)
+        all_outputs: List[TerminalBenchAgentOutput] = await asyncio.gather(*tasks)
 
-        responses = [output.response_ids for output in all_outputs]
-        rewards = [output.reward for output in all_outputs]
-        rollout_metrics = get_rollout_metrics(responses, rewards)
+        # For a group of trajectories (n_samples_per_prompt trajectories for the same prompt), if one
+        # of the trajectories fails, we skip the entire group. We also skip the group for rollout metric aggregation
+        failed_instance_ids = set()
+        num_failed_trajectories = 0  # per-trajectory, rather than per-instance
+        successful_outputs: List[TerminalBenchAgentOutput] = []  # only for metrics purpose
+        for output in all_outputs:
+            if output.stop_reason == "error":
+                failed_instance_ids.add(output.trajectory_id.instance_id)
+                num_failed_trajectories += 1
+
+        for output in all_outputs:
+            if output.trajectory_id.instance_id in failed_instance_ids:
+                output.response_ids = [0]
+                output.stop_reason = "error"
+                output.loss_mask = [0]
+                output.prompt_ids = [0]
+                output.reward = 0
+            else:
+                successful_outputs.append(output)
+
+        # Calculate rollout metrics for successful outputs
+        if len(successful_outputs) > 0:
+            rollout_metrics = get_rollout_metrics(
+                [output.response_ids for output in successful_outputs],
+                [output.reward for output in successful_outputs],
+            )
+            rollout_metrics["generate/trajectories_summarized"] = sum(
+                1 for output in successful_outputs if output.summarization_count > 0
+            )
+            rollout_metrics["generate/trajectories_truncated"] = sum(
+                1 for output in successful_outputs if output.stop_reason == "length"
+            )
+        else:
+            rollout_metrics = {}
+        rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
+        rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
-            "response_ids": responses,
-            "rewards": rewards,
+            "response_ids": [output.response_ids for output in all_outputs],
+            "rewards": [output.reward for output in all_outputs],
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": [output.rollout_logprobs for output in all_outputs],
+            "rollout_logprobs": None,
         }
 
         return generator_output
@@ -83,61 +143,61 @@ class TerminalBenchGenerator(GeneratorInterface):
     async def terminal_bench_agent_loop(
         self,
         prompt: ConversationType,
+        trajectory_id: TrajectoryID,
     ) -> TerminalBenchAgentOutput:
         """
         Run a single terminal_bench agent.
         """
-        # Generate session_id for sticky routing to inference engines
-        # All LLM requests in this trial will share the same session_id
-        session_id = uuid4().hex
-
-        if self.agent_name == "terminus":
-            trial_config = TrialConfig(
-                task=TaskConfig(path=prompt),
-                trials_dir=Path(self.trials_dir),
-                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
-                agent=AgentConfig(
-                    name=AgentName.TERMINUS_2.value,
-                    model_name=f"hosted_vllm/{self.model_name}",
-                    kwargs={
-                        "api_base": f"{self.base_url}/v1",
-                        "key": "fake_key",
-                        "session_id": session_id,
-                        "max_episodes": self.max_episodes,
-                    },
-                ),
-            )
-        elif self.agent_name == "oracle":
-            trial_config = TrialConfig(
-                task=TaskConfig(path=prompt),
-                trials_dir=Path(self.trials_dir),
-                environment=EnvironmentConfig(type=EnvironmentType.DAYTONA),
-                agent=AgentConfig(
-                    name=AgentName.ORACLE,
-                    model_name=f"hosted_vllm/{self.model_name}",
-                ),
-            )
-        else:
-            raise ValueError(f"Invalid agent name: {self.agent_name}")
+        # Build TrialConfig from template, only override task.path and session_id per trial
+        config = deepcopy(self._harbor_config_template)
+        config["task"] = {"path": prompt}
+        config["agent"]["kwargs"]["session_id"] = uuid4().hex
+        trial_config = TrialConfig.model_validate(config)
 
         trial = Trial(trial_config)
-        # Run the trial
-        while True:
+
+        # Run the trial to get `rewards`, `chat_history`, and `summarization_count`
+        successful = False
+        reward = None
+        chat_history = None
+        summarization_count = None
+        for i in range(MAX_NUM_RETRIES_PER_TRIAL):
+            prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
+            results = None
             try:
                 results = await trial.run()
-                print(f"Results: {results}")
                 if not results.verifier_result:
-                    print(f"[WARNING] Exception info: {results.exception_info}")
+                    logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
-                reward = results.verifier_result.reward
-                chat_history = results.agent_result.all_messages
-                if len(chat_history) > 0:
+
+                reward = results.verifier_result.rewards["reward"]
+                chat_history = results.agent_result.metadata["all_messages"]
+                summarization_count = results.agent_result.metadata["summarization_count"]
+                if len(chat_history) > 1 and chat_history[0]["role"] == "user":
+                    successful = True
+                    logger.info(f"{prefix} successful: Results: {results.agent_result.metadata}")
                     break
                 else:
-                    print(f"[WARNING] Agent {self.agent_name} did not return a response")
+                    logger.warning(
+                        f"{prefix} failed: Agent did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}"
+                    )
             except Exception as e:
-                print(f"Error running trial: {e}")
+                logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
                 continue
+
+        if not successful:
+            # We make loss mask 0 so it does not contribute to model updates
+            logger.warning(
+                f"Trajectory {trajectory_id} failed after {MAX_NUM_RETRIES_PER_TRIAL} attempts, will set loss mask to [0]."
+            )
+            return TerminalBenchAgentOutput(
+                response_ids=[0],
+                reward=0,
+                stop_reason="error",
+                loss_mask=[0],
+                prompt_ids=[0],
+                trajectory_id=trajectory_id,
+            )
 
         # Use the first message as the prompt. We assume to be no systems messages.
         assert chat_history[0]["role"] == "user", "The first message should be a user message"
@@ -146,6 +206,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             prompt,
             add_generation_prompt=False,  # the message below will add it themselves
             tokenize=True,
+            chat_template=self.custom_chat_template_content,
         )
         initial_prompt_length = len(prompt_ids)
 
@@ -153,7 +214,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         response_messages = chat_history[1:]
         assistant_logprobs = getattr(results.agent_result, "output_logprobs", None)
         response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
-            response_messages, self.tokenizer, assistant_logprobs
+            response_messages, self.tokenizer, assistant_logprobs, chat_template=self.custom_chat_template_content
         )
 
         # Determine stop reason
@@ -165,19 +226,16 @@ class TerminalBenchGenerator(GeneratorInterface):
         stop_reason = "complete"  # Default for trial completion
         if len(response_ids) > max_response_tokens:
             stop_reason = "length"
-        # TODO(Charlie): should we do rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)?
 
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
-        rollout_logprobs = rollout_logprobs[:max_response_tokens]
-
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
             reward=reward,
             stop_reason=stop_reason,
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
-            # in case harbor doesn't return logprobs, use None
-            rollout_logprobs=rollout_logprobs if assistant_logprobs is not None else None,
+            trajectory_id=trajectory_id,
+            summarization_count=summarization_count,
         )

@@ -291,3 +291,39 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
 
     finally:
         ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_set_lr(ray_init_fixture):
+    """
+    Test that WorkerDispatch.set_lr updates the optimizer's learning rate.
+    """
+    cfg = get_test_config()
+
+    try:
+        # Create placement group and policy actor
+        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(pg, timeout=30)
+
+        policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
+        ray.get(policy_group.async_init_model(MODEL_NAME))
+
+        dispatch = WorkerDispatch(cfg, policy_actor_group=policy_group)
+
+        # Get initial learning rate
+        initial_lrs = ray.get(policy_group.async_run_ray_method("pass_through", "get_lr"))
+        initial_lr = initial_lrs[0]
+
+        # Set a new learning rate via dispatch
+        new_lr = 1e-5
+        assert new_lr != initial_lr, "New LR should differ from initial for valid test"
+
+        dispatch.set_lr("policy", new_lr)
+
+        # Verify the learning rate was updated
+        updated_lrs = ray.get(policy_group.async_run_ray_method("pass_through", "get_lr"))
+        for updated_lr in updated_lrs:
+            assert updated_lr == new_lr, f"Expected LR {new_lr}, got {updated_lr}"
+
+    finally:
+        ray.shutdown()

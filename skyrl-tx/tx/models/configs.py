@@ -45,7 +45,11 @@ class ModelConfig(PretrainedConfig):
         self.loss_chunk_size = loss_chunk_size
         self.gradient_checkpointing = gradient_checkpointing
 
+    def get_num_experts(self):
+        return getattr(self, "num_experts", None) or getattr(self, "n_routed_experts", None)
+
 
 # Model-specific aliases for clarity and backwards compatibility
 Llama3Config = ModelConfig
 Qwen3Config = ModelConfig
+DeepseekV3Config = ModelConfig
