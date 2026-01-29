@@ -45,6 +45,7 @@ dependencies = [
     "uvicorn",
     "pybind11",
     "setuptools",
+    "martian-ares[vllm]",
 ]
 
 [tool.uv]
@@ -80,7 +81,12 @@ override-dependencies = [
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0",
-    "megatron-core==0.15.0"
+    "megatron-core==0.15.0",
+    "anthropic>=0.76.0",
+    "numpy>=2.3.5",
+    "datasets>=4.4.1",
+    "openai>=2.8.0",
+    "rich>=14.1.0"
 ]
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
@@ -101,6 +107,7 @@ flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'mcore' and extra != 'vllm'" }
 ]
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "04e370eedf8cc44a812189a19f2171d90555c07a"}
+martian-ares = { path = "../../ares", editable = true }
 
 
 [project.optional-dependencies]
