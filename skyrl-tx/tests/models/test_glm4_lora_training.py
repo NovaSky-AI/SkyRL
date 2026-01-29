@@ -72,7 +72,10 @@ def test_lora_training_moe_rank_normalized():
 
         optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)
 
-        batch = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]], dtype=jnp.int32)
+        # Use 11 tokens so input_ids has 10 (even) - cuDNN flash attention requires even seq length with bias
+        batch = jnp.array(
+            [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]], dtype=jnp.int32
+        )
         target_ids = batch[:, 1:]
         input_ids = batch[:, :-1]
         adapter_indices = jnp.array([0, 1], dtype=jnp.int32)
@@ -159,7 +162,10 @@ def test_lora_training_high_rank():
 
         optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)
 
-        batch = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]], dtype=jnp.int32)
+        # Use 11 tokens so input_ids has 10 (even) - cuDNN flash attention requires even seq length with bias
+        batch = jnp.array(
+            [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]], dtype=jnp.int32
+        )
         target_ids = batch[:, 1:]
         input_ids = batch[:, :-1]
         adapter_indices = jnp.array([0, 1], dtype=jnp.int32)
