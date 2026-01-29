@@ -120,7 +120,7 @@ def forward_layers(
             kv_cache=layer_kv,
         )
 
-        # Update stacked KV cache
+        # Update stacked KV cache if provided
         new_kv = kv
         if kv is not None:
             new_kv = (
@@ -128,16 +128,18 @@ def forward_layers(
                 kv[1].at[layer_idx].set(v),
             )
 
-        # Return updated carry and output for this iteration
-        output = hs if output_hidden_states else None
-        return (new_hs, new_kv), output
+        # Return updated carry and outputs for this iteration
+        # Always output (k, v) so we can build cache during prefill
+        # Output the layer OUTPUT (new_hs), not input, for hidden_states collection
+        hs_output = new_hs if output_hidden_states else None
+        return (new_hs, new_kv), (hs_output, k, v)
 
     # Apply gradient checkpointing if requested
     if gradient_checkpointing:
         body_fn = jax.checkpoint(body_fn)
 
     # Scan over layer indices
-    (final_hs, final_kv), all_hs = jax.lax.scan(
+    (final_hs, final_kv), (all_hs, all_keys, all_values) = jax.lax.scan(
         body_fn,
         (hidden_states, stacked_kv),
         jnp.arange(num_layers),
@@ -146,17 +148,27 @@ def forward_layers(
     # Collect hidden states if requested
     all_hidden_states: list[jax.Array] = []
     if output_hidden_states:
-        # all_hs has shape (num_layers, batch, seq, hidden)
-        # We want [input, layer0_out, layer1_out, ...] excluding final (it gets normed)
+        # all_hs has shape (num_layers, batch, seq, hidden) containing output of each layer
+        # We want [embed, layer0_out, layer1_out, ..., layer(N-2)_out]
+        # The model will append the normed layer(N-1)_out after calling this function
         all_hidden_states = [hidden_states] + [all_hs[i] for i in range(num_layers - 1)]
 
-    # Reconstruct KVCache if it was provided
-    new_kv_cache = None
+    # Reconstruct KVCache
     if kv_cache is not None and final_kv is not None:
+        # Decode mode: use updated cache from carry
         new_kv_cache = KVCache(
             keys=final_kv[0],
             values=final_kv[1],
             cache_position=kv_cache.cache_position,
+        )
+    else:
+        # Prefill mode: build cache from collected K/V outputs
+        # all_keys/all_values have shape (num_layers, batch, seq, heads, dim)
+        new_kv_cache = KVCache.from_layer_outputs(
+            keys=all_keys,
+            values=all_values,
+            positions=positions,
+            attention_mask=attention_mask,
         )
 
     return final_hs, all_hidden_states, new_kv_cache

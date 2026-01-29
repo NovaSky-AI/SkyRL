@@ -19,31 +19,23 @@ MODEL_PARAMS = [
 MODEL_IDS = ["llama3", "qwen3"]
 
 
-def create_model(model_name, config_cls, model_cls, mesh_axes):
+def create_model(model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0, gradient_checkpointing=None, seed=42):
     """Create model with random weights for testing."""
     base_config = AutoConfig.from_pretrained(model_name)
-    config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
-    mesh = jax.make_mesh((1, 1), mesh_axes)
+    config_kwargs = dict(max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True, loss_chunk_size=loss_chunk_size)
+    if gradient_checkpointing is not None:
+        config_kwargs["gradient_checkpointing"] = gradient_checkpointing
+    config = config_cls(base_config, **config_kwargs)
+    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=(jax.sharding.AxisType.Auto,) * 2)
     with jax.set_mesh(mesh):
-        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(seed))
     return model, config
 
 
 def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
     """Load model from pre-saved weights directory."""
-    base_config = AutoConfig.from_pretrained(model_name)
-    config = config_cls(
-        base_config,
-        max_lora_adapters=1,
-        max_lora_rank=1,
-        shard_attention_heads=True,
-        loss_chunk_size=loss_chunk_size,
-        gradient_checkpointing=False,
-    )
-    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=(jax.sharding.AxisType.Auto,) * 2)
-    with jax.set_mesh(mesh):
-        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-    load_safetensors(tmp_dir, config, model)
+    model, config = create_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=loss_chunk_size, gradient_checkpointing=False, seed=0)
+    load_safetensors(tmp_dir, config, model, config.num_hidden_layers)
     return model
 
 

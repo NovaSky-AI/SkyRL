@@ -42,7 +42,7 @@ def test_llama3(tp: int):
         mesh = jax.make_mesh((1, tp), ("dp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
         with jax.set_mesh(mesh):
             model = Llama3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model)
+        load_safetensors(tmp, config, model, config.num_hidden_layers)
 
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
 

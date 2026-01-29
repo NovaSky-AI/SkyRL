@@ -1,11 +1,31 @@
 from flax import nnx
 import jax
 from jax import numpy as jnp
+from jax.core import Tracer
 
 from tx.utils.models import filter_lora
 from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
+
+
+def _get_sharding_spec(arr: jax.Array):
+    """Get sharding spec from an array, handling both concrete and traced arrays.
+
+    Inside nnx.vmap, arrays become tracers and .sharding is not directly accessible.
+    Use jax.typeof() to get sharding info from traced arrays.
+    """
+    if isinstance(arr, Tracer):
+        # For traced arrays, use jax.typeof to get the abstract value with sharding
+        aval = jax.typeof(arr)
+        if hasattr(aval, "sharding") and aval.sharding is not None:
+            return aval.sharding.spec
+        return None
+    else:
+        # For concrete arrays, access sharding directly
+        if arr.sharding is not None:
+            return arr.sharding.spec
+        return None
 
 
 class LoRAMixin:
@@ -125,10 +145,10 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             embedding_init=embedding_init,
             rngs=rngs,
         )
-        assert (
-            self.embedding[...].sharding is not None
-        ), "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
-        sharding = self.embedding[...].sharding.spec
+        sharding = _get_sharding_spec(self.embedding[...])
+        assert sharding is not None, (
+            "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
+        )
 
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
@@ -183,10 +203,10 @@ class LoRALinear(LoRAMixin, nnx.Linear):
             bias_init=bias_init,
             rngs=rngs,
         )
-        assert (
-            self.kernel[...].sharding is not None
-        ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
-        sharding = self.kernel[...].sharding.spec
+        sharding = _get_sharding_spec(self.kernel[...])
+        assert sharding is not None, (
+            "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
+        )
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
@@ -224,8 +244,8 @@ class LoRAExpert(LoRAMixin, nnx.Module):
 
         self.weight = Param(num_experts, in_features, out_features, dtype=dtype, kernel_init=kernel_init, rngs=rngs)
 
-        assert self.weight[...].sharding is not None, "LoRAExpert layer needs sharding"
-        sharding = self.weight[...].sharding.spec
+        sharding = _get_sharding_spec(self.weight[...])
+        assert sharding is not None, "LoRAExpert layer needs sharding"
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,

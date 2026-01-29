@@ -21,7 +21,7 @@ def test_lora_training():
     mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
-        load_safetensors(checkpoint_path, config, model)
+        load_safetensors(checkpoint_path, config, model, config.num_hidden_layers)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
         init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16, seed=0))
