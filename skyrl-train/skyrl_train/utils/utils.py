@@ -644,8 +644,18 @@ def initialize_ray(cfg: DictConfig):
     """
     from .ppo_utils import sync_registries
 
+    # Use LOG_LEVEL to control Ray verbosity (DEBUG enables verbose Ray logging)
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    verbose_logging = log_level == "DEBUG"
+
+    if not verbose_logging:
+        # Suppress C++ logs (metrics exporter errors) on stdout
+        os.environ["RAY_BACKEND_LOG_LEVEL"] = "fatal"
+
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+
+    # log_to_driver=False suppresses worker/raylet logs forwarding to driver stdout
+    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=verbose_logging)
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()
