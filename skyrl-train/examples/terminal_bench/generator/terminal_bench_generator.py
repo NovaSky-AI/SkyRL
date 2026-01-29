@@ -8,11 +8,9 @@ from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_a
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
-from pathlib import Path
-from harbor.models.trial.config import TrialConfig, AgentConfig, TaskConfig, EnvironmentConfig
-from harbor.models.environment_type import EnvironmentType
-from harbor.models.agent.name import AgentName
 from harbor.trial.trial import Trial
+
+from examples.terminal_bench.harbor_config import HarborConfigBuilder
 
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
@@ -50,21 +48,15 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
 
-        # TerminalBench config. Parse here to ensure everything is passed in.
-        # TODO(Charlie): we should enable users to pass in a YAML with any fields that Harbor supports
-        # without SkyRL re-parsing.
-        self.trials_dir = terminal_bench_cfg.trials_dir
-        self.agent_name = terminal_bench_cfg.agent_name
-        self.max_episodes = terminal_bench_cfg.max_episodes
-        self.enable_summarize = terminal_bench_cfg.get("enable_summarize", True)
-
-        # Optional overrides for the environment
-        self.override_memory_mb = terminal_bench_cfg.get("override_memory_mb")
-        self.override_storage_mb = terminal_bench_cfg.get("override_storage_mb")
-        self.override_cpus = terminal_bench_cfg.get("override_cpus")
+        # Harbor config builder - handles all Harbor-specific configuration.
+        # Users can specify any Harbor-supported options in the YAML config,
+        # and SkyRL only injects minimal runtime values (task_path, api_base, session_id).
+        self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
 
         logger.info(
-            f"TerminalBenchGenerator initialized with overrides: memory={self.override_memory_mb}, storage={self.override_storage_mb}, cpus={self.override_cpus}"
+            f"TerminalBenchGenerator initialized with Harbor config. "
+            f"Agent: {self._harbor_config_builder.agent_name}, "
+            f"Trials dir: {self._harbor_config_builder.trials_dir}"
         )
 
         # Read custom chat template
@@ -151,56 +143,22 @@ class TerminalBenchGenerator(GeneratorInterface):
         # All LLM requests in this trial will share the same session_id
         session_id = uuid4().hex
 
-        environment_config = EnvironmentConfig(
-            type=EnvironmentType.DAYTONA,
-            override_cpus=self.override_cpus,
-            override_memory_mb=self.override_memory_mb,
-            override_storage_mb=self.override_storage_mb,
-        )
-
+        # Build model name for Harbor (hosted_vllm/{model_alias})
         assert self.generator_cfg.served_model_name is not None, "served_model_name must be set"
         assert (
             "/" not in self.generator_cfg.served_model_name
         ), "served_model_name must not contain '/', as Harbor expects hosted_vllm model names with exactly one '/', being hosted_vllm/{model_name}"
         model_alias = self.generator_cfg.served_model_name
 
-        if self.agent_name == "terminus":
-            trial_config = TrialConfig(
-                task=TaskConfig(path=prompt),
-                trials_dir=Path(self.trials_dir),
-                environment=environment_config,
-                agent=AgentConfig(
-                    name=AgentName.TERMINUS_2.value,
-                    model_name=f"hosted_vllm/{model_alias}",
-                    kwargs={
-                        "api_base": f"{self.base_url}/v1",
-                        "key": "fake_key",
-                        "max_episodes": self.max_episodes,
-                        "session_id": session_id,
-                        "enable_summarize": self.enable_summarize,
-                        "store_all_messages": True,
-                        # model_info. TODO(Charlie): is it reasonable to set like this?
-                        "model_info": {
-                            "max_input_tokens": 24576,
-                            "max_output_tokens": 8192,
-                            "input_cost_per_token": 0.0,  # set to 0 for local training
-                            "output_cost_per_token": 0.0,
-                        },
-                    },
-                ),
-            )
-        elif self.agent_name == "oracle":
-            trial_config = TrialConfig(
-                task=TaskConfig(path=prompt),
-                trials_dir=Path(self.trials_dir),
-                environment=environment_config,
-                agent=AgentConfig(
-                    name=AgentName.ORACLE,
-                    model_name=f"hosted_vllm/{model_alias}",
-                ),
-            )
-        else:
-            raise ValueError(f"Invalid agent name: {self.agent_name}")
+        # Build TrialConfig using the Harbor config builder
+        # User's YAML config provides agent, environment, verifier settings
+        # SkyRL injects runtime values: task_path, model_name, api_base, session_id
+        trial_config = self._harbor_config_builder.build_trial_config(
+            task_path=prompt,
+            model_name=f"hosted_vllm/{model_alias}",
+            api_base=f"{self.base_url}/v1",
+            session_id=session_id,
+        )
 
         trial = Trial(trial_config)
 
@@ -227,7 +185,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     break
                 else:
                     logger.warning(
-                        f"{prefix} failed: Agent {self.agent_name} did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}"
+                        f"{prefix} failed: Agent {self._harbor_config_builder.agent_name} did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}"
                     )
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")

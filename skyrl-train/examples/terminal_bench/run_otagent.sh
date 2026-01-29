@@ -21,14 +21,8 @@ uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypo
   trainer.policy.model.path=open-thoughts/OpenThinker-Agent-v1-SFT \
   generator.served_model_name=OpenThinker-Agent-v1-SFT \
   hydra.searchpath=['file://examples/terminal_bench'] \
-  +terminal_bench_config=terminal_bench \
-  +terminal_bench_config.agent_name=terminus \
-  +terminal_bench_config.max_episodes=32 \
-  +terminal_bench_config.trials_dir=$TRIALS_DIR \
-  +terminal_bench_config.override_memory_mb=1024 \
-  +terminal_bench_config.override_storage_mb=1024 \
-  +terminal_bench_config.override_cpus=1 \
-  +terminal_bench_config.enable_summarize=false \
+  +terminal_bench_config=default \
+  ++terminal_bench_config.trials_dir=$TRIALS_DIR \
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.algorithm.advantage_estimator=grpo \
