@@ -43,6 +43,7 @@ import os
 import random
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -73,6 +74,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("mcp").setLevel(logging.WARNING)
+
+# Thread pool for env operations - isolates MCP connections per thread (like SkyRL)
+_env_executor: ThreadPoolExecutor = None
+
+
+def _get_env_executor(max_workers: int = 16) -> ThreadPoolExecutor:
+    global _env_executor
+    if _env_executor is None:
+        _env_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="fleet-env-")
+    return _env_executor
+
+
+async def _run_in_executor(func, *args):
+    """Run sync function in thread pool - each thread gets isolated event loop/connections."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_get_env_executor(), func, *args)
 
 
 class RolloutOutput(BaseModel):
@@ -385,8 +402,8 @@ async def collect_fleet_rollout(
     env = FleetTaskEnv(env_config=env_config, extras=extras)
 
     try:
-        # Initialize environment (async) - builds system prompt, gets tools
-        chat_history, metadata = await env.init_async([])
+        # Initialize environment in thread pool - isolates MCP connections
+        chat_history, metadata = await _run_in_executor(env.init, [])
         env_key = metadata.get("env_key", "unknown")
 
         # Tokenize initial prompt
@@ -443,8 +460,8 @@ async def collect_fleet_rollout(
                 all_logprobs.extend([0.0] * len(output_ids))
             loss_mask.extend([1] * len(output_ids))
 
-            # Step environment with LLM output (handles tool parsing, chat history, etc.)
-            step_output = await env.step_async(output_text)
+            # Step environment in thread pool - isolates MCP connections
+            step_output = await _run_in_executor(env.step, output_text)
 
             # Get observation content for tokenization (masked out for loss)
             # Note: BaseTextEnvStepOutput is a TypedDict, use dict access
@@ -485,13 +502,13 @@ async def collect_batch_rollouts(
     max_generate_length: int = 2048,
     max_input_length: int = 30720,
     n_samples_per_prompt: int = 1,
-    max_concurrent: int = 2,
+    max_concurrent: int = 8,
 ) -> List[Dict[str, Any]]:
     """Collect rollouts for a batch of tasks with limited concurrency.
 
     Args:
         max_concurrent: Maximum number of concurrent Fleet environment connections.
-            Fleet MCP connections can timeout if too many are opened simultaneously.
+            Now safe to increase since ThreadPoolExecutor isolates connections.
     """
     # Semaphore to limit concurrent Fleet environment connections
     semaphore = asyncio.Semaphore(max_concurrent)

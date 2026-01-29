@@ -72,7 +72,8 @@ jobs:
           # Install tinker SDK
           uv pip install "tinker>=0.8.0"
           # Install OpenEnv with [fleet] extra for MCP support (includes mcp and fleet-python)
-          uv pip install "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
+          # Use --no-cache-dir to always fetch latest from git
+          uv pip install --no-cache-dir "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
 
       - name: Configure AWS credentials
         run: |
