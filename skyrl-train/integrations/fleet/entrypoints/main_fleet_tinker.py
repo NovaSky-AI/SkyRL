@@ -866,8 +866,8 @@ async def main(
         metrics["time/train"] = time.time() - train_start
         metrics["time/total"] = time.time() - step_start
 
-        # Log metrics
-        wandb.log(metrics, step=step)
+        # Log metrics (commit=True forces immediate sync)
+        wandb.log(metrics, step=step, commit=True)
         pbar.set_postfix(
             {
                 f"pass@{n_samples_per_prompt}": f"{metrics[f'reward/avg_pass_at_{n_samples_per_prompt}']:.3f}",
@@ -915,7 +915,7 @@ async def main(
                     eval_key = key.replace("reward/", "eval/")
                     eval_metrics[eval_key] = value
 
-                wandb.log(eval_metrics, step=step)
+                wandb.log(eval_metrics, step=step, commit=True)
                 logger.info(f"Step {step}: eval pass@1={eval_pass_at_1:.3f}, avg_score={np.mean(eval_rewards):.3f}")
 
     # Save final checkpoint
