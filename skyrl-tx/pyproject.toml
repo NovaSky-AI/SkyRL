@@ -93,6 +93,10 @@ tx = "tx.run.main:app"
 
 # The following is for supporting the skyrl-train dependency
 
+[tool.uv]
+# Exclude skyrl-train on macOS since it requires CUDA torch
+exclude-dependencies = ["skyrl-train"]
+
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
@@ -104,4 +108,4 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 [tool.uv.sources]
 # For now, just always use the current main branch, later it will be better to pin it to a released version. For development, you
 # can set it to your own development branch.
-skyrl-train = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-train" }
+# skyrl-train = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-train" }
