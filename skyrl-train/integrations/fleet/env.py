@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -172,6 +173,8 @@ class FleetTaskEnv(BaseTextEnv):
         Creates Fleet environment via OpenEnv's FleetTaskEnv and returns the task prompt.
         OpenEnv's FleetTaskEnv.__init__() creates the Fleet env and fetches tools.
         """
+        init_start = time.time()
+
         # Close any existing environment
         self.close()
 
@@ -180,17 +183,21 @@ class FleetTaskEnv(BaseTextEnv):
         task_config = self._normalize_task_config()
 
         try:
+            env_start = time.time()
             self.openenv_task_env = OpenEnvFleetTaskEnv(
                 task_config=task_config,
                 api_key=self.api_key,
                 ttl_seconds=self.ttl_seconds,
                 max_steps=self.max_turns,
             )
+            env_time = time.time() - env_start
         except Exception as e:
             raise RuntimeError(f"Failed to create OpenEnv FleetTaskEnv: {e}") from e
 
         # Reset episode state (tools are already cached from __init__)
+        reset_start = time.time()
         obs = await self.openenv_task_env.reset_async()
+        reset_time = time.time() - reset_start
 
         # Reset state
         self.turns = 0
@@ -200,7 +207,12 @@ class FleetTaskEnv(BaseTextEnv):
         self.tools = obs.get("tools", [])
         if not self.tools:
             raise RuntimeError(f"Task {self.task_key}: no tools found in observation. Fleet env requires tools.")
-        logger.info(f"Task {self.task_key}: loaded {len(self.tools)} tools")
+
+        init_time = time.time() - init_start
+        logger.info(
+            f"[{self.task_key}] Init: env={env_time:.1f}s reset={reset_time:.1f}s "
+            f"total={init_time:.1f}s tools={len(self.tools)}"
+        )
 
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
@@ -263,6 +275,7 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
         Parses the action for tool calls, executes via OpenEnv's FleetTaskEnv,
         and returns observation. Reward is computed by the verifier on completion.
         """
+        step_start = time.time()
         self.turns += 1
         self.chat_history.append({"role": "assistant", "content": action})
 
@@ -277,6 +290,7 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
         tool_result = None
         error = None
         reward = 0.0
+        mcp_time = 0.0
 
         # Execute tool call if present via OpenEnv
         if tool_call and self.openenv_task_env:
@@ -290,18 +304,24 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
 
             try:
                 # Use async step method
+                mcp_start = time.time()
                 obs, reward, done, info = await self.openenv_task_env.step_async(openenv_action)
+                mcp_time = time.time() - mcp_start
                 tool_result = obs.get("observation")
                 if "tool_error" in info:
                     error = info["tool_error"]
             except Exception as e:
+                mcp_time = time.time() - mcp_start
                 error = str(e)
         elif agent_done and self.openenv_task_env:
             # Agent signaled done without tool call
             openenv_action = {"done": True}
             try:
+                mcp_start = time.time()
                 obs, reward, done, info = await self.openenv_task_env.step_async(openenv_action)
+                mcp_time = time.time() - mcp_start
             except Exception as e:
+                mcp_time = time.time() - mcp_start
                 error = str(e)
 
         # Check if episode is done
@@ -334,6 +354,7 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
         new_obs = {"role": "user", "content": obs_content}
         self.chat_history.append(new_obs)
 
+        step_time = time.time() - step_start
         metadata = {
             "task_key": self.task_key,
             "turn": self.turns,
@@ -341,7 +362,17 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
             "tool_result": tool_result,
             "error": error,
             "done_reason": "agent_done" if agent_done else None,
+            "step_time": step_time,
+            "mcp_time": mcp_time,
         }
+
+        # Log step timing
+        tool_name = tool_call["name"] if tool_call else "none"
+        status = "DONE" if episode_done else "..."
+        logger.info(
+            f"[{self.task_key}] Turn {self.turns}: step={step_time:.1f}s mcp={mcp_time:.1f}s "
+            f"tool={tool_name} reward={reward:.2f} {status}"
+        )
 
         return BaseTextEnvStepOutput(
             observations=[new_obs],

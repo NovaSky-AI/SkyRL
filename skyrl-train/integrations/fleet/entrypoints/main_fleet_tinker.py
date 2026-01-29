@@ -106,6 +106,10 @@ class RolloutOutput(BaseModel):
     tool_calls: int
     stop_reason: str
     duration: float
+    # Timing breakdown for WandB
+    total_gen_time: float = 0.0  # Total Tinker generation time
+    total_step_time: float = 0.0  # Total MCP/Fleet step time
+    total_tokens: int = 0  # Total tokens generated
     error: Optional[str] = None
 
     class Config:
@@ -416,6 +420,10 @@ async def collect_fleet_rollout(
         done = False
         total_reward = 0.0
         stop_reason = "stop"
+        # Timing accumulators for WandB
+        total_gen_time = 0.0
+        total_step_time = 0.0
+        total_tokens = 0
 
         while not done and env.turns < max_turns:
             turn_start = time.time()
@@ -446,6 +454,7 @@ async def collect_fleet_rollout(
                 sampling_params=sampling_params,
             ).result()
             gen_time = time.time() - gen_start
+            total_gen_time += gen_time
 
             if not result.sequences or len(result.sequences) == 0:
                 logger.warning(f"[{task_key}] Turn {turn_num}: no sequences returned from Tinker")
@@ -470,6 +479,8 @@ async def collect_fleet_rollout(
             step_start = time.time()
             step_output = await _run_in_executor(env.step, output_text)
             step_time = time.time() - step_start
+            total_step_time += step_time
+            total_tokens += len(output_ids)
 
             # Get observation content for tokenization (masked out for loss)
             # Note: BaseTextEnvStepOutput is a TypedDict, use dict access
@@ -503,6 +514,9 @@ async def collect_fleet_rollout(
             tool_calls=env.tool_calls,
             stop_reason=stop_reason,
             duration=time.time() - rollout_start,
+            total_gen_time=total_gen_time,
+            total_step_time=total_step_time,
+            total_tokens=total_tokens,
         )
 
     finally:
@@ -814,6 +828,22 @@ async def main(
             n_samples_per_prompt=n_samples_per_prompt,
         )
         metrics.update(rollout_metrics)
+
+        # Compute timing metrics from valid rollouts
+        gen_times = [r.total_gen_time for r in valid_rollouts]
+        step_times = [r.total_step_time for r in valid_rollouts]
+        tokens = [r.total_tokens for r in valid_rollouts]
+        durations = [r.duration for r in valid_rollouts]
+
+        metrics["time/gen_total"] = sum(gen_times)
+        metrics["time/gen_mean"] = np.mean(gen_times)
+        metrics["time/step_total"] = sum(step_times)
+        metrics["time/step_mean"] = np.mean(step_times)
+        metrics["time/gen_pct"] = 100 * sum(gen_times) / sum(durations) if sum(durations) > 0 else 0
+        metrics["time/step_pct"] = 100 * sum(step_times) / sum(durations) if sum(durations) > 0 else 0
+        metrics["throughput/tokens_total"] = sum(tokens)
+        metrics["throughput/tokens_per_sec_gen"] = sum(tokens) / sum(gen_times) if sum(gen_times) > 0 else 0
+        metrics["throughput/tokens_per_sec_effective"] = sum(tokens) / sum(durations) if sum(durations) > 0 else 0
 
         # Prepare training data (DAPO filtering + truncation + datum creation)
         training_datums, truncated_count = prepare_training_data(
