@@ -62,7 +62,7 @@ class YouComSearchEngine(BaseTool):
     # Normalize to sets for faster checks
     blocklist_domains = {d.strip().lower() for d in _default_block_domains.split(",") if d.strip()}
     blocklist_keywords = {k.strip().lower() for k in _default_block_keywords.split(",") if k.strip()}
-    
+
     def _process_results(self, results: list):
         filtered_pages = []
         for p in results:
@@ -73,9 +73,7 @@ class YouComSearchEngine(BaseTool):
                 link_l = link.lower()
                 combined_l = f"{title} {snippet} {link}".lower()
                 # Domain filtering based on URL substring match
-                blocked_domain = (
-                    any(d in link_l for d in self.blocklist_domains) if self.blocklist_domains else False
-                )
+                blocked_domain = any(d in link_l for d in self.blocklist_domains) if self.blocklist_domains else False
                 # Keyword filtering anywhere in title/snippet/link
                 blocked_keyword = (
                     any(k in combined_l for k in self.blocklist_keywords) if self.blocklist_keywords else False
@@ -152,9 +150,8 @@ class YouComSearchEngine(BaseTool):
                 redacted_version = redacted_version.replace("Your browser can't play this video.", "")
                 web_snippets.append(redacted_version)
 
-            content = (
-                f"YDC search for '{query}' found {len(web_snippets)} results:\n\n## Web Results\n"
-                + "\n\n".join(web_snippets)
+            content = f"YDC search for '{query}' found {len(web_snippets)} results:\n\n## Web Results\n" + "\n\n".join(
+                web_snippets
             )
             return content
         except Exception as e:
