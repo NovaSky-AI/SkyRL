@@ -173,8 +173,6 @@ class FleetTaskEnv(BaseTextEnv):
         Creates Fleet environment via OpenEnv's FleetTaskEnv and returns the task prompt.
         OpenEnv's FleetTaskEnv.__init__() creates the Fleet env and fetches tools.
         """
-        init_start = time.time()
-
         # Close any existing environment
         self.close()
 
@@ -183,21 +181,17 @@ class FleetTaskEnv(BaseTextEnv):
         task_config = self._normalize_task_config()
 
         try:
-            env_start = time.time()
             self.openenv_task_env = OpenEnvFleetTaskEnv(
                 task_config=task_config,
                 api_key=self.api_key,
                 ttl_seconds=self.ttl_seconds,
                 max_steps=self.max_turns,
             )
-            env_time = time.time() - env_start
         except Exception as e:
             raise RuntimeError(f"Failed to create OpenEnv FleetTaskEnv: {e}") from e
 
         # Reset episode state (tools are already cached from __init__)
-        reset_start = time.time()
         obs = await self.openenv_task_env.reset_async()
-        reset_time = time.time() - reset_start
 
         # Reset state
         self.turns = 0
@@ -207,12 +201,6 @@ class FleetTaskEnv(BaseTextEnv):
         self.tools = obs.get("tools", [])
         if not self.tools:
             raise RuntimeError(f"Task {self.task_key}: no tools found in observation. Fleet env requires tools.")
-
-        init_time = time.time() - init_start
-        logger.info(
-            f"[{self.task_key}] Init: env={env_time:.1f}s reset={reset_time:.1f}s "
-            f"total={init_time:.1f}s tools={len(self.tools)}"
-        )
 
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
@@ -365,14 +353,6 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
             "step_time": step_time,
             "mcp_time": mcp_time,
         }
-
-        # Log step timing
-        tool_name = tool_call["name"] if tool_call else "none"
-        status = "DONE" if episode_done else "..."
-        logger.info(
-            f"[{self.task_key}] Turn {self.turns}: step={step_time:.1f}s mcp={mcp_time:.1f}s "
-            f"tool={tool_name} reward={reward:.2f} {status}"
-        )
 
         return BaseTextEnvStepOutput(
             observations=[new_obs],

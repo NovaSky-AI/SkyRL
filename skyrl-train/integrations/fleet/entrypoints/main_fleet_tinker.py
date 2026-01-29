@@ -448,11 +448,14 @@ async def collect_fleet_rollout(
                 top_p=1.0,
             )
 
-            result = sampling_client.sample(
+            # Use async sampling to avoid blocking the event loop
+            # Double await: first await returns a future, second await gets the result
+            sample_future = await sampling_client.sample_async(
                 prompt=types.ModelInput.from_ints(tokens=input_ids),
                 num_samples=1,
                 sampling_params=sampling_params,
-            ).result()
+            )
+            result = await sample_future
             gen_time = time.time() - gen_start
             total_gen_time += gen_time
 

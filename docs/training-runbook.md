@@ -47,7 +47,7 @@ Quick reference for launching training runs on Fleet tasks.
 
 ### Slack Notifications
 
-Channel: `#fleet-training-runs-test`
+Channel: `#fleet-training-runs`
 
 - Started: Run name, backend, modality, config
 - Completed: Final status, WandB link

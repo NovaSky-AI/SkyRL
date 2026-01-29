@@ -173,7 +173,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs-test",
+              "channel": "#fleet-training-runs",
               "text": "🚀 Training Run Started",
               "blocks": [
                 {
@@ -248,7 +248,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs-test",
+              "channel": "#fleet-training-runs",
               "thread_ts": "${{ steps.slack_start.outputs.ts }}",
               "text": "✅ Training Completed",
               "blocks": [
@@ -286,7 +286,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs-test",
+              "channel": "#fleet-training-runs",
               "thread_ts": "${{ steps.slack_start.outputs.ts }}",
               "text": "❌ Training Failed",
               "blocks": [
@@ -324,7 +324,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "#fleet-training-runs-test",
+              "channel": "#fleet-training-runs",
               "thread_ts": "${{ steps.slack_start.outputs.ts }}",
               "text": "⚠️ Training Cancelled",
               "blocks": [
