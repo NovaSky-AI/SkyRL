@@ -404,10 +404,7 @@ class Glm4Model(nnx.Module):
             rngs=rngs,
         )
         self.layers = nnx.List(
-            [
-                Glm4DecoderLayer(config, layer_idx=i, dtype=dtype, rngs=rngs)
-                for i in range(config.num_hidden_layers)
-            ]
+            [Glm4DecoderLayer(config, layer_idx=i, dtype=dtype, rngs=rngs) for i in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 

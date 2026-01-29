@@ -9,6 +9,7 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
+from tx.layers.lora import LoRAMixin
 from tx.models.configs import Glm4Config
 from tx.models.glm4 import Glm4ForCausalLM, Glm4MoE
 from tx.utils.models import load_safetensors
@@ -114,3 +115,96 @@ def test_glm4_moe_layer():
 
     # Higher tolerance due to cross-platform BLAS differences
     assert np.allclose(hf_expert_output.detach().numpy(), jax_expert_output, rtol=6e-3, atol=6e-3)
+
+
+def load_lora_weights(
+    jax_module: LoRAMixin,
+    adapter_idx: int,
+    lora_A_weights: np.ndarray,
+    lora_B_weights: np.ndarray,
+    scaling: float,
+    rank: int,
+) -> None:
+    """Load LoRA weights from numpy arrays to JAX module."""
+    assert (
+        jax_module.lora_A is not None
+        and jax_module.lora_B is not None
+        and jax_module.lora_scaling is not None
+        and jax_module.lora_ranks is not None
+    )
+    jax_module.lora_A[...] = jax_module.lora_A[...].at[adapter_idx].set(jnp.array(lora_A_weights))
+    jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(lora_B_weights))
+    jax_module.lora_scaling[...] = jax_module.lora_scaling[...].at[adapter_idx].set(scaling)
+    jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
+
+
+def test_glm4_moe_layer_lora():
+    """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
+    model_name = "yujiepan/glm-4-moe-tiny-random"
+    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    base_config = PretrainedConfig.from_pretrained(model_name)
+    config = Glm4Config(base_config, max_lora_adapters=3, max_lora_rank=4, shard_attention_heads=True)
+
+    hf_moe_layer = hf_model.model.layers[1].mlp
+    x = torch.randn(3, 4, config.hidden_size)
+
+    mesh = jax.make_mesh(
+        (1, 1),
+        ("fsdp", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto),
+    )
+    with jax.set_mesh(mesh):
+        moe_layer = Glm4MoE(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        load_moe_base_weights(moe_layer, hf_moe_layer)
+
+        # Set LoRA weights for all adapters
+        rng = np.random.default_rng(42)
+        scaling = 2.0
+        rank = config.max_lora_rank
+        for adapter_idx in range(config.max_lora_adapters):
+            for proj in [moe_layer.experts.gate_proj, moe_layer.experts.up_proj, moe_layer.experts.down_proj]:
+                assert proj.lora_A is not None and proj.lora_B is not None
+                lora_A = rng.normal(0, 1.0, proj.lora_A[...].shape[1:])
+                lora_B = rng.normal(0, 1.0, proj.lora_B[...].shape[1:])
+                load_lora_weights(proj, adapter_idx, lora_A, lora_B, scaling, rank)
+
+        # Test with different adapters per sample
+        adapter_indices = jnp.array([0, 2, 1])
+        output_with_lora = moe_layer(x.numpy(), adapter_indices=adapter_indices)
+
+        # Test each sample by comparing with merged weights for its adapter
+        for sample_idx in range(len(adapter_indices)):
+            adapter_idx = int(adapter_indices[sample_idx])
+
+            # Create merged model by adding LoRA weights to base weights
+            moe_layer_merged = Glm4MoE(config, dtype=jnp.float32, rngs=nnx.Rngs(1 + adapter_idx))
+
+            # Copy router weights
+            moe_layer_merged.gate.weight[:] = moe_layer.gate.weight[:]
+            moe_layer_merged.gate.e_score_correction_bias[:] = moe_layer.gate.e_score_correction_bias[:]
+
+            # Copy shared experts weights
+            moe_layer_merged.shared_experts.gate_proj.kernel[:] = moe_layer.shared_experts.gate_proj.kernel[:]
+            moe_layer_merged.shared_experts.up_proj.kernel[:] = moe_layer.shared_experts.up_proj.kernel[:]
+            moe_layer_merged.shared_experts.down_proj.kernel[:] = moe_layer.shared_experts.down_proj.kernel[:]
+
+            for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                proj = getattr(moe_layer.experts, proj_name)
+                proj_merged = getattr(moe_layer_merged.experts, proj_name)
+
+                # For each expert, merge: base + scaling * (lora_A @ lora_B)
+                for expert_idx in range(config.n_routed_experts):
+                    lora_A = proj.lora_A[adapter_idx, expert_idx, :, :]
+                    lora_B = proj.lora_B[adapter_idx, expert_idx, :, :]
+                    lora_delta = scaling * (lora_A @ lora_B)
+
+                    # Copy base weight AND add LoRA delta
+                    base_weight = proj.weight[expert_idx, :, :]
+                    merged_weight = base_weight + lora_delta
+                    proj_merged.weight[...] = proj_merged.weight[...].at[expert_idx, :, :].set(merged_weight)
+
+            # Run merged model on this sample
+            x_sample = x[sample_idx : sample_idx + 1].numpy()
+            output_merged = moe_layer_merged(x_sample)
+
+            assert np.allclose(output_with_lora[sample_idx : sample_idx + 1], output_merged, rtol=1e-3, atol=1e-3)
