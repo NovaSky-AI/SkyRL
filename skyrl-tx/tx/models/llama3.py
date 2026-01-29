@@ -8,7 +8,7 @@ from tx.layers.attention import dot_product_attention
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
-from tx.models.utils import forward_layers
+from tx.models.utils import create_stacked_layers, forward_layers
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -194,6 +194,7 @@ class Llama3Model(nnx.Module):
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
+        self.num_layers = config.num_hidden_layers
 
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
@@ -205,9 +206,11 @@ class Llama3Model(nnx.Module):
             embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
             rngs=rngs,
         )
-        self.layers = nnx.List(
-            [Llama3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
-        )
+
+        def create_layer(rngs: nnx.Rngs) -> Llama3DecoderLayer:
+            return Llama3DecoderLayer(config, dtype=dtype, rngs=rngs)
+
+        self.layers = create_stacked_layers(create_layer, config.num_hidden_layers, rngs)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -226,15 +229,15 @@ class Llama3Model(nnx.Module):
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
 
-        hidden_states, all_hidden_states, updated_keys, updated_values = forward_layers(
+        hidden_states, all_hidden_states, new_kv_cache = forward_layers(
             self.layers,
             hidden_states,
+            self.num_layers,
             attention_mask=attention_mask,
             positions=positions,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
             output_hidden_states=output_hidden_states,
-            training=self.training,
             gradient_checkpointing=self.config.gradient_checkpointing,
         )
 
@@ -244,7 +247,7 @@ class Llama3Model(nnx.Module):
 
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
+            kv_cache=new_kv_cache,
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 

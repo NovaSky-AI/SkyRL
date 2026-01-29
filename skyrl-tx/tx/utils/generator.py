@@ -1,4 +1,4 @@
-"""Generator mixin for autoregressive text generation with KV caching."""
+"""Generator mixin for autoregressive text generation with stacked KV caching."""
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -14,49 +14,61 @@ from tx.tinker import types
 @jax.tree_util.register_dataclass
 @dataclass
 class KVCache:
-    """Key-value cache for all layers, each entry in the list corresponds to one layer."""
+    """Key-value cache for all layers in stacked format.
 
-    keys: list[jax.Array]
-    values: list[jax.Array]
-    cache_position: jax.Array  # Per-sequence positions of shape [B] for left-aligned decoding
+    Attributes:
+        keys: Stacked key cache of shape (num_layers, batch, seq, num_kv_heads, head_dim).
+        values: Stacked value cache of shape (num_layers, batch, seq, num_kv_heads, head_dim).
+        cache_position: Per-sequence positions of shape (batch,) for left-aligned decoding.
+    """
+
+    keys: jax.Array  # (num_layers, batch, seq, num_kv_heads, head_dim)
+    values: jax.Array  # (num_layers, batch, seq, num_kv_heads, head_dim)
+    cache_position: jax.Array  # (batch,)
 
     @staticmethod
-    def update(
-        kv_cache: KVCache | None,
-        keys: list[jax.Array],
-        values: list[jax.Array],
+    def from_layer_outputs(
+        keys: jax.Array,
+        values: jax.Array,
         positions: jax.Array,
         attention_mask: jax.Array,
     ) -> KVCache:
-        """Create an updated KVCache with computed cache positions for left-aligned decoding.
+        """Create KVCache from stacked layer outputs after prefill.
 
         Args:
-            kv_cache: Existing KVCache (None during prefill).
-            keys: List of key arrays per layer.
-            values: List of value arrays per layer.
-            positions: Position indices with shape [B, seq_len].
-            attention_mask: Attention mask with shape [B, seq_len].
+            keys: Stacked keys of shape (num_layers, batch, seq, num_kv_heads, head_dim).
+            values: Stacked values of shape (num_layers, batch, seq, num_kv_heads, head_dim).
+            positions: Position indices of shape (batch, seq).
+            attention_mask: Attention mask of shape (batch, seq).
 
         Returns:
             New KVCache with computed cache_position.
         """
-        if kv_cache is not None:
-            # Decode: next position is current position + 1
-            cache_position = positions[:, 0] + 1
-        else:
-            # Prefill: next position is the sequence length (number of real tokens)
-            cache_position = attention_mask.sum(axis=1)
+        # Prefill: next position is the sequence length (number of real tokens)
+        cache_position = attention_mask.sum(axis=1).astype(jnp.int32)
         return KVCache(keys=keys, values=values, cache_position=cache_position)
 
     @staticmethod
-    def update_layer(kv_cache, k, v, positions):
-        """Update a single layer's KV cache at the given positions (for left-aligned decoding).
+    def update_layer(
+        kv_cache: tuple[jax.Array, jax.Array],
+        k: jax.Array,
+        v: jax.Array,
+        positions: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Update a single layer's KV cache at the given positions.
+
+        This is called from within the scan body to update a single layer's cache.
+        The layer index is handled by the caller (indexing into stacked cache).
 
         Args:
-            kv_cache: Tuple of (k_cache, v_cache) arrays for this layer.
-            k: New key values with shape [B, seq_len, num_heads, head_dim].
-            v: New value values with shape [B, seq_len, num_heads, head_dim].
-            positions: Position indices with shape [B, seq_len].
+            kv_cache: Tuple of (k_cache, v_cache) for this layer.
+                      Each has shape (batch, seq, num_kv_heads, head_dim).
+            k: New key values of shape (batch, seq_len, num_kv_heads, head_dim).
+            v: New value values of shape (batch, seq_len, num_kv_heads, head_dim).
+            positions: Position indices of shape (batch, seq_len).
+
+        Returns:
+            Updated (k_cache, v_cache) tuple with new values at positions.
         """
         k_cache, v_cache = kv_cache
 
@@ -68,22 +80,41 @@ class KVCache:
         return k, v
 
     def pad_to_length(self, max_length: int) -> KVCache:
-        """Pad KV cache to a specified maximum length.
+        """Pad KV cache to a specified maximum sequence length.
 
         Args:
-            max_length: Target length to pad the cache to.
+            max_length: Target sequence length to pad to.
 
         Returns:
             New KVCache with padded keys and values.
         """
-        # k and v have shape [B, T, num_heads, head_dim]
-        cache_pad_length = max_length - self.keys[0].shape[1]
-        pad_spec = ((0, 0), (0, cache_pad_length), (0, 0), (0, 0))
+        current_length = self.keys.shape[2]  # (num_layers, batch, seq, heads, dim)
+        if current_length >= max_length:
+            return self
+
+        pad_length = max_length - current_length
+        # Pad only the sequence dimension (axis 2)
+        pad_spec = ((0, 0), (0, 0), (0, pad_length), (0, 0), (0, 0))
         return KVCache(
-            keys=[jnp.pad(k, pad_spec) for k in self.keys],
-            values=[jnp.pad(v, pad_spec) for v in self.values],
+            keys=jnp.pad(self.keys, pad_spec),
+            values=jnp.pad(self.values, pad_spec),
             cache_position=self.cache_position,
         )
+
+    @property
+    def num_layers(self) -> int:
+        """Number of layers in the cache."""
+        return self.keys.shape[0]
+
+    @property
+    def batch_size(self) -> int:
+        """Batch size."""
+        return self.keys.shape[1]
+
+    @property
+    def seq_len(self) -> int:
+        """Current sequence length."""
+        return self.keys.shape[2]
 
 
 @jax.tree_util.register_dataclass
@@ -197,11 +228,16 @@ class GeneratorMixin:
             last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
-        # Pad KV cache and attention mask
+        # Pad KV cache to max_length
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
 
-        # Pad KV cache and attention mask to max_length
-        kv_cache = kv_cache.pad_to_length(max_length)
+        # Update cache_position after prefill
+        kv_cache = KVCache(
+            keys=kv_cache.keys,
+            values=kv_cache.values,
+            cache_position=attention_mask.sum(axis=1).astype(jnp.int32),
+        )
+
         decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
 
         def decode_fn(s: DecodeState, step: jax.Array) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:

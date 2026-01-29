@@ -1,4 +1,15 @@
-"""Utility functions for model forward passes."""
+"""Utility functions for model forward passes with stacked decoder layers.
+
+This module provides a unified forward_layers function that works for both training
+(with gradient checkpointing) and inference. The key insight is that jax.checkpoint
+is a no-op when not computing gradients, so we can use the same scan-based code path.
+
+Prerequisites:
+- Layers must be created with nnx.vmap (stacked weights)
+- KVCache must use stacked format: (num_layers, batch, seq, heads, dim)
+"""
+
+from typing import TypeVar
 
 from flax import nnx
 import jax
@@ -6,128 +17,146 @@ from jax import numpy as jnp
 
 from tx.utils.generator import KVCache
 
+T = TypeVar("T", bound=nnx.Module)
 
-def _forward_layers_checkpointed(
-    layers: nnx.List,
-    hidden_states: jax.Array,
-    *,
-    attention_mask: jax.Array,
-    positions: jax.Array,
-    adapter_indices: jax.Array | None,
-    output_hidden_states: bool,
-) -> tuple[jax.Array, list[jax.Array]]:
-    """Forward pass with gradient checkpointing using scan.
 
-    Uses scan so XLA compiles ONE loop body and reuses buffers during
-    backward recomputation. With a Python loop, XLA unrolls N separate
-    checkpoint regions and can't optimize buffer reuse across them.
+def create_stacked_layers(
+    create_layer_fn: callable,
+    num_layers: int,
+    rngs: nnx.Rngs,
+) -> nnx.Module:
+    """Create stacked decoder layers using nnx.vmap.
 
-    Tradeoff: requires stacking all layer weights once per forward pass.
-    This is acceptable because checkpointing already trades compute for memory.
+    This creates a single module object where all parameters have shape (num_layers, ...).
+    This enables efficient scanning over layers without runtime stacking.
 
-    TODO(haochen): Load weights directly into stacked format to avoid 2x memory.
-    Currently we have both self.layers (original) and stacked copy during forward.
+    Args:
+        create_layer_fn: Function that takes rngs and returns a single layer module.
+        num_layers: Number of layers to create.
+        rngs: Random number generators for initialization.
+
+    Returns:
+        A single module with stacked parameters.
+
+    Example:
+        >>> def create_layer(rngs):
+        ...     return Llama3DecoderLayer(config, dtype=dtype, rngs=rngs)
+        >>> layers = create_stacked_layers(create_layer, config.num_hidden_layers, rngs)
+        >>> # layers.self_attn.q_proj.kernel.shape == (num_layers, hidden, head_dim*num_heads)
     """
-    num_layers = len(layers)
-    if num_layers == 0:
-        return hidden_states, []
 
-    # Stack layer weights for dynamic indexing in scan
-    layer_graphdef, _ = nnx.split(layers[0])
-    stacked_weights = jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *[nnx.state(layer) for layer in layers])
+    @nnx.split_rngs(splits=num_layers)
+    @nnx.vmap(in_axes=(0,), out_axes=0)
+    def vmapped_create(rngs: nnx.Rngs):
+        return create_layer_fn(rngs)
 
-    def body_fn(hs, i):
-        layer_weights = jax.tree.map(lambda x: x[i], stacked_weights)
-        layer = nnx.merge(layer_graphdef, layer_weights)
-        hs, _ = layer(
-            hs, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices, kv_cache=None
-        )
-        return hs, hs if output_hidden_states else None
-
-    body_fn = jax.checkpoint(body_fn)
-    final_hs, all_hs = jax.lax.scan(body_fn, hidden_states, jnp.arange(num_layers))
-
-    if output_hidden_states:
-        # all_hs is [num_layers, batch, seq, hidden]. Exclude last layer output since
-        # it gets normed and appended in __call__ (matching non-checkpointed path).
-        all_hidden_states = [hidden_states] + [all_hs[i] for i in range(num_layers - 1)]
-    else:
-        all_hidden_states = []
-
-    return final_hs, all_hidden_states
+    return vmapped_create(rngs)
 
 
-def _forward_layers_standard(
-    layers: nnx.List,
+def forward_layers(
+    layers: nnx.Module,
     hidden_states: jax.Array,
+    num_layers: int,
     *,
     attention_mask: jax.Array,
     positions: jax.Array,
     adapter_indices: jax.Array | None,
     kv_cache: KVCache | None,
     output_hidden_states: bool,
-) -> tuple[jax.Array, list[jax.Array], list[jax.Array], list[jax.Array]]:
-    """Standard forward pass through decoder layers."""
-    all_hidden_states: list[jax.Array] = []
-    updated_keys, updated_values = [], []
+    gradient_checkpointing: bool,
+) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
+    """Unified forward pass through stacked decoder layers.
 
-    for layer_idx, layer in enumerate(layers):
-        if output_hidden_states:
-            all_hidden_states.append(hidden_states)
+    Uses jax.lax.scan for both training and inference. When gradient_checkpointing=True,
+    wraps the body function with jax.checkpoint. This is a no-op during inference
+    (when not computing gradients), so we can use a single code path.
 
-        layer_kv = kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
-        hidden_states, (k, v) = layer(
-            hidden_states,
+    Args:
+        layers: Stacked decoder layers (created with create_stacked_layers/nnx.vmap).
+        hidden_states: Input hidden states of shape (batch, seq, hidden).
+        num_layers: Number of decoder layers.
+        attention_mask: Attention mask of shape (batch, seq).
+        positions: Position indices of shape (batch, seq).
+        adapter_indices: Optional LoRA adapter indices of shape (batch,).
+        kv_cache: Optional KV cache with stacked keys/values.
+        output_hidden_states: Whether to return intermediate hidden states.
+        gradient_checkpointing: Whether to use gradient checkpointing.
+
+    Returns:
+        Tuple of:
+        - Final hidden states of shape (batch, seq, hidden)
+        - List of intermediate hidden states (if output_hidden_states=True)
+        - Updated KV cache (if kv_cache was provided)
+    """
+    if num_layers == 0:
+        return hidden_states, [], kv_cache
+
+    # Split layers into graph definition and stacked state
+    layer_graphdef, layer_state = nnx.split(layers)
+
+    # Prepare stacked KV cache
+    stacked_kv: tuple[jax.Array, jax.Array] | None = None
+    if kv_cache is not None:
+        stacked_kv = (kv_cache.keys, kv_cache.values)
+
+    def body_fn(carry, layer_idx):
+        hs, kv = carry
+
+        # Extract this layer's weights by indexing into stacked state
+        layer_weights = jax.tree.map(lambda x: x[layer_idx], layer_state)
+        layer = nnx.merge(layer_graphdef, layer_weights)
+
+        # Get this layer's KV cache slice
+        layer_kv = None
+        if kv is not None:
+            layer_kv = (kv[0][layer_idx], kv[1][layer_idx])
+
+        # Forward through layer
+        new_hs, (k, v) = layer(
+            hs,
             attention_mask=attention_mask,
             positions=positions,
             adapter_indices=adapter_indices,
             kv_cache=layer_kv,
         )
-        updated_keys.append(k)
-        updated_values.append(v)
 
-    return hidden_states, all_hidden_states, updated_keys, updated_values
+        # Update stacked KV cache
+        new_kv = kv
+        if kv is not None:
+            new_kv = (
+                kv[0].at[layer_idx].set(k),
+                kv[1].at[layer_idx].set(v),
+            )
 
+        # Return updated carry and output for this iteration
+        output = hs if output_hidden_states else None
+        return (new_hs, new_kv), output
 
-def forward_layers(
-    layers: nnx.List,
-    hidden_states: jax.Array,
-    *,
-    attention_mask: jax.Array,
-    positions: jax.Array,
-    adapter_indices: jax.Array | None,
-    kv_cache: KVCache | None,
-    output_hidden_states: bool,
-    training: bool,
-    gradient_checkpointing: bool,
-) -> tuple[jax.Array, list[jax.Array], list[jax.Array], list[jax.Array]]:
-    """Forward pass through decoder layers with optional gradient checkpointing.
+    # Apply gradient checkpointing if requested
+    if gradient_checkpointing:
+        body_fn = jax.checkpoint(body_fn)
 
-    Chooses between checkpointed (scan-based) and standard (loop-based) paths.
+    # Scan over layer indices
+    (final_hs, final_kv), all_hs = jax.lax.scan(
+        body_fn,
+        (hidden_states, stacked_kv),
+        jnp.arange(num_layers),
+    )
 
-    Returns:
-        hidden_states: Final hidden states after all layers
-        all_hidden_states: List of hidden states from each layer (if output_hidden_states)
-        updated_keys: List of updated key caches (empty if checkpointing)
-        updated_values: List of updated value caches (empty if checkpointing)
-    """
-    if training and gradient_checkpointing:
-        hidden_states, all_hidden_states = _forward_layers_checkpointed(
-            layers,
-            hidden_states,
-            attention_mask=attention_mask,
-            positions=positions,
-            adapter_indices=adapter_indices,
-            output_hidden_states=output_hidden_states,
+    # Collect hidden states if requested
+    all_hidden_states: list[jax.Array] = []
+    if output_hidden_states:
+        # all_hs has shape (num_layers, batch, seq, hidden)
+        # We want [input, layer0_out, layer1_out, ...] excluding final (it gets normed)
+        all_hidden_states = [hidden_states] + [all_hs[i] for i in range(num_layers - 1)]
+
+    # Reconstruct KVCache if it was provided
+    new_kv_cache = None
+    if kv_cache is not None and final_kv is not None:
+        new_kv_cache = KVCache(
+            keys=final_kv[0],
+            values=final_kv[1],
+            cache_position=kv_cache.cache_position,
         )
-        return hidden_states, all_hidden_states, [], []
-    else:
-        return _forward_layers_standard(
-            layers,
-            hidden_states,
-            attention_mask=attention_mask,
-            positions=positions,
-            adapter_indices=adapter_indices,
-            kv_cache=kv_cache,
-            output_hidden_states=output_hidden_states,
-        )
+
+    return final_hs, all_hidden_states, new_kv_cache
