@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, TypedDict, Any, Optional, Hashable, Protocol, runtime_checkable, TYPE_CHECKING
+from typing import List, Dict, TypedDict, Any, Optional, Hashable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from skyrl_train.weight_sync import WeightUpdateRequest
@@ -29,36 +29,6 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
-
-
-@runtime_checkable
-class InferenceClientProtocol(Protocol):
-    """
-    Structural protocol for inference clients.
-
-    Both InferenceEngineInterface and RemoteInferenceClient satisfy this protocol,
-    enabling code to work with either implementation via duck typing.
-
-    This is the minimal common interface for:
-    - Data plane: generate()
-    - Lifecycle: sleep(), wake_up(), teardown()
-    """
-
-    async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
-        """Generate completions for a batch of inputs."""
-        ...
-
-    async def sleep(self, *args: Any, **kwargs: Any) -> Any:
-        """Put the engine into sleep/low-power mode."""
-        ...
-
-    async def wake_up(self, *args: Any, **kwargs: Any) -> Any:
-        """Wake the engine from sleep mode."""
-        ...
-
-    async def teardown(self) -> None:
-        """Clean up resources."""
-        ...
 
 
 class InferenceEngineInterface(ABC):
