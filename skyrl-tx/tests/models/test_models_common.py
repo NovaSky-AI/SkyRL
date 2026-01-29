@@ -19,6 +19,16 @@ MODEL_PARAMS = [
 MODEL_IDS = ["llama3", "qwen3"]
 
 
+def create_model(model_name, config_cls, model_cls, mesh_axes):
+    """Create model with random weights for testing."""
+    base_config = AutoConfig.from_pretrained(model_name)
+    config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True)
+    mesh = jax.make_mesh((1, 1), mesh_axes)
+    with jax.set_mesh(mesh):
+        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(42))
+    return model, config
+
+
 def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
     """Load model from pre-saved weights directory."""
     base_config = AutoConfig.from_pretrained(model_name)
@@ -35,6 +45,69 @@ def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_ch
         model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
     load_safetensors(tmp_dir, config, model)
     return model
+
+
+@pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
+class TestGradientCheckpointing:
+
+    def test_output_matches_non_checkpointed(self, model_name, config_cls, model_cls, mesh_axes):
+        """Forward pass should produce identical outputs with/without checkpointing."""
+        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
+
+        batch_size, seq_len = 2, 8
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+        # Run without checkpointing
+        config.gradient_checkpointing = False
+        model.train()
+        out_no_ckpt = model(input_ids, attention_mask=attention_mask)
+        logits_no_ckpt = model.compute_logits(out_no_ckpt.last_hidden_state)
+
+        # Run with checkpointing
+        config.gradient_checkpointing = True
+        out_ckpt = model(input_ids, attention_mask=attention_mask)
+        logits_ckpt = model.compute_logits(out_ckpt.last_hidden_state)
+
+        np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-6)
+
+    def test_hidden_states_length_matches(self, model_name, config_cls, model_cls, mesh_axes):
+        """Both paths should return same number of hidden states."""
+        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
+
+        batch_size, seq_len = 2, 8
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+        config.gradient_checkpointing = False
+        model.train()
+        out_no_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
+
+        config.gradient_checkpointing = True
+        out_ckpt = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
+
+        assert len(out_no_ckpt.hidden_states) == len(out_ckpt.hidden_states)
+        assert len(out_ckpt.hidden_states) == config.num_hidden_layers + 1
+
+        for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(out_no_ckpt.hidden_states, out_ckpt.hidden_states)):
+            np.testing.assert_allclose(
+                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
+            )
+
+    def test_eval_mode_uses_standard_path(self, model_name, config_cls, model_cls, mesh_axes):
+        """eval() mode should use standard path with KV cache support."""
+        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
+        config.gradient_checkpointing = True
+
+        batch_size, seq_len = 2, 8
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+        model.eval()
+        out = model(input_ids, attention_mask=attention_mask)
+
+        # KV cache should be populated (checkpointed path returns empty)
+        assert len(out.kv_cache.keys) == config.num_hidden_layers
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)

@@ -4,10 +4,11 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
+from tx.layers.attention import dot_product_attention
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
-from tx.layers.attention import dot_product_attention
+from tx.models.utils import forward_layers
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -189,6 +190,7 @@ class Llama3DecoderLayer(nnx.Module):
 
 
 class Llama3Model(nnx.Module):
+    training: bool = False
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
@@ -223,22 +225,18 @@ class Llama3Model(nnx.Module):
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
+        hidden_states, all_hidden_states, updated_keys, updated_values = forward_layers(
+            self.layers,
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+            training=self.training,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+        )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -275,6 +273,12 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
         return self.lm_head
+
+    def train(self, **attributes):
+        return super().train(training=True, **attributes)
+
+    def eval(self, **attributes):
+        return super().eval(training=False, **attributes)
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:

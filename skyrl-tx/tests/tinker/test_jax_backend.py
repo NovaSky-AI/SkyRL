@@ -330,9 +330,10 @@ def test_process_optim_step_hyperparams_behavior():
 
 def test_gradient_checkpointing():
     """
-    Verify gradient checkpointing doesn't affect loss values.
+    Verify gradient checkpointing doesn't affect loss values or gradients.
     """
     losses = []
+    grads_list = []
     for use_gradient_checkpointing in (False, True):
         config = JaxBackendConfig(
             max_lora_adapters=1,
@@ -354,8 +355,8 @@ def test_gradient_checkpointing():
         sampling_logprobs = jnp.zeros((B, T), dtype=jnp.float32)
         advantages = jnp.zeros((B, T), dtype=jnp.float32)
 
-        # Compute loss, using gradient checkpointing if enabled
-        _, per_token_losses, _ = backend._forward_backward_and_accumulate(
+        # Compute loss and gradients, using gradient checkpointing if enabled
+        accumulated_grads, per_token_losses, _ = backend._forward_backward_and_accumulate(
             backend.accumulated_grads,
             backend.lora_params,
             backend.non_lora_params,
@@ -369,9 +370,13 @@ def test_gradient_checkpointing():
             advantages,
         )
         losses.append(float(per_token_losses.mean()))
+        grads_list.append(accumulated_grads.grad_sum)
 
     # Check relative difference between losses is small
     assert abs(losses[0] - losses[1]) / abs(losses[0]) < 5e-3
+
+    # Check gradients match
+    _assert_tree_allclose(grads_list[0], grads_list[1], rtol=1e-3, atol=1e-3, min_match_pct=99.0)
 
 
 def make_sample_input(tokens: list[int], prompt_logprobs: bool = False, max_tokens: int = 16) -> types.SampleInput:
