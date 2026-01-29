@@ -36,12 +36,14 @@ Currently, you'd have to have [Daytona](https://app.daytona.io/) access to host 
 
 ### Configuration
 
-To configure the Harbor-specific parameters (e.g. the maximum turns a rollout can take), we offer the base yaml in `terminal_bench_config.yaml`. Then in the launch script, specifying the following feeds the terminal_bench_config all the way to `TerminalBenchGenerator`. You can override any config supported by Harbor's `TrialConfig` in the script with `++`, just like what we do for `trials_dir` here.
+To configure the Harbor-specific parameters (e.g. the maximum turns a rollout can take), we offer the base yaml in `terminal_bench_config/default.yaml`. Then in the launch script, specifying the following feeds that yaml to `TerminalBenchGenerator`. 
 
 ```sh
   hydra.searchpath=['file://examples/terminal_bench'] \
   +terminal_bench_config=default \
   ++terminal_bench_config.trials_dir=$TRIALS_DIR \
 ```
+
+You can override any config supported by Harbor's `TrialConfig` in the script with `++`, just like what we do for `trials_dir` here.
 
 For all the configurations, see [Harbor's documentation](https://harborframework.com/docs), and the `TrialConfig` definition: https://github.com/laude-institute/harbor/blob/fdfe296145cf13663dc6a0233f8faab7bfcf5fe1/src/harbor/models/trial/config.py

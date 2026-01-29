@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional
 from loguru import logger
@@ -7,10 +8,9 @@ from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, Gene
 from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from harbor.trial.trial import Trial
-
-from examples.terminal_bench.harbor_config import HarborConfigBuilder
+from harbor.models.trial.config import TrialConfig
 
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
@@ -48,15 +48,24 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
 
-        # Harbor config builder - handles all Harbor-specific configuration.
-        # Users can specify any Harbor-supported options in the YAML config,
-        # and SkyRL only injects minimal runtime values (task_path, api_base, session_id).
-        self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
+        # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
+        # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
+        self._harbor_config_template = OmegaConf.to_container(terminal_bench_cfg, resolve=True)
+
+        # Set model_name and api_base once (constant across all trials)
+        assert generator_cfg.served_model_name is not None, "served_model_name must be set"
+        assert (
+            "/" not in generator_cfg.served_model_name
+        ), "served_model_name must not contain '/', Harbor expects hosted_vllm/{model_name}"
+        self._harbor_config_template.setdefault("agent", {})[
+            "model_name"
+        ] = f"hosted_vllm/{generator_cfg.served_model_name}"
+        self._harbor_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
         logger.info(
             f"TerminalBenchGenerator initialized with Harbor config. "
-            f"Agent: {self._harbor_config_builder.agent_name}, "
-            f"Trials dir: {self._harbor_config_builder.trials_dir}"
+            f"Agent: {self._harbor_config_template.get('agent', {}).get('name')}, "
+            f"Trials dir: {self._harbor_config_template.get('trials_dir', 'trials')}"
         )
 
         # Read custom chat template
@@ -139,26 +148,11 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         Run a single terminal_bench agent.
         """
-        # Generate session_id for sticky routing to inference engines
-        # All LLM requests in this trial will share the same session_id
-        session_id = uuid4().hex
-
-        # Build model name for Harbor (hosted_vllm/{model_alias})
-        assert self.generator_cfg.served_model_name is not None, "served_model_name must be set"
-        assert (
-            "/" not in self.generator_cfg.served_model_name
-        ), "served_model_name must not contain '/', as Harbor expects hosted_vllm model names with exactly one '/', being hosted_vllm/{model_name}"
-        model_alias = self.generator_cfg.served_model_name
-
-        # Build TrialConfig using the Harbor config builder
-        # User's YAML config provides agent, environment, verifier settings
-        # SkyRL injects runtime values: task_path, model_name, api_base, session_id
-        trial_config = self._harbor_config_builder.build_trial_config(
-            task_path=prompt,
-            model_name=f"hosted_vllm/{model_alias}",
-            api_base=f"{self.base_url}/v1",
-            session_id=session_id,
-        )
+        # Build TrialConfig from template, only override task.path and session_id per trial
+        config = deepcopy(self._harbor_config_template)
+        config["task"] = {"path": prompt}
+        config["agent"]["kwargs"]["session_id"] = uuid4().hex
+        trial_config = TrialConfig.model_validate(config)
 
         trial = Trial(trial_config)
 
@@ -185,7 +179,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     break
                 else:
                     logger.warning(
-                        f"{prefix} failed: Agent {self._harbor_config_builder.agent_name} did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}"
+                        f"{prefix} failed: Agent did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}"
                     )
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
