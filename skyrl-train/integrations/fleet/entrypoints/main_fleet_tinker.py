@@ -418,18 +418,22 @@ async def collect_fleet_rollout(
         stop_reason = "stop"
 
         while not done and env.turns < max_turns:
+            turn_start = time.time()
+            turn_num = env.turns + 1  # 1-indexed for logging
+
             # Prepare input for Tinker (use env's chat_history)
             input_ids = tokenize_chat(tokenizer, env.chat_history, add_generation_prompt=True)
 
             # Check context length limit (matching SkyRL's skyrl_gym_generator.py:274)
             if len(input_ids) > max_input_length:
                 logger.info(
-                    f"Context length ({len(input_ids)}) exceeds max_input_length ({max_input_length}), ending rollout"
+                    f"[{task_key}] Turn {turn_num}: context length ({len(input_ids)}) exceeds max ({max_input_length}), ending"
                 )
                 stop_reason = "length"
                 break
 
             # Generate with Tinker
+            gen_start = time.time()
             sampling_params = types.SamplingParams(
                 max_tokens=max_generate_length,
                 temperature=temperature,
@@ -441,9 +445,10 @@ async def collect_fleet_rollout(
                 num_samples=1,
                 sampling_params=sampling_params,
             ).result()
+            gen_time = time.time() - gen_start
 
             if not result.sequences or len(result.sequences) == 0:
-                logger.warning("No sequences returned from Tinker")
+                logger.warning(f"[{task_key}] Turn {turn_num}: no sequences returned from Tinker")
                 break
 
             sequence = result.sequences[0]
@@ -462,7 +467,9 @@ async def collect_fleet_rollout(
             loss_mask.extend([1] * len(output_ids))
 
             # Step environment in thread pool - isolates MCP connections
+            step_start = time.time()
             step_output = await _run_in_executor(env.step, output_text)
+            step_time = time.time() - step_start
 
             # Get observation content for tokenization (masked out for loss)
             # Note: BaseTextEnvStepOutput is a TypedDict, use dict access
@@ -475,6 +482,14 @@ async def collect_fleet_rollout(
 
             total_reward = step_output["reward"]
             done = step_output["done"]
+
+            # Log turn completion with timing
+            turn_time = time.time() - turn_start
+            status = "DONE" if done else "..."
+            logger.info(
+                f"[{task_key}] Turn {turn_num}: gen={gen_time:.1f}s step={step_time:.1f}s "
+                f"total={turn_time:.1f}s toks={len(output_ids)} reward={total_reward:.2f} {status}"
+            )
 
         return RolloutOutput(
             prompt_ids=prompt_ids,
