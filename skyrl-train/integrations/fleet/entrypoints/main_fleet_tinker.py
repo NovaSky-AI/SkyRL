@@ -426,7 +426,6 @@ async def collect_fleet_rollout(
         total_tokens = 0
 
         while not done and env.turns < max_turns:
-            turn_start = time.time()
             turn_num = env.turns + 1  # 1-indexed for logging
 
             # Prepare input for Tinker (use env's chat_history)
@@ -494,14 +493,6 @@ async def collect_fleet_rollout(
 
             total_reward = step_output["reward"]
             done = step_output["done"]
-
-            # Log turn completion with timing
-            turn_time = time.time() - turn_start
-            status = "DONE" if done else "..."
-            logger.info(
-                f"[{task_key}] Turn {turn_num}: gen={gen_time:.1f}s step={step_time:.1f}s "
-                f"total={turn_time:.1f}s toks={len(output_ids)} reward={total_reward:.2f} {status}"
-            )
 
         return RolloutOutput(
             prompt_ids=prompt_ids,
