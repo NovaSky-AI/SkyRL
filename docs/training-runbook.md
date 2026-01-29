@@ -26,6 +26,7 @@ Quick reference for launching training runs on Fleet tasks.
 | `modality` | `tool_use` or `computer_use` | `tool_use` |
 | `env_key` | Filter by environment (empty=all) | `""` |
 | `max_tasks` | Limit tasks for testing | `""` (all) |
+| `data_version` | Dataset version in S3 (e.g., `v0.1`, `v0.2`) | `v0.2` |
 
 #### SkyRL-Specific
 
@@ -125,6 +126,6 @@ sky down <cluster-name> -y
 | `LAMBDA_API_KEY` | SkyRL |
 | `RUNPOD_API_KEY` | SkyRL |
 | `VAST_API_KEY` | SkyRL |
-| `AWS_ACCESS_KEY_ID` | SkyRL (S3 datasets) |
-| `AWS_SECRET_ACCESS_KEY` | SkyRL (S3 datasets) |
+| `AWS_ACCESS_KEY_ID` | Both (S3 datasets) |
+| `AWS_SECRET_ACCESS_KEY` | Both (S3 datasets) |
 | `SLACK_BOT_TOKEN` | Notifications |

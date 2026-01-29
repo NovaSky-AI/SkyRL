@@ -37,13 +37,17 @@ on:
         description: "Samples per prompt (for GRPO)"
         type: string
         default: "4"
+      data_version:
+        description: "Dataset version in S3 (e.g., v0.1, v0.2)"
+        type: string
+        default: "v0.2"
 
 permissions:
   contents: read
 
 env:
   TASKS_BUCKET: "fleet-internal-datasets"
-  TASKS_PREFIX: "v0.2/openenv"
+  TASKS_PREFIX: "${{ inputs.data_version }}/openenv"
 
 jobs:
   train:
@@ -100,6 +104,18 @@ jobs:
           echo "name=$RUN_NAME" >> $GITHUB_OUTPUT
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
           echo "Generated run name: $RUN_NAME"
+
+      - name: Validate data version
+        run: |
+          DATA_VERSION="${{ inputs.data_version }}"
+          echo "Checking if data version '$DATA_VERSION' exists in S3..."
+          if ! aws s3 ls "s3://${{ env.TASKS_BUCKET }}/${DATA_VERSION}/openenv/" > /dev/null 2>&1; then
+            echo "ERROR: Data version '$DATA_VERSION' not found in S3"
+            echo "Available versions:"
+            aws s3 ls "s3://${{ env.TASKS_BUCKET }}/" | grep PRE | awk '{print $2}'
+            exit 1
+          fi
+          echo "Data version '$DATA_VERSION' validated"
 
       - name: Download tasks from S3
         run: |

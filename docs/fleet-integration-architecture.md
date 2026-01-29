@@ -98,6 +98,31 @@ This document describes how Fleet environments integrate with SkyRL and Tinker t
 | Env | `FleetTaskEnv` (OpenEnv) | Low-level Fleet API: env creation, tool execution, verifier |
 | Platform | Fleet | Hosted task environments (Outlook, GitHub, etc.) |
 
+## Dataset Configuration
+
+Both training loops use the same dataset preparation process:
+
+### Data Versioning
+
+Tasks are stored in S3 at `s3://fleet-internal-datasets/{data_version}/openenv/`:
+- `all_tool_use.json` - Tool use tasks
+- `all_computer_use.json` - Computer use tasks
+
+The `data_version` parameter (e.g., `v0.1`, `v0.2`) is configurable in both workflows and validated against S3 before training starts.
+
+### Train/Test Split (`prepare_dataset.py`)
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `eval_ratio` | 10% | Fraction for evaluation |
+| `MAX_EVAL_SAMPLES` | 30 | Cap per environment |
+| `MIN_EVAL_SAMPLES` | 1 | Minimum to create eval split |
+
+Split strategy:
+- **Stratified by environment**: Each env maintains the train/eval ratio
+- **Hash-based assignment**: Deterministic (same task → same split)
+- **Held-out envs**: `instacart` (computer_use only) goes to eval only
+
 ## Communication Flow
 
 ### Tinker Training Loop

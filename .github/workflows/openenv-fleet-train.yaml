@@ -31,6 +31,10 @@ on:
         description: "SkyPilot task name (YAML file in skyrl-train/tasks/)"
         type: string
         default: "openenv-fleet-grpo"
+      data_version:
+        description: "Dataset version in S3 (e.g., v0.1, v0.2)"
+        type: string
+        default: "v0.2"
 
 permissions:
   contents: read
@@ -79,6 +83,22 @@ jobs:
       - name: Verify Cloud Credentials
         run: sky check lambda runpod vast primeintellect
 
+      - name: Validate data version
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          DATA_VERSION="${{ inputs.data_version }}"
+          S3_BUCKET="fleet-internal-datasets"
+          echo "Checking if data version '$DATA_VERSION' exists in S3..."
+          if ! aws s3 ls "s3://${S3_BUCKET}/${DATA_VERSION}/openenv/" > /dev/null 2>&1; then
+            echo "ERROR: Data version '$DATA_VERSION' not found in S3"
+            echo "Available versions:"
+            aws s3 ls "s3://${S3_BUCKET}/" | grep PRE | awk '{print $2}'
+            exit 1
+          fi
+          echo "Data version '$DATA_VERSION' validated"
+
       - name: Generate Cluster Name and Run Name
         id: cluster
         run: |
@@ -126,6 +146,7 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
           LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
           LAUNCH_CMD="$LAUNCH_CMD --env RUN_ID=${{ steps.cluster.outputs.run_id }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env DATA_VERSION=${{ inputs.data_version }}"
 
           # AWS credentials (required for S3 dataset download and checkpoint upload)
           if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
