@@ -4,7 +4,7 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
-from tx.layers.rotary_embedding import apply_rope
+from tx.layers.rotary_embedding import get_rope
 from tx.layers.util import Param, prepare_routing
 from tx.layers.layernorm import RMSNorm
 from tx.layers.attention import dot_product_attention
@@ -30,13 +30,6 @@ class Glm4Attention(nnx.Module):
         tp_shard = "tp" if shard_attention_heads else None
 
         self.head_dim = config.head_dim or config.hidden_size // self.num_heads
-        # Handle both rope_theta directly or via rope_parameters dict
-        if hasattr(config, "rope_parameters") and config.rope_parameters:
-            self.rope_theta = config.rope_parameters["rope_theta"]
-        else:
-            self.rope_theta = config.rope_theta
-
-        self.rotary_dim = int(self.head_dim * self.config.partial_rotary_factor)
 
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
@@ -87,6 +80,9 @@ class Glm4Attention(nnx.Module):
             self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
             self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
+        self.rotary_dim = int(self.head_dim * self.config.partial_rotary_factor)
+        self.rotary_emb, _ = get_rope(self.rotary_dim, config.rope_theta, config.rope_scaling)
+
     def __call__(
         self,
         x: jax.Array,
@@ -110,8 +106,8 @@ class Glm4Attention(nnx.Module):
         q_rot, q_pass = q[..., : self.rotary_dim], q[..., self.rotary_dim :]
         k_rot, k_pass = k[..., : self.rotary_dim], k[..., self.rotary_dim :]
 
-        q_rot = apply_rope(q_rot, positions, self.rotary_dim, self.rope_theta)
-        k_rot = apply_rope(k_rot, positions, self.rotary_dim, self.rope_theta)
+        q_rot = self.rotary_emb(q_rot, positions)
+        k_rot = self.rotary_emb(k_rot, positions)
 
         q = jnp.concatenate([q_rot, q_pass], axis=-1)
         k = jnp.concatenate([k_rot, k_pass], axis=-1)
@@ -204,7 +200,6 @@ class Glm4TopkRouter(nnx.Module):
 
 
 class Glm4Experts(nnx.Module):
-    """MoE experts with separate gate, up, and down projections."""
 
     def __init__(self, config: Glm4Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
