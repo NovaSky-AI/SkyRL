@@ -255,6 +255,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._dispatch is None:
             raise RuntimeError("Model not initialized")
 
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
         # Create temp directory for checkpoint
         with tempfile.TemporaryDirectory() as temp_dir:
             ckpt_dir = os.path.join(temp_dir, "checkpoint")
@@ -302,6 +305,9 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model {model_id} not found")
         if self._dispatch is None:
             raise RuntimeError("Model not initialized")
+
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         # Create temp directory for HuggingFace export
         with tempfile.TemporaryDirectory() as temp_dir:
