@@ -28,7 +28,7 @@ $$
 - $\frac{p_\theta(x)}{q(x)}$ — the PPO importance sampling ratio, correcting for distributional shift between the sampling policy and the current policy when taking multiple mini batch steps for a single training batch
 - $\epsilon_{\text{low}}, \epsilon_{\text{high}}$ — clipping bounds (can be asymmetric)
 
-In most RL frameworks there are two options for representing $q$
+In most RL frameworks, there are two options for representing $q$:
 - $q = \mu_{\theta_{\text{old}}}$, where $\mu$ is the actual sampling policy via the inference engine
 - $q = \pi_{\theta_{\text{old}}}$, where $\pi$ is the trainer policy (same weights, but potentially different parallelism/kernels)
 
@@ -42,7 +42,7 @@ $$
 
 # Off-policy drift in RL
 
-We can quantify off policy drift from this ideal $\frac{\pi_{\theta}(x)}{\mu_{\theta_{\text{old}}}(x)}$ by considering the following expansion:
+We can quantify off-policy drift from this ideal $\frac{\pi_{\theta}(x)}{\mu_{\theta_{\text{old}}}(x)}$ by considering the following expansion:
 
 $$
 \frac{p(x)}{q(x)} = \frac{\pi_{\theta}(x)}{\mu_{\theta_{\text{old}}}(x)} = \frac{\pi_{\theta_{\text{old}}}(x)}{\mu_{\theta_{\text{old}}}(x)} * \frac{\pi_{\theta}(x)}{\pi_{\theta_{\text{old}}}(x)}
@@ -54,7 +54,7 @@ $$
 \frac{\pi_{\theta_{\text{old}}}(x)}{\mu_{\theta_{\text{old}}}(x)}
 $$
 
-corresponds to the off policy drift from **training vs inference mismatch** (due to system differences).
+corresponds to the off-policy drift from **training vs inference mismatch** (due to system differences).
 
 While the second term: 
 
@@ -62,7 +62,7 @@ $$
 \frac{\pi_{\theta}(x)}{\pi_{\theta_{\text{old}}}(x)}
 $$
 
-corresponds to the off policy drift from **policy staleness** (due to parameter differences).
+corresponds to the off-policy drift from **policy staleness** (due to parameter differences).
 
 Next, we discuss how each of these commonly occur in RL training
 
@@ -116,7 +116,7 @@ $$
 The original TIS blog post suggests applying this term using a token-wise $\frac{\pi_{\theta_{\text{old}}}(x)}{\mu_{\theta_{\text{old}}}(x)}$, but follow-up works like [Liu et. al 2025](https://yingru.notion.site/When-Speed-Kills-Stability-Demystifying-RL-Collapse-from-the-Training-Inference-Mismatch-271211a558b7808d8b12d403fd15edda) suggest applying a sequence-level term instead:
 
 $$
-\textcolor{red}{min(\prod_{t=1}^{T} \frac{\pi_{\theta_{\text{old}}}(x_t)}{\mu_{\theta_{\text{old}}}(x_t)}, C)}
+\textcolor{red}{\min(\prod_{t=1}^{T} \frac{\pi_{\theta_{\text{old}}}(x_t)}{\mu_{\theta_{\text{old}}}(x_t)}, C)}
 $$
 
 ```yaml
