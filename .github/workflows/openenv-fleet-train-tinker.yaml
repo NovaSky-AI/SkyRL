@@ -201,7 +201,6 @@ jobs:
             --max-steps ${{ inputs.max_steps }} \
             --n-samples-per-prompt ${{ inputs.n_samples_per_prompt }} \
             --max-turns 50 \
-            --save-every 10 \
             --eval-every 20 \
             --wandb-project fleet-tinker-grpo \
             --wandb-name "${{ steps.run.outputs.name }}"

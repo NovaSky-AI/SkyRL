@@ -644,7 +644,7 @@ async def main(
     max_input_length: int = 30720,
     max_sequence_length: int = 32768,
     n_samples_per_prompt: int = 4,
-    save_every: int = 10,
+    save_every: int = 0,  # Disabled by default - local index file lost on ephemeral runners
     eval_every: int = 20,
     seed: int = 42,
     wandb_project: str = "fleet-tinker-grpo",
@@ -918,8 +918,9 @@ async def main(
                 wandb.log(eval_metrics, step=step, commit=True)
                 logger.info(f"Step {step}: eval pass@1={eval_pass_at_1:.3f}, avg_score={np.mean(eval_rewards):.3f}")
 
-    # Save final checkpoint
-    await save_checkpoint(training_client, "final", save_path, max_steps)
+    # Save final checkpoint (only if checkpointing enabled)
+    if save_every > 0:
+        await save_checkpoint(training_client, "final", save_path, max_steps)
 
     wandb.finish()
     logger.info("Training completed!")
