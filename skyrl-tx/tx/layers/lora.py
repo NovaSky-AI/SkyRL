@@ -343,20 +343,38 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
+        # Check if this is a stacked layer parameter (shape has extra leading dimension)
+        # Stacked layers have shape (num_layers, num_adapters, ...) while
+        # non-stacked (embed_tokens) have shape (num_adapters, ...)
+        is_stacked = "layers" in normalized_path
+
         key_name = path[-2].key
         if key_name == "lora_ranks":
+            if is_stacked:
+                return value.at[:, adapter_index].set(effective_rank)
             return value.at[adapter_index].set(effective_rank)
         if key_name == "lora_scaling":
             # Set scaling to 0.0 if rank is 0
-            return value.at[adapter_index].set(lora_config.alpha / effective_rank if effective_rank > 0 else 0.0)
+            scaling_value = lora_config.alpha / effective_rank if effective_rank > 0 else 0.0
+            if is_stacked:
+                return value.at[:, adapter_index].set(scaling_value)
+            return value.at[adapter_index].set(scaling_value)
         if key_name == "lora_A":
             # Reinitialize with he_uniform, then zero columns beyond rank
-            shape = value[adapter_index].shape
-            new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
-            new_A = new_A.at[..., effective_rank:].set(0.0)
-            return value.at[adapter_index].set(new_A)
+            if is_stacked:
+                shape = value[:, adapter_index].shape
+                new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
+                new_A = new_A.at[..., effective_rank:].set(0.0)
+                return value.at[:, adapter_index].set(new_A)
+            else:
+                shape = value[adapter_index].shape
+                new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
+                new_A = new_A.at[..., effective_rank:].set(0.0)
+                return value.at[adapter_index].set(new_A)
         if key_name == "lora_B":
             # Explicitly zero lora_B
+            if is_stacked:
+                return value.at[:, adapter_index].set(0.0)
             return value.at[adapter_index].set(0.0)
         return value
 
@@ -373,10 +391,16 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     state = nnx.state(model)
 
     def clear_adapter(path, value):
+        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+        is_stacked = "layers" in normalized_path
         key = path[-2].key
         if key == "lora_ranks":
+            if is_stacked:
+                return value.at[:, adapter_index].set(0)
             return value.at[adapter_index].set(0)
         if key in ("lora_scaling", "lora_A", "lora_B"):
+            if is_stacked:
+                return value.at[:, adapter_index].set(0.0)
             return value.at[adapter_index].set(0.0)
         return value
 

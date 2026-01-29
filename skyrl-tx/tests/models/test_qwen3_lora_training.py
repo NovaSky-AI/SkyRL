@@ -46,18 +46,33 @@ def test_lora_training():
         graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
         # Helper to extract adapter params at specific index
+        # Decoder layer LoRA params have shape (num_layers, num_adapters, ...)
+        # Embed tokens LoRA params have shape (num_adapters, ...)
         def get_adapter_params(params, adapter_idx):
-            return jax.tree.map(lambda p: p[adapter_idx].copy(), params)
+            def extract(path, p):
+                path_str = str(path)
+                if "layers" in path_str:
+                    return p[:, adapter_idx].copy()  # Keep layer dimension
+                else:
+                    return p[adapter_idx].copy()
+            return jax.tree.map_with_path(extract, params)
 
         # Helper to extract out-of-rank params for an adapter
         def get_out_of_rank_params(params, adapter_idx, rank):
             def slice_param(path, p):
-                if "lora_A" in str(path):
-                    return p[adapter_idx, :, rank:].copy()
-                elif "lora_B" in str(path):
-                    return p[adapter_idx, rank:, :].copy()
+                path_str = str(path)
+                is_stacked = "layers" in path_str
+                if "lora_A" in path_str:
+                    if is_stacked:
+                        return p[:, adapter_idx, :, rank:].copy()
+                    else:
+                        return p[adapter_idx, :, rank:].copy()
+                elif "lora_B" in path_str:
+                    if is_stacked:
+                        return p[:, adapter_idx, rank:, :].copy()
+                    else:
+                        return p[adapter_idx, rank:, :].copy()
                 return p
-
             return jax.tree.map_with_path(slice_param, params)
 
         # Save initial states

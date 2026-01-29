@@ -156,10 +156,12 @@ def forward_layers(
     # Reconstruct KVCache
     if kv_cache is not None and final_kv is not None:
         # Decode mode: use updated cache from carry
+        # Increment cache_position by the number of new tokens processed
+        new_cache_position = kv_cache.cache_position + positions.shape[1]
         new_kv_cache = KVCache(
             keys=final_kv[0],
             values=final_kv[1],
-            cache_position=kv_cache.cache_position,
+            cache_position=new_cache_position,
         )
     else:
         # Prefill mode: build cache from collected K/V outputs
