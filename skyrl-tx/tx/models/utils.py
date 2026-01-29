@@ -62,7 +62,7 @@ def forward_layers(
     kv_cache: KVCache | None,
     output_hidden_states: bool,
     gradient_checkpointing: bool,
-) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
+) -> tuple[jax.Array, list[jax.Array], KVCache]:
     """Unified forward pass through stacked decoder layers.
 
     Uses jax.lax.scan for both training and inference. When gradient_checkpointing=True,
@@ -76,42 +76,30 @@ def forward_layers(
         attention_mask: Attention mask of shape (batch, seq).
         positions: Position indices of shape (batch, seq).
         adapter_indices: Optional LoRA adapter indices of shape (batch,).
-        kv_cache: Optional KV cache with stacked keys/values.
+        kv_cache: Optional KV cache for decode mode (None for prefill).
         output_hidden_states: Whether to return intermediate hidden states.
         gradient_checkpointing: Whether to use gradient checkpointing.
 
     Returns:
-        Tuple of:
-        - Final hidden states of shape (batch, seq, hidden)
-        - List of intermediate hidden states (if output_hidden_states=True, else empty list)
-        - KV cache: In decode mode (kv_cache provided), returns the updated cache.
-          In prefill mode (kv_cache=None), returns a newly constructed cache from
-          layer outputs. Only None if num_layers=0.
+        Tuple of (final_hidden_states, all_hidden_states, kv_cache).
     """
-    if num_layers == 0:
-        return hidden_states, [], kv_cache
+    assert num_layers > 0, "num_layers must be positive"
 
-    # Split layers into graph definition and stacked state
     layer_graphdef, layer_state = nnx.split(layers)
+    is_decode = kv_cache is not None
 
-    # Prepare stacked KV cache
-    stacked_kv: tuple[jax.Array, jax.Array] | None = None
-    if kv_cache is not None:
-        stacked_kv = (kv_cache.keys, kv_cache.values)
+    def body_fn(hs, xs):
+        # Unpack xs based on mode (structure differs between prefill and decode)
+        if is_decode:
+            layer_idx, layer_k, layer_v = xs
+            layer_kv = (layer_k, layer_v)
+        else:
+            layer_idx = xs
+            layer_kv = None
 
-    def body_fn(carry, layer_idx):
-        hs, kv = carry
+        # Reconstruct layer module from stacked weights
+        layer = nnx.merge(layer_graphdef, jax.tree.map(lambda x: x[layer_idx], layer_state))
 
-        # Extract this layer's weights by indexing into stacked state
-        layer_weights = jax.tree.map(lambda x: x[layer_idx], layer_state)
-        layer = nnx.merge(layer_graphdef, layer_weights)
-
-        # Get this layer's KV cache slice
-        layer_kv = None
-        if kv is not None:
-            layer_kv = (kv[0][layer_idx], kv[1][layer_idx])
-
-        # Forward through layer
         new_hs, (k, v) = layer(
             hs,
             attention_mask=attention_mask,
@@ -120,58 +108,31 @@ def forward_layers(
             kv_cache=layer_kv,
         )
 
-        # Update stacked KV cache if provided
-        new_kv = kv
-        if kv is not None:
-            new_kv = (
-                kv[0].at[layer_idx].set(k),
-                kv[1].at[layer_idx].set(v),
-            )
-
-        # Return updated carry and outputs for this iteration.
-        # Note: We always output (k, v) because JAX scan requires fixed output structure.
-        # During decode (kv_cache provided), these are unused but the memory overhead is
-        # minimal since decode processes seq_len=1. During prefill, we need them to build
-        # the initial KV cache.
         hs_output = new_hs if output_hidden_states else None
-        return (new_hs, new_kv), (hs_output, k, v)
+        return new_hs, (hs_output, k, v)
 
-    # Apply gradient checkpointing if requested
     if gradient_checkpointing:
         body_fn = jax.checkpoint(body_fn)
 
-    # Scan over layer indices
-    (final_hs, final_kv), (all_hs, all_keys, all_values) = jax.lax.scan(
-        body_fn,
-        (hidden_states, stacked_kv),
-        jnp.arange(num_layers),
-    )
+    # Prepare scan inputs: in decode mode, pass per-layer caches via xs
+    # Scan automatically slices along axis 0, so each iteration gets one layer's cache
+    layer_indices = jnp.arange(num_layers)
+    xs = (layer_indices, kv_cache.keys, kv_cache.values) if is_decode else layer_indices
 
-    # Collect hidden states if requested
-    all_hidden_states: list[jax.Array] = []
-    if output_hidden_states:
-        # all_hs has shape (num_layers, batch, seq, hidden) containing output of each layer
-        # We want [embed, layer0_out, layer1_out, ..., layer(N-2)_out]
-        # The model will append the normed layer(N-1)_out after calling this function
-        all_hidden_states = [hidden_states] + [all_hs[i] for i in range(num_layers - 1)]
+    final_hs, (all_hs, all_keys, all_values) = jax.lax.scan(body_fn, hidden_states, xs)
 
-    # Reconstruct KVCache
-    if kv_cache is not None and final_kv is not None:
-        # Decode mode: use updated cache from carry
-        # Increment cache_position by the number of new tokens processed
-        new_cache_position = kv_cache.cache_position + positions.shape[1]
+    # [embed, layer0_out, ..., layer(N-2)_out]; final layer output gets normed by caller
+    all_hidden_states = [hidden_states] + list(all_hs[:-1]) if output_hidden_states else []
+
+    if is_decode:
+        # Decode mode: scan stacked the per-layer updated caches into (num_layers, ...)
         new_kv_cache = KVCache(
-            keys=final_kv[0],
-            values=final_kv[1],
-            cache_position=new_cache_position,
-        )
-    else:
-        # Prefill mode: build cache from collected K/V outputs
-        # all_keys/all_values have shape (num_layers, batch, seq, heads, dim)
-        new_kv_cache = KVCache.from_layer_outputs(
             keys=all_keys,
             values=all_values,
-            attention_mask=attention_mask,
+            cache_position=kv_cache.cache_position + positions.shape[1],
         )
+    else:
+        # Prefill mode: build cache from collected k,v outputs
+        new_kv_cache = KVCache.from_layer_outputs(all_keys, all_values, attention_mask)
 
     return final_hs, all_hidden_states, new_kv_cache
