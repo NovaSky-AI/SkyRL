@@ -64,6 +64,7 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     import tx.models.llama3
     import tx.models.qwen3
     import tx.models.deepseekv3
+    import tx.models.glm4
 
     for architecture in config.architectures or []:
         if hasattr(tx.models.llama3, architecture):
@@ -72,6 +73,8 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
             return getattr(tx.models.qwen3, architecture)
         if hasattr(tx.models.deepseekv3, architecture):
             return getattr(tx.models.deepseekv3, architecture)
+        if hasattr(tx.models.glm4, architecture):
+            return getattr(tx.models.glm4, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
