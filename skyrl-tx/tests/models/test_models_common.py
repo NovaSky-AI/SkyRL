@@ -1,4 +1,5 @@
 import tempfile
+from typing import Any
 
 from flax import nnx
 import jax
@@ -7,9 +8,10 @@ import numpy as np
 import pytest
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from tx.models.configs import Llama3Config, Qwen3Config
+from tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
+from tx.models.types import CausalLMOutput, ModelForCausalLM
 from tx.utils.models import load_safetensors
 
 MODEL_PARAMS = [
@@ -19,7 +21,15 @@ MODEL_PARAMS = [
 MODEL_IDS = ["llama3", "qwen3"]
 
 
-def create_model(model_name, config_cls, model_cls, mesh_axes, *, mesh_axis_types=None, **config_kwargs):
+def create_model(
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+    *,
+    mesh_axis_types: tuple[jax.sharding.AxisType, ...] | None = None,
+    **config_kwargs: Any,
+) -> tuple[ModelForCausalLM, ModelConfig]:
     """Create model with random weights for testing."""
     base_config = AutoConfig.from_pretrained(model_name)
     config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True, **config_kwargs)
@@ -30,7 +40,15 @@ def create_model(model_name, config_cls, model_cls, mesh_axes, *, mesh_axis_type
     return model, config
 
 
-def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
+def load_model(
+    tmp_dir: str,
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+    *,
+    loss_chunk_size: int = 0,
+) -> ModelForCausalLM:
     """Load model from pre-saved weights directory."""
     model, config = create_model(
         model_name, config_cls, model_cls, mesh_axes,
@@ -45,7 +63,15 @@ def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_ch
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
 class TestGradientCheckpointing:
 
-    def _forward(self, model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing, **forward_kwargs):
+    def _forward(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+        gradient_checkpointing: bool,
+        **forward_kwargs: Any,
+    ) -> tuple[ModelForCausalLM, ModelConfig, CausalLMOutput]:
         """Create model, run forward pass, and return (model, config, out)."""
         batch_size, seq_len = 2, 8
         model, config = create_model(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=gradient_checkpointing)
@@ -55,7 +81,13 @@ class TestGradientCheckpointing:
         out = model(input_ids, attention_mask=attention_mask, **forward_kwargs)
         return model, config, out
 
-    def test_output_matches_non_checkpointed(self, model_name, config_cls, model_cls, mesh_axes):
+    def test_output_matches_non_checkpointed(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+    ) -> None:
         """Forward pass should produce identical outputs with/without checkpointing."""
         model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False)
         logits_no_ckpt = model.compute_logits(out.last_hidden_state)
@@ -67,7 +99,13 @@ class TestGradientCheckpointing:
 
         np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-6)
 
-    def test_hidden_states_length_matches(self, model_name, config_cls, model_cls, mesh_axes):
+    def test_hidden_states_length_matches(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+    ) -> None:
         """Both paths should return same number of hidden states."""
         _, config, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False, output_hidden_states=True)
         hidden_states_no_ckpt = out.hidden_states
@@ -82,7 +120,13 @@ class TestGradientCheckpointing:
         for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
             np.testing.assert_allclose(hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}")
 
-    def test_eval_mode_uses_standard_path(self, model_name, config_cls, model_cls, mesh_axes):
+    def test_eval_mode_uses_standard_path(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+    ) -> None:
         """eval() mode should use standard path with KV cache support."""
         model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
         config.gradient_checkpointing = True
@@ -99,7 +143,12 @@ class TestGradientCheckpointing:
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
-def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
+def test_compute_logits(
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+) -> None:
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -126,7 +175,13 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
 @pytest.mark.parametrize("chunk_size", [8, 16, 32])
-def test_chunked_logprobs(model_name, config_cls, model_cls, mesh_axes, chunk_size):
+def test_chunked_logprobs(
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+    chunk_size: int,
+) -> None:
     """Test that chunked and non-chunked compute_logprobs produce identical results."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     inputs = ["The capital of France is", "Hello world"]
