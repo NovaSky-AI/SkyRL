@@ -159,8 +159,8 @@ def load_safetensors(
             continue
 
         if _is_layer_param(path):
-            # Stack layer weights from individual layer tensors
-            layer_tensors = []
+            # Pre-allocate array for stacked layer weights to avoid 2x memory from list + stack
+            stacked_tensor = np.empty(param.shape, dtype=param.dtype)
             for layer_idx in range(num_layers):
                 key = _get_hf_key_for_layer(path, layer_idx)
 
@@ -190,9 +190,7 @@ def load_safetensors(
                     target_shape = param.shape[1:]
                     tensor = tensor.reshape(target_shape)
 
-                layer_tensors.append(tensor)
-
-            stacked_tensor = np.stack(layer_tensors, axis=0)
+                stacked_tensor[layer_idx] = tensor
         else:
             # Non-layer parameter - load directly
             key = _get_hf_key(path)
@@ -389,21 +387,24 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
     def extract_state(path: tuple, p: jnp.ndarray):
         if path[-2].key not in {"lora_A", "lora_B"}:
             return p
-        # For stacked layers, LoRA params have shape (num_layers, num_adapters, ...)
-        # We extract adapter_index from the adapter dimension
+        # LoRA param shapes:
+        # - 3D: Non-stacked linear/embed (A, in, R) or (A, R, out)
+        # - 4D: Stacked linear/embed (L, A, in, R) or non-stacked expert (A, E, in, R)
+        # - 5D: Stacked expert (L, A, E, in, R)
+        # We extract adapter_index from the adapter dimension (axis 1 for stacked, axis 0 otherwise)
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
+        is_stacked = "layers" in [pk.key if hasattr(pk, "key") else str(pk) for pk in path]
         if path[-2].key == "lora_A":
-            # Shape: (L, A, in, R) or (A, in, R) -> extract [..., :, :rank]
-            if p.ndim == 4:  # Stacked: (L, A, in, R)
-                return p[:, adapter_index, :, :rank]
-            else:  # Non-stacked: (A, in, R)
-                return p[adapter_index, :, :rank]
+            if is_stacked:  # (L, A, ..., R)
+                return p[:, adapter_index, ..., :rank]
+            else:  # (A, ..., R)
+                return p[adapter_index, ..., :rank]
         if path[-2].key == "lora_B":
-            # Shape: (L, A, R, out) or (A, R, out) -> extract [..., :rank, :]
-            if p.ndim == 4:  # Stacked: (L, A, R, out)
-                return p[:, adapter_index, :rank, :]
-            else:  # Non-stacked: (A, R, out)
-                return p[adapter_index, :rank, :]
+            if is_stacked:  # (L, A, ..., out)
+                return p[:, adapter_index, ..., :rank, :]
+            else:  # (A, ..., out)
+                return p[adapter_index, ..., :rank, :]
+        return p  # Defensive fallback (should not be reached)
 
     return jax.tree.map_with_path(extract_state, lora_params)
 
@@ -418,17 +419,20 @@ def insert_adapter_state(
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
         if path[-2].key not in {"lora_A", "lora_B"}:
             return new
+        # See extract_adapter_state for shape documentation
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
+        is_stacked = "layers" in [pk.key if hasattr(pk, "key") else str(pk) for pk in path]
         if path[-2].key == "lora_A":
-            if p.ndim == 4:  # Stacked: (L, A, in, R)
-                return p.at[:, adapter_index, :, :rank].set(new)
-            else:  # Non-stacked: (A, in, R)
-                return p.at[adapter_index, :, :rank].set(new)
+            if is_stacked:  # (L, A, ..., R)
+                return p.at[:, adapter_index, ..., :rank].set(new)
+            else:  # (A, ..., R)
+                return p.at[adapter_index, ..., :rank].set(new)
         elif path[-2].key == "lora_B":
-            if p.ndim == 4:  # Stacked: (L, A, R, out)
-                return p.at[:, adapter_index, :rank, :].set(new)
-            else:  # Non-stacked: (A, R, out)
-                return p.at[adapter_index, :rank, :].set(new)
+            if is_stacked:  # (L, A, ..., out)
+                return p.at[:, adapter_index, ..., :rank, :].set(new)
+            else:  # (A, ..., out)
+                return p.at[adapter_index, ..., :rank, :].set(new)
+        return new  # Defensive fallback (should not be reached)
 
     updated = jax.tree.map_with_path(insert_state, lora_params, new_params)
     nnx.update(lora_params, updated)

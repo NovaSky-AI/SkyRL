@@ -9,7 +9,7 @@ Prerequisites:
 - KVCache must use stacked format: (num_layers, batch, seq, heads, dim)
 """
 
-from typing import TypeVar
+from typing import Callable
 
 from flax import nnx
 import jax
@@ -17,11 +17,9 @@ from jax import numpy as jnp
 
 from tx.utils.generator import KVCache
 
-T = TypeVar("T", bound=nnx.Module)
-
 
 def create_stacked_layers(
-    create_layer_fn: callable,
+    create_layer_fn: Callable[[nnx.Rngs], nnx.Module],
     num_layers: int,
     rngs: nnx.Rngs,
 ) -> nnx.Module:
@@ -85,8 +83,10 @@ def forward_layers(
     Returns:
         Tuple of:
         - Final hidden states of shape (batch, seq, hidden)
-        - List of intermediate hidden states (if output_hidden_states=True)
-        - Updated KV cache (if kv_cache was provided)
+        - List of intermediate hidden states (if output_hidden_states=True, else empty list)
+        - KV cache: In decode mode (kv_cache provided), returns the updated cache.
+          In prefill mode (kv_cache=None), returns a newly constructed cache from
+          layer outputs. Only None if num_layers=0.
     """
     if num_layers == 0:
         return hidden_states, [], kv_cache
@@ -128,9 +128,11 @@ def forward_layers(
                 kv[1].at[layer_idx].set(v),
             )
 
-        # Return updated carry and outputs for this iteration
-        # Always output (k, v) so we can build cache during prefill
-        # Output the layer OUTPUT (new_hs), not input, for hidden_states collection
+        # Return updated carry and outputs for this iteration.
+        # Note: We always output (k, v) because JAX scan requires fixed output structure.
+        # During decode (kv_cache provided), these are unused but the memory overhead is
+        # minimal since decode processes seq_len=1. During prefill, we need them to build
+        # the initial KV cache.
         hs_output = new_hs if output_hidden_states else None
         return (new_hs, new_kv), (hs_output, k, v)
 
@@ -169,7 +171,6 @@ def forward_layers(
         new_kv_cache = KVCache.from_layer_outputs(
             keys=all_keys,
             values=all_values,
-            positions=positions,
             attention_mask=attention_mask,
         )
 

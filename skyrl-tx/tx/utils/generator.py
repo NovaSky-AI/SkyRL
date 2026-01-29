@@ -30,7 +30,6 @@ class KVCache:
     def from_layer_outputs(
         keys: jax.Array,
         values: jax.Array,
-        positions: jax.Array,
         attention_mask: jax.Array,
     ) -> KVCache:
         """Create KVCache from stacked layer outputs after prefill.
@@ -38,7 +37,6 @@ class KVCache:
         Args:
             keys: Stacked keys of shape (num_layers, batch, seq, num_kv_heads, head_dim).
             values: Stacked values of shape (num_layers, batch, seq, num_kv_heads, head_dim).
-            positions: Position indices of shape (batch, seq).
             attention_mask: Attention mask of shape (batch, seq).
 
         Returns:
@@ -228,15 +226,8 @@ class GeneratorMixin:
             last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
-        # Pad KV cache to max_length
+        # Pad KV cache to max_length (cache_position is already set by from_layer_outputs)
         kv_cache = outputs.kv_cache.pad_to_length(max_length)
-
-        # Update cache_position after prefill
-        kv_cache = KVCache(
-            keys=kv_cache.keys,
-            values=kv_cache.values,
-            cache_position=attention_mask.sum(axis=1).astype(jnp.int32),
-        )
 
         decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
 
