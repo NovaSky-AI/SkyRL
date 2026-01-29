@@ -33,7 +33,7 @@ agent:
   # Agent-specific settings passed to the agent constructor
   kwargs:
     # Maximum number of agent episodes/iterations
-    max_turns: 2
+    max_turns: 32
 
     # Suppress Harbor override warnings for max_turns
     suppress_max_turns_warning: true
