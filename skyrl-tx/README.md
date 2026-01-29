@@ -19,7 +19,7 @@ SkyRL tx is an open-source library that implements a backend for the [Tinker API
 - **Multi-User LoRA Support** — Efficient GPU sharing across users with individual adapters
 - **SFT & RL Support** — Supervised fine-tuning and reinforcement learning with PPO and custom loss functions
 - **Multi-Node Training** — FSDP and tensor parallelism for distributed training
-- **Multiple Model Architectures** — Support for Qwen3 (dense & MoE) and Llama 3
+- **Multiple Model Architectures** — Support for Qwen3 (dense & MoE), Llama 3, and DeepSeek V3
 - **External Inference Engine** — Optional vLLM integration for optimized inference
 - **Production Ready** — PostgreSQL support, cloud storage checkpoints, and database migrations
 
@@ -229,6 +229,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api 
 | Qwen3 Dense Models | ✅ |
 | Qwen3 MoE Models | ✅ |
 | Llama 3 Models | ✅ |
+| DeepSeek V3 Models | ✅ |
 | Multi-User LoRA | ✅ |
 | LoRA (all layers) | ✅ |
 | Forward/Backward | ✅ |
