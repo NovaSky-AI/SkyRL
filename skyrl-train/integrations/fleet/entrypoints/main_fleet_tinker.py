@@ -396,7 +396,8 @@ async def collect_fleet_rollout(
     task_key = task_config.get("task_key") or task_config.get("key")
 
     # Create SkyRL FleetTaskEnv wrapper
-    env_config = OmegaConf.create({"tasks_file": tasks_file, "ttl_seconds": 1800})
+    # TTL of 2 hours - some rollouts with many turns can take 30+ minutes
+    env_config = OmegaConf.create({"tasks_file": tasks_file, "ttl_seconds": 7200})
     extras = {"task_key": task_key, "max_turns": max_turns}
 
     env = FleetTaskEnv(env_config=env_config, extras=extras)
@@ -764,19 +765,20 @@ async def main(
         metrics["time/rollout"] = time.time() - rollout_start
 
         # Filter valid rollouts and log invalid ones
+        # Note: rollouts are RolloutOutput Pydantic objects - use attribute access
         valid_rollouts = []
         invalid_rollouts = []
         for r in rollouts:
-            if r.get("response_ids") and not r.get("error"):
+            if r.response_ids and not r.error:
                 valid_rollouts.append(r)
             else:
                 invalid_rollouts.append(r)
 
         if invalid_rollouts:
             for r in invalid_rollouts:
-                task_key = r.get("task_key", "unknown")
-                error = r.get("error", "no response_ids")
-                stop_reason = r.get("stop_reason", "unknown")
+                task_key = r.task_key
+                error = r.error or "no response_ids"
+                stop_reason = r.stop_reason
                 logger.warning(f"Step {step}: Invalid rollout for {task_key}: {error} (stop_reason={stop_reason})")
             metrics["rollouts/invalid"] = len(invalid_rollouts)
 
@@ -788,10 +790,10 @@ async def main(
         rewards = [r.reward for r in valid_rollouts]
         advantages = compute_advantages_grpo(rewards, group_size=n_samples_per_prompt, normalize=True)
 
-        # Compute all rollout metrics
+        # Compute all rollout metrics (convert to dicts for metrics functions)
         rollout_metrics = compute_rollout_metrics(
-            rollouts=rollouts,
-            valid_rollouts=valid_rollouts,
+            rollouts=[r.model_dump() for r in rollouts],
+            valid_rollouts=[r.model_dump() for r in valid_rollouts],
             rewards=rewards,
             advantages=advantages,
             n_samples_per_prompt=n_samples_per_prompt,
@@ -854,12 +856,14 @@ async def main(
                     max_input_length=max_input_length,
                     n_samples_per_prompt=1,
                 )
-                all_eval_rollouts.extend([r for r in eval_rollouts if not r.get("error")])
+                all_eval_rollouts.extend([r for r in eval_rollouts if not r.error])
 
             if all_eval_rollouts:
                 eval_rewards = [r.reward for r in all_eval_rollouts]
-                eval_pass_at_1 = compute_pass_at_n(all_eval_rollouts, 1)
-                eval_per_env = compute_per_env_metrics(all_eval_rollouts, 1)
+                # Convert to dicts for metrics functions
+                eval_rollouts_dicts = [r.model_dump() for r in all_eval_rollouts]
+                eval_pass_at_1 = compute_pass_at_n(eval_rollouts_dicts, 1)
+                eval_per_env = compute_per_env_metrics(eval_rollouts_dicts, 1)
 
                 eval_metrics = {
                     "eval/all/avg_score": np.mean(eval_rewards),
