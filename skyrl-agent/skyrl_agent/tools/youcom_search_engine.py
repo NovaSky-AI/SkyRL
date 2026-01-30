@@ -16,6 +16,12 @@ except Exception:
 
 @register_tool("youcom_search_engine")
 class YouComSearchEngine(BaseTool):
+    """
+    A tool that performs batched web searches using the YouCom API.
+    In order to use this tool, you need to set the YDC_API_KEY environment variable. Example of adding to as a tool: 
+    tools: ["youcom_search_engine", "web_browser", "finish"]
+    Also, if you want to run this tool standalone, run it as: YDC_API_KEY="<your_api_key>" python -m skyrl_agent.tools.youcom_search_engine 
+    """
     def __init__(self):
         super().__init__()
         self.you_search_key = os.getenv("YDC_API_KEY")
