@@ -60,8 +60,8 @@ class FSDPStrategy(DistributedStrategy):
     def __init__(
         self,
         fsdp_config: FSDPConfig,
-        optimizer_config: Optional[OptimizerConfig]=None,
-        model_config: Optional[ModelConfig]=None,
+        optimizer_config: Optional[OptimizerConfig] = None,
+        model_config: Optional[ModelConfig] = None,
         fsdp_strategy: str = "fsdp",
         seed: int = 42,
         micro_train_batch_size_per_gpu=1,
@@ -82,9 +82,7 @@ class FSDPStrategy(DistributedStrategy):
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
         self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.cpu_offload
         if self.optimizer_config is not None:
-            self.manual_offload_optimizer = (
-                self.optimizer_config.offload_after_step and self.manual_offload
-            )
+            self.manual_offload_optimizer = self.optimizer_config.offload_after_step and self.manual_offload
         else:
             self.manual_offload_optimizer = False
 
