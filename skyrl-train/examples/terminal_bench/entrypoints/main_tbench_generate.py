@@ -1,5 +1,5 @@
 """
-Main entrypoint for generating rollouts on terminal bench tasks.
+Main entrypoint for generating rollouts on terminal bench tasks. For debugging purposes.
 """
 
 import ray
@@ -14,9 +14,13 @@ from skyrl_train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
 )
-from skyrl_train.generators.base import GeneratorInput
+from skyrl_train.generators.base import GeneratorInput, TrajectoryID
 from examples.terminal_bench.generator.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
+
+
+# For debugging purposes, we only generate a few samples.
+NUM_SAMPLES_TO_TEST = 10
 
 
 class TerminalBenchGenerateExp(BasePPOExp):
@@ -56,9 +60,16 @@ class TerminalBenchGenerateExp(BasePPOExp):
     def run(self):
         generator = self._setup_generator()
 
+        prompts = []
+        trajectory_ids = []
+        for item in self.train_dataset:
+            prompts.append(item["prompt"])
+            trajectory_ids.append(TrajectoryID(instance_id=item["uid"], repetition_id=0))
+
         # Build input from the training dataset
         input_batch = GeneratorInput(
-            prompts=[item["prompt"] for item in self.train_dataset],
+            prompts=prompts[:NUM_SAMPLES_TO_TEST],
+            trajectory_ids=trajectory_ids[:NUM_SAMPLES_TO_TEST],
             env_classes=None,
             env_extras=None,
             sampling_params=None,

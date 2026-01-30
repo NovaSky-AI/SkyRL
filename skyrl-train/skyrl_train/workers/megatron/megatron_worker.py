@@ -29,7 +29,7 @@ from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype
 from skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
-from skyrl_train.training_batch import TrainingOutputBatch
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
@@ -315,7 +315,7 @@ class MegatronWorker:
         )
         return model
 
-    def forward(self, data):
+    def forward(self, data: TrainingInputBatch):
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
@@ -519,7 +519,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
 
-    def ppo_train(self, train_data) -> "TrainingOutputBatch":
+    def ppo_train(self, train_data: TrainingInputBatch) -> TrainingOutputBatch:
         """
         Overrides `PolicyWorkerBase.ppo_train` for megatron.
 

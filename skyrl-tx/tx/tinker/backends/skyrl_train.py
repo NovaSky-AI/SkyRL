@@ -49,6 +49,11 @@ def _build_config(base_model: str, config: SkyRLTrainBackendConfig, lora_config:
     """Build config for SkyRL-Train workers using default config."""
     cfg = get_default_config()
     cfg.trainer.policy.model.path = base_model
+
+    # Disable scheduler - Tinker manages learning rate externally via set_lr()
+    cfg.trainer.policy.optimizer_config.scheduler = "constant"
+    cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
+
     return cfg
 
 
@@ -200,8 +205,14 @@ class SkyRLTrainBackend(AbstractBackend):
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         if model_id != self._model_id:
             raise ValueError(f"Model {model_id} not found")
+
+        # Apply learning rate from AdamParams before optimizer step
+        # Note: beta1, beta2, eps are fixed at optimizer creation and cannot be changed dynamically
+        adam_params = request_data.adam_params
+        self._dispatch.set_lr("policy", adam_params.learning_rate)
+
         grad_norm = self._dispatch.optim_step("policy")
-        logger.info(f"grad_norm: {grad_norm}")
+        logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
         return types.OptimStepOutput()
 
     def sample(

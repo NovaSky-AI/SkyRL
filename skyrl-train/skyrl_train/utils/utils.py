@@ -604,6 +604,10 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
+    if os.environ.get("DAYTONA_API_KEY"):
+        logger.info("Exporting daytona api key to ray runtime env")
+        env_vars["DAYTONA_API_KEY"] = os.environ["DAYTONA_API_KEY"]
+
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
