@@ -5,8 +5,11 @@ These mirror the YAML configuration structure 1:1. The top-level SkyRLConfig
 can be constructed from a Hydra DictConfig via SkyRLConfig.from_dict_config().
 """
 
+from abc import ABC
+import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+import typing
+from typing import Any, Dict, List, Optional, Union, Type, TypeVar, Annotated
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -19,7 +22,12 @@ from skyrl_gym.envs.sql.env import Text2SQLEnvConfig
 
 
 @dataclass
-class DataConfig:
+class BaseConfig(ABC):
+    pass
+
+
+@dataclass
+class DataConfig(BaseConfig):
     train_data: List[str] = field(default_factory=list)
     val_data: List[str] = field(default_factory=list)
 
@@ -30,7 +38,7 @@ class DataConfig:
 
 
 @dataclass
-class LoraConfig:
+class LoraConfig(BaseConfig):
     rank: int = 0
     alpha: int = 16
     dropout: float = 0.0
@@ -41,7 +49,7 @@ class LoraConfig:
 
 
 @dataclass
-class ModelConfig:
+class ModelConfig(BaseConfig):
     path: str = "Qwen/Qwen2.5-1.5B-Instruct"
     lora: Optional[LoraConfig] = None
 
@@ -52,7 +60,7 @@ class ModelConfig:
 
 
 @dataclass
-class OptimizerConfig:
+class OptimizerConfig(BaseConfig):
     lr: float = 1e-6
     adam_betas: List[float] = field(default_factory=lambda: [0.9, 0.999])
     weight_decay: float = 1e-2
@@ -63,14 +71,14 @@ class OptimizerConfig:
 
 
 @dataclass
-class MixedPrecisionConfig:
+class MixedPrecisionConfig(BaseConfig):
     param_dtype: str = "bf16"
     reduce_dtype: str = "fp32"
     buffer_dtype: str = "fp32"
 
 
 @dataclass
-class FSDPConfig:
+class FSDPConfig(BaseConfig):
     cpu_offload: bool = False
     reshard_after_forward: Union[bool, int] = True
     fsdp_size: int = -1
@@ -84,7 +92,7 @@ class FSDPConfig:
 
 
 @dataclass
-class MegatronDDPConfig:
+class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
@@ -92,19 +100,19 @@ class MegatronDDPConfig:
 
 
 @dataclass
-class MegatronTorchProfilerConfig:
+class MegatronTorchProfilerConfig(BaseConfig):
     enable: bool = False
     ranks: List[int] = field(default_factory=list)
     save_path: Optional[str] = None
 
 
 @dataclass
-class MegatronLoraConfig:
+class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
 
 
 @dataclass
-class MegatronOptimizerKwargs:
+class MegatronOptimizerKwargs(BaseConfig):
     overlap_cpu_optimizer_d2h_h2d: bool = False
     use_precision_aware_optimizer: bool = False
     optimizer_cpu_offload: bool = False
@@ -112,7 +120,7 @@ class MegatronOptimizerKwargs:
 
 
 @dataclass
-class MegatronTransformerKwargs:
+class MegatronTransformerKwargs(BaseConfig):
     recompute_granularity: Optional[str] = "full"
     recompute_modules: Optional[List[str]] = field(default_factory=lambda: ["core_attn"])
     recompute_method: Optional[str] = "uniform"
@@ -122,7 +130,7 @@ class MegatronTransformerKwargs:
 
 
 @dataclass
-class MegatronConfig:
+class MegatronConfig(BaseConfig):
     tensor_model_parallel_size: int = 1
     pipeline_model_parallel_size: int = 1
     context_parallel_size: int = 1
@@ -143,7 +151,7 @@ class MegatronConfig:
 
 
 @dataclass
-class PlacementConfig:
+class PlacementConfig(BaseConfig):
     colocate_all: bool = True
     colocate_policy_ref: bool = True
     policy_num_nodes: int = 1
@@ -160,7 +168,7 @@ class PlacementConfig:
 
 
 @dataclass
-class PolicyConfig:
+class PolicyConfig(BaseConfig):
     model: ModelConfig = field(default_factory=ModelConfig)
     optimizer_config: OptimizerConfig = field(default_factory=OptimizerConfig)
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
@@ -172,7 +180,7 @@ class PolicyConfig:
 
 
 @dataclass
-class CriticConfig:
+class CriticConfig(BaseConfig):
     model: ModelConfig = field(default_factory=ModelConfig)
     optimizer_config: OptimizerConfig = field(default_factory=OptimizerConfig)
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
@@ -181,7 +189,7 @@ class CriticConfig:
 
 
 @dataclass
-class RefConfig:
+class RefConfig(BaseConfig):
     model: ModelConfig = field(default_factory=ModelConfig)
     sequence_parallel_size: int = 1
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
@@ -195,46 +203,46 @@ class RefConfig:
 
 
 @dataclass
-class KLCtrlConfig:
+class KLCtrlConfig(BaseConfig):
     type: str = "fixed"
     kl_target: float = 0.1
     horizon: int = 10000
 
 
 @dataclass
-class SAPOConfig:
+class SAPOConfig(BaseConfig):
     tau_pos: float = 1.0
     tau_neg: float = 1.05
 
 
 @dataclass
-class DynamicSamplingConfig:
+class DynamicSamplingConfig(BaseConfig):
     type: Optional[str] = None
     max_sample_batches: int = 30
     min_replace_ratio: float = 0.3
 
 
 @dataclass
-class ClipCovConfig:
+class ClipCovConfig(BaseConfig):
     clip_ratio: float = 0.0002
     clip_cov_lb: float = 1.0
     clip_cov_ub: float = 5.0
 
 
 @dataclass
-class KLCovConfig:
+class KLCovConfig(BaseConfig):
     kl_cov_frac: float = 0.2
     ppo_kl_coef: float = 1.0
 
 
 @dataclass
-class CISPOConfig:
+class CISPOConfig(BaseConfig):
     cispo_eps_clip_low: float = 0.0
     cispo_eps_clip_high: float = 5.0
 
 
 @dataclass
-class AlgorithmConfig:
+class AlgorithmConfig(BaseConfig):
     advantage_estimator: str = "grpo"
     kl_ctrl: KLCtrlConfig = field(default_factory=KLCtrlConfig)
     kl_estimator_type: str = "k3"
@@ -271,7 +279,7 @@ class AlgorithmConfig:
 
 
 @dataclass
-class FullyAsyncConfig:
+class FullyAsyncConfig(BaseConfig):
     max_staleness_steps: int = 4
     num_parallel_generation_workers: int = 768
 
@@ -282,7 +290,7 @@ class FullyAsyncConfig:
 
 
 @dataclass
-class SamplingParams:
+class SamplingParams(BaseConfig):
     max_generate_length: int = 1024
     repetition_penalty: float = 1.0
     temperature: float = 1.0
@@ -295,7 +303,7 @@ class SamplingParams:
 
 
 @dataclass
-class ChatTemplateConfig:
+class ChatTemplateConfig(BaseConfig):
     source: str = "name"
     name_or_path: Optional[str] = None
 
@@ -306,7 +314,7 @@ class ChatTemplateConfig:
 
 
 @dataclass
-class GeneratorConfig:
+class GeneratorConfig(BaseConfig):
     model_name: str = ""
     model_dtype: str = "bfloat16"
     run_engines_locally: bool = True
@@ -360,13 +368,13 @@ class GeneratorConfig:
 
 # redefinition of Judge Env configuration because this is currently only available in examples/
 @dataclass
-class GSM8kLLMJudgeEnvConfig:
+class GSM8kLLMJudgeEnvConfig(BaseConfig):
     model: str = "gpt-4o-mini"
     base_url: Optional[str] = None
 
 
 @dataclass
-class SkyRLGymConfig:
+class SkyRLGymConfig(BaseConfig):
     max_env_workers: int = 32
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
@@ -374,7 +382,7 @@ class SkyRLGymConfig:
 
 
 @dataclass
-class EnvironmentConfig:
+class EnvironmentConfig(BaseConfig):
     env_class: str = "gsm8k"
     skyrl_gym: SkyRLGymConfig = field(default_factory=SkyRLGymConfig)
 
@@ -385,7 +393,7 @@ class EnvironmentConfig:
 
 
 @dataclass
-class TrainerConfig:
+class TrainerConfig(BaseConfig):
     placement: PlacementConfig = field(default_factory=PlacementConfig)
     sequence_parallel_backend: str = "ulysses"
     strategy: str = "fsdp2"
@@ -435,7 +443,7 @@ class TrainerConfig:
 
 
 @dataclass
-class SkyRLConfig:
+class SkyRLConfig(BaseConfig):
     data: DataConfig = field(default_factory=DataConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
@@ -445,7 +453,7 @@ class SkyRLConfig:
     def from_dict_config(cls, cfg: DictConfig) -> "SkyRLConfig":
         """Construct a typed SkyRLConfig from a Hydra DictConfig."""
         raw = OmegaConf.to_container(cfg, resolve=True)
-        return _build_skyrl_config(raw)
+        return build_nested_dataclass(SkyRLConfig, raw)
 
 
 # ---------------------------------------------------------------------------
@@ -453,139 +461,73 @@ class SkyRLConfig:
 # ---------------------------------------------------------------------------
 
 
-def _build_flat(datacls, d: dict):
-    """Build a flat dataclass from a dict, filtering to valid fields only."""
-    import dataclasses
+def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
+    """
+    Validate the keys of a dict against fields of a dataclass.
 
+    Args:
+        datacls: The dataclass class to validate
+    """
     valid_fields = {f.name for f in dataclasses.fields(datacls)}
-    filtered = {k: v for k, v in d.items() if k in valid_fields}
-    return datacls(**filtered)
+    if invalid_keys := set(d.keys() - valid_fields):
+        raise ValueError(f"Invalid fields {invalid_keys} for {datacls.__name__}. Valid fields are {valid_fields}.")
 
 
-def _build_model_config(d: dict) -> ModelConfig:
-    lora_d = d.get("lora")
-    return ModelConfig(
-        path=d.get("path"),
-        lora=_build_flat(LoraConfig, lora_d) if lora_d else None,
-    )
+def _resolve_dataclass_type(type_annotation: Any) -> Optional[Type]:
+    """Extract the concrete dataclass type from a type annotation.
+
+    Handles plain types, Optional[T], Union[T, None], and Annotated[T, ...].
+    Returns None if no dataclass type can be resolved.
+    """
+    origin = typing.get_origin(type_annotation)
+
+    if origin is Union:
+        # Optional[X] is Union[X, None]. Find the non-None dataclass arg.
+        for arg in typing.get_args(type_annotation):
+            if arg is type(None):
+                continue
+            resolved = _resolve_dataclass_type(arg)
+            if resolved is not None:
+                return resolved
+        return None
+
+    if origin is Annotated:
+        return _resolve_dataclass_type(typing.get_args(type_annotation)[0])
+
+    # Plain class check
+    if isinstance(type_annotation, type) and dataclasses.is_dataclass(type_annotation):
+        return type_annotation
+
+    return None
 
 
-def _build_megatron_config(d: dict) -> MegatronConfig:
-    return MegatronConfig(
-        tensor_model_parallel_size=d["tensor_model_parallel_size"],
-        pipeline_model_parallel_size=d["pipeline_model_parallel_size"],
-        context_parallel_size=d["context_parallel_size"],
-        expert_model_parallel_size=d["expert_model_parallel_size"],
-        expert_tensor_parallel_size=d.get("expert_tensor_parallel_size"),
-        ddp_config=_build_flat(MegatronDDPConfig, d["ddp_config"]) if "ddp_config" in d else None,
-        torch_profiler_config=(
-            _build_flat(MegatronTorchProfilerConfig, d["torch_profiler_config"])
-            if "torch_profiler_config" in d
-            else None
-        ),
-        lora_config=_build_flat(MegatronLoraConfig, d["lora_config"]) if "lora_config" in d else None,
-        optimizer_config_kwargs=(
-            _build_flat(MegatronOptimizerKwargs, d["optimizer_config_kwargs"])
-            if "optimizer_config_kwargs" in d
-            else None
-        ),
-        transformer_config_kwargs=(
-            _build_flat(MegatronTransformerKwargs, d["transformer_config_kwargs"])
-            if "transformer_config_kwargs" in d and d["transformer_config_kwargs"]
-            else None
-        ),
-        empty_cuda_cache=d.get("empty_cuda_cache"),
-        model_config_kwargs=d.get("model_config_kwargs", {}),
-    )
+T = TypeVar("T")
 
 
-def _build_algorithm_config(d: dict) -> AlgorithmConfig:
-    nested = {
-        "kl_ctrl": _build_flat(KLCtrlConfig, d["kl_ctrl"]),
-        "sapo": _build_flat(SAPOConfig, d["sapo"]),
-        "dynamic_sampling": _build_flat(DynamicSamplingConfig, d["dynamic_sampling"]),
-        "clip_cov": _build_flat(ClipCovConfig, d["clip_cov"]),
-        "kl_cov": _build_flat(KLCovConfig, d["kl_cov"]),
-        "cispo": _build_flat(CISPOConfig, d["cispo"]),
-    }
-    flat_keys = {f.name for f in AlgorithmConfig.__dataclass_fields__.values()} - set(nested.keys())
-    flat = {k: d[k] for k in flat_keys if k in d}
-    return AlgorithmConfig(**flat, **nested)
+def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
+    """Recursively build a dataclass from a dict, handling nested dataclasses.
 
+    Supports fields typed as standard python types, plain dataclasses, Optional[DataclassType],
+    Union[DataclassType, None], and Annotated[...] wrappers. Non-dataclass
+    fields (primitives, dicts, lists, etc.) are passed through as-is.
 
-def _build_generator_config(d: dict) -> GeneratorConfig:
-    nested = {
-        "chat_template": _build_flat(ChatTemplateConfig, d["chat_template"]),
-        "sampling_params": _build_flat(SamplingParams, d["sampling_params"]),
-        "eval_sampling_params": _build_flat(SamplingParams, d["eval_sampling_params"]),
-    }
-    flat_keys = {f.name for f in GeneratorConfig.__dataclass_fields__.values()} - set(nested.keys())
-    flat = {k: d[k] for k in flat_keys if k in d}
-    return GeneratorConfig(**flat, **nested)
+    Args:
+        datacls: The dataclass class to build.
+        d: The dict to build the dataclass from.
 
-
-def _build_policy_config(d: dict) -> PolicyConfig:
-    return PolicyConfig(
-        model=_build_model_config(d["model"]),
-        optimizer_config=_build_flat(OptimizerConfig, d["optimizer_config"]),
-        fsdp_config=_build_flat(FSDPConfig, d["fsdp_config"]),
-        sequence_parallel_size=d["sequence_parallel_size"],
-        use_torch_compile=d["use_torch_compile"],
-        record_memory=d["record_memory"],
-        megatron_config=_build_megatron_config(d["megatron_config"]),
-    )
-
-
-def _build_critic_config(d: dict) -> CriticConfig:
-    return CriticConfig(
-        model=_build_model_config(d["model"]),
-        optimizer_config=_build_flat(OptimizerConfig, d["optimizer_config"]),
-        fsdp_config=_build_flat(FSDPConfig, d["fsdp_config"]),
-        sequence_parallel_size=d["sequence_parallel_size"],
-    )
-
-
-def _build_ref_config(d: dict) -> RefConfig:
-    return RefConfig(
-        model=_build_model_config(d["model"]),
-        sequence_parallel_size=d["sequence_parallel_size"],
-        fsdp_config=_build_flat(FSDPConfig, d["fsdp_config"]),
-        megatron_config=_build_megatron_config(d["megatron_config"]),
-    )
-
-
-def _build_environment_config(d: dict) -> EnvironmentConfig:
-    skyrl_gym_d = d["skyrl_gym"]
-    skyrl_gym = SkyRLGymConfig(
-        max_env_workers=skyrl_gym_d["max_env_workers"],
-        text2sql=_build_flat(Text2SQLEnvConfig, skyrl_gym_d["text2sql"]),
-        llm_as_a_judge=_build_flat(GSM8kLLMJudgeEnvConfig, skyrl_gym_d["llm_as_a_judge"]),
-        search=_build_flat(SearchEnvConfig, skyrl_gym_d["search"]),
-    )
-    return EnvironmentConfig(
-        env_class=d["env_class"],
-        skyrl_gym=skyrl_gym,
-    )
-
-
-def _build_trainer_config(d: dict) -> TrainerConfig:
-    nested = {
-        "placement": _build_flat(PlacementConfig, d["placement"]),
-        "policy": _build_policy_config(d["policy"]),
-        "ref": _build_ref_config(d["ref"]),
-        "critic": _build_critic_config(d["critic"]),
-        "algorithm": _build_algorithm_config(d["algorithm"]),
-        "fully_async": _build_flat(FullyAsyncConfig, d["fully_async"]),
-    }
-    flat_keys = {f.name for f in TrainerConfig.__dataclass_fields__.values()} - set(nested.keys())
-    flat = {k: d[k] for k in flat_keys if k in d}
-    return TrainerConfig(**flat, **nested)
-
-
-def _build_skyrl_config(raw: dict) -> SkyRLConfig:
-    return SkyRLConfig(
-        data=_build_flat(DataConfig, raw["data"]),
-        trainer=_build_trainer_config(raw["trainer"]),
-        generator=_build_generator_config(raw["generator"]),
-        environment=_build_environment_config(raw["environment"]),
-    )
+    Returns:
+        An instance of the dataclass.
+    """
+    validate_dict_keys_against_dataclass(datacls, d)
+    kwargs = {}
+    for f in dataclasses.fields(datacls):
+        if f.name not in d:
+            continue
+        value = d[f.name]
+        nested_cls = _resolve_dataclass_type(f.type)
+        if nested_cls is not None and isinstance(value, dict):
+            kwargs[f.name] = build_nested_dataclass(nested_cls, value)
+        else:
+            # Primitives, None, lists, raw dicts, already-constructed objects
+            kwargs[f.name] = value
+    return datacls(**kwargs)
