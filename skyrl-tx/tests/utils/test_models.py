@@ -55,14 +55,18 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     adapter_config = LoraConfig(rank=rank, alpha=alpha, seed=0)
 
     # Set LoRA weights to random values for testing (to catch transpose bugs)
-    q_proj = model.model.layers[0].self_attn.q_proj
+    # layers is now stacked, so access directly (not subscriptable)
+    # LoRA weights have shape (num_layers, num_adapters, ...) for stacked layers
+    q_proj = model.model.layers.self_attn.q_proj
     rng1, rng2 = jax.random.split(jax.random.PRNGKey(42))
     q_proj.lora_A[...] = jax.random.normal(rng1, q_proj.lora_A[...].shape)
     q_proj.lora_B[...] = jax.random.normal(rng2, q_proj.lora_B[...].shape)
 
     # Store expected values (trimmed to rank and transposed)
-    expected_lora_A = np.array(q_proj.lora_A[...][adapter_index, :, :rank].T)
-    expected_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :].T)
+    # For stacked layers: shape is (num_layers, num_adapters, in_dim, rank) for lora_A
+    # We have 1 layer, so index [0] for layer, then adapter_index
+    expected_lora_A = np.array(q_proj.lora_A[...][0, adapter_index, :, :rank].T)
+    expected_lora_B = np.array(q_proj.lora_B[...][0, adapter_index, :rank, :].T)
 
     # Save and verify checkpoint exists
     models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path)
