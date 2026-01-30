@@ -16,16 +16,20 @@ def _get_sharding_spec(arr: jax.Array):
     Use jax.typeof() to get sharding info from traced arrays.
     """
     if isinstance(arr, Tracer):
-        # For traced arrays, use jax.typeof to get the abstract value with sharding
         aval = jax.typeof(arr)
         if hasattr(aval, "sharding") and aval.sharding is not None:
             return aval.sharding.spec
         return None
-    else:
-        # For concrete arrays, access sharding directly
-        if arr.sharding is not None:
-            return arr.sharding.spec
-        return None
+    if arr.sharding is not None:
+        return arr.sharding.spec
+    return None
+
+
+def _adapter_index(is_stacked: bool, adapter_index: int):
+    """Return index for accessing an adapter. Stacked params have layers as first dim."""
+    # Stacked layers have shape (num_layers, num_adapters, ...),
+    # non-stacked (embed_tokens) have shape (num_adapters, ...)
+    return (slice(None), adapter_index) if is_stacked else (adapter_index,)
 
 
 class LoRAMixin:
@@ -364,39 +368,22 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
-        # Check if this is a stacked layer parameter (shape has extra leading dimension)
-        # Stacked layers have shape (num_layers, num_adapters, ...) while
-        # non-stacked (embed_tokens) have shape (num_adapters, ...)
-        is_stacked = "layers" in normalized_path
+        idx = _adapter_index("layers" in normalized_path, adapter_index)
 
         key_name = path[-2].key
         if key_name == "lora_ranks":
-            if is_stacked:
-                return value.at[:, adapter_index].set(effective_rank)
-            return value.at[adapter_index].set(effective_rank)
+            return value.at[idx].set(effective_rank)
         if key_name == "lora_scaling":
-            # Set scaling to 0.0 if rank is 0
-            scaling_value = lora_config.alpha / effective_rank if effective_rank > 0 else 0.0
-            if is_stacked:
-                return value.at[:, adapter_index].set(scaling_value)
-            return value.at[adapter_index].set(scaling_value)
+            scaling = lora_config.alpha / effective_rank if effective_rank > 0 else 0.0
+            return value.at[idx].set(scaling)
         if key_name == "lora_A":
             # Reinitialize with he_uniform, then zero columns beyond rank
-            if is_stacked:
-                shape = value[:, adapter_index].shape
-                new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
-                new_A = new_A.at[..., effective_rank:].set(0.0)
-                return value.at[:, adapter_index].set(new_A)
-            else:
-                shape = value[adapter_index].shape
-                new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
-                new_A = new_A.at[..., effective_rank:].set(0.0)
-                return value.at[adapter_index].set(new_A)
+            new_A = nnx.initializers.he_uniform()(rngs.params(), value[idx].shape, value.dtype)
+            new_A = new_A.at[..., effective_rank:].set(0.0)
+            return value.at[idx].set(new_A)
         if key_name == "lora_B":
             # Explicitly zero lora_B
-            if is_stacked:
-                return value.at[:, adapter_index].set(0.0)
-            return value.at[adapter_index].set(0.0)
+            return value.at[idx].set(0.0)
         return value
 
     updated_state = jax.tree.map_with_path(init_adapter, state)
@@ -412,18 +399,12 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     state = nnx.state(model)
 
     def clear_adapter(path, value):
-        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-        is_stacked = "layers" in normalized_path
         key = path[-2].key
-        if key == "lora_ranks":
-            if is_stacked:
-                return value.at[:, adapter_index].set(0)
-            return value.at[adapter_index].set(0)
-        if key in ("lora_scaling", "lora_A", "lora_B"):
-            if is_stacked:
-                return value.at[:, adapter_index].set(0.0)
-            return value.at[adapter_index].set(0.0)
-        return value
+        if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
+            return value
+        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+        idx = _adapter_index("layers" in normalized_path, adapter_index)
+        return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
 
     updated_state = jax.tree.map_with_path(clear_adapter, state)
     nnx.update(model, updated_state)
