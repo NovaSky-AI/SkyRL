@@ -4,7 +4,7 @@ import ray
 from loguru import logger
 from functools import lru_cache
 from skyrl_train.utils.utils import peer_access_supported
-from skyrl_train.env_vars import SKYRL_INCLUDE_PYTHONPATH_IN_RUNTIME_ENV
+from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
 
 
 @lru_cache(5)
@@ -34,8 +34,11 @@ def ray_init_fixture():
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
 
-    if SKYRL_INCLUDE_PYTHONPATH_IN_RUNTIME_ENV:
-        env_vars["PYTHONPATH"] = os.environ.get("PYTHONPATH")
+    if SKYRL_PYTHONPATH_EXPORT:
+        pythonpath = os.environ.get("PYTHONPATH")
+        if pythonpath is None:
+            raise RuntimeError("SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment")
+        env_vars["PYTHONPATH"] = pythonpath
 
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
     ray.init(runtime_env={"env_vars": env_vars})

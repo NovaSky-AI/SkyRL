@@ -9,12 +9,13 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import ray
 from omegaconf import DictConfig
 
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.workers.worker import PPORayActorGroup
 
@@ -40,10 +41,14 @@ class WorkerDispatch:
         policy_actor_group: PPORayActorGroup,
         critic_actor_group: Optional[PPORayActorGroup] = None,
         ref_actor_group: Optional[PPORayActorGroup] = None,
+        inference_engine_client: Optional[InferenceEngineClient] = None,
     ):
         self.cfg = cfg
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.colocate_policy_ref = cfg.trainer.placement.colocate_policy_ref
+
+        # Inference engine client for weight sync (optional)
+        self._inference_engine_client = inference_engine_client
 
         # Actor groups by name.
         # TODO: Remove these role-specific identifiers. We will move to using model IDs and add support for generic models beyond these.
@@ -148,14 +153,51 @@ class WorkerDispatch:
         output = concatenate_outputs_after_mesh_dispatch(self._actor_groups[model].actor_infos, results)
         return output
 
-    def forward_backward(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
-        """Run forward/backward pass. Needs model + optimizer."""
+    def forward_backward(
+        self,
+        model: str,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """Run forward/backward pass. Needs model + optimizer.
+
+        Args:
+            model: Model identifier ("policy", "critic", or "ref")
+            data: Training batch data
+            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
+                     If provided, overrides the config's policy_loss_type.
+            loss_fn_config: Optional config overrides for the loss function
+                           (e.g., {"clip_low_threshold": 0.9} for PPO)
+
+        Returns:
+            Dictionary of training metrics
+        """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data)
+        # Only pass kwargs that are not None (critic worker doesn't accept loss_fn)
+        kwargs = {}
+        if loss_fn is not None:
+            kwargs["loss_fn"] = loss_fn
+        if loss_fn_config is not None:
+            kwargs["loss_fn_config"] = loss_fn_config
+
+        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data, **kwargs)
         statuses = ray.get(refs)
 
         self._save_memory_snapshot(model, "forward_backward")
+
+        # With DP>1, each rank returns loss_fn_outputs for its data chunk.
+        # Concatenate them in rank order to get the full batch's outputs.
+        # Scalar metrics (loss, lr) are already all-reduced, so use statuses[0] for those.
+        if len(statuses) > 1 and statuses[0] and "loss_fn_outputs" in statuses[0]:
+            all_loss_fn_outputs = []
+            for status in statuses:
+                all_loss_fn_outputs.extend(status.pop("loss_fn_outputs", []))
+            result = statuses[0]
+            result["loss_fn_outputs"] = all_loss_fn_outputs
+            return result
+
         return statuses[0]
 
     def optim_step(self, model: str) -> Optional[float]:
@@ -271,6 +313,34 @@ class WorkerDispatch:
         if not self.colocate_all:
             return
         self._offload("policy", offload_optimizer=False, offload_model=True)
+
+    async def save_weights_for_sampler(self) -> None:
+        """
+        Tinker API method to prepare updated parameters for sampling.
+
+        Syncs weights to inference engine for sampling.
+        """
+        if self._inference_engine_client is None:
+            raise RuntimeError(
+                "Cannot save_weights_for_sampler: no inference_engine_client configured. "
+                "Pass inference_engine_client to WorkerDispatch constructor or call set_inference_engine_client()."
+            )
+
+        # Sync weights to inference engine
+        self.prepare_for_weight_sync()
+        if self.colocate_all:
+            await self._inference_engine_client.wake_up(tags=["weights"])
+        self.broadcast_to_inference_engines(self._inference_engine_client)
+        self.finish_weight_sync()
+        if self.colocate_all:
+            await self._inference_engine_client.wake_up(tags=["kv_cache"])
+
+    def set_inference_engine_client(self, inference_engine_client: InferenceEngineClient) -> None:
+        """Set the inference engine client for weight sync.
+
+        This can be called after construction if the client isn't available at init time.
+        """
+        self._inference_engine_client = inference_engine_client
 
     def empty_cache(self, model: Optional[str] = None) -> None:
         """Empty GPU cache for model(s)."""

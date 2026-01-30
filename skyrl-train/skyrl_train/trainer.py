@@ -25,6 +25,7 @@ from skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
 )
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.evaluate import evaluate, evaluate_step_wise
 from skyrl_train.generators.base import (
     GeneratorInput,
@@ -44,7 +45,6 @@ from skyrl_train.utils import (
     ppo_utils,
     trainer_utils,
 )
-from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.utils.io import io
 from skyrl_train.utils.logging_utils import log_example
 from skyrl_train.utils.ppo_utils import (
@@ -179,14 +179,9 @@ class RayPPOTrainer:
             with Timer("load_checkpoints"):
                 self.global_step, _ = self.load_checkpoints()
 
-        self.dispatch.prepare_for_weight_sync()
-        if self.colocate_all:
-            await self.inference_engine_client.wake_up(tags=["weights"])
+        # Prepare weights for sampling
         with Timer("sync_weights"):
-            self.dispatch.broadcast_to_inference_engines(self.inference_engine_client)
-        self.dispatch.finish_weight_sync()
-        if self.colocate_all:
-            await self.inference_engine_client.wake_up(tags=["kv_cache"])
+            await self.dispatch.save_weights_for_sampler()
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
@@ -307,15 +302,9 @@ class RayPPOTrainer:
                         with Timer("update_ref_with_policy", self.all_timings):
                             self.update_ref_with_policy()
 
-                    # 7. sync weights to inference engines
-                    self.dispatch.prepare_for_weight_sync()
-                    if self.colocate_all:
-                        await self.inference_engine_client.wake_up(tags=["weights"])
+                    # 7. Prepare weights for sampling
                     with Timer("sync_weights", self.all_timings):
-                        self.dispatch.broadcast_to_inference_engines(self.inference_engine_client)
-                    self.dispatch.finish_weight_sync()
-                    if self.colocate_all:
-                        await self.inference_engine_client.wake_up(tags=["kv_cache"])
+                        await self.dispatch.save_weights_for_sampler()
 
                 # 8. set logs
                 logger.info(status)
@@ -562,6 +551,7 @@ class RayPPOTrainer:
             policy_actor_group=policy_model,
             critic_actor_group=critic_model,
             ref_actor_group=ref_model,
+            inference_engine_client=self.inference_engine_client,
         )
 
         # Mark all models as offloaded if colocate_all (they were offloaded above)
@@ -574,12 +564,20 @@ class RayPPOTrainer:
         """
         Setup the connection between policy model and inference engine for weight syncing.
         """
-        ray.get(
-            self.policy_model.async_run_ray_method(
-                "pass_through", "init_weight_sync_state", self.inference_engine_client
-            )
-        )
+        self.dispatch.init_weight_sync_state(self.inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
+
+    def sync_policy_weights_to_inference_engines(self) -> List[ObjectRef]:
+        """Broadcast policy weights to inference engines.
+
+        Note: For new code, prefer using dispatch.save_weights_for_sampler() which
+        handles the full weight sync protocol including offload/backload.
+        This method is kept for backward compatibility with subclasses.
+        TODO(tgriggs): Remove this method when migration is complete.
+        """
+        return self.policy_model.async_run_ray_method(
+            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+        )
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training"""
@@ -1021,11 +1019,6 @@ class RayPPOTrainer:
 
         return data
 
-    def sync_policy_weights_to_inference_engines(self) -> List[ObjectRef]:
-        return self.policy_model.async_run_ray_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
-        )
-
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Execute training step for FSDP strategy using forward_backward + optim_step.
@@ -1375,7 +1368,7 @@ class RayPPOTrainer:
         Update the reference model with the policy model weights (required by some algorithms).
 
         Dispatch handles offload/backload automatically for all colocation configurations.
-        After this method, prepare_for_weight_sync() should be called to ensure policy is on GPU.
+        After this method, save_weights_for_sampler() should be called to sync weights.
         """
         # TODO(tgriggs): Make policy-to-ref sync faster.
         policy_export_dir = os.path.join(self.cfg.trainer.export_path, f"global_step_{self.global_step}", "policy")

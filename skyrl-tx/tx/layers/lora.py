@@ -149,7 +149,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
     def T(self):
         """Return a callable that projects hidden states back to vocabulary space."""
         # TODO: Apply lora adapters here as well
-        return lambda hidden_states, adapter_indices=None: hidden_states @ self.embedding.value.T
+        return lambda hidden_states, adapter_indices=None: hidden_states @ self.embedding[...].T
 
 
 class LoRALinear(LoRAMixin, nnx.Linear):
@@ -224,8 +224,8 @@ class LoRAExpert(LoRAMixin, nnx.Module):
 
         self.weight = Param(num_experts, in_features, out_features, dtype=dtype, kernel_init=kernel_init, rngs=rngs)
 
-        assert self.weight.value.sharding is not None, "LoRAExpert layer needs sharding"
-        sharding = self.weight.value.sharding.spec
+        assert self.weight[...].sharding is not None, "LoRAExpert layer needs sharding"
+        sharding = self.weight[...].sharding.spec
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
@@ -245,7 +245,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         *,
         group_offset: jax.Array | None = None,
     ) -> jax.Array:
-        base_out = ragged_dot(x, self.weight.value, group_sizes, group_offset=group_offset)
+        base_out = ragged_dot(x, self.weight[...], group_sizes, group_offset=group_offset)
 
         if self.max_lora_adapters == 0 or adapter_indices_sorted is None:
             return base_out
@@ -259,14 +259,18 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         # Expert-first flattening so local expert groups are contiguous
         flattened_indices = expert_indices * self.max_lora_adapters + adapter_indices_sorted
         num_flattened_groups = self.num_experts * self.max_lora_adapters
-        num_local_experts = self.lora_A.value.shape[1]
+        num_local_experts = self.lora_A[...].shape[1]
 
         # Reshape LoRA weights in expert-first order
-        lora_A = self.lora_A.value.transpose((1, 0, 2, 3)).reshape(
-            self.max_lora_adapters * num_local_experts, self.in_features, self.max_lora_rank
+        lora_A = (
+            self.lora_A[...]
+            .transpose((1, 0, 2, 3))
+            .reshape(self.max_lora_adapters * num_local_experts, self.in_features, self.max_lora_rank)
         )
-        lora_B = self.lora_B.value.transpose((1, 0, 2, 3)).reshape(
-            self.max_lora_adapters * num_local_experts, self.max_lora_rank, self.out_features
+        lora_B = (
+            self.lora_B[...]
+            .transpose((1, 0, 2, 3))
+            .reshape(self.max_lora_adapters * num_local_experts, self.max_lora_rank, self.out_features)
         )
 
         # Sort tokens by combined index
@@ -281,7 +285,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
 
         # Unsort and apply scaling
         lora_output = lora_output_sorted[unsort_indices]
-        lora_output = lora_output * self.lora_scaling.value[adapter_indices_sorted, None]
+        lora_output = lora_output * self.lora_scaling[...][adapter_indices_sorted, None]
 
         return base_out + lora_output
 
@@ -298,6 +302,11 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         adapter_index: Index of the adapter to initialize
         lora_config: LoraConfig object containing rank, alpha, seed, and training flags
     """
+    if lora_config.train_unembed and getattr(model.config, "tie_word_embeddings", False):
+        raise ValueError(
+            "train_unembed=True is incompatible with tie_word_embeddings=True. "
+            "Tied embeddings use embed_tokens.T which does not support LoRA."
+        )
     rngs = nnx.Rngs(lora_config.seed)
     state = nnx.state(model)
 

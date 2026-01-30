@@ -1,13 +1,36 @@
+from unittest.mock import MagicMock
+
 from flax import nnx
 import jax.numpy as jnp
 from tx.models.types import CausalLMOutput
 from tx.tinker.types import SamplingParams
 from tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch, apply_top_p_batch
+from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
 
-class DummyModel(GeneratorMixin, nnx.Module):
-    def __init__(self, vocab_size: int = 16):
+class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
+    """Dummy model for testing generator behavior.
+
+    In this dummy model, hidden_states directly equal logits (identity transformation).
+    When adapter_indices is provided, it scales logits by (1 + adapter_index).
+    """
+
+    def __init__(self, vocab_size: int = 16, loss_chunk_size: int = 0):
+        self.config = MagicMock(loss_chunk_size=loss_chunk_size, gradient_checkpointing=False)
         self.vocab_size = vocab_size
+
+        def lm_head(hidden_states, adapter_indices=None):
+            # Scale logits by (1 + adapter_index) so different adapters give different log-softmax results
+            if adapter_indices is not None:
+                scale = (1 + adapter_indices[:, None, None]).astype(jnp.float32)
+                return hidden_states * scale
+            return hidden_states
+
+        self.lm_head = lm_head
+
+    def get_lm_head(self) -> LMHead:
+        """Return the lm_head callable for logits computation."""
+        return self.lm_head
 
     def __call__(
         self,
@@ -16,27 +39,27 @@ class DummyModel(GeneratorMixin, nnx.Module):
         positions=None,
         kv_cache=None,
         adapter_indices=None,
-        skip_prompt_logits=False,
     ):
-        """Simple dummy model for testing generator behavior."""
         batch_size, seq_len = input_ids.shape
         base = jnp.arange(self.vocab_size, dtype=jnp.float32)
 
         if kv_cache is None:
-            # Prefill: deterministic logits
-            logits = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
-            # Only return last token logits if requested (saves memory during prefill)
-            if skip_prompt_logits:
-                logits = logits[:, -1:, :]
+            # Prefill: deterministic hidden_states (which equal logits)
+            hidden_states = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
-            kv_cache = KVCache(keys=keys, values=values, cache_position=seq_len)
+            # Per-sequence cache_position (all same length in this test)
+            cache_position = (
+                attention_mask.sum(axis=1) if attention_mask is not None else jnp.full((batch_size,), seq_len)
+            )
+            kv_cache = KVCache(keys=keys, values=values, cache_position=cache_position)
         else:
-            # Step: logits vary with cache_position
-            logits = jnp.tile(base[None, None, :] + kv_cache.cache_position, (batch_size, 1, 1))
+            # Step: hidden_states vary with cache_position (use mean for batched position)
+            mean_pos = kv_cache.cache_position.mean()
+            hidden_states = jnp.tile(base[None, None, :] + mean_pos, (batch_size, 1, 1))
             kv_cache = KVCache(keys=kv_cache.keys, values=kv_cache.values, cache_position=kv_cache.cache_position + 1)
 
-        return CausalLMOutput(logits=logits, last_hidden_state=logits, kv_cache=kv_cache)
+        return CausalLMOutput(last_hidden_state=hidden_states, kv_cache=kv_cache)
 
 
 def make_inputs(batch_size: int, prompt_length: int):
@@ -135,6 +158,19 @@ def test_prompt_logprobs():
         assert (
             len(result_batch.prompt_logprobs[i]) == expected_length
         ), f"Sequence {i}: expected prompt_logprobs length {expected_length}"
+
+    # Test that adapter_indices affects prompt_logprobs (verifies adapter_indices is passed to compute_logprobs)
+    adapter_0 = jnp.array([0], dtype=jnp.int32)
+    adapter_1 = jnp.array([1], dtype=jnp.int32)
+    result_adapter_0 = model.generate(
+        input_ids, attention_mask, sampling_params=[sampling], adapter_indices=adapter_0, prompt_logprobs=True
+    )
+    result_adapter_1 = model.generate(
+        input_ids, attention_mask, sampling_params=[sampling], adapter_indices=adapter_1, prompt_logprobs=True
+    )
+    assert not jnp.allclose(
+        jnp.array(result_adapter_0.prompt_logprobs[0]), jnp.array(result_adapter_1.prompt_logprobs[0])
+    ), "prompt_logprobs should differ when adapter_indices differ"
 
 
 def test_top_k_filtering():

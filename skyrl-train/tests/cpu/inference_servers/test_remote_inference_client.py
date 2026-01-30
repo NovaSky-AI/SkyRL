@@ -178,26 +178,6 @@ class TestRemoteInferenceClientInit:
         # Session should be None after unpickling
         assert restored._session is None
 
-    def test_from_server_group(self, mock_servers):
-        """Test factory method from_server_group."""
-        client = RemoteInferenceClient.from_server_group(
-            server_urls=mock_servers["server_urls"],
-            router_url=mock_servers["proxy_url"],
-            model_name="test-model",
-        )
-        assert client.proxy_url == mock_servers["proxy_url"]
-        assert client.server_urls == mock_servers["server_urls"]
-
-    def test_from_router(self, mock_servers):
-        """Test factory method from_router."""
-        router_url = mock_servers["proxy_url"]
-        client = RemoteInferenceClient.from_router(
-            router_url=router_url,
-            model_name="test-model",
-        )
-        assert client.proxy_url == router_url
-        assert client.server_urls == [router_url]
-
 
 class TestDataPlane:
     """Test data plane methods."""

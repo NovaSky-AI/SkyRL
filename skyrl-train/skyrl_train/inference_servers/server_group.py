@@ -13,7 +13,6 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from skyrl_train.inference_servers.common import ServerInfo
 from skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl_train.inference_servers.server_pool import ServerActorPool
-from skyrl_train.inference_servers.vllm_server_actor import VLLMServerActor
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ class ServerGroup:
         enable_dp: bool = False,
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
-        server_actor_cls: Type[ServerActorProtocol] = VLLMServerActor,
+        server_actor_cls: Optional[Type[ServerActorProtocol]] = None,
     ):
         """
         Initialize the server group.
@@ -61,10 +60,12 @@ class ServerGroup:
             nixl_side_channel_base: Base port for NIXL side channels. Each
                 server will be assigned a port of nixl_side_channel_base +
                 server_idx.
-            server_actor_cls: Server actor class implementing ServerActorProtocol.
-                Defaults to VLLMServerActor.
+            server_actor_cls: Server actor class implementing
+                ServerActorProtocol. Defaults to VLLMServerActor.
         """
-        self._server_actor_cls = server_actor_cls
+        from skyrl_train.inference_servers.vllm_server_actor import VLLMServerActor
+
+        self._server_actor_cls = server_actor_cls or VLLMServerActor
         self._cli_args = cli_args
         self._num_servers = num_servers
         self._start_port = start_port
@@ -77,10 +78,10 @@ class ServerGroup:
         self._internal_pg: Optional[PlacementGroup] = None
 
         # Query the actor class for GPU requirements
-        self._num_gpus_per_server = server_actor_cls.compute_num_gpus_per_server(cli_args)
+        self._num_gpus_per_server = self._server_actor_cls.compute_num_gpus_per_server(cli_args)
 
         logger.info(
-            f"ServerGroup: actor_cls={server_actor_cls.__name__}, "
+            f"ServerGroup: actor_cls={self._server_actor_cls.__name__}, "
             f"num_servers={num_servers}, "
             f"gpus_per_server={self._num_gpus_per_server}, "
             f"enable_dp={enable_dp}, enable_pd={enable_pd}, "

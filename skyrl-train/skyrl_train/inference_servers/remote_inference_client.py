@@ -5,26 +5,42 @@ This is a lightweight, fully serializable HTTP client that wraps the inference
 server HTTP API. It replaces the old InferenceEngineInterface for HTTP-based
 inference servers.
 
+Architecture:
+-------------
+This client is responsible for BOTH data plane and control plane operations:
+
+1. Data Plane (routed through proxy_url):
+   - generate, chat_completion, completion, tokenize, detokenize
+   - Uses proxy_url which points to a router (vllm-router, sglang-router, InferenceRouter)
+   - Router handles load balancing and session-aware routing
+
+2. Control Plane (fan-out to all server_urls):
+   - pause, resume, sleep, wake_up, reset_prefix_cache
+   - init_weight_transfer, update_weights, finalize_weight_update
+   - Fans out directly to all backend servers (bypassing router)
+   - This allows using external routers that only handle data plane
+
+The router (proxy_url) is expected to be a data-plane-only router. Control plane
+operations are always fanned out to all backends by this client directly.
+
 Key features:
 - Serializable: Can be pickled and passed between processes
 - Two URL types:
   - proxy_url: Single URL for data plane operations (routed requests)
   - server_urls: List of backend URLs for control plane operations (fan-out)
 - Lazy world_size fetching from /get_server_info
-- Pure HTTP: Uses /tokenize endpoint if token IDs are needed
-- Built-in retry on abort for in-flight weight updates
+- Built-in retry on abort for in-flight weight updates (temporary)
 
 Usage:
-    # Full proxy mode (router handles both data and control plane)
     client = RemoteInferenceClient(
-        proxy_url="http://router:8080",
-        server_urls=["http://router:8080"],
+        proxy_url="http://router:8080",  # Data plane (router)
+        server_urls=["http://backend1:8000", "http://backend2:8000"],  # Control plane
     )
 
 Comparison with existing code:
 - Replaces: InferenceEngineClient + RemoteInferenceEngine (for remote-only usage)
 - Key difference: Talks directly to router via HTTP, no Ray actor wrapping
-- The router handles session-aware routing; this client is simpler
+- The router handles session-aware routing; this client handles control plane fan-out
 
 TODO: Data Plane Operations - Future Deprecation
 ------------------------------------------------
@@ -97,18 +113,15 @@ class RemoteInferenceClient:
     - proxy_url: Single URL for data plane operations (routed requests)
     - server_urls: List of backend URLs for control plane operations (fan-out)
 
-    This separation allows using external routers (vllm-router, sglang-router)
-    that only handle data plane, while still being able to call control plane
-    endpoints directly on backends.
+    The router (proxy_url) is expected to be a data-plane-only router (like
+    vllm-router, sglang-router, or InferenceRouter). Control plane operations
+    are always fanned out to all backends directly by this client.
 
-    For a "full proxy" setup where the router handles both data and control plane,
-    set proxy_url and server_urls to the same value:
-        proxy_url = "http://router:8080"
-        server_urls = ["http://router:8080"]
-
-    For external routers that only handle data plane:
-        proxy_url = "http://vllm-router:8080"
-        server_urls = ["http://backend1:8000", "http://backend2:8000"]
+    Usage:
+        client = RemoteInferenceClient(
+            proxy_url="http://router:8080",  # Data plane (router)
+            server_urls=["http://backend1:8000", "http://backend2:8000"],  # Control plane
+        )
     """
 
     proxy_url: str
@@ -627,56 +640,3 @@ class RemoteInferenceClient:
         """Restore state after unpickling."""
         self.__dict__.update(state)
         self._session = None
-
-    # ---------------------------
-    # Compatibility helpers
-    # ---------------------------
-
-    @classmethod
-    def from_server_group(
-        cls,
-        server_urls: List[str],
-        router_url: str,
-        model_name: str = "default",
-    ) -> "RemoteInferenceClient":
-        """
-        Create client from server group URLs.
-
-        Args:
-            server_urls: List of backend server URLs.
-            router_url: Router URL for data plane.
-            model_name: Model name for API calls.
-
-        Returns:
-            Configured RemoteInferenceClient.
-        """
-        return cls(
-            proxy_url=router_url,
-            server_urls=server_urls,
-            model_name=model_name,
-        )
-
-    @classmethod
-    def from_router(
-        cls,
-        router_url: str,
-        model_name: str = "default",
-    ) -> "RemoteInferenceClient":
-        """
-        Create client for a full-feature router (handles both data and control plane).
-
-        This is for routers like InferenceRouter that support all endpoints.
-        Control plane calls go to the router which fans out to backends.
-
-        Args:
-            router_url: Router URL.
-            model_name: Model name for API calls.
-
-        Returns:
-            Configured RemoteInferenceClient.
-        """
-        return cls(
-            proxy_url=router_url,
-            server_urls=[router_url],
-            model_name=model_name,
-        )

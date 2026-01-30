@@ -1,5 +1,12 @@
 """
-Inference Router - HTTP proxy with session-aware routing and control plane fan-out.
+Inference Router - HTTP proxy with session-aware routing (data plane only).
+
+This router handles data plane operations only, similar to vllm-router:
+- Routes requests to ONE server (session-aware or round-robin)
+- Does NOT handle control plane operations (pause, resume, weight sync, etc.)
+
+Control plane operations should be handled by RemoteInferenceClient, which
+fans out directly to all backend servers.
 """
 
 import asyncio
@@ -20,33 +27,19 @@ from skyrl_train.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEO
 logger = logging.getLogger(__name__)
 
 
-# Control plane routes are broadcast to ALL servers.
-# Everything else (data plane) is load-balanced to ONE server.
-CONTROL_PLANE_ROUTES = [
-    # BUILT-IN ROUTES
-    "/pause",
-    "/resume",
-    "/is_paused",
-    "/sleep",
-    "/wake_up",
-    "/reset_prefix_cache",
-    "/collective_rpc",
-    # SKYRL-SPECIFIC ROUTES
-    "/init_weight_transfer",
-    "/update_weights",
-    "/finalize_weight_update",
-]
-
-
 class InferenceRouter:
     """
-    HTTP proxy router for multiple vLLM servers.
+    HTTP proxy router for multiple vLLM servers (data plane only).
+
+    This is a simple load-balancing router similar to vllm-router. It handles
+    data plane operations only (generation, tokenization, etc.).
 
     Routing behavior:
-    - Data plane (generation requests): Routes to ONE server.
-      - If X-Session-ID header present: consistent hash to same backend
-      - Otherwise: round-robin
-    - Control plane (sleep, pause, weight sync): Fans out to ALL backends
+    - If X-Session-ID header present: consistent hash to same backend
+    - Otherwise: round-robin
+
+    Control plane operations (pause, resume, sleep, weight sync) should be
+    handled by RemoteInferenceClient, which fans out directly to all backends.
 
     Usage:
         router = InferenceRouter(server_urls, host="0.0.0.0", port=8080)
@@ -106,10 +99,6 @@ class InferenceRouter:
             return self._get_server_for_session(session_id)
         return self._get_server_round_robin()
 
-    def _is_control_plane_route(self, path: str) -> bool:
-        """Check if path is a control plane route (fan-out to all)."""
-        return any(path.startswith(route) for route in CONTROL_PLANE_ROUTES)
-
     def _build_app(self) -> FastAPI:
         """Build the FastAPI app with proxy routes."""
         app = FastAPI(
@@ -122,17 +111,14 @@ class InferenceRouter:
         @app.get("/health")
         async def health():
             """Router health check (doesn't proxy to backends)."""
+            # TODO: What should be the health check for router?
+            # https://github.com/NovaSky-AI/SkyRL/issues/958
             return {"status": "healthy"}
 
         @app.get("/servers")
         async def list_servers():
             """Return list of server URLs."""
             return {"servers": self._server_urls}
-
-        @app.get("/get_server_info")
-        async def get_server_info():
-            """Fetch server info from all servers, return mapping."""
-            return await self._fan_out_get("/get_server_info")
 
         # Catch-all: proxy everything else to backends
         @app.api_route(
@@ -146,34 +132,15 @@ class InferenceRouter:
 
     async def _proxy_request(self, request: Request, path: str) -> Response:
         """
-        Proxy a request to backend(s).
-
-        Control plane routes go to ALL backends.
-        Data plane routes go to ONE backend (session-aware or round-robin).
+        Proxy a request to one backend (session-aware or round-robin).
         """
-        if self._is_control_plane_route(path):
-            return await self._proxy_to_all(request, path)
-        else:
-            return await self._proxy_to_one(request, path)
+        return await self._proxy_to_one(request, path)
 
     def _forward_headers(self, request: Request) -> dict:
         """Forward headers (filter out hop-by-hop headers)."""
         return {
             k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length", "transfer-encoding")
         }
-
-    async def _fan_out_get(self, path: str) -> dict:
-        """Fan out a GET request to all servers, return mapping of server_url -> response."""
-
-        async def call_server(server_url: str):
-            try:
-                resp = await self._client.get(f"{server_url}{path}", timeout=30.0)
-                return server_url, resp.json() if resp.content else None
-            except Exception as e:
-                return server_url, {"error": str(e)}
-
-        results = await asyncio.gather(*[call_server(url) for url in self._server_urls])
-        return {url: response for url, response in results}
 
     async def _proxy_to_one(self, request: Request, path: str) -> Response:
         """Proxy request to one server (data plane)."""
@@ -194,51 +161,6 @@ class InferenceRouter:
             content=response.content,
             status_code=response.status_code,
             headers=dict(response.headers),
-        )
-
-    async def _proxy_to_all(self, request: Request, path: str) -> Response:
-        """Proxy request to all servers (control plane), return mapping of responses."""
-        import json
-
-        method = request.method
-        body = await request.body()
-
-        # Forward headers
-        headers = self._forward_headers(request)
-
-        # Send to all servers concurrently
-        async def call_server(server_url: str):
-            url = f"{server_url}{path}"
-            try:
-                response = await self._client.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    content=body,
-                )
-                return server_url, {
-                    "status": response.status_code,
-                    "body": response.json() if response.content else None,
-                }
-            except Exception as e:
-                return server_url, {
-                    "status": 500,
-                    "error": str(e),
-                }
-
-        results = await asyncio.gather(*[call_server(url) for url in self._server_urls])
-
-        # Build mapping from server_url to response
-        response_map = {url: resp for url, resp in results}
-
-        # Check if all succeeded
-        all_ok = all(r.get("status") == 200 for r in response_map.values())
-        status_code = 200 if all_ok else 207  # Multi-Status on partial failure
-
-        return Response(
-            content=json.dumps(response_map),
-            status_code=status_code,
-            media_type="application/json",
         )
 
     def start(self) -> str:
@@ -274,8 +196,7 @@ class InferenceRouter:
         self._wait_until_healthy(router_url)
 
         logger.info(f"Router started at {router_url}")
-        logger.info("  GET /servers - list servers")
-        logger.info("  GET /get_server_info - get parallelism info")
+        logger.info("  GET /servers - list backend server URLs")
         return router_url
 
     def _wait_until_healthy(
