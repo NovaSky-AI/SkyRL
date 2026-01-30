@@ -186,3 +186,51 @@ def test_deepseekv3_moe_layer_lora(ep: int, tp: int):
             output_merged = moe_layer_merged(x_sample)
 
             assert np.allclose(output_with_lora[sample_idx : sample_idx + 1], output_merged, rtol=1e-3, atol=1e-3)
+
+
+def test_deepseekv3_gradient_checkpointing():
+    """Test that gradient checkpointing produces identical outputs for DeepSeekV3.
+
+    DeepSeekV3 has split stacking (dense_layers + moe_layers), so this tests
+    that gradient checkpointing works correctly with heterogeneous layer types.
+    """
+    model_name = "yujiepan/deepseek-v3-tiny-random"
+    base_config = PretrainedConfig.from_pretrained(model_name, trust_remote_code=True)
+
+    batch_size, seq_len = 2, 8
+    mesh = jax.make_mesh((1, 1, 1), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
+
+    results = {}
+    for use_checkpointing in [False, True]:
+        config = DeepseekV3Config(
+            base_config,
+            max_lora_adapters=1,
+            max_lora_rank=1,
+            shard_attention_heads=True,
+            gradient_checkpointing=use_checkpointing,
+        )
+        with jax.set_mesh(mesh):
+            model = DeepseekV3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+
+            input_ids = jax.random.randint(jax.random.key(42), (batch_size, seq_len), 0, config.vocab_size)
+            attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+            out = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
+            logits = model.compute_logits(out.last_hidden_state)
+
+            results[use_checkpointing] = {
+                "logits": np.array(logits),
+                "hidden_states": [np.array(hs) for hs in out.hidden_states],
+                "kv_cache_shape": out.kv_cache.keys.shape,
+            }
+
+    # Verify outputs match
+    np.testing.assert_allclose(results[False]["logits"], results[True]["logits"], rtol=1e-4, atol=1e-6)
+
+    # Verify hidden states match
+    assert len(results[False]["hidden_states"]) == len(results[True]["hidden_states"])
+    for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(results[False]["hidden_states"], results[True]["hidden_states"])):
+        np.testing.assert_allclose(hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}")
+
+    # Verify KV cache shape is correct (num_layers, batch, seq, heads, dim)
+    assert results[True]["kv_cache_shape"][0] == config.num_hidden_layers
