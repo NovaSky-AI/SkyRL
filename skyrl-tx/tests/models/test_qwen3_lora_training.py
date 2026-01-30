@@ -11,6 +11,8 @@ from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import init_lora_adapter
 from tx.tinker.types import LoraConfig
 
+from tests.models.lora_test_utils import get_adapter_params, get_out_of_rank_params, verify_params_unchanged
+
 
 def test_lora_training():
     base_model = "Qwen/Qwen3-0.6B"
@@ -21,7 +23,7 @@ def test_lora_training():
     mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
-        load_safetensors(checkpoint_path, config, model, config.num_hidden_layers)
+        load_safetensors(checkpoint_path, config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
         init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16, seed=0))
@@ -45,36 +47,6 @@ def test_lora_training():
         # that we want to compute gradients for
         graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-        # Helper to extract adapter params at specific index
-        # Decoder layer LoRA params have shape (num_layers, num_adapters, ...)
-        # Embed tokens LoRA params have shape (num_adapters, ...)
-        def get_adapter_params(params, adapter_idx):
-            def extract(path, p):
-                path_str = str(path)
-                if "layers" in path_str:
-                    return p[:, adapter_idx].copy()  # Keep layer dimension
-                else:
-                    return p[adapter_idx].copy()
-            return jax.tree.map_with_path(extract, params)
-
-        # Helper to extract out-of-rank params for an adapter
-        def get_out_of_rank_params(params, adapter_idx, rank):
-            def slice_param(path, p):
-                path_str = str(path)
-                is_stacked = "layers" in path_str
-                if "lora_A" in path_str:
-                    if is_stacked:
-                        return p[:, adapter_idx, :, rank:].copy()
-                    else:
-                        return p[adapter_idx, :, rank:].copy()
-                elif "lora_B" in path_str:
-                    if is_stacked:
-                        return p[:, adapter_idx, rank:, :].copy()
-                    else:
-                        return p[adapter_idx, rank:, :].copy()
-                return p
-            return jax.tree.map_with_path(slice_param, params)
-
         # Save initial states
         initial_adapter_2_params = get_adapter_params(lora_params, 2)
         initial_adapter_0_out_of_rank = get_out_of_rank_params(lora_params, 0, 16)
@@ -93,12 +65,6 @@ def test_lora_training():
             optimizer.update(lora_params, lora_grads)
 
             print(f"Step {step}: loss = {float(loss):.4f}")
-
-        def verify_params_unchanged(initial_params, final_params, error_msg_prefix):
-            for (path, initial), (_, final) in zip(
-                jax.tree.leaves_with_path(initial_params), jax.tree.leaves_with_path(final_params)
-            ):
-                assert jnp.allclose(initial, final), f"{error_msg_prefix} for {path}"
 
         # Verify adapter 2 (unused) was not modified
         final_adapter_2_params = get_adapter_params(lora_params, 2)

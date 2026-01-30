@@ -43,7 +43,7 @@ def test_qwen3(tp: int):
         mesh = jax.make_mesh((1, tp), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model, config.num_hidden_layers)
+        load_safetensors(tmp, config, model)
 
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
         assert outputs.hidden_states is not None
@@ -240,7 +240,7 @@ def test_qwen3_lora():
         mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-            load_safetensors(base_tmp, config, model, config.num_hidden_layers)
+            load_safetensors(base_tmp, config, model)
 
         # Get outputs from all HF models
         hf_outputs_list = []

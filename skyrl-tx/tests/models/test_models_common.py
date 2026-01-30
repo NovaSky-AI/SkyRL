@@ -58,7 +58,7 @@ def load_model(
         loss_chunk_size=loss_chunk_size,
         gradient_checkpointing=False,
     )
-    load_safetensors(tmp_dir, config, model, config.num_hidden_layers)
+    load_safetensors(tmp_dir, config, model)
     return model
 
 

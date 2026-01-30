@@ -49,7 +49,7 @@ def test_qwen3_generate():
         mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model, config.num_hidden_layers)
+        load_safetensors(tmp, config, model)
 
         sampling_params = [
             types.SamplingParams(max_tokens=10, temperature=0.0, seed=42),
@@ -149,7 +149,7 @@ def test_qwen3_generate_speed():
         mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
         with jax.set_mesh(mesh):
             model = Qwen3ForCausalLM(config, dtype=jnp.bfloat16, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model, config.num_hidden_layers)
+        load_safetensors(tmp, config, model)
         sampling_params = [types.SamplingParams(max_tokens=50, temperature=0.0, seed=42) for i in range(len(inputs))]
 
         # Warmup

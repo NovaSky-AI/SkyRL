@@ -3,7 +3,7 @@ import jax
 from jax import numpy as jnp
 from jax.core import Tracer
 
-from tx.utils.models import filter_lora
+from tx.utils.models import filter_lora, is_stacked_lora_path
 from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
@@ -368,8 +368,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
-        is_stacked = any(name in normalized_path for name in ("layers", "dense_layers", "moe_layers"))
-        idx = _adapter_index(is_stacked, adapter_index)
+        idx = _adapter_index(is_stacked_lora_path(path), adapter_index)
 
         key_name = path[-2].key
         if key_name == "lora_ranks":
@@ -403,9 +402,7 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
         key = path[-2].key
         if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
             return value
-        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-        is_stacked = any(name in normalized_path for name in ("layers", "dense_layers", "moe_layers"))
-        idx = _adapter_index(is_stacked, adapter_index)
+        idx = _adapter_index(is_stacked_lora_path(path), adapter_index)
         return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
 
     updated_state = jax.tree.map_with_path(clear_adapter, state)

@@ -53,7 +53,7 @@ def test_deepseekv3(tp: int):
         )
         with jax.set_mesh(mesh):
             model = DeepseekV3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model, config.num_hidden_layers)
+        load_safetensors(tmp, config, model)
 
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
 

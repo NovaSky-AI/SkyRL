@@ -78,10 +78,20 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
 
-def _is_layer_param(path: tuple) -> bool:
-    """Check if a parameter path corresponds to a decoder layer weight."""
+def is_stacked_lora_path(path: tuple) -> bool:
+    """Check if a parameter path is for stacked layer weights (for LoRA indexing).
+
+    Stacked layer params have the adapter dimension at axis 1: (num_layers, num_adapters, ...).
+    Non-stacked params (e.g., embed_tokens) have adapter dimension at axis 0: (num_adapters, ...).
+
+    Args:
+        path: Parameter path tuple (can be nnx path objects or strings).
+
+    Returns:
+        True if the path contains 'layers', 'dense_layers', or 'moe_layers'.
+    """
     path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
-    return "layers" in path_strs
+    return any(name in path_strs for name in ("layers", "dense_layers", "moe_layers"))
 
 
 def _is_stacked_layer_param(path: tuple) -> bool:
@@ -186,7 +196,6 @@ def load_safetensors(
     checkpoint_dir: str | os.PathLike,
     config: ModelConfig,
     model: nnx.Module,
-    num_layers: int,
     skip_lora: bool = True,
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
@@ -233,7 +242,6 @@ def save_safetensors(
     config: ModelConfig,
     model: nnx.Module,
     filename: Path,
-    num_layers: int,
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
@@ -301,7 +309,6 @@ def load_lora_checkpoint(
             temp_dir,
             model.config,
             adapter_lora_params,
-            model.model.num_layers,
             skip_lora=False,
             prefix="base_model.model.",
             filter_fn=lambda path: filter_lora(adapter_config, path),
@@ -337,7 +344,6 @@ def save_lora_checkpoint(
             model.config,
             adapter_lora_params,
             temp_dir / "adapter_model.safetensors",
-            model.model.num_layers,
             prefix="base_model.model.",
             filter_fn=lambda path: filter_lora(adapter_config, path),
         )
@@ -371,8 +377,7 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
         # - 5D: Stacked expert (L, A, E, in, R)
         # We extract adapter_index from the adapter dimension (axis 1 for stacked, axis 0 otherwise)
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
-        path_strs = [pk.key if hasattr(pk, "key") else str(pk) for pk in path]
-        is_stacked = any(name in path_strs for name in ("layers", "dense_layers", "moe_layers"))
+        is_stacked = is_stacked_lora_path(path)
         if path[-2].key == "lora_A":
             if is_stacked:  # (L, A, ..., R)
                 return p[:, adapter_index, ..., :rank]
@@ -400,8 +405,7 @@ def insert_adapter_state(
             return new
         # See extract_adapter_state for shape documentation
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
-        path_strs = [pk.key if hasattr(pk, "key") else str(pk) for pk in path]
-        is_stacked = any(name in path_strs for name in ("layers", "dense_layers", "moe_layers"))
+        is_stacked = is_stacked_lora_path(path)
         if path[-2].key == "lora_A":
             if is_stacked:  # (L, A, ..., R)
                 return p.at[:, adapter_index, ..., :rank].set(new)
