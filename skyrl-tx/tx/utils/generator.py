@@ -99,6 +99,34 @@ class KVCache:
             cache_position=self.cache_position,
         )
 
+    @staticmethod
+    def update(
+        kv_cache: KVCache | None,
+        keys: list[jax.Array],
+        values: list[jax.Array],
+        positions: jax.Array,
+        attention_mask: jax.Array,
+    ) -> KVCache:
+        """Create KVCache from list of per-layer outputs (for non-stacked models like DeepSeekV3).
+
+        Args:
+            kv_cache: Existing KVCache (None during prefill).
+            keys: List of key arrays per layer.
+            values: List of value arrays per layer.
+            positions: Position indices with shape (batch, seq_len).
+            attention_mask: Attention mask with shape (batch, seq_len).
+
+        Returns:
+            New KVCache with stacked keys/values and computed cache_position.
+        """
+        stacked_keys = jnp.stack(keys, axis=0)
+        stacked_values = jnp.stack(values, axis=0)
+        if kv_cache is not None:
+            cache_position = kv_cache.cache_position + positions.shape[1]
+        else:
+            cache_position = attention_mask.sum(axis=1).astype(jnp.int32)
+        return KVCache(keys=stacked_keys, values=stacked_values, cache_position=cache_position)
+
     @property
     def num_layers(self) -> int:
         """Number of layers in the cache."""

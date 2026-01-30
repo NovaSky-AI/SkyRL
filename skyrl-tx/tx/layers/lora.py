@@ -32,6 +32,23 @@ def _adapter_index(is_stacked: bool, adapter_index: int):
     return (slice(None), adapter_index) if is_stacked else (adapter_index,)
 
 
+def _is_stacked_path(normalized_path: tuple[str | int, ...]) -> bool:
+    """Check if a parameter path corresponds to a STACKED decoder layer weight.
+
+    Stacked layers (Qwen3/Llama3) have paths like: ('model', 'layers', 'self_attn', ...)
+    Non-stacked layers (DeepSeekV3) have paths like: ('model', 'layers', 0, 'self_attn', ...)
+    """
+    if "layers" not in normalized_path:
+        return False
+    layers_idx = normalized_path.index("layers")
+    if layers_idx + 1 < len(normalized_path):
+        next_elem = normalized_path[layers_idx + 1]
+        # Check if next element is a layer index (int or numeric string)
+        if isinstance(next_elem, int) or (isinstance(next_elem, str) and next_elem.isdigit()):
+            return False  # Non-stacked: path already contains layer index
+    return True  # Stacked: no layer index in path
+
+
 class LoRAMixin:
     """A mixin for flax NNX modules to add multi-adapter LoRA support.
     This mixin adds LoRA parameters (lora_A, lora_B) and methods to apply
@@ -368,7 +385,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
-        idx = _adapter_index("layers" in normalized_path, adapter_index)
+        idx = _adapter_index(_is_stacked_path(normalized_path), adapter_index)
 
         key_name = path[-2].key
         if key_name == "lora_ranks":
@@ -403,7 +420,7 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
         if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
             return value
         normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-        idx = _adapter_index("layers" in normalized_path, adapter_index)
+        idx = _adapter_index(_is_stacked_path(normalized_path), adapter_index)
         return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
 
     updated_state = jax.tree.map_with_path(clear_adapter, state)
