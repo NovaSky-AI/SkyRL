@@ -5,7 +5,7 @@ from jax.sharding import get_abstract_mesh
 
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.rotary_embedding import get_rope
-from tx.layers.util import Param, prepare_routing
+from tx.layers.util import Param, prepare_routing, shard_map_ep
 from tx.layers.layernorm import RMSNorm
 from tx.models.configs import DeepseekV3Config
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
@@ -254,40 +254,37 @@ class DeepseekV3NaiveMoe(nnx.Module):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.num_experts = config.n_routed_experts
-        self.hidden_dim = config.hidden_size
-        self.intermediate_dim = config.moe_intermediate_size
 
         # NOTE: Huggingface implementation uses a fused gate_up_proj, but the weights are keyed
         # by gate_proj and up_proj separately.
         self.gate_proj = LoRAExpert(
-            self.num_experts,
-            self.hidden_dim,
-            self.intermediate_dim,
+            config.n_routed_experts,
+            config.hidden_size,
+            config.moe_intermediate_size,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "fsdp", "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "fsdp", "tp")),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
-            self.num_experts,
-            self.hidden_dim,
-            self.intermediate_dim,
+            config.n_routed_experts,
+            config.hidden_size,
+            config.moe_intermediate_size,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "fsdp", "tp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "fsdp", "tp")),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
-            self.num_experts,
-            self.intermediate_dim,
-            self.hidden_dim,
+            config.n_routed_experts,
+            config.moe_intermediate_size,
+            config.hidden_size,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp", "fsdp")),
+            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "tp", "fsdp")),
             rngs=rngs,
         )
 
@@ -299,29 +296,38 @@ class DeepseekV3NaiveMoe(nnx.Module):
         adapter_indices: jax.Array | None = None,
     ) -> jax.Array:
         num_experts_per_tok = top_k_index.shape[1]
+        num_experts = self.config.n_routed_experts
+
+        ep = get_abstract_mesh().shape.get("ep", 1)
+        assert num_experts % ep == 0, f"num_experts={num_experts} must be divisible by ep={ep}"
 
         # Prepare for ragged_dot by sorting tokens based on their assigned expert
-        selected_experts_flat = top_k_index.ravel()
-        hidden_states_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
-        adapter_indices_expanded = (
-            jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
+        hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
+        adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
+        hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
+            hidden_expanded,
+            top_k_index.ravel(),
+            num_experts,
+            adapter_indices=adapter_expanded,
         )
 
-        hidden_states_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
-            hidden_states_expanded,
-            selected_experts_flat,
-            self.num_experts,
-            adapter_indices=adapter_indices_expanded,
-        )
+        def forward(experts, hidden_sorted, group_sizes, unsort_indices, adapter_sorted, top_k_weights):
+            # Calculate local offset for this EP shard
+            ep_rank = jax.lax.axis_index("ep")
+            experts_per_rank = num_experts // jax.lax.axis_size("ep")
+            group_offset = jnp.array([ep_rank * experts_per_rank], dtype=jnp.int32)
 
-        gate_out = self.gate_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted)
-        up_out = self.up_proj(hidden_states_sorted, group_sizes, adapter_indices_sorted)
-        down_out = self.down_proj(nnx.silu(gate_out) * up_out, group_sizes, adapter_indices_sorted)
+            # Expert computation with group_offset
+            gate = experts.gate_proj(hidden_sorted, group_sizes, adapter_sorted, group_offset=group_offset)
+            up = experts.up_proj(hidden_sorted, group_sizes, adapter_sorted, group_offset=group_offset)
+            down = experts.down_proj(nnx.silu(gate) * up, group_sizes, adapter_sorted, group_offset=group_offset)
 
-        # Unsort and combine the expert outputs
-        unsorted_out = down_out[unsort_indices]
-        reshaped_out = unsorted_out.reshape(-1, num_experts_per_tok, self.hidden_dim)
-        return jnp.sum(reshaped_out * top_k_weights[..., None], axis=1)
+            # Unsort and combine
+            out = down[unsort_indices].reshape(-1, num_experts_per_tok, self.config.hidden_size)
+            local_out = jnp.sum(out * top_k_weights[..., None], axis=1)
+            return jax.lax.psum(local_out, axis_name="ep")
+
+        return shard_map_ep(self, forward, hidden_sorted, group_sizes, unsort_indices, adapter_sorted, top_k_weights)
 
 
 class DeepseekV3MoE(nnx.Module):

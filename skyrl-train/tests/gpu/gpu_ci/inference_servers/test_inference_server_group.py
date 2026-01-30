@@ -3,7 +3,8 @@ GPU CI tests for ServerGroup + InferenceRouter.
 
 Tests:
     - 2 vLLM servers with TP=2 (4 GPUs total)
-    - Router with load balancing and control plane fan-out
+    - Router with load balancing (data plane only)
+    - RemoteInferenceClient for control plane operations (fan-out)
     - Health, completions, get_server_info, session affinity, pause/resume
 
 Run:
@@ -20,6 +21,7 @@ import argparse
 from skyrl_train.inference_servers.common import get_open_port
 from skyrl_train.inference_servers.router import InferenceRouter
 from skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -90,18 +92,28 @@ def server_group_and_router(ray_init_fixture):
     router_url = router.start()
     assert wait_for_url(router_url), "Router failed to start"
 
+    # Create RemoteInferenceClient for control plane operations
+    client = RemoteInferenceClient(
+        proxy_url=router_url,
+        server_urls=server_urls,
+        model_name=MODEL,
+    )
+
     yield {
         "group": group,
         "server_urls": server_urls,
         "router": router,
         "router_url": router_url,
+        "client": client,
     }
 
+    asyncio.get_event_loop().run_until_complete(client.teardown())
     router.shutdown()
     group.shutdown()
 
 
 @pytest.mark.vllm
+@pytest.mark.asyncio(loop_scope="class")
 class TestServerGroupAndRouter:
     """Tests for ServerGroup + InferenceRouter with 2 TP=2 servers."""
 
@@ -118,23 +130,15 @@ class TestServerGroupAndRouter:
         assert resp.status_code == 200
         assert len(resp.json()["servers"]) == 2
 
-    def test_get_server_info(self, server_group_and_router):
-        """/get_server_info returns mapping of server_url -> info for all servers."""
-        router_url = server_group_and_router["router_url"]
-        server_urls = server_group_and_router["server_urls"]
+    @pytest.mark.asyncio
+    async def test_get_world_size(self, server_group_and_router):
+        """get_world_size returns total world size across all servers."""
+        client = server_group_and_router["client"]
 
-        resp = httpx.get(f"{router_url}/get_server_info", timeout=10.0)
-        assert resp.status_code == 200
-        info_map = resp.json()
-        print(f"Server info map: {info_map}")
-
-        # Should have info for each server
-        assert len(info_map) == 2
-        for url in server_urls:
-            assert url in info_map
-            server_info = info_map[url]
-            # Each server has TP=2, so per-server world_size=2
-            assert server_info["world_size"] == 2
+        # Each server has TP=2, we have 2 servers = total world_size of 4
+        world_size = await client.get_world_size()
+        print(f"Total world_size: {world_size}")
+        assert world_size == 4
 
     def test_completion_request(self, server_group_and_router):
         """Completion requests work through router."""
@@ -157,31 +161,20 @@ class TestServerGroupAndRouter:
 
     @pytest.mark.asyncio
     async def test_pause_resume(self, server_group_and_router):
-        """Pause/resume control plane routes work."""
+        """Pause/resume control plane operations work via RemoteInferenceClient."""
         router_url = server_group_and_router["router_url"]
+        client = server_group_and_router["client"]
 
-        async with httpx.AsyncClient() as client:
-            # Pause
-            resp = await client.post(
-                f"{router_url}/pause",
-                json={"wait_for_inflight_request": False},
-                timeout=30.0,
-            )
-            assert resp.status_code == 200
+        # Pause using client (fans out to all servers)
+        result = await client.pause()
+        # All servers should report success
+        for server_url, resp in result.items():
+            assert resp["status"] == 200, f"Server {server_url} failed to pause"
 
-            # Check is paused - router returns aggregated responses from all servers
-            resp = await client.get(f"{router_url}/is_paused", timeout=30.0)
-            assert resp.status_code == 200
-            # Response format: {server_url: {"status": 200, "body": {...}}}
-            server_responses = resp.json()
-            # All servers should report is_paused=True
-            for server_url, server_resp in server_responses.items():
-                assert server_resp["status"] == 200, f"Server {server_url} failed"
-                assert server_resp["body"]["is_paused"] is True, f"Server {server_url} not paused"
-
-            # Send a request while paused (should block)
-            async def send_request():
-                r = await client.post(
+        # Send a request while paused (should block)
+        async def send_request():
+            async with httpx.AsyncClient() as http_client:
+                r = await http_client.post(
                     f"{router_url}/v1/completions",
                     json={"model": MODEL, "prompt": "Test", "max_tokens": 4},
                     timeout=60.0,
@@ -189,16 +182,17 @@ class TestServerGroupAndRouter:
                 assert r.status_code == 200
                 return r.json()
 
-            task = asyncio.create_task(send_request())
-            await asyncio.sleep(1)
+        task = asyncio.create_task(send_request())
+        await asyncio.sleep(1)
 
-            # Task should not be done here (request blocked by pause)
-            assert not task.done()
+        # Task should not be done here (request blocked by pause)
+        assert not task.done()
 
-            # Resume
-            resp = await client.post(f"{router_url}/resume", json={}, timeout=30.0)
-            assert resp.status_code == 200
+        # Resume using client (fans out to all servers)
+        result = await client.resume()
+        for server_url, resp in result.items():
+            assert resp["status"] == 200, f"Server {server_url} failed to resume"
 
-            # Verify that after resume, the request is completed
-            result = await task
-            assert result["choices"][0]["text"] is not None
+        # Verify that after resume, the request is completed
+        result = await task
+        assert result["choices"][0]["text"] is not None

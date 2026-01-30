@@ -38,7 +38,7 @@ dependencies = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn",
+    "flash-attn; sys_platform == 'linux'",
     "polars",
     "s3fs",
     "fastapi",
@@ -79,8 +79,8 @@ override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
-    "transformer-engine[pytorch]==2.10.0",
-    "megatron-core==0.15.0"
+    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
+    "megatron-core==0.15.0; sys_platform == 'linux'",
 ]
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
@@ -92,16 +92,23 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
-torch = { index = "pytorch-cu128" }
+# Use CUDA torch on Linux, CPU torch on macOS
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "fdfe296145cf13663dc6a0233f8faab7bfcf5fe1" }
-torchvision = { index = "pytorch-cu128" }
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+]
 # We use `flashinfer-jit-cache` to avoid slow JIT compilation on first run.
 # Different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "extra == 'vllm' or extra == 'mcore'" }
 flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'mcore' and extra != 'vllm'" }
 ]
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "04e370eedf8cc44a812189a19f2171d90555c07a"}
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "04e370eedf8cc44a812189a19f2171d90555c07a", marker = "sys_platform == 'linux'"}
 
 
 [project.optional-dependencies]
@@ -125,39 +132,39 @@ harbor = [
     "harbor",
 ]
 vllm = [
-    "vllm==0.13.0",
-    "flash-attn==2.8.3",
-    "torch==2.9.0",
-    "flashinfer-python",
-    "flashinfer-jit-cache",
-    "torchvision"
+    "vllm==0.13.0; sys_platform == 'linux'",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "torch==2.9.0; sys_platform == 'linux'",
+    "flashinfer-python; sys_platform == 'linux'",
+    "flashinfer-jit-cache; sys_platform == 'linux'",
+    "torchvision; sys_platform == 'linux'",
 ]
 sglang = [
-    "sglang[srt,openai,torch_memory_saver]==0.4.8.post1",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
-    "flashinfer-python",
-    "flash-attn==2.8.3",
-    "torch==2.7.1",
-    "torchvision",
+    "sglang[srt,openai,torch_memory_saver]==0.4.8.post1; sys_platform == 'linux'",  # 0.4.9.post1 causes non-colocate weight broadcast to hang
+    "flashinfer-python; sys_platform == 'linux'",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "torch==2.7.1; sys_platform == 'linux'",
+    "torchvision; sys_platform == 'linux'",
 ]
 mcore = [
-  "transformer-engine[pytorch]==2.10.0",
-  "flash-attn==2.8.1",
-  "vllm==0.13.0",
-  "torch==2.9.0",
-  "flashinfer-python==0.5.3",
-  "torchvision",
-  "megatron-bridge",
-  "megatron-core==0.15.0",
-  "flashinfer-jit-cache==0.5.3",
-  "nvidia-modelopt",
+    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
+    "flash-attn==2.8.1; sys_platform == 'linux'",
+    "vllm==0.13.0; sys_platform == 'linux'",
+    "torch==2.9.0; sys_platform == 'linux'",
+    "flashinfer-python==0.5.3; sys_platform == 'linux'",
+    "torchvision; sys_platform == 'linux'",
+    "megatron-bridge; sys_platform == 'linux'",
+    "megatron-core==0.15.0; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux'",
+    "nvidia-modelopt; sys_platform == 'linux'",
 ]
 flashrl = [
     # NOTE: Custom vLLM wheel must be installed separately.
     # See examples/flash_rl/README.md for installation instructions.
-    "flash-attn==2.8.3",
-    "torch==2.7.0",
-    "flashinfer-python",
-    "torchvision",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "torch==2.7.0; sys_platform == 'linux'",
+    "flashinfer-python; sys_platform == 'linux'",
+    "torchvision; sys_platform == 'linux'",
 ]
 miniswe = [
     # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
@@ -169,6 +176,11 @@ miniswe = [
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [[tool.uv.index]]
