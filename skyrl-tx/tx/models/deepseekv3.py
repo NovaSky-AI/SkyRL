@@ -304,7 +304,10 @@ class DeepseekV3NaiveMoe(nnx.Module):
         hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
         adapter_expanded = jnp.repeat(adapter_indices, num_experts_per_tok) if adapter_indices is not None else None
         hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
-            hidden_expanded, top_k_index.ravel(), num_experts, adapter_indices=adapter_expanded,
+            hidden_expanded,
+            top_k_index.ravel(),
+            num_experts,
+            adapter_indices=adapter_expanded,
         )
 
         def forward(experts, hidden_sorted, group_sizes, unsort_indices, adapter_sorted, top_k_weights):
