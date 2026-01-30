@@ -81,40 +81,61 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
 def _is_layer_param(path: tuple) -> bool:
     """Check if a parameter path corresponds to a stacked decoder layer weight."""
     path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
-    # Layer params have 'layers' in their path but not as part of another word
     return "layers" in path_strs
 
 
-def _get_hf_key_for_layer(path: tuple, layer_idx: int) -> str:
-    """Convert a stacked layer param path to a per-layer HuggingFace key."""
+def _path_to_hf_key(path: tuple, layer_idx: int | None = None) -> str:
+    """Convert param path to HuggingFace key. If layer_idx provided, insert it after 'layers'."""
     parts = []
     for p in path:
         key = p.key if hasattr(p, "key") else str(p)
-        if key == "layers":
+        if key == "layers" and layer_idx is not None:
             parts.append(f"layers.{layer_idx}")
         elif key in ("kernel", "embedding"):
             parts.append("weight")
         elif key in ("lora_A", "lora_B"):
-            parts.append(key)
-            parts.append("weight")
+            parts.extend([key, "weight"])
         else:
             parts.append(key)
     return ".".join(parts)
 
 
-def _get_hf_key(path: tuple) -> str:
-    """Convert a non-layer param path to a HuggingFace key."""
-    parts = []
-    for p in path:
-        key = p.key if hasattr(p, "key") else str(p)
-        if key in ("kernel", "embedding"):
-            parts.append("weight")
-        elif key in ("lora_A", "lora_B"):
-            parts.append(key)
-            parts.append("weight")
-        else:
-            parts.append(key)
-    return ".".join(parts)
+def _load_hf_tensor(tensors: dict, key: str, target_shape: tuple, num_experts: int | None) -> np.ndarray:
+    """Load tensor from HF format, handling experts, transpose, and reshape."""
+    # Handle MoE expert weights (HF stores each expert separately)
+    if ".experts." in key and num_experts:
+        tensor = np.stack([
+            tensors[key.replace(".experts.", f".experts.{i}.")].T
+            for i in range(num_experts)
+        ], axis=0)
+    else:
+        tensor = tensors[key]
+        if "embed_tokens" not in key:
+            tensor = tensor.T
+
+    # Reshape attention projections to match model's grouped head format
+    if any(p in key for p in ("q_proj", "k_proj", "v_proj", "o_proj")):
+        tensor = tensor.reshape(target_shape)
+
+    return tensor
+
+
+def _save_hf_tensor(tensors: dict, key: str, param: np.ndarray, num_experts: int | None) -> None:
+    """Save tensor to HF format, handling experts, transpose, and reshape."""
+    # Handle MoE expert weights
+    if ".experts." in key and num_experts:
+        for i in range(num_experts):
+            tensors[key.replace(".experts.", f".experts.{i}.")] = param[i].T
+        return
+
+    # Reshape attention projections back to 2D
+    if any(p in key for p in ("q_proj", "k_proj", "v_proj")):
+        param = param.reshape(param.shape[0], -1)
+    elif "o_proj" in key:
+        param = param.reshape(-1, param.shape[-1])
+
+    # Transpose to HF format
+    tensors[key] = param if "embed_tokens" in key else param.T
 
 
 def load_safetensors(
@@ -126,25 +147,13 @@ def load_safetensors(
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
-    """Load safetensors weights into a model with stacked layers.
-
-    For layer parameters, loads individual layer weights and stacks them.
-    For non-layer parameters, loads directly.
-
-    Args:
-        checkpoint_dir: Directory containing safetensors files.
-        config: Model configuration.
-        model: Model with stacked layer weights (created with create_stacked_layers).
-        num_layers: Number of decoder layers.
-        skip_lora: Whether to skip LoRA parameters.
-        prefix: Prefix to remove from tensor keys.
-        filter_fn: Optional filter for which parameters to load.
-    """
+    """Load safetensors weights into a model with stacked layers."""
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
     tensors = {k.removeprefix(prefix): v for k, v in tensors.items()}
 
+    num_experts = getattr(config, "num_experts", None)
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
 
@@ -153,69 +162,21 @@ def load_safetensors(
             continue
 
         path_keys = [p.key if hasattr(p, "key") else str(p) for p in path]
-
-        # Skip LoRA parameters if requested
         if skip_lora and any(k in path_keys for k in ("lora_A", "lora_B", "lora_scaling", "lora_ranks")):
             continue
 
         if _is_layer_param(path):
-            # Pre-allocate array for stacked layer weights to avoid 2x memory from list + stack
+            # Stack per-layer weights from HF format
             stacked_tensor = np.empty(param.shape, dtype=param.dtype)
-            for layer_idx in range(num_layers):
-                key = _get_hf_key_for_layer(path, layer_idx)
-
-                # Handle expert weights (MoE) - HF stores each expert separately
-                # Our model has shape (num_experts, in, out), HF has experts.{idx}.*.weight
-                if ".experts." in key and hasattr(config, "num_experts"):
-                    num_experts = config.num_experts
-                    expert_tensors = []
-                    for expert_idx in range(num_experts):
-                        # Insert expert index: experts.gate_proj -> experts.0.gate_proj
-                        expert_key = key.replace(".experts.", f".experts.{expert_idx}.")
-                        if expert_key in tensors:
-                            expert_tensors.append(tensors[expert_key].T)
-                    if expert_tensors:
-                        tensor = np.stack(expert_tensors, axis=0)
-                    else:
-                        raise KeyError(f"Expert weights not found for {key}")
-                else:
-                    tensor = tensors[key]
-                    # Transpose linear weights (HF uses [out, in], we use [in, out])
-                    if "embed_tokens" not in key:
-                        tensor = tensor.T
-
-                # Reshape attention projections if needed
-                if any(proj in key for proj in ("q_proj", "k_proj", "v_proj", "o_proj")):
-                    # param.shape[1:] gives the target shape without the layer axis
-                    target_shape = param.shape[1:]
-                    tensor = tensor.reshape(target_shape)
-
-                stacked_tensor[layer_idx] = tensor
+            for i in range(num_layers):
+                key = _path_to_hf_key(path, layer_idx=i)
+                stacked_tensor[i] = _load_hf_tensor(tensors, key, param.shape[1:], num_experts)
         else:
-            # Non-layer parameter - load directly
-            key = _get_hf_key(path)
+            key = _path_to_hf_key(path)
+            stacked_tensor = _load_hf_tensor(tensors, key, param.shape, num_experts)
 
-            if ".experts." in key and hasattr(config, "num_experts"):
-                num_experts = config.num_experts
-                expert_tensors = []
-                for expert_idx in range(num_experts):
-                    expert_key = key.replace(".experts.", f".experts.{expert_idx}.")
-                    if expert_key in tensors:
-                        expert_tensors.append(tensors[expert_key].T)
-                if expert_tensors:
-                    stacked_tensor = np.stack(expert_tensors, axis=0)
-                else:
-                    raise KeyError(f"Expert weights not found for {key}")
-            else:
-                stacked_tensor = tensors[key]
-                if "embed_tokens" not in key:
-                    stacked_tensor = stacked_tensor.T
-
-        assert param.shape == stacked_tensor.shape, (
-            f"Shape mismatch for {path}: expected {param.shape}, got {stacked_tensor.shape}"
-        )
-        sharded_tensor = jax.device_put(stacked_tensor.astype(param.dtype), param.sharding)
-        updates.append((path, sharded_tensor))
+        assert param.shape == stacked_tensor.shape, f"Shape mismatch for {path}"
+        updates.append((path, jax.device_put(stacked_tensor.astype(param.dtype), param.sharding)))
 
     nnx.update(model, nnx.from_flat_state(updates))
 
@@ -228,16 +189,8 @@ def save_safetensors(
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
-    """Save model weights to safetensors, unstacking layer weights for HF compatibility.
-
-    Args:
-        config: Model configuration.
-        model: Model with stacked layer weights.
-        filename: Output safetensors file path.
-        num_layers: Number of decoder layers.
-        prefix: Prefix to add to tensor keys.
-        filter_fn: Optional filter for which parameters to save.
-    """
+    """Save model weights to safetensors, unstacking layer weights for HF compatibility."""
+    num_experts = getattr(config, "num_experts", None)
     model_params = nnx.to_flat_state(nnx.state(model))
     tensors = {}
 
@@ -250,39 +203,12 @@ def save_safetensors(
 
         if _is_layer_param(path):
             # Unstack and save as individual layer weights
-            for layer_idx in range(num_layers):
-                key = prefix + _get_hf_key_for_layer(path, layer_idx)
-                layer_param = param[layer_idx]
-
-                # Handle expert weights (MoE) - save each expert separately for HF compatibility
-                if ".experts." in key and hasattr(config, "num_experts"):
-                    for expert_idx in range(config.num_experts):
-                        expert_key = key.replace(".experts.", f".experts.{expert_idx}.")
-                        tensors[expert_key] = layer_param[expert_idx].T
-                else:
-                    # Reshape attention projections back to 2D
-                    if "q_proj" in key or "k_proj" in key or "v_proj" in key:
-                        layer_param = layer_param.reshape(layer_param.shape[0], -1)
-                    elif "o_proj" in key:
-                        layer_param = layer_param.reshape(-1, layer_param.shape[-1])
-
-                    # Transpose back to HF format
-                    if "embed_tokens" not in key:
-                        layer_param = layer_param.T
-                    tensors[key] = layer_param
+            for i in range(num_layers):
+                key = prefix + _path_to_hf_key(path, layer_idx=i)
+                _save_hf_tensor(tensors, key, param[i], num_experts)
         else:
-            # Non-layer parameter - save directly
-            key = prefix + _get_hf_key(path)
-
-            if ".experts." in key and hasattr(config, "num_experts"):
-                for expert_idx in range(config.num_experts):
-                    expert_key = key.replace(".experts.", f".experts.{expert_idx}.")
-                    tensors[expert_key] = param[expert_idx].T
-            else:
-                tensor = param
-                if "embed_tokens" not in key:
-                    tensor = tensor.T
-                tensors[key] = tensor
+            key = prefix + _path_to_hf_key(path)
+            _save_hf_tensor(tensors, key, param, num_experts)
 
     # In multi-host mode, gather all shards and only save from rank 0
     if jax.process_count() > 1:
