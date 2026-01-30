@@ -27,11 +27,11 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = [
-    "jax[cuda12]>=0.7.2",
+    "jax[cuda12]>=0.7.2; sys_platform == 'linux'",
 ]
 
 tpu = [
-    "jax[tpu]>=0.7.2",
+    "jax[tpu]>=0.7.2; sys_platform == 'linux'",
 ]
 
 tinker = [
@@ -61,14 +61,14 @@ azure = [
 # respectively.
 
 jax = [
-    "jax[cuda12]>=0.7.2",
+    "jax[cuda12]>=0.7.2; sys_platform == 'linux'",
 ]
 
 skyrl_train = [
     # We currently need the extra pin on the python version
     # here since skyrl-train pins on python version 3.12,
     # hopefully in the future we can remove that.
-    "skyrl-train[vllm]; python_version == '3.12'",
+    "skyrl-train[vllm]; python_version == '3.12' and sys_platform == 'linux'",
 ]
 
 dev = [
@@ -92,6 +92,18 @@ version = {attr = "tx.__version__"}
 tx = "tx.run.main:app"
 
 # The following is for supporting the skyrl-train dependency
+
+[tool.uv]
+# Ensure we resolve for both macOS (dev) and Linux (prod) platforms
+required-environments = [
+    "sys_platform == 'darwin'",
+    "sys_platform == 'linux'",
+]
+
+# Override torch to use PyPI version on macOS for dev (CUDA version has no macOS wheels)
+override-dependencies = [
+    "torch>=2.0; sys_platform == 'darwin'",
+]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
