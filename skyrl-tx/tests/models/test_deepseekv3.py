@@ -47,20 +47,20 @@ def test_deepseekv3(tp: int):
         base_config = PretrainedConfig.from_pretrained(model_name, trust_remote_code=True)
         config = DeepseekV3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
         mesh = jax.make_mesh(
-            (1, tp),
-            ("fsdp", "tp"),
-            axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto),
+            (1, 1, tp),
+            ("fsdp", "ep", "tp"),
+            axis_types=(jax.sharding.AxisType.Auto,) * 3,
         )
         with jax.set_mesh(mesh):
             model = DeepseekV3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(tmp, config, model)
+            load_safetensors(tmp, config, model)
 
-        outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
+            outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
 
-        assert outputs.hidden_states is not None
-        assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
-        assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
-        assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=3e-2, atol=6e-2)
+            assert outputs.hidden_states is not None
+            assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
+            assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
+            assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=3e-2, atol=6e-2)
 
 
 def load_moe_base_weights(jax_moe_layer: DeepseekV3MoE, hf_moe_layer: HFDeepseekV3MoE) -> None:
@@ -78,7 +78,8 @@ def load_moe_base_weights(jax_moe_layer: DeepseekV3MoE, hf_moe_layer: HFDeepseek
     jax_moe_layer.shared_experts.down_proj.kernel[:] = hf_moe_layer.shared_experts.down_proj.weight.detach().numpy().T
 
 
-def test_deepseekv3_moe_layer():
+@pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
+def test_deepseekv3_moe_layer(ep: int, tp: int):
     model_name = "yujiepan/deepseek-v3-tiny-random"
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
     base_config = PretrainedConfig.from_pretrained(model_name)
@@ -92,15 +93,15 @@ def test_deepseekv3_moe_layer():
         hf_expert_output = hf_moe_layer.forward(x)
 
     mesh = jax.make_mesh(
-        (1, 1),
-        ("fsdp", "tp"),
-        axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto),
+        (1, ep, tp),
+        ("fsdp", "ep", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * 3,
     )
     with jax.set_mesh(mesh):
         moe_layer = DeepseekV3MoE(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         load_moe_base_weights(moe_layer, hf_moe_layer)
 
-    jax_expert_output = moe_layer(x.numpy())
+        jax_expert_output = moe_layer(x.numpy())
 
     # Higher tolerance due to cross-platform BLAS differences
     assert np.allclose(hf_expert_output.detach().numpy(), jax_expert_output, rtol=6e-3, atol=6e-3)
@@ -127,7 +128,8 @@ def load_lora_weights(
     jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
 
 
-def test_deepseekv3_moe_layer_lora():
+@pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
+def test_deepseekv3_moe_layer_lora(ep: int, tp: int):
     """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
     model_name = "yujiepan/deepseek-v3-tiny-random"
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
@@ -138,9 +140,9 @@ def test_deepseekv3_moe_layer_lora():
     x = torch.randn(3, 4, config.hidden_size)
 
     mesh = jax.make_mesh(
-        (1, 1),
-        ("fsdp", "tp"),
-        axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto),
+        (1, ep, tp),
+        ("fsdp", "ep", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * 3,
     )
     with jax.set_mesh(mesh):
         moe_layer = DeepseekV3MoE(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
