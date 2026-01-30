@@ -362,31 +362,32 @@ def get_optimizer(optimizer_name: OptimizerName, optimizer_args: dict) -> optax.
             raise ValueError("The 'learning_rate' key must be provided in optimizer_args.")
 
 
+def _lora_slice(is_stacked: bool, adapter_index: int, rank: int, is_lora_A: bool) -> tuple:
+    """Return slice tuple for extracting/inserting LoRA params.
+
+    LoRA param shapes:
+    - 3D: Non-stacked linear/embed (A, in, R) or (A, R, out)
+    - 4D: Stacked linear/embed (L, A, in, R) or non-stacked expert (A, E, in, R)
+    - 5D: Stacked expert (L, A, E, in, R)
+    """
+    # Adapter index: axis 1 for stacked (L, A, ...), axis 0 for non-stacked (A, ...)
+    adapter_idx = (slice(None), adapter_index) if is_stacked else (adapter_index,)
+    # Rank slice: lora_A has rank at last dim, lora_B has rank at second-to-last
+    rank_slice = (Ellipsis, slice(None, rank)) if is_lora_A else (Ellipsis, slice(None, rank), slice(None))
+    return adapter_idx + rank_slice
+
+
 @nnx.jit(static_argnames=("adapter_index", "rank"))
 def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank: int) -> nnx.GraphState:
     "Helper function to extract the adapter parameters for a specific adapter index."
 
     def extract_state(path: tuple, p: jnp.ndarray):
-        if path[-2].key not in {"lora_A", "lora_B"}:
+        key = path[-2].key
+        if key not in {"lora_A", "lora_B"}:
             return p
-        # LoRA param shapes:
-        # - 3D: Non-stacked linear/embed (A, in, R) or (A, R, out)
-        # - 4D: Stacked linear/embed (L, A, in, R) or non-stacked expert (A, E, in, R)
-        # - 5D: Stacked expert (L, A, E, in, R)
-        # We extract adapter_index from the adapter dimension (axis 1 for stacked, axis 0 otherwise)
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
-        is_stacked = is_stacked_lora_path(path)
-        if path[-2].key == "lora_A":
-            if is_stacked:  # (L, A, ..., R)
-                return p[:, adapter_index, ..., :rank]
-            else:  # (A, ..., R)
-                return p[adapter_index, ..., :rank]
-        if path[-2].key == "lora_B":
-            if is_stacked:  # (L, A, ..., out)
-                return p[:, adapter_index, ..., :rank, :]
-            else:  # (A, ..., out)
-                return p[adapter_index, ..., :rank, :]
-        return p  # Defensive fallback (should not be reached)
+        idx = _lora_slice(is_stacked_lora_path(path), adapter_index, rank, is_lora_A=(key == "lora_A"))
+        return p[idx]
 
     return jax.tree.map_with_path(extract_state, lora_params)
 
@@ -399,22 +400,12 @@ def insert_adapter_state(
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_state)."
 
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
-        if path[-2].key not in {"lora_A", "lora_B"}:
+        key = path[-2].key
+        if key not in {"lora_A", "lora_B"}:
             return new
-        # See extract_adapter_state for shape documentation
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
-        is_stacked = is_stacked_lora_path(path)
-        if path[-2].key == "lora_A":
-            if is_stacked:  # (L, A, ..., R)
-                return p.at[:, adapter_index, ..., :rank].set(new)
-            else:  # (A, ..., R)
-                return p.at[adapter_index, ..., :rank].set(new)
-        elif path[-2].key == "lora_B":
-            if is_stacked:  # (L, A, ..., out)
-                return p.at[:, adapter_index, ..., :rank, :].set(new)
-            else:  # (A, ..., out)
-                return p.at[adapter_index, ..., :rank, :].set(new)
-        return new  # Defensive fallback (should not be reached)
+        idx = _lora_slice(is_stacked_lora_path(path), adapter_index, rank, is_lora_A=(key == "lora_A"))
+        return p.at[idx].set(new)
 
     updated = jax.tree.map_with_path(insert_state, lora_params, new_params)
     nnx.update(lora_params, updated)
