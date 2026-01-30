@@ -80,7 +80,6 @@ class TestGradientCheckpointing:
         model, config = create_model(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=gradient_checkpointing)
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-        model.train()
         out = model(input_ids, attention_mask=attention_mask, **forward_kwargs)
         return model, config, out
 
@@ -138,7 +137,6 @@ class TestGradientCheckpointing:
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-        model.eval()
         out = model(input_ids, attention_mask=attention_mask)
 
         # KV cache should be populated (checkpointed path returns empty)

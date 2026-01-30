@@ -246,7 +246,7 @@ class JaxBackendImpl(AbstractBackend):
             target_ids: jax.Array,
         ) -> jax.Array:
             """Forward pass and logprobs computation."""
-            model = nnx.merge(graphdef, lora_params, non_lora_params).train()
+            model = nnx.merge(graphdef, lora_params, non_lora_params)
             output = model(
                 input_ids,
                 attention_mask=attention_mask,
