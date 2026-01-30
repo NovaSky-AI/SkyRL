@@ -79,9 +79,24 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
 
 
 def _is_layer_param(path: tuple) -> bool:
-    """Check if a parameter path corresponds to a stacked decoder layer weight."""
+    """Check if a parameter path corresponds to a decoder layer weight."""
     path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
     return "layers" in path_strs
+
+
+def _is_stacked_layer_param(path: tuple) -> bool:
+    """Check if a parameter path corresponds to a STACKED decoder layer weight.
+
+    Stacked layers (Qwen3/Llama3) have paths like: ('model', 'layers', 'self_attn', ...)
+    Non-stacked layers (DeepSeekV3) have paths like: ('model', 'layers', '0', 'self_attn', ...)
+    """
+    path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
+    if "layers" not in path_strs:
+        return False
+    layers_idx = path_strs.index("layers")
+    if layers_idx + 1 < len(path_strs) and path_strs[layers_idx + 1].isdigit():
+        return False  # Non-stacked: path already contains layer index
+    return True  # Stacked: no layer index in path
 
 
 def _path_to_hf_key(path: tuple, layer_idx: int | None = None) -> str:
@@ -153,7 +168,7 @@ def load_safetensors(
         tensors.update(safetensors.numpy.load_file(file))
     tensors = {k.removeprefix(prefix): v for k, v in tensors.items()}
 
-    num_experts = getattr(config, "num_experts", None)
+    num_experts = config.get_num_experts()
     model_params = nnx.to_flat_state(nnx.state(model))
     updates = []
 
@@ -165,13 +180,14 @@ def load_safetensors(
         if skip_lora and any(k in path_keys for k in ("lora_A", "lora_B", "lora_scaling", "lora_ranks")):
             continue
 
-        if _is_layer_param(path):
-            # Stack per-layer weights from HF format
+        if _is_stacked_layer_param(path):
+            # Stack per-layer weights from HF format (stacked layers like Qwen3/Llama3)
             stacked_tensor = np.empty(param.shape, dtype=param.dtype)
             for i in range(num_layers):
                 key = _path_to_hf_key(path, layer_idx=i)
                 stacked_tensor[i] = _load_hf_tensor(tensors, key, param.shape[1:], num_experts)
         else:
+            # Non-stacked layers (like DeepSeekV3) or non-layer params
             key = _path_to_hf_key(path)
             stacked_tensor = _load_hf_tensor(tensors, key, param.shape, num_experts)
 
@@ -190,7 +206,7 @@ def save_safetensors(
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
     """Save model weights to safetensors, unstacking layer weights for HF compatibility."""
-    num_experts = getattr(config, "num_experts", None)
+    num_experts = config.get_num_experts()
     model_params = nnx.to_flat_state(nnx.state(model))
     tensors = {}
 
@@ -201,12 +217,13 @@ def save_safetensors(
         if filter_fn is not None and not filter_fn(path):
             continue
 
-        if _is_layer_param(path):
-            # Unstack and save as individual layer weights
+        if _is_stacked_layer_param(path):
+            # Unstack and save as individual layer weights (stacked layers like Qwen3/Llama3)
             for i in range(num_layers):
                 key = prefix + _path_to_hf_key(path, layer_idx=i)
                 _save_hf_tensor(tensors, key, param[i], num_experts)
         else:
+            # Non-stacked layers (like DeepSeekV3) or non-layer params
             key = prefix + _path_to_hf_key(path)
             _save_hf_tensor(tensors, key, param, num_experts)
 

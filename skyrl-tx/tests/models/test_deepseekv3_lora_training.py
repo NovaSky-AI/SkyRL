@@ -62,7 +62,7 @@ def test_lora_training_moe_rank_normalized():
     )
     with jax.set_mesh(mesh):
         model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
-        load_safetensors(checkpoint_path, config, model)
+        load_safetensors(checkpoint_path, config, model, config.num_hidden_layers)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
         # For routed experts with 256 experts: effective rank = max(1, rank // 256) = 1
@@ -152,7 +152,7 @@ def test_lora_training_high_rank():
     )
     with jax.set_mesh(mesh):
         model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
-        load_safetensors(checkpoint_path, config, model)
+        load_safetensors(checkpoint_path, config, model, config.num_hidden_layers)
 
         init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16, seed=0))
         init_lora_adapter(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8, seed=1))

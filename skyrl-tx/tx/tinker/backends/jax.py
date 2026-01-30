@@ -185,7 +185,7 @@ class JaxBackendImpl(AbstractBackend):
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
-            load_safetensors(checkpoint_path, self.model_config, self.model)
+            load_safetensors(checkpoint_path, self.model_config, self.model, self.model.model.num_layers)
 
             # Split model into LoRA and non-LoRA parameters
             self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)

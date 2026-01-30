@@ -34,8 +34,10 @@ def create_model(
     """Create model with random weights for testing."""
     base_config = AutoConfig.from_pretrained(model_name)
     config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True, **config_kwargs)
-    mesh_kwargs = {"axis_types": mesh_axis_types} if mesh_axis_types else {}
-    mesh = jax.make_mesh((1, 1), mesh_axes, **mesh_kwargs)
+    # Default to Auto axis types to avoid sharding resolution errors
+    if mesh_axis_types is None:
+        mesh_axis_types = (jax.sharding.AxisType.Auto,) * len(mesh_axes)
+    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=mesh_axis_types)
     with jax.set_mesh(mesh):
         model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(seed))
     return model, config
@@ -140,7 +142,8 @@ class TestGradientCheckpointing:
         out = model(input_ids, attention_mask=attention_mask)
 
         # KV cache should be populated (checkpointed path returns empty)
-        assert len(out.kv_cache.keys) == config.num_hidden_layers
+        # keys is a stacked array with shape (num_layers, batch, seq, heads, dim)
+        assert out.kv_cache.keys.shape[0] == config.num_hidden_layers
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
