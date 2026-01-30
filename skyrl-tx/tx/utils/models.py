@@ -87,10 +87,18 @@ def _is_layer_param(path: tuple) -> bool:
 def _is_stacked_layer_param(path: tuple) -> bool:
     """Check if a parameter path corresponds to a STACKED decoder layer weight.
 
-    Stacked layers (Qwen3/Llama3) have paths like: ('model', 'layers', 'self_attn', ...)
-    Non-stacked layers (DeepSeekV3) have paths like: ('model', 'layers', '0', 'self_attn', ...)
+    Stacked layers have paths like:
+    - Qwen3/Llama3: ('model', 'layers', 'self_attn', ...)
+    - DeepSeekV3 dense: ('model', 'dense_layers', 'self_attn', ...)
+    - DeepSeekV3 MoE: ('model', 'moe_layers', 'self_attn', ...)
+
+    Non-stacked layers have paths like: ('model', 'layers', '0', 'self_attn', ...)
     """
     path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
+    # Check for split stacked layer names (DeepSeekV3)
+    if "dense_layers" in path_strs or "moe_layers" in path_strs:
+        return True
+    # Check for regular stacked layers (Qwen3/Llama3)
     if "layers" not in path_strs:
         return False
     layers_idx = path_strs.index("layers")
@@ -99,12 +107,33 @@ def _is_stacked_layer_param(path: tuple) -> bool:
     return True  # Stacked: no layer index in path
 
 
+def _get_layer_group_info(path: tuple, config: ModelConfig) -> tuple[str, int]:
+    """Get layer group name and starting layer index for a stacked param path.
+
+    Returns:
+        Tuple of (layer_name_for_hf_key, layer_offset) where:
+        - layer_name_for_hf_key is 'layers' (HF always uses 'layers')
+        - layer_offset is the starting layer index for this group
+    """
+    path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
+    if "dense_layers" in path_strs:
+        return "layers", 0
+    elif "moe_layers" in path_strs:
+        return "layers", getattr(config, "first_k_dense_replace", 0)
+    else:
+        return "layers", 0
+
+
 def _path_to_hf_key(path: tuple, layer_idx: int | None = None) -> str:
-    """Convert param path to HuggingFace key. If layer_idx provided, insert it after 'layers'."""
+    """Convert param path to HuggingFace key. If layer_idx provided, insert it after 'layers'.
+
+    Handles split stacked layer names (dense_layers, moe_layers) by converting them to 'layers'.
+    """
     parts = []
     for p in path:
         key = p.key if hasattr(p, "key") else str(p)
-        if key == "layers" and layer_idx is not None:
+        # Handle split stacked layer names - convert to 'layers' with index
+        if key in ("layers", "dense_layers", "moe_layers") and layer_idx is not None:
             parts.append(f"layers.{layer_idx}")
         elif key in ("kernel", "embedding"):
             parts.append("weight")
@@ -181,13 +210,16 @@ def load_safetensors(
             continue
 
         if _is_stacked_layer_param(path):
-            # Stack per-layer weights from HF format (stacked layers like Qwen3/Llama3)
+            # Stack per-layer weights from HF format
+            # Infer layer count from param shape and get offset for split stacked layers
+            stacked_layer_count = param.shape[0]
+            _, layer_offset = _get_layer_group_info(path, config)
             stacked_tensor = np.empty(param.shape, dtype=param.dtype)
-            for i in range(num_layers):
-                key = _path_to_hf_key(path, layer_idx=i)
+            for i in range(stacked_layer_count):
+                key = _path_to_hf_key(path, layer_idx=layer_offset + i)
                 stacked_tensor[i] = _load_hf_tensor(tensors, key, param.shape[1:], num_experts)
         else:
-            # Non-stacked layers (like DeepSeekV3) or non-layer params
+            # Non-stacked layers or non-layer params
             key = _path_to_hf_key(path)
             stacked_tensor = _load_hf_tensor(tensors, key, param.shape, num_experts)
 
@@ -218,12 +250,15 @@ def save_safetensors(
             continue
 
         if _is_stacked_layer_param(path):
-            # Unstack and save as individual layer weights (stacked layers like Qwen3/Llama3)
-            for i in range(num_layers):
-                key = prefix + _path_to_hf_key(path, layer_idx=i)
+            # Unstack and save as individual layer weights
+            # Infer layer count from param shape and get offset for split stacked layers
+            stacked_layer_count = param.shape[0]
+            _, layer_offset = _get_layer_group_info(path, config)
+            for i in range(stacked_layer_count):
+                key = prefix + _path_to_hf_key(path, layer_idx=layer_offset + i)
                 _save_hf_tensor(tensors, key, param[i], num_experts)
         else:
-            # Non-stacked layers (like DeepSeekV3) or non-layer params
+            # Non-stacked layers or non-layer params
             key = prefix + _path_to_hf_key(path)
             _save_hf_tensor(tensors, key, param, num_experts)
 
@@ -336,7 +371,8 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
         # - 5D: Stacked expert (L, A, E, in, R)
         # We extract adapter_index from the adapter dimension (axis 1 for stacked, axis 0 otherwise)
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
-        is_stacked = "layers" in [pk.key if hasattr(pk, "key") else str(pk) for pk in path]
+        path_strs = [pk.key if hasattr(pk, "key") else str(pk) for pk in path]
+        is_stacked = any(name in path_strs for name in ("layers", "dense_layers", "moe_layers"))
         if path[-2].key == "lora_A":
             if is_stacked:  # (L, A, ..., R)
                 return p[:, adapter_index, ..., :rank]
@@ -364,7 +400,8 @@ def insert_adapter_state(
             return new
         # See extract_adapter_state for shape documentation
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
-        is_stacked = "layers" in [pk.key if hasattr(pk, "key") else str(pk) for pk in path]
+        path_strs = [pk.key if hasattr(pk, "key") else str(pk) for pk in path]
+        is_stacked = any(name in path_strs for name in ("layers", "dense_layers", "moe_layers"))
         if path[-2].key == "lora_A":
             if is_stacked:  # (L, A, ..., R)
                 return p.at[:, adapter_index, ..., :rank].set(new)

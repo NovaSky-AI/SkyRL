@@ -27,6 +27,15 @@ def _is_routed_expert_path(path) -> bool:
     return False
 
 
+def _is_stacked_path(path) -> bool:
+    """Check if path is for stacked layers (dense_layers or moe_layers)."""
+    for p in path:
+        key = p.key if hasattr(p, "key") else str(p)
+        if key in ("dense_layers", "moe_layers"):
+            return True
+    return False
+
+
 def _get_out_of_rank_params(params, adapter_idx: int, rank: int, num_experts: int):
     """Extract out-of-rank params, using effective rank for routed expert layers."""
 
@@ -38,11 +47,18 @@ def _get_out_of_rank_params(params, adapter_idx: int, rank: int, num_experts: in
         else:
             effective_rank = rank
 
+        # For stacked layers, adapter index is dim 1; for non-stacked, it's dim 0
+        is_stacked = _is_stacked_path(path)
+
         if "lora_A" in path_str:
-            # lora_A shape: [adapters, ..., max_rank] - slice last dim
+            # lora_A shape: [layers, adapters, ..., max_rank] (stacked) or [adapters, ..., max_rank]
+            if is_stacked:
+                return p[:, adapter_idx, ..., effective_rank:].copy()
             return p[adapter_idx, ..., effective_rank:].copy()
         elif "lora_B" in path_str:
-            # lora_B shape: [adapters, ..., max_rank, out] - slice second-to-last dim
+            # lora_B shape: [layers, adapters, ..., max_rank, out] (stacked) or [adapters, ..., max_rank, out]
+            if is_stacked:
+                return p[:, adapter_idx, ..., effective_rank:, :].copy()
             return p[adapter_idx, ..., effective_rank:, :].copy()
         return p
 
@@ -86,7 +102,11 @@ def test_lora_training_moe_rank_normalized():
         graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
         def get_adapter_params(params, adapter_idx):
-            return jax.tree.map(lambda p: p[adapter_idx].copy(), params)
+            def extract(path, p):
+                if _is_stacked_path(path):
+                    return p[:, adapter_idx].copy()
+                return p[adapter_idx].copy()
+            return jax.tree.map_with_path(extract, params)
 
         num_experts = config.n_routed_experts
 
@@ -173,7 +193,11 @@ def test_lora_training_high_rank():
         graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
         def get_adapter_params(params, adapter_idx):
-            return jax.tree.map(lambda p: p[adapter_idx].copy(), params)
+            def extract(path, p):
+                if _is_stacked_path(path):
+                    return p[:, adapter_idx].copy()
+                return p[adapter_idx].copy()
+            return jax.tree.map_with_path(extract, params)
 
         num_experts = config.n_routed_experts
 
