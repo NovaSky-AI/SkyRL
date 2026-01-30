@@ -159,9 +159,9 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             rngs=rngs,
         )
         sharding = _get_sharding_spec(self.embedding[...])
-        assert sharding is not None, (
-            "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
-        )
+        assert (
+            sharding is not None
+        ), "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
 
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
@@ -229,9 +229,9 @@ class LoRALinear(LoRAMixin, nnx.Linear):
             rngs=rngs,
         )
         sharding = _get_sharding_spec(self.kernel[...])
-        assert sharding is not None, (
-            "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
-        )
+        assert (
+            sharding is not None
+        ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,

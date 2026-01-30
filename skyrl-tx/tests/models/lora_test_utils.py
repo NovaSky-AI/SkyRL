@@ -12,10 +12,12 @@ def get_adapter_params(params, adapter_idx: int):
     Decoder layer LoRA params have shape (num_layers, num_adapters, ...).
     Embed tokens LoRA params have shape (num_adapters, ...).
     """
+
     def extract(path, p):
         if is_stacked_lora_path(path):
             return p[:, adapter_idx].copy()
         return p[adapter_idx].copy()
+
     return jax.tree.map_with_path(extract, params)
 
 
@@ -25,6 +27,7 @@ def get_out_of_rank_params(params, adapter_idx: int, rank: int):
     Returns the portion of LoRA weights beyond the effective rank,
     which should remain unchanged during training.
     """
+
     def slice_param(path, p):
         path_str = str(path)
         is_stacked = is_stacked_lora_path(path)
@@ -37,6 +40,7 @@ def get_out_of_rank_params(params, adapter_idx: int, rank: int):
                 return p[:, adapter_idx, ..., rank:, :].copy()
             return p[adapter_idx, ..., rank:, :].copy()
         return p
+
     return jax.tree.map_with_path(slice_param, params)
 
 
@@ -67,6 +71,7 @@ def get_moe_out_of_rank_params(params, adapter_idx: int, rank: int, num_experts:
 
     For routed experts, uses effective rank = max(1, rank // num_experts).
     """
+
     def slice_param(path, p):
         path_str = str(path)
         effective_rank = max(1, rank // num_experts) if is_routed_expert_path(path) else rank
@@ -80,4 +85,5 @@ def get_moe_out_of_rank_params(params, adapter_idx: int, rank: int, num_experts:
                 return p[:, adapter_idx, ..., effective_rank:, :].copy()
             return p[adapter_idx, ..., effective_rank:, :].copy()
         return p
+
     return jax.tree.map_with_path(slice_param, params)

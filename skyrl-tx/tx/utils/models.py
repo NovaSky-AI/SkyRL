@@ -158,10 +158,7 @@ def _load_hf_tensor(tensors: dict, key: str, target_shape: tuple, num_experts: i
     """Load tensor from HF format, handling experts, transpose, and reshape."""
     # Handle MoE expert weights (HF stores each expert separately)
     if ".experts." in key and num_experts:
-        tensor = np.stack([
-            tensors[key.replace(".experts.", f".experts.{i}.")].T
-            for i in range(num_experts)
-        ], axis=0)
+        tensor = np.stack([tensors[key.replace(".experts.", f".experts.{i}.")].T for i in range(num_experts)], axis=0)
     else:
         tensor = tensors[key]
         if "embed_tokens" not in key:
@@ -273,6 +270,7 @@ def save_safetensors(
     # In multi-host mode, gather all shards and only save from rank 0
     if jax.process_count() > 1:
         from jax.experimental import multihost_utils
+
         tensors = {k: multihost_utils.process_allgather(v, tiled=True) for k, v in tensors.items()}
 
     if jax.process_index() == 0:

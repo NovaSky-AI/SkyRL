@@ -474,16 +474,20 @@ class DeepseekV3Model(nnx.Module):
 
         # Create stacked dense layers (layers 0 to first_k_dense_replace - 1)
         if self.num_dense_layers > 0:
+
             def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DenseDecoderLayer:
                 return DeepseekV3DenseDecoderLayer(config, dtype=dtype, rngs=rngs)
+
             self.dense_layers = create_stacked_layers(create_dense_layer, self.num_dense_layers, rngs)
         else:
             self.dense_layers = None
 
         # Create stacked MoE layers (layers first_k_dense_replace to num_hidden_layers - 1)
         if self.num_moe_layers > 0:
+
             def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3MoEDecoderLayer:
                 return DeepseekV3MoEDecoderLayer(config, dtype=dtype, rngs=rngs)
+
             self.moe_layers = create_stacked_layers(create_moe_layer, self.num_moe_layers, rngs)
         else:
             self.moe_layers = None
@@ -513,14 +517,14 @@ class DeepseekV3Model(nnx.Module):
         if kv_cache is not None:
             if self.num_dense_layers > 0:
                 dense_kv_cache = KVCache(
-                    keys=kv_cache.keys[:self.num_dense_layers],
-                    values=kv_cache.values[:self.num_dense_layers],
+                    keys=kv_cache.keys[: self.num_dense_layers],
+                    values=kv_cache.values[: self.num_dense_layers],
                     cache_position=kv_cache.cache_position,
                 )
             if self.num_moe_layers > 0:
                 moe_kv_cache = KVCache(
-                    keys=kv_cache.keys[self.num_dense_layers:],
-                    values=kv_cache.values[self.num_dense_layers:],
+                    keys=kv_cache.keys[self.num_dense_layers :],
+                    values=kv_cache.values[self.num_dense_layers :],
                     cache_position=kv_cache.cache_position,
                 )
 
