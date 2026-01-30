@@ -388,7 +388,8 @@ class DeepseekV3MoE(nnx.Module):
 
         router_logits = self.gate(hidden_states_flat)
         top_k_weights, top_k_index = self._compute_routing(router_logits)
-        # Cast routing weights to hidden_states dtype to preserve dtype through the forward pass
+        # _compute_routing uses float32 for softmax stability; cast back to model dtype
+        # to maintain consistent dtypes through jax.lax.scan in forward_layers
         top_k_weights = top_k_weights.astype(hidden_states.dtype)
 
         expert_output = self.experts(hidden_states_flat, top_k_index, top_k_weights, adapter_indices_flat)

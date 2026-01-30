@@ -55,7 +55,6 @@ def load_model(
     """Load model from pre-saved weights directory."""
     model, config = create_model(
         model_name, config_cls, model_cls, mesh_axes,
-        mesh_axis_types=(jax.sharding.AxisType.Auto,) * 2,
         loss_chunk_size=loss_chunk_size,
         gradient_checkpointing=False,
     )
@@ -122,14 +121,14 @@ class TestGradientCheckpointing:
         for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
             np.testing.assert_allclose(hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}")
 
-    def test_eval_mode_uses_standard_path(
+    def test_kv_cache_with_checkpointing(
         self,
         model_name: str,
         config_cls: type[ModelConfig],
         model_cls: type[ModelForCausalLM],
         mesh_axes: tuple[str, str],
     ) -> None:
-        """eval() mode should use standard path with KV cache support."""
+        """KV cache should be populated even with gradient checkpointing enabled."""
         model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
         config.gradient_checkpointing = True
 
@@ -139,7 +138,6 @@ class TestGradientCheckpointing:
 
         out = model(input_ids, attention_mask=attention_mask)
 
-        # KV cache should be populated (checkpointed path returns empty)
         # keys is a stacked array with shape (num_layers, batch, seq, heads, dim)
         assert out.kv_cache.keys.shape[0] == config.num_hidden_layers
 
