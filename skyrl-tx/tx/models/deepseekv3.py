@@ -410,6 +410,8 @@ class DeepseekV3MoE(nnx.Module):
 class DeepseekV3DecoderLayer(nnx.Module):
     """Base decoder layer with shared attributes and forward pass."""
 
+    mlp: DeepseekV3MLP | DeepseekV3MoE  # Set by subclasses
+
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
