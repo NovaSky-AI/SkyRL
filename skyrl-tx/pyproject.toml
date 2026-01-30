@@ -31,7 +31,7 @@ gpu = [
 ]
 
 tpu = [
-    "jax[tpu]>=0.7.2; sys_platform == 'linux'",
+    "jax[tpu]; sys_platform == 'linux'"
 ]
 
 tinker = [
