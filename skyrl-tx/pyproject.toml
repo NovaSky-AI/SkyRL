@@ -61,7 +61,7 @@ azure = [
 # respectively.
 
 jax = [
-    "jax[cuda12]>=0.7.2; sys_platform == 'linux'",
+    "jax[cuda12]; sys_platform == 'linux'"
 ]
 
 skyrl_train = [
