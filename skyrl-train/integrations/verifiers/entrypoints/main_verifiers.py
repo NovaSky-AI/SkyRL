@@ -6,11 +6,11 @@ import ray
 from integrations.verifiers.verifiers_generator import VerifiersGenerator
 from transformers import PreTrainedTokenizer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-
+from skyrl_train.config import SkyRLConfig
 
 class VerifiersEntrypoint(BasePPOExp):
     def get_generator(
-        self, cfg: DictConfig, tokenizer: PreTrainedTokenizer, inference_engine_client: InferenceEngineClient
+        self, cfg: SkyRLConfig, tokenizer: PreTrainedTokenizer, inference_engine_client: InferenceEngineClient
     ):
         return VerifiersGenerator(
             generator_cfg=cfg.generator,

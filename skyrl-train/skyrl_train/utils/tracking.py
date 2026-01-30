@@ -19,17 +19,20 @@ import dataclasses
 from enum import Enum
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Optional
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import pprint
+from dataclasses import asdict
+
+from skyrl_train.config import SkyRLConfig
 
 
 # TODO(tgriggs): Test all backends.
 class Tracking:
     supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console"]
 
-    def __init__(self, project_name, experiment_name, backends: Union[str, List[str]] = "console", config=None):
+    def __init__(self, project_name, experiment_name, backends: Union[str, List[str]] = "console", config: Optional[SkyRLConfig]=None):
         if isinstance(backends, str):
             backends = [backends]
         for backend in backends:
@@ -41,7 +44,7 @@ class Tracking:
             import wandb
             from omegaconf import OmegaConf
 
-            wandb.init(project=project_name, name=experiment_name, config=OmegaConf.to_container(config, resolve=True))
+            wandb.init(project=project_name, name=experiment_name, config=asdict(config))
             self.logger["wandb"] = wandb
 
         if "mlflow" in backends:
@@ -143,7 +146,7 @@ class _TensorboardAdapter:
 
 
 class _MlflowLoggingAdapter:
-    def __init__(self, project_name, experiment_name, config):
+    def __init__(self, project_name, experiment_name, config: Optional[SkyRLConfig]=None):
         import os
 
         import mlflow

@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Iterable, Iterator, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
 
 import ray
 import torch
@@ -203,7 +203,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(cfg: "DictConfig") -> BroadcastInitInfo:
+    def create_init_info(cfg: "SkyRLConfig") -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:

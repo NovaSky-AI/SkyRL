@@ -9,7 +9,8 @@ import pytest
 import torch
 from jaxtyping import Float, Integer
 from pytest import approx
-from skyrl_train.config.utils import get_default_config
+
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
@@ -21,7 +22,7 @@ from tests.cpu.util import example_dummy_config
 
 
 @pytest.fixture
-def dummy_config():
+def dummy_config() -> SkyRLConfig:
     return example_dummy_config()
 
 
@@ -208,7 +209,7 @@ def test_normalize_mini_batch_size():
 
     def create_policy_worker_with_config(dp_size):
         """Helper to create policy worker with specific config."""
-        cfg = get_default_config()
+        cfg = SkyRLConfig()
         cfg.trainer.algorithm.policy_loss_type = "regular"
 
         worker = TestPolicyWorker(
@@ -228,7 +229,7 @@ def test_normalize_mini_batch_size():
 
     def create_critic_worker_with_config(dp_size):
         """Helper to create critic worker with specific config."""
-        cfg = get_default_config()
+        cfg = SkyRLConfig()
 
         worker = TestCriticWorker(
             cfg=cfg,
@@ -293,7 +294,7 @@ def test_validate_batch_sizes():
         critic_model_path=None,
     ):
         """Helper to create config for validation testing."""
-        cfg = get_default_config()
+        cfg = SkyRLConfig()
         cfg.trainer.train_batch_size = train_batch_size
         cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
         cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
@@ -453,7 +454,7 @@ def test_forward_backward_batch_calculations():
     """
 
     # Create test configuration
-    cfg = get_default_config()
+    cfg = SkyRLConfig()
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.algorithm.policy_loss_type = "regular"
@@ -574,7 +575,7 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     """Ensure train_batch_size is >= lcm(policy_dp, ref_dp) when ref is used; else >= policy_dp."""
 
     def create_config(train_batch_size, policy_dp, ref_dp, include_ref=True):
-        cfg = get_default_config()
+        cfg = SkyRLConfig()
         cfg.trainer.train_batch_size = train_batch_size
         cfg.trainer.policy_mini_batch_size = train_batch_size
         cfg.trainer.critic_mini_batch_size = 1

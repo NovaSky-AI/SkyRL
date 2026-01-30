@@ -5,22 +5,18 @@ uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_training_step.py
 
 import ray
 import pytest
-import hydra
-from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, validate_cfg
 from skyrl_train.utils.utils import print_mem
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.config import SkyRLConfig
 
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 
-def get_test_actor_config() -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+def get_test_actor_config() -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.logger = "console"
     cfg.generator.inference_engine_tensor_parallel_size = 2
@@ -29,7 +25,7 @@ def get_test_actor_config() -> DictConfig:
 
 
 @pytest.fixture
-def cfg() -> DictConfig:
+def cfg() -> SkyRLConfig:
     return get_test_actor_config()
 
 

@@ -7,6 +7,7 @@ import hydra
 import torch
 from typing import Optional
 from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry
@@ -17,7 +18,7 @@ def compute_reinforce_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: SkyRLConfig,
     loss_mask: Optional[torch.Tensor] = None,
 ):
     """

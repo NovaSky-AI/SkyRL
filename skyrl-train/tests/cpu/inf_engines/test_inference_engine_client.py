@@ -20,7 +20,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
-from omegaconf import OmegaConf
+from skyrl_train.config import SkyRLConfig, GeneratorConfig, PolicyConfig, ModelConfig, TrainerConfig
 import asyncio
 import pytest
 import random
@@ -198,19 +198,7 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
             }
 
     # Create a minimal config to avoid spinning up HTTP endpoint
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "policy": {"model": {"path": "dummy-model"}},
-            },
-            "generator": {
-                "backend": "vllm",
-                "enable_http_endpoint": False,
-                "http_endpoint_host": "127.0.0.1",
-                "http_endpoint_port": 0,
-            },
-        }
-    )
+    cfg = _make_min_cfg()
 
     engines = [MockEngine() for _ in range(num_engines)]
     tokenizer = object()  # not used by completion()
@@ -289,19 +277,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
             }
 
     # Minimal config, do not spin up HTTP endpoint
-    cfg = OmegaConf.create(
-        {
-            "trainer": {
-                "policy": {"model": {"path": "dummy-model"}},
-            },
-            "generator": {
-                "backend": "vllm",
-                "enable_http_endpoint": False,
-                "http_endpoint_host": "127.0.0.1",
-                "http_endpoint_port": 0,
-            },
-        }
-    )
+    cfg = _make_min_cfg()
 
     engines = [MockEngine() for _ in range(num_engines)]
     tokenizer = object()  # not used when prompt_token_ids are provided
@@ -420,18 +396,16 @@ def test_route_prompts_to_engines_validation_errors():
 
 
 def _make_min_cfg():
-    return OmegaConf.create(
-        {
-            "trainer": {
-                "policy": {"model": {"path": "dummy-model"}},
-            },
-            "generator": {
-                "backend": "vllm",
-                "enable_http_endpoint": False,
-                "http_endpoint_host": "127.0.0.1",
-                "http_endpoint_port": 0,
-            },
-        }
+    return SkyRLConfig(
+        trainer=TrainerConfig(
+            policy=PolicyConfig(model=ModelConfig(path="dummy-model")),
+        ),
+        generator=GeneratorConfig(
+            backend="vllm",
+            enable_http_endpoint=False,
+            http_endpoint_host="127.0.0.1",
+            http_endpoint_port=0,
+        ),
     )
 
 

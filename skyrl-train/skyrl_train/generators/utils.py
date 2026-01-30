@@ -12,7 +12,7 @@ from skyrl_train.generators.base import (
     MetricsOutput,
 )
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
+from skyrl_train.config import ChatTemplateConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
 
@@ -99,7 +99,7 @@ CUSTOM_CHAT_TEMPLATES = {
 }
 
 
-def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConfig]] = None) -> Optional[str]:
+def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemplateConfig]] = None) -> Optional[str]:
     """
     Get custom chat template based on the new config structure.
 
@@ -112,11 +112,14 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
     if chat_template_config is None:
         return None
 
-    source = chat_template_config.get("source")
+    if isinstance(chat_template_config, dict):
+        chat_template_config = ChatTemplateConfig(**chat_template_config)
+        
+    source = chat_template_config.source
     if not source:
         raise ValueError("'source' is required in chat_template_config")
 
-    name_or_path = chat_template_config.get("name_or_path")
+    name_or_path = chat_template_config.name_or_path
     if not name_or_path:
         return None  # if name_or_path is not provided, use the default chat template from the tokenizer
 

@@ -10,6 +10,7 @@ from loguru import logger
 from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
@@ -42,20 +43,20 @@ class InferenceEngineClient(InferenceEngineInterface):
     """
 
     def __init__(
-        self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, full_config: DictConfig
+        self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, full_config: SkyRLConfig
     ):
         """
         Args:
             engines: List[InferenceEngineInterface] - The inference engines, remote or local.
             tokenizer: PreTrainedTokenizerBase - The tokenizer to use.
-            full_config: DictConfig - See ppo_base_config.yaml
+            full_config: full training configuration
         """
         self.engines = engines
         self.tokenizer = tokenizer
         # Use served_model_name if provided, otherwise fall back to model path.
         # served_model_name allows using a different model name for HTTP endpoint validation
         # than the actual model path. See ppo_base_config.yaml for details.
-        served_model_name = full_config.generator.get("served_model_name", None)
+        served_model_name = full_config.generator.served_model_name
         if served_model_name is not None:
             self.model_name = served_model_name
         else:

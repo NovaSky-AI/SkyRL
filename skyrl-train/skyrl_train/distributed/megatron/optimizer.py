@@ -22,14 +22,15 @@ from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+from skyrl_train.config import OptimizerConfig as SkyRLOptimizerConfig
 
-def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
+def init_megatron_optim_config(optim_config: SkyRLOptimizerConfig, optimizer_config_kwargs: dict) -> OptimizerConfig:
     optim_args = {
-        "optimizer": optim_config.get("optimizer", "adam"),
-        "lr": optim_config.get("lr"),
-        "min_lr": optim_config.get("min_lr", 0.0),
-        "clip_grad": optim_config.get("max_grad_norm", 1.0),
-        "weight_decay": optim_config.get("weight_decay", 0.01),
+        "optimizer": optim_config.optimizer,
+        "lr": optim_config.lr,
+        "min_lr": optim_config.min_lr,
+        "clip_grad": optim_config.max_grad_norm,
+        "weight_decay": optim_config.weight_decay,
         "bf16": True,
         "params_dtype": torch.bfloat16,
         "use_distributed_optimizer": True,
@@ -54,29 +55,29 @@ def get_megatron_optimizer(
 
 def get_megatron_optimizer_param_scheduler(
     optimizer,
-    config,
+    config: SkyRLOptimizerConfig,
     num_training_steps: int = 1e9,  # default to a large number for constant lr/wd
 ):
     """
     Get the optimizer parameter scheduler for Megatron.
     """
     # TODO: support other schedulers for Megatron
-    if config.get("scheduler", "constant_with_warmup") != "constant_with_warmup":
+    if config.scheduler != "constant_with_warmup":
         raise ValueError("Only constant_with_warmup scheduler is supported for Megatron")
 
     lr_warmup_steps = config.num_warmup_steps
-    if config.get("lr_decay_steps", None) is None:
+    if config.lr_decay_steps is None:
         lr_decay_steps = num_training_steps
-    if config.get("lr_warmup_steps_ratio", None) is not None and (
-        config.get("lr_warmup_steps", None) is None or config.lr_warmup_steps <= 0
+    if config.lr_warmup_steps_ratio is not None and (
+        config.lr_warmup_steps is None or config.lr_warmup_steps <= 0
     ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
     opt_param_scheduler = OptimizerParamScheduler(
         optimizer,
-        init_lr=config.get("lr_warmup_init", 0.0),
+        init_lr=config.lr_warmup_init,
         max_lr=config.lr,
-        min_lr=config.get("min_lr", 0.0),
+        min_lr=config.min_lr,
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
         lr_decay_style="constant",

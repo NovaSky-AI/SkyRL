@@ -10,15 +10,14 @@ uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_save_load_m
 
 import ray
 import pytest
-import hydra
 import torch
 import os
 import shutil
 import tempfile
-from omegaconf import DictConfig
 import json
 from transformers import AutoTokenizer
 
+from skyrl_train.config import SkyRLConfig
 from tests.gpu.utils import (
     init_worker_with_type,
     make_dummy_training_batch,
@@ -26,17 +25,14 @@ from tests.gpu.utils import (
     ray_init_for_tests,
     validate_cfg,
 )
-from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MODEL_ARCH = "Qwen3ForCausalLM"
 NUM_GPUS = 4
 
 
-def get_test_actor_config(strategy: str) -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+def get_test_actor_config(strategy: str) -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.strategy = strategy

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
 
 import torch
 
@@ -244,7 +244,7 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(cfg: "DictConfig") -> CudaIpcInitInfo:
+    def create_init_info(cfg: "SkyRLConfig") -> CudaIpcInitInfo:
         """Create init info with all config-derived args.
 
         Args:

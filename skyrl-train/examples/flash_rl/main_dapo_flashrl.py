@@ -7,6 +7,7 @@ import hydra
 import torch
 from typing import List
 from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import (
@@ -20,7 +21,7 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.generators.base import GeneratorOutput
 
 
-def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: DictConfig, colocate_pg, tokenizer):
+def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: SkyRLConfig, colocate_pg, tokenizer):
     from examples.flash_rl.flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
 
     return create_ray_wrapped_inference_engines_flashrl(

@@ -16,7 +16,9 @@ from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeou
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import OmegaConf, DictConfig
+from skyrl_train.config import SkyRLConfig
 from pathlib import Path
+import pprint
 import ray
 
 import os
@@ -36,7 +38,7 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
-def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
+def create_ray_wrapped_inference_engines_from_config(cfg: SkyRLConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
     engine_kwargs = {
@@ -81,17 +83,17 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
             )
             engine_kwargs["enforce_eager"] = False
 
-    if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
-        engine_kwargs["rope_scaling"] = rope_scaling
-    if (rope_theta := cfg.generator.get("rope_theta", None)) is not None:
-        engine_kwargs["rope_theta"] = rope_theta
-    if (served_model_name := cfg.generator.get("served_model_name", None)) is not None:
-        engine_kwargs["served_model_name"] = served_model_name
+    if cfg.generator.rope_scaling is not None:
+        engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
+    if cfg.generator.rope_theta is not None:
+        engine_kwargs["rope_theta"] = cfg.generator.rope_theta
+    if cfg.generator.served_model_name is not None:
+        engine_kwargs["served_model_name"] = cfg.generator.served_model_name
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
-def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
+def create_remote_inference_engines_from_config(cfg: SkyRLConfig, tokenizer: PreTrainedTokenizerBase):
     # TODO(tgriggs): We may want a separate config for the model name in case
     # it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
@@ -113,15 +115,15 @@ class BasePPOExp:
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
-        self.cfg = cfg
+        self.cfg = SkyRLConfig.from_dict_config(cfg)
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
 
     @staticmethod
-    def get_cfg_as_str(dict_cfg: DictConfig) -> str:
-        return OmegaConf.to_yaml(dict_cfg)
+    def get_cfg_as_str(cfg: SkyRLConfig) -> str:
+        return pprint.pformat(cfg)
 
     def get_tokenizer(self, padding_side="left"):
         """Initializes a tokenizer for the given model."""

@@ -372,7 +372,7 @@ def test_advantage_estimator_registry_specific():
 
 def test_policy_loss_registry_specific():
     """Test PolicyLossRegistry-specific functionality."""
-    from omegaconf import DictConfig
+    from skyrl_train.config import AlgorithmConfig
 
     @register_policy_loss("test_policy_decorator")
     def decorated_policy_loss(log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_log_probs=None):
@@ -384,7 +384,7 @@ def test_policy_loss_registry_specific():
     assert retrieved == decorated_policy_loss
 
     # Test function execution
-    config = DictConfig({"policy_loss_type": "test_policy_decorator"})
+    config = AlgorithmConfig(policy_loss_type="test_policy_decorator")
     loss, clip_ratio = retrieved(
         log_probs=torch.tensor([[0.1]]),
         old_log_probs=torch.tensor([[0.2]]),
@@ -406,7 +406,7 @@ def test_registry_cross_ray_process():
     """Test that registry works with Ray and that functions can be retrieved and called from different processes"""
     try:
         import ray
-        from omegaconf import DictConfig
+        from skyrl_train.config import AlgorithmConfig
 
         if not ray.is_initialized():
             ray.init()
@@ -436,7 +436,7 @@ def test_registry_cross_ray_process():
                 log_probs=torch.tensor([[0.1]]),
                 old_log_probs=torch.tensor([[0.2]]),
                 advantages=torch.tensor([[1.0]]),
-                config=DictConfig({"policy_loss_type": "cross_process_test"}),
+                config=AlgorithmConfig(policy_loss_type="cross_process_test"),
             )
 
             adv, ret = adv_estimator(
@@ -459,7 +459,7 @@ def test_registry_cross_ray_process():
             log_probs=torch.tensor([[0.1]]),
             old_log_probs=torch.tensor([[0.2]]),
             advantages=torch.tensor([[1.0]]),
-            config=DictConfig({"policy_loss_type": "cross_process_test_2"}),
+            config=AlgorithmConfig(policy_loss_type="cross_process_test_2"),
         )
         assert loss_2.item() == 3.0
         assert clip_ratio_2 == 0.6

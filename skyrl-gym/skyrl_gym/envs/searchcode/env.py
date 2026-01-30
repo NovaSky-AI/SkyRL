@@ -4,7 +4,6 @@ from skyrl_gym.tools import SearchToolGroup, PythonCodeExecutorToolGroup
 from skyrl_gym.envs.gsm8k import utils
 import re
 from typing import Dict
-from omegaconf import DictConfig
 
 
 class SearchCodeEnv(BaseTextEnv):
@@ -12,7 +11,7 @@ class SearchCodeEnv(BaseTextEnv):
     Environment that calls multiple tools
     """
 
-    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: Any, extras: Dict[str, Any] = {}):
         super().__init__()
 
         assert "reward_spec" in extras, "reward_spec field is required"

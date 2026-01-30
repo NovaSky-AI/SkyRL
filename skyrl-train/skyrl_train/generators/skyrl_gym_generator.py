@@ -8,6 +8,7 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 import asyncio
 import copy
 from uuid import uuid4
+from dataclasses import asdict
 import skyrl_gym
 from typing import List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,7 @@ from tqdm.asyncio import tqdm
 from dataclasses import dataclass
 from loguru import logger
 
+from skyrl_train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
@@ -100,8 +102,8 @@ class TurnOutput:
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: DictConfig,
-        skyrl_gym_cfg: DictConfig,
+        generator_cfg: GeneratorConfig,
+        skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,
@@ -155,7 +157,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
-    def _validate_cfg(self, generator_cfg: DictConfig):
+    def _validate_cfg(self, generator_cfg: GeneratorConfig):
         if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
@@ -222,7 +224,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
-        env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+        env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
         session_id = (
@@ -250,7 +252,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
 
-        current_sampling_params = sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
+        # `sampling_params` if provided is a dict in the format expected by the inference engine backend
+        # we cast default config to a dict for consistency
+        current_sampling_params: dict = sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
@@ -589,7 +593,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         init_prompts = []
         for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
             env_extra["max_turns"] = self.max_turns
-            env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+            env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
             env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extra)
             init_prompt, _ = await self._run_in_executor_if_available(env.init, prompt)
             init_prompts.append(init_prompt)

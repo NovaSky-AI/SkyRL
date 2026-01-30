@@ -1,6 +1,7 @@
 """
 uv run --isolated --extra dev pytest tests/cpu/test_trainer_utils.py
 """
+import copy 
 
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
@@ -858,11 +859,11 @@ def test_build_dataloader_seeding(dummy_config):
     dataset = MultiItemDataset(size=20)
 
     # Test 1: Same seed should produce same shuffling
-    config1 = dummy_config.copy()
+    config1 = copy.deepcopy(dummy_config)
     config1.trainer.seed = 42
     config1.trainer.train_batch_size = 5
 
-    config2 = dummy_config.copy()
+    config2 = copy.deepcopy(dummy_config)
     config2.trainer.seed = 42  # Same seed
     config2.trainer.train_batch_size = 5
 
@@ -880,7 +881,7 @@ def test_build_dataloader_seeding(dummy_config):
     ), f"Same seed should produce same first batch, got {first_batch1} vs {first_batch2}"
 
     # Test 2: Different seeds should produce different shuffling
-    config3 = dummy_config.copy()
+    config3 = copy.deepcopy(dummy_config)
     config3.trainer.seed = 123  # Different seed
     config3.trainer.train_batch_size = 5
 

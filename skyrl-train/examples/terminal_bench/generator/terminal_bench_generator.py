@@ -14,6 +14,8 @@ from harbor.models.environment_type import EnvironmentType
 from harbor.models.agent.name import AgentName
 from harbor.trial.trial import Trial
 
+from skyrl_train.config import GeneratorConfig
+
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
 MAX_NUM_RETRIES_PER_TRIAL = 2
@@ -30,18 +32,28 @@ class TerminalBenchAgentOutput:
     summarization_count: Optional[int] = None
 
 
+@dataclass
+class TerminalBenchConfig:
+    trials_dir: str
+    agent_name: str
+    max_episodes: int
+    override_memory_mb: Optional[int] = None
+    override_storage_mb: Optional[int] = None
+    override_cpus: Optional[int] = None
+    enable_summarize: Optional[bool] = True
+
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: DictConfig,
-        terminal_bench_cfg: DictConfig,
+        generator_cfg: GeneratorConfig,
+        terminal_bench_cfg: TerminalBenchConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
     ):
         """
         Args:
-            generator_cfg: DictConfig object containing the generator configuration
-            terminal_bench_cfg: DictConfig object containing the terminal bench configuration
+            generator_cfg: generator configuration
+            terminal_bench_cfg: terminal bench configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
         """
@@ -56,19 +68,19 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.trials_dir = terminal_bench_cfg.trials_dir
         self.agent_name = terminal_bench_cfg.agent_name
         self.max_episodes = terminal_bench_cfg.max_episodes
-        self.enable_summarize = terminal_bench_cfg.get("enable_summarize", True)
+        self.enable_summarize = terminal_bench_cfg.enable_summarize
 
         # Optional overrides for the environment
-        self.override_memory_mb = terminal_bench_cfg.get("override_memory_mb")
-        self.override_storage_mb = terminal_bench_cfg.get("override_storage_mb")
-        self.override_cpus = terminal_bench_cfg.get("override_cpus")
+        self.override_memory_mb = terminal_bench_cfg.override_memory_mb
+        self.override_storage_mb = terminal_bench_cfg.override_storage_mb
+        self.override_cpus = terminal_bench_cfg.override_cpus
 
         logger.info(
             f"TerminalBenchGenerator initialized with overrides: memory={self.override_memory_mb}, storage={self.override_storage_mb}, cpus={self.override_cpus}"
         )
 
         # Read custom chat template
-        custom_chat_template_path = generator_cfg.engine_init_kwargs.get("chat_template", None)
+        custom_chat_template_path = generator_cfg.engine_init_kwargs.chat_template
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()

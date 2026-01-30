@@ -6,14 +6,18 @@ from skyrl_gym.envs.sql.utils import compute_score_single
 import os
 from typing import Dict
 from omegaconf import DictConfig
+from dataclasses import dataclass
 
+@dataclass
+class Text2SQLEnvConfig:
+    db_path: str = "/home/ray/default/sql_data"
 
 class SQLEnv(BaseTextEnv):
     """
     Environment for one SQL execution task.
     """
 
-    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: Text2SQLEnvConfig, extras: Dict[str, Any] = {}):
         super().__init__()
 
         # Initialize the environment

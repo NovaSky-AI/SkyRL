@@ -28,6 +28,7 @@ from jaxtyping import Float
 from loguru import logger
 from omegaconf import DictConfig
 
+from skyrl_train.config import AlgorithmConfig
 from skyrl_train.training_batch import TrainingInputBatch
 
 # Import cloudpickle for function serialization
@@ -67,7 +68,7 @@ class FixedKLController:
         pass
 
 
-def get_kl_controller(algorithm_cfg: DictConfig):
+def get_kl_controller(algorithm_cfg: AlgorithmConfig):
     if algorithm_cfg.kl_ctrl.type == "fixed":
         return FixedKLController(kl_coef=algorithm_cfg.kl_loss_coef)
     elif algorithm_cfg.kl_ctrl.type == "adaptive":
@@ -179,7 +180,7 @@ def ppo_critic_loss(
     values: torch.Tensor,
     old_values: torch.Tensor,
     returns: torch.Tensor,
-    config: DictConfig,
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[float]]:
     if config.value_clip is not None:
@@ -560,7 +561,7 @@ def ppo_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
@@ -601,7 +602,7 @@ def sapo_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
@@ -669,7 +670,7 @@ def gspo_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
@@ -729,7 +730,7 @@ def compute_policy_loss_cispo(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
@@ -758,7 +759,7 @@ def compute_policy_loss_clip_cov(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
@@ -825,7 +826,7 @@ def compute_policy_loss_kl_cov(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
@@ -885,7 +886,7 @@ def cross_entropy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, float]:
@@ -1133,7 +1134,7 @@ def compute_advantages_and_returns(
     response_mask: torch.Tensor,
     index: np.ndarray,
     adv_estimator: AdvantageEstimator,
-    config: DictConfig,
+    config: AlgorithmConfig,
     values: Optional[torch.Tensor] = None,
     grpo_norm_by_std: bool = True,
     gamma=1.0,

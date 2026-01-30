@@ -14,7 +14,7 @@ import torch
 from skyrl_train.weight_sync.base import WeightChunk
 
 if TYPE_CHECKING:
-    from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.weight_sync.base import WeightUpdateRequest
 
@@ -121,7 +121,7 @@ class WeightTransferStrategy(ABC):
 
     @staticmethod
     @abstractmethod
-    def create_init_info(cfg: "DictConfig") -> WeightSyncInitInfo:
+    def create_init_info(cfg: "SkyRLConfig") -> WeightSyncInitInfo:
         """Create init info with all config-derived args.
 
         Args:

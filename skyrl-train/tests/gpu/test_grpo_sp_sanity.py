@@ -12,6 +12,8 @@ from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl_train.trainer import RayPPOTrainer
 import ray
 from tqdm import tqdm
+
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils import Timer
 from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 
@@ -140,7 +142,7 @@ class RayPPOTestTrainer(RayPPOTrainer):
                 return self.all_metrics
 
 
-def run_exp_and_get_metrics(exp: BasePPOExp, cfg: DictConfig):
+def run_exp_and_get_metrics(exp: BasePPOExp, cfg: SkyRLConfig):
     metrics = exp.run()
     # ray shutdown will clear all state for the ray session
     ray.shutdown()

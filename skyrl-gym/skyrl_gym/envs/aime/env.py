@@ -1,7 +1,6 @@
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.aime import utils
 from typing import Dict, Any
-from omegaconf import DictConfig
 
 
 class AIMEEnv(BaseTextEnv):
@@ -9,7 +8,7 @@ class AIMEEnv(BaseTextEnv):
     Environment for Math execution tasks.
     """
 
-    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: Any, extras: Dict[str, Any] = {}):
         super().__init__()
 
         assert "reward_model" in extras, "reward_model field is required"

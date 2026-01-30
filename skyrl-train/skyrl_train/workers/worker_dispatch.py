@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import ray
-from omegaconf import DictConfig
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -37,7 +37,7 @@ class WorkerDispatch:
 
     def __init__(
         self,
-        cfg: DictConfig,
+        cfg: SkyRLConfig,
         policy_actor_group: PPORayActorGroup,
         critic_actor_group: Optional[PPORayActorGroup] = None,
         ref_actor_group: Optional[PPORayActorGroup] = None,

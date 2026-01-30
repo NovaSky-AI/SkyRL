@@ -7,13 +7,13 @@ import requests
 import importlib
 from loguru import logger
 from ray.util.placement_group import placement_group
-from omegaconf import DictConfig
 import hydra
 from typing import List, Tuple
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from functools import lru_cache
 import subprocess
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.dataset import PromptDataset
@@ -32,16 +32,12 @@ from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
 
-def get_test_actor_config() -> DictConfig:
+def get_test_actor_config() -> SkyRLConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
-        cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
-        cfg.trainer.logger = "console"
-        validate_cfg(cfg)
-
-        return cfg
+    cfg = SkyRLConfig()
+    cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
+    cfg.trainer.logger = "console"
+    return cfg
 
 
 def get_rank_0_memory(actor_group, message: str):
@@ -407,7 +403,7 @@ def init_remote_inference_servers(
     tp_size: int,
     backend: str,
     tokenizer: PreTrainedTokenizerBase,
-    config: DictConfig,
+    config: SkyRLConfig,
     model: str,
 ) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()

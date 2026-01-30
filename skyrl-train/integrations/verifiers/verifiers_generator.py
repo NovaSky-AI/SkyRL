@@ -1,23 +1,24 @@
 from typing import Optional
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
-from omegaconf import DictConfig
 from openai import AsyncOpenAI
 import httpx
 from verifiers import load_environment
 from verifiers.types import GenerateOutputs, ProcessedOutputs, RolloutInput
 from skyrl_train.generators.utils import get_rollout_metrics
 
+from skyrl_train.config import GeneratorConfig
+
 
 class VerifiersGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: DictConfig,
+        generator_cfg: GeneratorConfig,
         tokenizer,
         model_name: str,
     ):
         """
         Args:
-            generator_cfg: DictConfig object containing the generator configuration
+            generator_cfg: GeneratorConfig object containing the generator configuration
             tokenizer: tokenizer object for encoding and decoding text
         """
         self.generator_cfg = generator_cfg
