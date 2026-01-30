@@ -453,7 +453,6 @@ class DeepseekV3MoEDecoderLayer(DeepseekV3DecoderLayer):
 
 
 class DeepseekV3Model(nnx.Module):
-    training: bool = False
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
@@ -603,12 +602,6 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
         return self.lm_head
-
-    def train(self, **attributes):
-        return super().train(training=True, **attributes)
-
-    def eval(self, **attributes):
-        return super().eval(training=False, **attributes)
 
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
