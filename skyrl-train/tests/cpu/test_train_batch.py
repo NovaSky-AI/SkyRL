@@ -179,6 +179,47 @@ def test_train_batch_pickle():
     assert unpickled.metadata == data.metadata
 
 
+def test_train_batch_pickle_bfloat16():
+    """Test pickle serialization with bfloat16 tensors (uses torch fallback path)."""
+    batch_size = 3
+    seq_len = 4
+    # bfloat16 is not supported by numpy, so this tests the torch.save fallback
+    sequences_bf16 = torch.randn(batch_size, seq_len, dtype=torch.bfloat16)
+    # Mix with regular float32 to test both paths in same batch
+    attention_mask_f32 = torch.ones(batch_size, seq_len, dtype=torch.float32)
+    # Also test int64 (numpy-compatible)
+    indices = torch.arange(batch_size, dtype=torch.int64)
+
+    data = TensorBatch(
+        {
+            "sequences": sequences_bf16,
+            "attention_mask": attention_mask_f32,
+            "indices": indices,
+        }
+    )
+    metadata = {"dtype_test": "bfloat16"}
+    data.metadata = metadata
+
+    # Serialize
+    pickled = pickle.dumps(data)
+
+    # Deserialize
+    unpickled = pickle.loads(pickled)
+
+    # Verify dtypes are preserved
+    assert unpickled["sequences"].dtype == torch.bfloat16, "bfloat16 dtype not preserved"
+    assert unpickled["attention_mask"].dtype == torch.float32, "float32 dtype not preserved"
+    assert unpickled["indices"].dtype == torch.int64, "int64 dtype not preserved"
+
+    # Verify data is preserved (use float() for bfloat16 comparison due to precision)
+    assert torch.allclose(unpickled["sequences"].float(), data["sequences"].float()), "bfloat16 data mismatch"
+    assert torch.equal(unpickled["attention_mask"], data["attention_mask"]), "float32 data mismatch"
+    assert torch.equal(unpickled["indices"], data["indices"]), "int64 data mismatch"
+
+    # Verify metadata preserved
+    assert unpickled.metadata == data.metadata
+
+
 def test_train_batch_setitem():
     batch_size = 3
     seq_len = 4

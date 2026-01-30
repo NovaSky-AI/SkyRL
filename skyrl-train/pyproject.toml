@@ -34,7 +34,7 @@ dependencies = [
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
-    "datasets==4.0.0",
+    "datasets>=4.0.0",
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
@@ -93,6 +93,7 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
 torch = { index = "pytorch-cu128" }
+harbor = { git = "https://github.com/laude-institute/harbor", rev = "fdfe296145cf13663dc6a0233f8faab7bfcf5fe1" }
 torchvision = { index = "pytorch-cu128" }
 # We use `flashinfer-jit-cache` to avoid slow JIT compilation on first run.
 # Different inference engines may pin different compatible flashinfer versions, so we provide the option to pin different versions for vllm/sglang
@@ -120,9 +121,8 @@ docs = [
     "sphinx-copybutton>=0.5.0",
     "sphinx-autobuild>=2021.3.14"
 ]
-# TODO(tgriggs): Add `sandboxes` here once available as a package.
-sandboxes = [
-    "litellm[proxy]>=1.67.5",
+harbor = [
+    "harbor",
 ]
 vllm = [
     "vllm==0.13.0",

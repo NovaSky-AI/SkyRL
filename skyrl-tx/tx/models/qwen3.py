@@ -10,7 +10,7 @@ from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.layers.layernorm import RMSNorm
 from tx.layers.attention import dot_product_attention
 from tx.models.configs import Qwen3Config
-from tx.models.types import CausalLMOutput, ModelOutput
+from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
 
 
@@ -366,7 +366,7 @@ class Qwen3Model(nnx.Module):
         )
 
 
-class Qwen3ForCausalLM(nnx.Module, GeneratorMixin, LogitsProcessorMixin):
+class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProcessorMixin):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config

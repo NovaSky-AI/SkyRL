@@ -130,10 +130,14 @@ class MeshDispatch(Dispatch):
         chunk_size = len(data) // dp_size
         data_chunks: List[TrainingInputBatch] = data.chunk(chunk_size)
 
+        # Put each unique chunk in object store ONCE to avoid redundant serialization
+        # when the same chunk is sent to multiple workers (e.g., SP/TP replicas)
+        chunk_refs: List[ObjectRef] = [ray.put(chunk) for chunk in data_chunks]
+
         for actor_info in actor_infos:
-            # index into tensordict to get the correct data to send
-            data_to_send = data_chunks[actor_info.rank.dp]
-            object_refs.append(getattr(actor_info.handle, method).remote(data_to_send, **kwargs))
+            # Pass ObjectRef instead of data - workers will fetch from object store
+            chunk_ref = chunk_refs[actor_info.rank.dp]
+            object_refs.append(getattr(actor_info.handle, method).remote(chunk_ref, **kwargs))
         return object_refs
 
     @classmethod
@@ -155,6 +159,50 @@ class MeshDispatch(Dispatch):
         # all should be none
         assert all(obj is None for obj in all_objects), "Got a mix of `None` and non-`None` objects"
         return
+
+    @classmethod
+    def dispatch_from_staged(
+        cls, actor_infos: List[ActorInfo], method: str, data_ref: ObjectRef, start_idx: int, end_idx: int, **kwargs
+    ) -> List[ObjectRef]:
+        """
+        Dispatch to workers using pre-staged data from object store.
+
+        Workers receive the full batch ObjectRef and slice indices, then fetch
+        and slice locally. This avoids serialization on each mini-batch iteration.
+
+        Args:
+            actor_infos: List of actor info objects
+            method: Name of method to call on workers
+            data_ref: ObjectRef to full TrainingInputBatch in object store
+            start_idx: Start index for mini-batch slice (before DP chunking)
+            end_idx: End index for mini-batch slice (before DP chunking)
+            **kwargs: Additional keyword arguments to pass to the method
+
+        Returns:
+            List of ObjectRefs for worker results
+        """
+        assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
+        object_refs = []
+        dp_size = actor_infos[0].rank.dp_size
+
+        # Compute per-DP-rank slice indices
+        mini_batch_size = end_idx - start_idx
+        assert (
+            mini_batch_size % dp_size == 0
+        ), f"mini_batch_size must be divisible by dp_size, got {mini_batch_size} and {dp_size}"
+        chunk_size = mini_batch_size // dp_size
+
+        for actor_info in actor_infos:
+            dp_rank = actor_info.rank.dp
+            # Compute this worker's slice of the mini-batch
+            worker_start = start_idx + dp_rank * chunk_size
+            worker_end = worker_start + chunk_size
+            object_refs.append(
+                getattr(actor_info.handle, method).remote(
+                    data_ref, start_idx=worker_start, end_idx=worker_end, **kwargs
+                )
+            )
+        return object_refs
 
     @classmethod
     def validate_dispatch_args(cls, *args, **kwargs) -> Tuple[Tuple, Dict[str, Any]]:
