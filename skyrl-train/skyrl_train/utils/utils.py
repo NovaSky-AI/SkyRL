@@ -9,7 +9,6 @@ import socket
 import ray
 import torch
 from loguru import logger
-from omegaconf import OmegaConf
 from ray.util.placement_group import (
     placement_group,
     PlacementGroupSchedulingStrategy,
@@ -268,8 +267,9 @@ def validate_cfg(cfg: SkyRLConfig):
     # per batch can be variable based on the prompt length. This is used to normalize the loss for
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
     # fixed max response budget.
-    cfg.trainer.algorithm.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-
+    cfg.trainer.algorithm.max_seq_len = (
+        cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    )
 
     if cfg.trainer.algorithm.use_tis:
         if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:

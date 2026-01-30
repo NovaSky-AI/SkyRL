@@ -45,6 +45,7 @@ class ModelConfig:
     path: str = "Qwen/Qwen2.5-1.5B-Instruct"
     lora: Optional[LoraConfig] = None
 
+
 # ---------------------------------------------------------------------------
 # Optimizer / FSDP
 # ---------------------------------------------------------------------------
@@ -67,6 +68,7 @@ class MixedPrecisionConfig:
     reduce_dtype: str = "fp32"
     buffer_dtype: str = "fp32"
 
+
 @dataclass
 class FSDPConfig:
     cpu_offload: bool = False
@@ -74,6 +76,7 @@ class FSDPConfig:
     fsdp_size: int = -1
     mixed_precision: Optional[MixedPrecisionConfig] = None
     wrap_policy: Optional[str] = None
+
 
 # ---------------------------------------------------------------------------
 # Megatron
@@ -184,6 +187,7 @@ class RefConfig:
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
     megatron_config: MegatronConfig = field(default_factory=MegatronConfig)
     model_config_kwargs: dict = field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Algorithm
@@ -353,11 +357,13 @@ class GeneratorConfig:
 # Environment
 # ---------------------------------------------------------------------------
 
+
 # redefinition of Judge Env configuration because this is currently only available in examples/
 @dataclass
 class GSM8kLLMJudgeEnvConfig:
     model: str = "gpt-4o-mini"
     base_url: Optional[str] = None
+
 
 @dataclass
 class SkyRLGymConfig:
@@ -365,6 +371,7 @@ class SkyRLGymConfig:
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
     search: SearchEnvConfig = field(default_factory=SearchEnvConfig)
+
 
 @dataclass
 class EnvironmentConfig:
@@ -471,10 +478,22 @@ def _build_megatron_config(d: dict) -> MegatronConfig:
         expert_model_parallel_size=d["expert_model_parallel_size"],
         expert_tensor_parallel_size=d.get("expert_tensor_parallel_size"),
         ddp_config=_build_flat(MegatronDDPConfig, d["ddp_config"]) if "ddp_config" in d else None,
-        torch_profiler_config=_build_flat(MegatronTorchProfilerConfig, d["torch_profiler_config"]) if "torch_profiler_config" in d else None,
+        torch_profiler_config=(
+            _build_flat(MegatronTorchProfilerConfig, d["torch_profiler_config"])
+            if "torch_profiler_config" in d
+            else None
+        ),
         lora_config=_build_flat(MegatronLoraConfig, d["lora_config"]) if "lora_config" in d else None,
-        optimizer_config_kwargs=_build_flat(MegatronOptimizerKwargs, d["optimizer_config_kwargs"]) if "optimizer_config_kwargs" in d else None,
-        transformer_config_kwargs=_build_flat(MegatronTransformerKwargs, d["transformer_config_kwargs"]) if "transformer_config_kwargs" in d and d["transformer_config_kwargs"] else None,
+        optimizer_config_kwargs=(
+            _build_flat(MegatronOptimizerKwargs, d["optimizer_config_kwargs"])
+            if "optimizer_config_kwargs" in d
+            else None
+        ),
+        transformer_config_kwargs=(
+            _build_flat(MegatronTransformerKwargs, d["transformer_config_kwargs"])
+            if "transformer_config_kwargs" in d and d["transformer_config_kwargs"]
+            else None
+        ),
         empty_cuda_cache=d.get("empty_cuda_cache"),
         model_config_kwargs=d.get("model_config_kwargs", {}),
     )

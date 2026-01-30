@@ -20,7 +20,7 @@ def test_fsdp1_wrap_policy():
     cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.strategy = "fsdp"
-    
+
     os.environ["RANK"] = "0"
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(get_free_port())

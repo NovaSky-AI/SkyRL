@@ -11,7 +11,6 @@ from dataclasses import asdict
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
-from omegaconf import OmegaConf
 
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.lora import LoRA

@@ -17,7 +17,7 @@ from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any, Dict
 from loguru import logger
-from skyrl_train.config import SkyRLConfig, GeneratorConfig, SamplingParams, SkyRLGymConfig
+from skyrl_train.config import SkyRLConfig, SamplingParams
 
 OBSERVATION_PROMPT = "give me another solution"
 

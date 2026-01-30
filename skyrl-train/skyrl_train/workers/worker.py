@@ -7,14 +7,13 @@ from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type
-from dataclasses import asdict 
+from dataclasses import asdict
 
 import ray
 import torch
 import torch.distributed
 import torch.nn as nn
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
     PlacementGroup,

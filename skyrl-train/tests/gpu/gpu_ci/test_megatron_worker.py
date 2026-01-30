@@ -18,7 +18,13 @@ from tests.gpu.utils import (
     Timer,
 )
 from skyrl_train.utils.utils import print_mem, validate_cfg
-from skyrl_train.config import SkyRLConfig, LoraConfig, MegatronTransformerKwargs, MegatronOptimizerKwargs, MegatronTorchProfilerConfig
+from skyrl_train.config import (
+    SkyRLConfig,
+    LoraConfig,
+    MegatronTransformerKwargs,
+    MegatronOptimizerKwargs,
+    MegatronTorchProfilerConfig,
+)
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
@@ -669,7 +675,9 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 2
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
-    cfg.trainer.policy.megatron_config.optimizer_config_kwargs = MegatronOptimizerKwargs(use_precision_aware_optimizer=False)
+    cfg.trainer.policy.megatron_config.optimizer_config_kwargs = MegatronOptimizerKwargs(
+        use_precision_aware_optimizer=False
+    )
     if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = MegatronTransformerKwargs()
     cfg.trainer.policy.megatron_config.transformer_config_kwargs.num_layers = 2

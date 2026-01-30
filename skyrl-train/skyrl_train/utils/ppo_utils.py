@@ -26,7 +26,6 @@ import ray
 import torch
 from jaxtyping import Float
 from loguru import logger
-from omegaconf import DictConfig
 
 from skyrl_train.config import AlgorithmConfig
 from skyrl_train.training_batch import TrainingInputBatch

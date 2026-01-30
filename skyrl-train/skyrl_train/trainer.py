@@ -11,7 +11,6 @@ import ray
 import torch
 from jaxtyping import Float
 from loguru import logger
-from omegaconf import DictConfig
 from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.generators.base import GeneratorOutput
-from skyrl_train.config import SkyRLConfig, SamplingParams
+from skyrl_train.config import SkyRLConfig
 
 
 class DummyDataset:

@@ -24,6 +24,7 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 from skyrl_train.config import OptimizerConfig as SkyRLOptimizerConfig
 
+
 def init_megatron_optim_config(optim_config: SkyRLOptimizerConfig, optimizer_config_kwargs: dict) -> OptimizerConfig:
     optim_args = {
         "optimizer": optim_config.optimizer,
@@ -68,9 +69,7 @@ def get_megatron_optimizer_param_scheduler(
     lr_warmup_steps = config.num_warmup_steps
     if config.lr_decay_steps is None:
         lr_decay_steps = num_training_steps
-    if config.lr_warmup_steps_ratio is not None and (
-        config.lr_warmup_steps is None or config.lr_warmup_steps <= 0
-    ):
+    if config.lr_warmup_steps_ratio is not None and (config.lr_warmup_steps is None or config.lr_warmup_steps <= 0):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
     opt_param_scheduler = OptimizerParamScheduler(

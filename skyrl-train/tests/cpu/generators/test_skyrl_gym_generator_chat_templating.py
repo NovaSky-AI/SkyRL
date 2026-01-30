@@ -11,7 +11,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
 from skyrl_train.generators.utils import get_custom_chat_template
-from skyrl_train.config import SkyRLConfig, GeneratorConfig, SamplingParams, ChatTemplateConfig, SkyRLGymConfig
+from skyrl_train.config import GeneratorConfig, SamplingParams, ChatTemplateConfig, SkyRLGymConfig
 from skyrl_train.generators.utils import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
 from tests.cpu.generators.chat_templating_test_constants import (

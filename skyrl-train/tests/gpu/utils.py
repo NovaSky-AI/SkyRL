@@ -7,7 +7,6 @@ import requests
 import importlib
 from loguru import logger
 from ray.util.placement_group import placement_group
-import hydra
 from typing import List, Tuple
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from functools import lru_cache
@@ -18,11 +17,10 @@ from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.training_batch import TensorBatch, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType, TrajectoryID
-from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
+from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput

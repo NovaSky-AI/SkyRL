@@ -4,6 +4,7 @@ from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from skyrl_gym.envs.gsm8k import utils
 
+
 class GSM8kMultiTurnEnv(BaseTextEnv):
     """
     Multi-turn GSM8k environment with turn-level rewards.

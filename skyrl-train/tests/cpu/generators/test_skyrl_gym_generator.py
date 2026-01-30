@@ -1234,7 +1234,9 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
-    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking")  # TODO: revisit this test once we separate the retokenize config from the custom chat template config
+    cfg.chat_template = ChatTemplateConfig(
+        source="name", name_or_path="qwen3_without_thinking"
+    )  # TODO: revisit this test once we separate the retokenize config from the custom chat template config
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,

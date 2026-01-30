@@ -14,7 +14,6 @@ uv run --isolated --extra dev --extra mcore pytest tests/gpu/gpu_ci/test_trainer
 
 import ray
 import pytest
-import hydra
 import torch
 import os
 import shutil

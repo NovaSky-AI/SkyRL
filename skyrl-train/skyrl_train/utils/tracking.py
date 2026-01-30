@@ -32,7 +32,13 @@ from skyrl_train.config import SkyRLConfig
 class Tracking:
     supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console"]
 
-    def __init__(self, project_name, experiment_name, backends: Union[str, List[str]] = "console", config: Optional[SkyRLConfig]=None):
+    def __init__(
+        self,
+        project_name,
+        experiment_name,
+        backends: Union[str, List[str]] = "console",
+        config: Optional[SkyRLConfig] = None,
+    ):
         if isinstance(backends, str):
             backends = [backends]
         for backend in backends:
@@ -42,7 +48,6 @@ class Tracking:
 
         if "wandb" in backends:
             import wandb
-            from omegaconf import OmegaConf
 
             wandb.init(project=project_name, name=experiment_name, config=asdict(config))
             self.logger["wandb"] = wandb
@@ -146,7 +151,7 @@ class _TensorboardAdapter:
 
 
 class _MlflowLoggingAdapter:
-    def __init__(self, project_name, experiment_name, config: Optional[SkyRLConfig]=None):
+    def __init__(self, project_name, experiment_name, config: Optional[SkyRLConfig] = None):
         import os
 
         import mlflow

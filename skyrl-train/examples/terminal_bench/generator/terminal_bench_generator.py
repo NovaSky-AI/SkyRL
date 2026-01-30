@@ -7,7 +7,6 @@ from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, Gene
 from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
 from pathlib import Path
 from harbor.models.trial.config import TrialConfig, AgentConfig, TaskConfig, EnvironmentConfig
 from harbor.models.environment_type import EnvironmentType
@@ -41,6 +40,7 @@ class TerminalBenchConfig:
     override_storage_mb: Optional[int] = None
     override_cpus: Optional[int] = None
     enable_summarize: Optional[bool] = True
+
 
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(

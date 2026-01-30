@@ -13,8 +13,6 @@ from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.utils.utils import validate_cfg
-from skyrl_train.entrypoints.main_base import config_dir
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -26,6 +24,7 @@ def get_test_actor_config() -> SkyRLConfig:
     cfg.generator.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
     return cfg
+
 
 @pytest.fixture
 def cfg() -> SkyRLConfig:

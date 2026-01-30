@@ -29,10 +29,12 @@ or
 Do not include any explanation after the final score.
 """
 
+
 @dataclass
 class GSM8kLLMJudgeEnvConfig:
     model: str = "gpt-4o-mini"
     base_url: Optional[str] = None
+
 
 class GSM8kLLMJudgeEnv(BaseTextEnv):
     """

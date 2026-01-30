@@ -4,7 +4,6 @@ from skyrl_gym.envs.search.utils import compute_score
 from skyrl_gym.tools import SearchToolGroup
 import re
 from typing import Dict, Optional, List
-from omegaconf import DictConfig
 from dataclasses import dataclass
 
 

@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from loguru import logger
-from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
 from skyrl_train.config import SkyRLConfig

@@ -20,7 +20,6 @@ from skyrl_train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
-from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.generators.utils import (
     get_custom_chat_template,
@@ -254,7 +253,9 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # `sampling_params` if provided is a dict in the format expected by the inference engine backend
         # we cast default config to a dict for consistency
-        current_sampling_params: dict = sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
+        current_sampling_params: dict = (
+            sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
+        )
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []

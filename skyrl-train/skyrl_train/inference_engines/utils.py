@@ -1,7 +1,6 @@
 from typing import Dict, Any, Optional, Union
 import random
 import hashlib
-from omegaconf import DictConfig, ListConfig
 
 from skyrl_train.config import SamplingParams
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo

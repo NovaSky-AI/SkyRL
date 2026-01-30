@@ -1,7 +1,8 @@
 """
 uv run --isolated --extra dev pytest tests/cpu/test_trainer_utils.py
 """
-import copy 
+
+import copy
 
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,

@@ -5,12 +5,13 @@ import re
 from skyrl_gym.envs.sql.utils import compute_score_single
 import os
 from typing import Dict
-from omegaconf import DictConfig
 from dataclasses import dataclass
+
 
 @dataclass
 class Text2SQLEnvConfig:
     db_path: str = "/home/ray/default/sql_data"
+
 
 class SQLEnv(BaseTextEnv):
     """

@@ -361,8 +361,11 @@ def apply_fsdp2(model, fsdp_kwargs, config: FSDPConfig):
     """model: AutoModelForCausalLM"""
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
     default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
-    fsdp_transformer_layer_cls_to_wrap = config.wrap_policy.transformer_layer_cls_to_wrap if config.wrap_policy else default_transformer_cls_names_to_wrap
-    
+    fsdp_transformer_layer_cls_to_wrap = (
+        config.wrap_policy.transformer_layer_cls_to_wrap
+        if config.wrap_policy
+        else default_transformer_cls_names_to_wrap
+    )
 
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]

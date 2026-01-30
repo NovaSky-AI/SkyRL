@@ -15,7 +15,7 @@ from skyrl_train.inference_engines.remote_inference_engine import create_remote_
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig
 from skyrl_train.config import SkyRLConfig
 from pathlib import Path
 import pprint

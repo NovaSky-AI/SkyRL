@@ -114,7 +114,7 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemp
 
     if isinstance(chat_template_config, dict):
         chat_template_config = ChatTemplateConfig(**chat_template_config)
-        
+
     source = chat_template_config.source
     if not source:
         raise ValueError("'source' is required in chat_template_config")

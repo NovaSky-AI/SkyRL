@@ -1,6 +1,5 @@
 import asyncio
 from typing import Dict, List, Optional, Any, Tuple
-from omegaconf import DictConfig
 import yaml
 import traceback
 import ray
@@ -117,9 +116,9 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
 
         self.http_server_inference_engine_client_host = generator_cfg.http_endpoint_host
-        
+
         self.http_server_inference_engine_client_port = generator_cfg.http_endpoint_port
-        
+
         self.base_url = (
             f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
         )

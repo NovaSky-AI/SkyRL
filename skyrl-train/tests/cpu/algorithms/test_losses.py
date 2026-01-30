@@ -6,7 +6,7 @@ uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_losses.py
 
 import pytest
 import torch
-from skyrl_train.config import AlgorithmConfig, SAPOConfig, CISPOConfig, ClipCovConfig, KLCovConfig, KLCtrlConfig, DynamicSamplingConfig
+from skyrl_train.config import AlgorithmConfig, SAPOConfig, CISPOConfig, ClipCovConfig, KLCovConfig
 
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean
 
@@ -25,15 +25,15 @@ def test_policy_loss_dual_clip():
     log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)  # approx log(0.5)-1, log(1)-1, log(10)-3
 
     # Create config for dual clipping
-    config = AlgorithmConfig(    
-            eps_clip_low=0.2,
-            eps_clip_high=0.2,
-            clip_ratio_c=3.0,
-            policy_loss_type="dual_clip",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            use_tis=False,
-        )
+    config = AlgorithmConfig(
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        clip_ratio_c=3.0,
+        policy_loss_type="dual_clip",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        use_tis=False,
+    )
 
     # Create loss function with dual clipping
     loss_fn = PolicyLossRegistry.get("dual_clip")
@@ -78,12 +78,13 @@ def test_policy_loss_cispo():
     log_probs = torch.tensor([[-1.69315, -1.0, -0.69741]], device=device)  # approx log(0.5)-1, log(1)-1, log(10)-3
 
     # Create config for cispo
-    config = AlgorithmConfig(cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2),
-            policy_loss_type="cispo",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            use_tis=False,
-        )
+    config = AlgorithmConfig(
+        cispo=CISPOConfig(cispo_eps_clip_low=0.2, cispo_eps_clip_high=0.2),
+        policy_loss_type="cispo",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        use_tis=False,
+    )
 
     # Create loss function with cispo
     loss_fn = PolicyLossRegistry.get("cispo")
@@ -152,23 +153,23 @@ def test_policy_loss_reduction_modes():
 
     # Create configs for different reduction modes
     config_token = AlgorithmConfig(
-            eps_clip_low=clip_eps_low,
-            eps_clip_high=clip_eps_high,
-            clip_ratio_c=3.0,
-            policy_loss_type="regular",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            use_tis=False,
+        eps_clip_low=clip_eps_low,
+        eps_clip_high=clip_eps_high,
+        clip_ratio_c=3.0,
+        policy_loss_type="regular",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        use_tis=False,
     )
 
     config_seq = AlgorithmConfig(
-            eps_clip_low=clip_eps_low,
-            eps_clip_high=clip_eps_high,
-            clip_ratio_c=3.0,
-            policy_loss_type="regular",
-            loss_reduction="sequence_mean",
-            max_seq_len=4,
-            use_tis=False,
+        eps_clip_low=clip_eps_low,
+        eps_clip_high=clip_eps_high,
+        clip_ratio_c=3.0,
+        policy_loss_type="regular",
+        loss_reduction="sequence_mean",
+        max_seq_len=4,
+        use_tis=False,
     )
 
     # Get loss function
@@ -233,24 +234,24 @@ def test_policy_loss_reduction_edge_cases():
 
     # Create configs for different reduction modes
     config_token = AlgorithmConfig(
-            eps_clip_low=0.2,
-            eps_clip_high=0.2,
-            clip_ratio_c=3.0,
-            policy_loss_type="regular",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            use_tis=False,
-        )
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        clip_ratio_c=3.0,
+        policy_loss_type="regular",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        use_tis=False,
+    )
 
     config_seq = AlgorithmConfig(
-            eps_clip_low=0.2,
-            eps_clip_high=0.2,
-            clip_ratio_c=3.0,
-            policy_loss_type="regular",
-            loss_reduction="sequence_mean",
-            max_seq_len=4,
-            use_tis=False,
-        )
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        clip_ratio_c=3.0,
+        policy_loss_type="regular",
+        loss_reduction="sequence_mean",
+        max_seq_len=4,
+        use_tis=False,
+    )
     # Get loss function
     loss_fn = PolicyLossRegistry.get("regular")
 
@@ -326,27 +327,27 @@ def test_gspo_importance_sampling_levels():
 
     # Test standard PPO (token-level importance sampling)
     ppo_config = AlgorithmConfig(
-            eps_clip_low=clip_eps_low,
-            eps_clip_high=clip_eps_high,
-            clip_ratio_c=3.0,
-            policy_loss_type="regular",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            use_tis=False,
-        )
+        eps_clip_low=clip_eps_low,
+        eps_clip_high=clip_eps_high,
+        clip_ratio_c=3.0,
+        policy_loss_type="regular",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        use_tis=False,
+    )
     ppo_loss_fn = PolicyLossRegistry.get("regular")
     loss_token, _ = ppo_loss_fn(log_probs, old_log_probs, advantages, ppo_config, loss_mask)
 
     # Test GSPO (sequence-level importance sampling)
     gspo_config = AlgorithmConfig(
-            eps_clip_low=clip_eps_low,
-            eps_clip_high=clip_eps_high,
-            clip_ratio_c=3.0,
-            policy_loss_type="gspo",
-            loss_reduction="sequence_mean",  # GSPO recommended reduction
-            max_seq_len=4,
-            use_tis=False,
-        )
+        eps_clip_low=clip_eps_low,
+        eps_clip_high=clip_eps_high,
+        clip_ratio_c=3.0,
+        policy_loss_type="gspo",
+        loss_reduction="sequence_mean",  # GSPO recommended reduction
+        max_seq_len=4,
+        use_tis=False,
+    )
     gspo_loss_fn = PolicyLossRegistry.get("gspo")
     loss_sequence, _ = gspo_loss_fn(log_probs, old_log_probs, advantages, gspo_config, loss_mask)
 
@@ -444,13 +445,13 @@ def test_clip_cov_policy_loss():
 
     # Create Clip-Cov config
     config = AlgorithmConfig(
-            eps_clip_low=0.2,
-            eps_clip_high=0.2,
-            policy_loss_type="clip_cov",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            clip_cov=ClipCovConfig(clip_ratio=0.5, clip_cov_lb=-5.0, clip_cov_ub=5.0),  # Large ratio for testing
-        )
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="clip_cov",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        clip_cov=ClipCovConfig(clip_ratio=0.5, clip_cov_lb=-5.0, clip_cov_ub=5.0),  # Large ratio for testing
+    )
 
     # Get loss function
     clip_cov_fn = PolicyLossRegistry.get("clip_cov")
@@ -464,13 +465,13 @@ def test_clip_cov_policy_loss():
 
     # Compare with regular PPO (should be different due to covariance correction)
     regular_config = AlgorithmConfig(
-            eps_clip_low=0.2,
-            eps_clip_high=0.2,
-            policy_loss_type="regular",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            use_tis=False,
-        )
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="regular",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        use_tis=False,
+    )
 
     regular_fn = PolicyLossRegistry.get("regular")
     regular_loss, regular_clip_frac = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
@@ -504,11 +505,11 @@ def test_kl_cov_policy_loss():
 
     # Create KL-Cov config
     config = AlgorithmConfig(
-            policy_loss_type="kl_cov",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            kl_cov=KLCovConfig(kl_cov_frac=0.5, ppo_kl_coef=1.0),  # Apply KL to 50% of tokens
-        )
+        policy_loss_type="kl_cov",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        kl_cov=KLCovConfig(kl_cov_frac=0.5, ppo_kl_coef=1.0),  # Apply KL to 50% of tokens
+    )
 
     # Get loss function
     kl_cov_fn = PolicyLossRegistry.get("kl_cov")
@@ -522,13 +523,13 @@ def test_kl_cov_policy_loss():
 
     # Compare with regular PPO (should be different due to KL regularization)
     regular_config = AlgorithmConfig(
-            eps_clip_low=0.2,
-            eps_clip_high=0.2,
-            policy_loss_type="regular",
-            loss_reduction="token_mean",
-            max_seq_len=4,
-            use_tis=False,
-        )
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="regular",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        use_tis=False,
+    )
 
     regular_fn = PolicyLossRegistry.get("regular")
     regular_loss, _ = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
@@ -554,11 +555,11 @@ def test_sapo_policy_loss_basic():
 
     # SAPO config: uses sequence_mean reduction and distinct tau_pos / tau_neg
     config = AlgorithmConfig(
-            policy_loss_type="sapo",
-            loss_reduction="sequence_mean",
-            max_seq_len=4,
-            sapo=SAPOConfig(tau_pos=1.0, tau_neg=2.0),
-        )
+        policy_loss_type="sapo",
+        loss_reduction="sequence_mean",
+        max_seq_len=4,
+        sapo=SAPOConfig(tau_pos=1.0, tau_neg=2.0),
+    )
 
     loss_fn = PolicyLossRegistry.get("sapo")
 

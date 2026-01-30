@@ -80,7 +80,7 @@ class FSDPStrategy(DistributedStrategy):
         self.total_training_steps: Optional[int] = num_training_steps
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
-        self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.cpu_offload")
+        self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.cpu_offload
         if self.optimizer_config is not None:
             self.manual_offload_optimizer = (
                 self.optimizer_config.offload_after_step and self.manual_offload
