@@ -408,14 +408,20 @@ class DeepseekV3MoE(nnx.Module):
 
 
 class DeepseekV3DecoderLayer(nnx.Module):
-    """Base decoder layer with shared attributes and forward pass."""
+    """Decoder layer supporting both dense MLP and sparse MoE."""
 
-    mlp: DeepseekV3MLP | DeepseekV3MoE  # Set by subclasses
-
-    def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+    def __init__(
+        self,
+        config: DeepseekV3Config,
+        *,
+        mlp_cls: type[DeepseekV3MLP] | type[DeepseekV3MoE],
+        dtype: jnp.dtype,
+        rngs: nnx.Rngs,
+    ) -> None:
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.self_attn = DeepseekV3Attention(config, dtype=dtype, rngs=rngs)
+        self.mlp = mlp_cls(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -445,22 +451,6 @@ class DeepseekV3DecoderLayer(nnx.Module):
         return hidden_states, updated_cache
 
 
-class DeepseekV3DenseDecoderLayer(DeepseekV3DecoderLayer):
-    """Dense decoder layer (uses MLP, no MoE)."""
-
-    def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        super().__init__(config, dtype=dtype, rngs=rngs)
-        self.mlp = DeepseekV3MLP(config, dtype=dtype, rngs=rngs)
-
-
-class DeepseekV3MoEDecoderLayer(DeepseekV3DecoderLayer):
-    """MoE decoder layer (uses sparse MoE instead of dense MLP)."""
-
-    def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        super().__init__(config, dtype=dtype, rngs=rngs)
-        self.mlp = DeepseekV3MoE(config, dtype=dtype, rngs=rngs)
-
-
 class DeepseekV3Model(nnx.Module):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
@@ -483,8 +473,8 @@ class DeepseekV3Model(nnx.Module):
         # Create stacked dense layers (layers 0 to first_k_dense_replace - 1)
         if self.num_dense_layers > 0:
 
-            def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DenseDecoderLayer:
-                return DeepseekV3DenseDecoderLayer(config, dtype=dtype, rngs=rngs)
+            def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
+                return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MLP, dtype=dtype, rngs=rngs)
 
             self.dense_layers = create_stacked_layers(create_dense_layer, self.num_dense_layers, rngs)
         else:
@@ -493,8 +483,8 @@ class DeepseekV3Model(nnx.Module):
         # Create stacked MoE layers (layers first_k_dense_replace to num_hidden_layers - 1)
         if self.num_moe_layers > 0:
 
-            def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3MoEDecoderLayer:
-                return DeepseekV3MoEDecoderLayer(config, dtype=dtype, rngs=rngs)
+            def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
+                return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MoE, dtype=dtype, rngs=rngs)
 
             self.moe_layers = create_stacked_layers(create_moe_layer, self.num_moe_layers, rngs)
         else:

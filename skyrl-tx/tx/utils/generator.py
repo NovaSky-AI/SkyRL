@@ -114,6 +114,46 @@ class KVCache:
         """Current sequence length."""
         return self.keys.shape[2]
 
+    def split(self, layer_idx: int) -> tuple[KVCache, KVCache]:
+        """Split the cache at a layer index.
+
+        Args:
+            layer_idx: Layer index to split at.
+
+        Returns:
+            Tuple of (first_cache, second_cache) where first_cache contains
+            layers [0, layer_idx) and second_cache contains layers [layer_idx, num_layers).
+        """
+        return (
+            KVCache(
+                keys=self.keys[:layer_idx],
+                values=self.values[:layer_idx],
+                cache_position=self.cache_position,
+            ),
+            KVCache(
+                keys=self.keys[layer_idx:],
+                values=self.values[layer_idx:],
+                cache_position=self.cache_position,
+            ),
+        )
+
+    @staticmethod
+    def concatenate(first: KVCache, second: KVCache) -> KVCache:
+        """Concatenate two caches along the layer dimension.
+
+        Args:
+            first: First cache (earlier layers).
+            second: Second cache (later layers).
+
+        Returns:
+            Combined KVCache with all layers.
+        """
+        return KVCache(
+            keys=jnp.concatenate([first.keys, second.keys], axis=0),
+            values=jnp.concatenate([first.values, second.values], axis=0),
+            cache_position=second.cache_position,
+        )
+
 
 @jax.tree_util.register_dataclass
 @dataclass

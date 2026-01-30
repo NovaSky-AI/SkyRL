@@ -21,27 +21,33 @@ def get_adapter_params(params, adapter_idx: int):
     return jax.tree.map_with_path(extract, params)
 
 
-def get_out_of_rank_params(params, adapter_idx: int, rank: int):
-    """Extract out-of-rank params for an adapter.
+def _slice_out_of_rank(params, adapter_idx: int, get_rank):
+    """Extract out-of-rank params using a rank function.
 
-    Returns the portion of LoRA weights beyond the effective rank,
-    which should remain unchanged during training.
+    Args:
+        params: LoRA parameters tree.
+        adapter_idx: Adapter index to extract.
+        get_rank: Function (path) -> int returning effective rank for that path.
     """
 
     def slice_param(path, p):
         path_str = str(path)
+        if "lora_A" not in path_str and "lora_B" not in path_str:
+            return p
+        rank = get_rank(path)
         is_stacked = is_stacked_lora_path(path)
         if "lora_A" in path_str:
-            if is_stacked:
-                return p[:, adapter_idx, ..., rank:].copy()
-            return p[adapter_idx, ..., rank:].copy()
-        elif "lora_B" in path_str:
-            if is_stacked:
-                return p[:, adapter_idx, ..., rank:, :].copy()
-            return p[adapter_idx, ..., rank:, :].copy()
-        return p
+            idx = (slice(None), adapter_idx, ..., slice(rank, None)) if is_stacked else (adapter_idx, ..., slice(rank, None))
+        else:  # lora_B
+            idx = (slice(None), adapter_idx, ..., slice(rank, None), slice(None)) if is_stacked else (adapter_idx, ..., slice(rank, None), slice(None))
+        return p[idx].copy()
 
     return jax.tree.map_with_path(slice_param, params)
+
+
+def get_out_of_rank_params(params, adapter_idx: int, rank: int):
+    """Extract out-of-rank params for an adapter."""
+    return _slice_out_of_rank(params, adapter_idx, lambda _: rank)
 
 
 def verify_params_unchanged(initial_params, final_params, error_msg_prefix: str):
@@ -52,7 +58,7 @@ def verify_params_unchanged(initial_params, final_params, error_msg_prefix: str)
         assert jnp.allclose(initial, final), f"{error_msg_prefix} for {path}"
 
 
-def is_routed_expert_path(path) -> bool:
+def _is_routed_expert_path(path) -> bool:
     """Check if path is for routed experts (not shared_experts)."""
     keys = []
     for p in path:
@@ -72,18 +78,7 @@ def get_moe_out_of_rank_params(params, adapter_idx: int, rank: int, num_experts:
     For routed experts, uses effective rank = max(1, rank // num_experts).
     """
 
-    def slice_param(path, p):
-        path_str = str(path)
-        effective_rank = max(1, rank // num_experts) if is_routed_expert_path(path) else rank
-        is_stacked = is_stacked_lora_path(path)
-        if "lora_A" in path_str:
-            if is_stacked:
-                return p[:, adapter_idx, ..., effective_rank:].copy()
-            return p[adapter_idx, ..., effective_rank:].copy()
-        elif "lora_B" in path_str:
-            if is_stacked:
-                return p[:, adapter_idx, ..., effective_rank:, :].copy()
-            return p[adapter_idx, ..., effective_rank:, :].copy()
-        return p
+    def get_rank(path):
+        return max(1, rank // num_experts) if _is_routed_expert_path(path) else rank
 
-    return jax.tree.map_with_path(slice_param, params)
+    return _slice_out_of_rank(params, adapter_idx, get_rank)
