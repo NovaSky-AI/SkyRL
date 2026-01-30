@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 
-from tx.utils.models import is_stacked_lora_path
+from tx.utils.models import get_adapter_idx
 
 
 def get_adapter_params(params, adapter_idx: int):
@@ -14,9 +14,8 @@ def get_adapter_params(params, adapter_idx: int):
     """
 
     def extract(path, p):
-        if is_stacked_lora_path(path):
-            return p[:, adapter_idx].copy()
-        return p[adapter_idx].copy()
+        idx = get_adapter_idx(path, adapter_idx)
+        return p[idx].copy()
 
     return jax.tree.map_with_path(extract, params)
 
@@ -35,12 +34,10 @@ def _slice_out_of_rank(params, adapter_idx: int, get_rank):
         if "lora_A" not in path_str and "lora_B" not in path_str:
             return p
         rank = get_rank(path)
-        is_stacked = is_stacked_lora_path(path)
+        idx = get_adapter_idx(path, adapter_idx)
         if "lora_A" in path_str:
-            idx = (slice(None), adapter_idx, ..., slice(rank, None)) if is_stacked else (adapter_idx, ..., slice(rank, None))
-        else:  # lora_B
-            idx = (slice(None), adapter_idx, ..., slice(rank, None), slice(None)) if is_stacked else (adapter_idx, ..., slice(rank, None), slice(None))
-        return p[idx].copy()
+            return p[idx + (..., slice(rank, None))].copy()
+        return p[idx + (..., slice(rank, None), slice(None))].copy()
 
     return jax.tree.map_with_path(slice_param, params)
 

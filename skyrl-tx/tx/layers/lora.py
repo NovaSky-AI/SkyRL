@@ -3,7 +3,7 @@ import jax
 from jax import numpy as jnp
 from jax.core import Tracer
 
-from tx.utils.models import filter_lora, is_stacked_lora_path
+from tx.utils.models import filter_lora, get_adapter_idx
 from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
@@ -23,13 +23,6 @@ def _get_sharding_spec(arr: jax.Array):
     if arr.sharding is not None:
         return arr.sharding.spec
     return None
-
-
-def _adapter_index(is_stacked: bool, adapter_index: int):
-    """Return index for accessing an adapter. Stacked params have layers as first dim."""
-    # Stacked layers have shape (num_layers, num_adapters, ...),
-    # non-stacked (embed_tokens) have shape (num_adapters, ...)
-    return (slice(None), adapter_index) if is_stacked else (adapter_index,)
 
 
 class LoRAMixin:
@@ -368,7 +361,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
-        idx = _adapter_index(is_stacked_lora_path(path), adapter_index)
+        idx = get_adapter_idx(path, adapter_index)
 
         key_name = path[-2].key
         if key_name == "lora_ranks":
@@ -402,7 +395,7 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
         key = path[-2].key
         if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
             return value
-        idx = _adapter_index(is_stacked_lora_path(path), adapter_index)
+        idx = get_adapter_idx(path, adapter_index)
         return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
 
     updated_state = jax.tree.map_with_path(clear_adapter, state)
