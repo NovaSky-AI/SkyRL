@@ -1,0 +1,22 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+/* Fix table styling in dark mode */
+.dark table,
+.dark table thead,
+.dark table tbody,
+.dark table tr,
+.dark table th,
+.dark table td {
+  background-color: rgb(55, 55, 55) !important;
+  color: rgb(229, 229, 229) !important;
+}
+
+.dark table thead th {
+  background-color: rgb(70, 70, 70) !important;
+}
+
+.dark table tbody tr:nth-child(even) td {
+  background-color: rgb(70, 70, 70) !important;
+}

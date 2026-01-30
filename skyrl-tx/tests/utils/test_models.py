@@ -31,7 +31,7 @@ def create_test_model(base_model_name: str, rank: int, alpha: int, adapter_index
 
     config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
-    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"))
+    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
         init_lora_adapter(model, adapter_index=adapter_index, lora_config=LoraConfig(rank=rank, alpha=alpha, seed=0))
@@ -57,12 +57,12 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     # Set LoRA weights to random values for testing (to catch transpose bugs)
     q_proj = model.model.layers[0].self_attn.q_proj
     rng1, rng2 = jax.random.split(jax.random.PRNGKey(42))
-    q_proj.lora_A.value = jax.random.normal(rng1, q_proj.lora_A.value.shape)
-    q_proj.lora_B.value = jax.random.normal(rng2, q_proj.lora_B.value.shape)
+    q_proj.lora_A[...] = jax.random.normal(rng1, q_proj.lora_A[...].shape)
+    q_proj.lora_B[...] = jax.random.normal(rng2, q_proj.lora_B[...].shape)
 
     # Store expected values (trimmed to rank and transposed)
-    expected_lora_A = np.array(q_proj.lora_A.value[adapter_index, :, :rank].T)
-    expected_lora_B = np.array(q_proj.lora_B.value[adapter_index, :rank, :].T)
+    expected_lora_A = np.array(q_proj.lora_A[...][adapter_index, :, :rank].T)
+    expected_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :].T)
 
     # Save and verify checkpoint exists
     models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path)

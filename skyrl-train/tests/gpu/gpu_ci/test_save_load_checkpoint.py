@@ -17,7 +17,7 @@ from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
 from skyrl_train.utils.utils import print_mem
-from tests.gpu.utils import init_worker_with_type, make_dummy_experience, get_model_logits_from_actor, validate_cfg
+from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, get_model_logits_from_actor, validate_cfg
 from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -28,7 +28,7 @@ NUM_GPUS = 4
 def run_one_training_step(
     actor_group,
     strategy,
-    experience=None,
+    data=None,
     megatron_batch=None,
 ):
     """Run forward_backward + optim_step to perform one training step."""
@@ -36,8 +36,8 @@ def run_one_training_step(
         assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
         return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
     else:
-        assert experience is not None, f"{strategy} requires an Experience for forward_backward"
-        ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", experience, 1))
+        assert data is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
+        ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=data))
         ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
@@ -92,13 +92,13 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
         checkpoint_dir = None
-        # Create dummy experiences for training steps
-        dummy_experience_1 = make_dummy_experience()  # First training step
-        dummy_experience_2 = make_dummy_experience()  # Second training step
+        # Create dummy training batches for training steps
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        dummy_batch_1 = make_dummy_training_batch(batch_size=dp_size)  # First training step
+        dummy_batch_2 = make_dummy_training_batch(batch_size=dp_size)  # Second training step
 
-        # Ensure the second experience is different from the first
-        for i, seq in enumerate(dummy_experience_2.sequences):
-            dummy_experience_2.sequences[i] = torch.randint(100, 200, seq.shape, device=seq.device)
+        # Ensure the second batch is different from the first
+        dummy_batch_2["sequences"] = torch.randint(100, 200, dummy_batch_2["sequences"].shape, device="cpu")
 
         # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
         if "megatron" in strategy:
@@ -115,7 +115,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         run_one_training_step(
             actor_group,
             strategy,
-            experience=dummy_experience_1,
+            data=dummy_batch_1,
             megatron_batch=train_batch_1,
         )
 
@@ -161,7 +161,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         run_one_training_step(
             actor_group,
             strategy,
-            experience=dummy_experience_2,
+            data=dummy_batch_2,
             megatron_batch=train_batch_2,
         )
 
@@ -181,7 +181,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         run_one_training_step(
             actor_group,
             strategy,
-            experience=dummy_experience_2,
+            data=dummy_batch_2,
             megatron_batch=train_batch_2,
         )
 

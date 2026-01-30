@@ -22,8 +22,6 @@ def example_dummy_config():
         "resume_mode": "none",
         "algorithm": {
             "advantage_estimator": "grpo",
-            "use_kl_estimator_k3": False,
-            "use_abs_kl": False,
             "kl_estimator_type": "k1",
             "use_kl_loss": True,
             "kl_loss_coef": 0.0,

@@ -5,6 +5,7 @@ import torch
 from jaxtyping import Float, Integer
 import pickle
 import io
+import numpy as np
 
 DictType = TypeVar("DictType")
 
@@ -133,15 +134,36 @@ class TensorBatch(dict, Generic[DictType]):
         return self._device
 
     def __getstate__(self):
-        """Serialize the `TensorBatch` object for pickle protocol"""
+        """Serialize the `TensorBatch` object for pickle protocol.
+
+        Uses fast numpy-based serialization when possible, with fallback to torch.save
+        for dtypes not supported by numpy (e.g., bfloat16).
+        """
         self.contiguous()
         if self._device is not None:
             assert self._device == torch.device("cpu"), "Tensors must be on CPU before serialization"
         batch_dict = {}
         for key, value in self.items():
-            buffer = io.BytesIO()
-            torch.save(value, buffer)
-            batch_dict[key] = buffer.getvalue()
+            if value is None:
+                batch_dict[key] = None
+            else:
+                try:
+                    # Fast path: direct memory copy via numpy (works for most dtypes)
+                    arr = value.numpy()
+                    batch_dict[key] = {
+                        "format": "numpy",
+                        "data": arr.tobytes(),
+                        "shape": arr.shape,
+                        "dtype": str(arr.dtype),
+                    }
+                except TypeError:
+                    # Fallback for dtypes not supported by numpy (e.g., bfloat16)
+                    buffer = io.BytesIO()
+                    torch.save(value, buffer)
+                    batch_dict[key] = {
+                        "format": "torch",
+                        "data": buffer.getvalue(),
+                    }
 
         return {
             "batch_dict": batch_dict,
@@ -151,10 +173,24 @@ class TensorBatch(dict, Generic[DictType]):
         }
 
     def __setstate__(self, state):
-        """Deserialize the `TensorBatch` object and load it into memory"""
+        """Deserialize the `TensorBatch` object and load it into memory.
+
+        Handles both numpy-based format (fast path) and torch format (fallback for bfloat16 etc).
+        """
         for key, value in state["batch_dict"].items():
-            buffer = io.BytesIO(value)
-            self[key] = torch.load(buffer)
+            if value is None:
+                self[key] = None
+            elif value.get("format") == "torch":
+                # Fallback path: torch.load for unsupported dtypes
+                buffer = io.BytesIO(value["data"])
+                self[key] = torch.load(buffer, weights_only=True)
+            else:
+                # Fast path: reconstruct from numpy bytes
+                # Also handles legacy format without "format" key
+                arr = np.frombuffer(value["data"], dtype=np.dtype(value["dtype"]))
+                arr = arr.reshape(value["shape"])
+                # Convert to tensor (makes a copy, which is needed since frombuffer is read-only)
+                self[key] = torch.from_numpy(arr.copy())
 
         self._batch_size = state["batch_size"]
         self._device = state["device"]

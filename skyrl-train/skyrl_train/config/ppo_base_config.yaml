@@ -96,8 +96,6 @@ trainer:
       kl_target: 0.1 # target KL divergence for adaptive KL controller
       horizon: 10000 # controls the update rate of the adaptive KL controller
     kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
-    use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
-    use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
     # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
@@ -151,7 +149,7 @@ trainer:
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
   
-  # Fully async specific knobs. For more see http://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
+  # Fully async specific knobs. For more see https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:
     # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,
     # and it is used to train at step j, it is guaranteed that j - i <= max_staleness_steps.
@@ -193,8 +191,6 @@ trainer:
   max_prompt_length: 512
   flash_attn: true
   disable_fast_tokenizer: false
-  target_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.target_modules or trainer.critic.model.lora.target_modules instead
-  exclude_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.exclude_modules or trainer.critic.model.lora.exclude_modules instead
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
@@ -235,15 +231,27 @@ generator:
   # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
   fully_sharded_loras: false
+  # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only)
+  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger
+  enable_ray_prometheus_stats: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
   enable_http_endpoint: false
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
+  # served_model_name: The model name to use for HTTP endpoint validation. If set, this name
+  # must be used in the `model` field of /chat/completions and /completions requests instead
+  # of the model path. This is useful when:
+  # - The model path differs from the desired API model name (e.g., local paths vs API names)
+  # - Using LiteLLM or other clients that expect a specific model name format
+  # If null (default), the model path (trainer.policy.model.path) is used for validation.
+  served_model_name: null
   max_turns: 1
 
-  # chat template configuration
+  # chat template configuration for SkyRLGymGenerator.
+  # For `/chat/completions` with vllm via the HTTP endpoint for rollout, instead use say
+  # `+generator.engine_init_kwargs.chat_template=/path/to/templates/qwen3_acc_thinking.jinja2`
   chat_template:
     source: "name"  # "name" or "file"
     name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"

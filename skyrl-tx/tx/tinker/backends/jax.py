@@ -83,6 +83,10 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=False,
         description="Whether to use gradient checkpointing (full recomputation strategy)",
     )
+    loss_chunk_size: int = Field(
+        default=1024,
+        description="Chunk size for cross-entropy loss computation. Reduces memory by avoiding full [B*T, V] logits materialization. Set to 0 to disable chunking.",
+    )
     # Multi-node configuration
     coordinator_address: str | None = Field(
         default=None,
@@ -163,6 +167,8 @@ class JaxBackendImpl(AbstractBackend):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             shard_attention_heads=config.shard_attention_heads,
+            loss_chunk_size=config.loss_chunk_size,
+            gradient_checkpointing=config.gradient_checkpointing,
         )
 
         if config.max_lora_rank % 8 != 0:
@@ -181,6 +187,7 @@ class JaxBackendImpl(AbstractBackend):
                 config.tensor_parallel_size,
             ),
             ("fsdp", "ep", "tp"),
+            axis_types=(jax.sharding.AxisType.Auto,) * 3,
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
@@ -242,10 +249,16 @@ class JaxBackendImpl(AbstractBackend):
             input_ids: jax.Array,
             attention_mask: jax.Array,
             adapter_indices: jax.Array,
+            target_ids: jax.Array,
         ) -> jax.Array:
+            """Forward pass and logprobs computation."""
             model = nnx.merge(graphdef, lora_params, non_lora_params)
-            output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
-            return output.logits
+            output = model(
+                input_ids,
+                attention_mask=attention_mask,
+                adapter_indices=adapter_indices,
+            )
+            return model.compute_logprobs(output.last_hidden_state, target_ids, adapter_indices)
 
         if self.config.gradient_checkpointing:
             # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
@@ -264,13 +277,15 @@ class JaxBackendImpl(AbstractBackend):
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            logits = _model_forward(
-                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
-            )  # [B, T, V]
-
-            log_sum_exp = jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-            target_logits = jnp.take_along_axis(logits, target_ids[..., None], axis=-1)
-            target_logprobs = (target_logits - log_sum_exp).squeeze(-1)
+            target_logprobs = _model_forward(
+                self.graphdef,
+                lora_params,
+                non_lora_params,
+                input_ids,
+                attention_mask,
+                adapter_indices,
+                target_ids,
+            )
 
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
                 return jax.lax.switch(
@@ -723,10 +738,9 @@ class JaxBackendImpl(AbstractBackend):
 
                 # Pad sequences to same length within the batch to minimize memory usage.
                 # Also bin it so the JIT has to compile fewer kernels.
-                # Use left-padding for sampling so the last position is always the last real token.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
-                input_ids = pad_batch(batch_prompts, max_len, np.int32, left=True)
-                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32, left=True)
+                input_ids = pad_batch(batch_prompts, max_len, np.int32)
+                attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
 
                 # Shard inputs along FSDP axis (already padded to max_batch_size)
                 input_ids, attention_mask, adapter_indices = jax.device_put(

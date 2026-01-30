@@ -17,7 +17,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
 
 
 class Timer:
@@ -272,13 +272,6 @@ def validate_cfg(cfg: DictConfig):
     # fixed max response budget.
     algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
 
-    # TODO (erictang000): remove these after deprecation period
-    if algorithm_config.use_abs_kl:
-        logger.warning("`use_abs_kl` will be deprecated, overriding to use `kl_estimator_type='abs'` instead")
-        algorithm_config.kl_estimator_type = "abs"
-    elif algorithm_config.use_kl_estimator_k3:
-        logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
-        algorithm_config.kl_estimator_type = "k3"
     cfg.trainer.algorithm = algorithm_config
 
     if cfg.trainer.algorithm.use_tis:
@@ -311,15 +304,6 @@ def validate_cfg(cfg: DictConfig):
             "fsdp2",
             "megatron",
         ), "LoRA enabled requires fsdp/fsdp2/megatron training backend"
-
-        if cfg.trainer.target_modules is not None:
-            logger.warning(
-                "`trainer.target_modules` is deprecated, use `trainer.policy.model.lora.target_modules` or `trainer.critic.model.lora.target_modules` instead"
-            )
-        if cfg.trainer.exclude_modules is not None:
-            logger.warning(
-                "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
-            )
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -592,6 +576,10 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     if os.environ.get("MLFLOW_TRACKING_TOKEN"):
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
+
+    if os.environ.get("DAYTONA_API_KEY"):
+        logger.info("Exporting daytona api key to ray runtime env")
+        env_vars["DAYTONA_API_KEY"] = os.environ["DAYTONA_API_KEY"]
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
