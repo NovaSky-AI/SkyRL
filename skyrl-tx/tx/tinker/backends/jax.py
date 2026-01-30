@@ -52,6 +52,7 @@ from tx.utils.models import (
     insert_adapter_state,
     round_up_seq_len,
     resolve_model_path,
+    is_stacked_lora_path,
 )
 from tx.utils.log import logger
 
@@ -124,17 +125,38 @@ class AccumulatedGradients:
         )
 
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
-        """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
+        """Compute mean gradients for a specific adapter, with zeros for all other adapters.
+
+        Handles both stacked (num_layers, num_adapters, ...) and non-stacked (num_adapters, ...) params.
+        """
         count = self.counts[adapter_index]
-        return jax.tree.map(
-            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
-            self.grad_sum,
-        )
+
+        def compute_mean(path, g):
+            if is_stacked_lora_path(path):
+                # Stacked: (num_layers, num_adapters, ...) -> index as [:, adapter_index]
+                return jnp.zeros_like(g).at[:, adapter_index].set(g[:, adapter_index] / count.astype(g.dtype))
+            else:
+                # Non-stacked: (num_adapters, ...) -> index as [adapter_index]
+                return jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype))
+
+        return jax.tree.map_with_path(compute_mean, self.grad_sum)
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
-        """Reset gradients and count for a specific adapter."""
+        """Reset gradients and count for a specific adapter.
+
+        Handles both stacked (num_layers, num_adapters, ...) and non-stacked (num_adapters, ...) params.
+        """
+
+        def reset_grad(path, g):
+            if is_stacked_lora_path(path):
+                # Stacked: (num_layers, num_adapters, ...) -> index as [:, adapter_index]
+                return g.at[:, adapter_index].set(0.0)
+            else:
+                # Non-stacked: (num_adapters, ...) -> index as [adapter_index]
+                return g.at[adapter_index].set(0.0)
+
         return AccumulatedGradients(
-            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            grad_sum=jax.tree.map_with_path(reset_grad, self.grad_sum),
             counts=self.counts.at[adapter_index].set(0),
         )
 
