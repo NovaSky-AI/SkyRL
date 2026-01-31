@@ -240,7 +240,12 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         self.out_features = out_features
 
         self.weight = Param(
-            num_experts, in_features, out_features, dtype=dtype, kernel_init=nnx.with_partitioning(kernel_init, sharding), rngs=rngs
+            num_experts,
+            in_features,
+            out_features,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(kernel_init, sharding),
+            rngs=rngs,
         )
 
         self.init_lora(
