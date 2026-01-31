@@ -117,6 +117,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
         num_embeddings: int,
         features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -131,13 +132,9 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             features=features,
             dtype=dtype,
             param_dtype=param_dtype,
-            embedding_init=embedding_init,
+            embedding_init=nnx.with_partitioning(embedding_init, sharding),
             rngs=rngs,
         )
-        assert (
-            self.embedding[...].sharding is not None
-        ), "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
-        sharding = self.embedding[...].sharding.spec
 
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
@@ -181,6 +178,7 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         in_features: int,
         out_features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -200,14 +198,11 @@ class LoRALinear(LoRAMixin, nnx.Linear):
             use_bias=use_bias,
             dtype=dtype,
             param_dtype=param_dtype,
-            kernel_init=kernel_init,
-            bias_init=bias_init,
+            kernel_init=nnx.with_partitioning(kernel_init, sharding),
+            bias_init=nnx.with_partitioning(bias_init, (sharding[-1],)),
             rngs=rngs,
         )
-        assert (
-            self.kernel[...].sharding is not None
-        ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
-        sharding = self.kernel[...].sharding.spec
+
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
@@ -233,6 +228,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         in_features: int,
         out_features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -243,10 +239,10 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        self.weight = Param(num_experts, in_features, out_features, dtype=dtype, kernel_init=kernel_init, rngs=rngs)
+        self.weight = Param(
+            num_experts, in_features, out_features, dtype=dtype, kernel_init=nnx.with_partitioning(kernel_init, sharding), rngs=rngs
+        )
 
-        assert self.weight[...].sharding is not None, "LoRAExpert layer needs sharding"
-        sharding = self.weight[...].sharding.spec
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
