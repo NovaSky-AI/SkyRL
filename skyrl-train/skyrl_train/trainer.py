@@ -1073,26 +1073,17 @@ class RayPPOTrainer:
         """
         Run the training step for the policy and critic models.
 
-        For Megatron strategy: uses ppo_train (training loop inside worker)
-        For FSDP strategy: uses forward_backward + optim_step (training loop in trainer)
+        Uses forward_backward + optim_step for both FSDP and Megatron strategies.
         """
         data.metadata["global_step"] = self.global_step
         critic_status = None
 
-        if self.cfg.trainer.strategy == "megatron":
-            # Megatron: training loop inside worker via ppo_train
-            if self.has_critic:
-                with Timer("critic_train", self.all_timings):
-                    critic_status = self.dispatch.ppo_train("critic", data)
-            with Timer("policy_train", self.all_timings):
-                policy_status = self.dispatch.ppo_train("policy", data)
-        else:
-            # FSDP: training loop in trainer via forward_backward + optim_step
-            if self.has_critic:
-                with Timer("critic_train", self.all_timings):
-                    critic_status = self._execute_training_step("critic", data)
-            with Timer("policy_train", self.all_timings):
-                policy_status = self._execute_training_step("policy", data)
+        # Unified training interface for both FSDP and Megatron
+        if self.has_critic:
+            with Timer("critic_train", self.all_timings):
+                critic_status = self._execute_training_step("critic", data)
+        with Timer("policy_train", self.all_timings):
+            policy_status = self._execute_training_step("policy", data)
 
         # Update metrics
         if critic_status is not None:

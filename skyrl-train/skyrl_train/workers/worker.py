@@ -639,23 +639,6 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-
-    def _normalize_mini_batch_size(self):
-        """
-        Initialize micro batch tracking for gradient accumulation.
-
-        The worker no longer needs to know mini batch size - it processes whatever
-        batch it receives, breaking it into micro batches. Gradient scaling happens
-        at optim_step time based on how many micro batches were accumulated.
-
-        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
-        requires mini-batch normalization in its override. The name is kept for
-        backwards compatibility with Megatron which still does actual normalization.
-        """
-        if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
-            raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
-
-        # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
     def forward_backward(
@@ -1017,23 +1000,6 @@ class CriticWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
-
-    def _normalize_mini_batch_size(self):
-        """
-        Initialize micro batch tracking for gradient accumulation.
-
-        The worker no longer needs to know mini batch size - it processes whatever
-        batch it receives, breaking it into micro batches. Gradient scaling happens
-        at optim_step time based on how many micro batches were accumulated.
-
-        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
-        requires mini-batch normalization in its override. The name is kept for
-        backwards compatibility with Megatron which still does actual normalization.
-        """
-        if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
-            raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
-
-        # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
