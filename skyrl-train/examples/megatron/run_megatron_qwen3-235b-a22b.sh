@@ -51,8 +51,6 @@ USE_KL_LOSS=false
 LORA_RANK=128
 LORA_ALPHA=128
 
-export SKYRL_LD_LIBRARY_PATH_EXPORT=true
-export LD_LIBRARY_PATH=/opt/amazon/efa/lib:$LD_LIBRARY_PATH
 
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
