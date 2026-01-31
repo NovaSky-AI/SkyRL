@@ -16,15 +16,15 @@ DATA_DIR="$HOME/data/gsm8k"
 # `HF_HUB_ENABLE_HF_TRANSFER=1 hf download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
 MODEL_NAME="Qwen/Qwen3-235B-A22B-Instruct-2507"
 
-NUM_NODES=4
+NUM_NODES=8
 NUM_GPUS=8
 
 ### Megatron configuration
 # the max TP that can be used is 4, since Qwen3-235B-A22B uses Grouped Query Attention with 4 groups
 MEGATRON_TP=4
-MEGATRON_PP=8
+MEGATRON_PP=16
 MEGATRON_CP=1
-MEGATRON_EP=8
+MEGATRON_EP=4
 MEGATRON_ETP=1
 # Qwen3-235B-A22B has 94 blocks, so we set the last pipeline stage layer to use 4 blocks
 MEGATRON_LAST_PIPELINE_STAGE_LAYER=4
@@ -47,7 +47,6 @@ INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 # no kl loss, so just use the policy model
 USE_KL_LOSS=false
 
-
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -64,8 +63,6 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
-  trainer.policy.model.lora.rank=$LORA_RANK \
-  trainer.policy.model.lora.alpha=$LORA_ALPHA \
   trainer.policy.megatron_config.optimizer_config_kwargs.overlap_cpu_optimizer_d2h_h2d=$OPTIMIZER_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=$OPTIMIZER_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_OFFLOAD \
