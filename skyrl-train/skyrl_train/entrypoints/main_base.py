@@ -2,6 +2,7 @@
 Main entrypoint for training.
 """
 
+from typing import Union
 from ray.util.placement_group import placement_group, PlacementGroup
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -38,7 +39,9 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
-def create_ray_wrapped_inference_engines_from_config(cfg: SkyRLConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
+def create_ray_wrapped_inference_engines_from_config(
+    cfg: Union[SkyRLConfig, DictConfig], colocate_pg, tokenizer: PreTrainedTokenizerBase
+):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
     engine_kwargs = {
@@ -93,7 +96,9 @@ def create_ray_wrapped_inference_engines_from_config(cfg: SkyRLConfig, colocate_
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
-def create_remote_inference_engines_from_config(cfg: SkyRLConfig, tokenizer: PreTrainedTokenizerBase):
+def create_remote_inference_engines_from_config(
+    cfg: Union[SkyRLConfig, DictConfig], tokenizer: PreTrainedTokenizerBase
+):
     # TODO(tgriggs): We may want a separate config for the model name in case
     # it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
@@ -109,7 +114,7 @@ def create_remote_inference_engines_from_config(cfg: SkyRLConfig, tokenizer: Pre
 
 
 class BasePPOExp:
-    def __init__(self, cfg: DictConfig):
+    def __init__(self, cfg: Union[SkyRLConfig, DictConfig]):
         """
         Initializes a PPO experiment.
 

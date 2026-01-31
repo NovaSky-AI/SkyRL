@@ -27,6 +27,11 @@ from skyrl_train.config.config import (
     KLCovConfig,
     KLCtrlConfig,
     DynamicSamplingConfig,
+    BaseConfig,
+    MixedPrecisionConfig,
+    MegatronDDPConfig,
+    MegatronLoraConfig,
+    GSM8kLLMJudgeEnvConfig,
 )
 
 __all__ = [
@@ -58,4 +63,9 @@ __all__ = [
     "KLCovConfig",
     "KLCtrlConfig",
     "DynamicSamplingConfig",
+    "BaseConfig",
+    "MixedPrecisionConfig",
+    "MegatronDDPConfig",
+    "MegatronLoraConfig",
+    "GSM8kLLMJudgeEnvConfig",
 ]
