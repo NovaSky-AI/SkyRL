@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 import yaml
 import traceback
 import ray
@@ -11,6 +11,7 @@ from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
 from .mini_swe_utils import evaluate_trajectory, get_sb_environment
 
+from omegaconf import DictConfig
 from skyrl_train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
 from skyrl_train.generators.base import TrajectoryID, TrainingPhase, BatchMetadata
@@ -44,7 +45,7 @@ def init_and_run(
     instance: dict,
     litellm_model_name: str,
     sweagent_config: dict,
-    generator_cfg: GeneratorConfig,
+    generator_cfg: Union[GeneratorConfig, DictConfig],
     data_source: str,
     sampling_params: dict,
     trajectory_id: TrajectoryID,
@@ -105,8 +106,8 @@ def init_and_run(
 class MiniSweAgentGenerator(SkyRLGymGenerator):
     def __init__(
         self,
-        generator_cfg: GeneratorConfig,
-        skyrl_gym_cfg: SkyRLGymConfig,
+        generator_cfg: Union[GeneratorConfig, DictConfig],
+        skyrl_gym_cfg: Union[SkyRLGymConfig, DictConfig],
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,

@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Union
 from pathlib import Path
 from loguru import logger
 from collections import defaultdict
@@ -24,6 +24,7 @@ from skyrl_train.utils.trainer_utils import (
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.logging_utils import log_example
 
+from omegaconf import DictConfig
 from skyrl_train.config import SkyRLConfig
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
@@ -33,7 +34,7 @@ from transformers import AutoTokenizer
 async def evaluate(
     eval_dataloader: StatefulDataLoader,
     generator: GeneratorInterface,
-    cfg: SkyRLConfig,
+    cfg: Union[SkyRLConfig, DictConfig],
     global_step: int | None,
     tokenizer: AutoTokenizer,
 ) -> Dict[str, float]:
@@ -128,7 +129,7 @@ async def evaluate(
 async def evaluate_step_wise(
     eval_dataloader: StatefulDataLoader,
     generator: GeneratorInterface,
-    cfg: SkyRLConfig,
+    cfg: Union[SkyRLConfig, DictConfig],
     global_step: int | None,
     tokenizer: AutoTokenizer,
 ) -> Dict[str, float]:

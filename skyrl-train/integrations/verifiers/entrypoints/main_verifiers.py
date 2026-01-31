@@ -1,4 +1,5 @@
 import hydra
+from typing import Union
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils import initialize_ray
@@ -11,7 +12,10 @@ from skyrl_train.config import SkyRLConfig
 
 class VerifiersEntrypoint(BasePPOExp):
     def get_generator(
-        self, cfg: SkyRLConfig, tokenizer: PreTrainedTokenizer, inference_engine_client: InferenceEngineClient
+        self,
+        cfg: Union[SkyRLConfig, DictConfig],
+        tokenizer: PreTrainedTokenizer,
+        inference_engine_client: InferenceEngineClient,
     ):
         return VerifiersGenerator(
             generator_cfg=cfg.generator,

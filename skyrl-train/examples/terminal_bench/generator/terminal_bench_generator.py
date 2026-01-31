@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Union
+from omegaconf import DictConfig
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
@@ -45,7 +46,7 @@ class TerminalBenchConfig:
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: GeneratorConfig,
+        generator_cfg: Union[GeneratorConfig, DictConfig],
         terminal_bench_cfg: TerminalBenchConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,

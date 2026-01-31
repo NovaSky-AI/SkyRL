@@ -660,7 +660,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
 
 
 def build_dataloader(
-    cfg: SkyRLConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
+    cfg: Union[SkyRLConfig, DictConfig], dataset: PromptDataset, is_train=True, is_fully_async=False
 ) -> StatefulDataLoader:
     """
     Build the dataloader for the training or evaluation dataset.

@@ -157,7 +157,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
-    def _validate_cfg(self, generator_cfg: GeneratorConfig):
+    def _validate_cfg(self, generator_cfg: Union[GeneratorConfig, DictConfig]):
         if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"

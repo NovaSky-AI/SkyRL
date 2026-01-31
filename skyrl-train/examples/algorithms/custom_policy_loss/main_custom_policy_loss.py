@@ -5,7 +5,7 @@ uv run --isolated --extra vllm -m examples.algorithm.custom_policy_loss.main_cus
 import ray
 import hydra
 import torch
-from typing import Optional
+from typing import Optional, Union
 from omegaconf import DictConfig
 from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils import initialize_ray
@@ -18,7 +18,7 @@ def compute_reinforce_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: SkyRLConfig,
+    config: Union[SkyRLConfig, DictConfig],
     loss_mask: Optional[torch.Tensor] = None,
 ):
     """

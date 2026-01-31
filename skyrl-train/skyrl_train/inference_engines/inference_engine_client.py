@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
+from omegaconf import DictConfig
 from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
@@ -42,7 +43,10 @@ class InferenceEngineClient(InferenceEngineInterface):
     """
 
     def __init__(
-        self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, full_config: SkyRLConfig
+        self,
+        engines: List[InferenceEngineInterface],
+        tokenizer: PreTrainedTokenizerBase,
+        full_config: Union[SkyRLConfig, DictConfig],
     ):
         """
         Args:
