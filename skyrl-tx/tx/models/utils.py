@@ -44,7 +44,7 @@ def create_stacked_layers(
     """
 
     @nnx.split_rngs(splits=num_layers)
-    @nnx.vmap(in_axes=(0,), out_axes=0)
+    @nnx.vmap(in_axes=(0,), out_axes=0, transform_metadata={nnx.PARTITION_NAME: None})
     def vmapped_create(rngs: nnx.Rngs):
         return create_layer_fn(rngs)
 
