@@ -363,7 +363,7 @@ def apply_fsdp2(model, fsdp_kwargs, config: FSDPConfig):
     default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
     fsdp_transformer_layer_cls_to_wrap = (
         config.wrap_policy.transformer_layer_cls_to_wrap
-        if config.wrap_policy
+        if getattr(config, "wrap_policy", None)
         else default_transformer_cls_names_to_wrap
     )
 
