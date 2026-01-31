@@ -5,6 +5,8 @@ import sys
 import logging
 import math
 import socket
+from omegaconf import DictConfig, OmegaConf
+from typing import Union
 
 import ray
 import torch
@@ -46,7 +48,7 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
-def validate_batch_sizes(cfg: SkyRLConfig):
+def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Validate configured batch sizes.
 
@@ -179,7 +181,7 @@ def validate_batch_sizes(cfg: SkyRLConfig):
     )
 
 
-def validate_megatron_cfg(cfg: SkyRLConfig):
+def validate_megatron_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # not yet supported + tested features
     assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
@@ -204,7 +206,7 @@ def validate_megatron_cfg(cfg: SkyRLConfig):
         )
 
 
-def validate_cfg(cfg: SkyRLConfig):
+def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
@@ -267,9 +269,14 @@ def validate_cfg(cfg: SkyRLConfig):
     # per batch can be variable based on the prompt length. This is used to normalize the loss for
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
     # fixed max response budget.
-    cfg.trainer.algorithm.max_seq_len = (
-        cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-    )
+    if isinstance(cfg, DictConfig):
+        new_cfg = OmegaConf.create(cfg.trainer.algorithm)
+        new_cfg.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+        cfg.trainer.algorithm = new_cfg
+    else:
+        cfg.trainer.algorithm.max_seq_len = (
+            cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+        )
 
     if cfg.trainer.algorithm.use_tis:
         if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
@@ -329,7 +336,7 @@ def validate_cfg(cfg: SkyRLConfig):
             )
 
 
-def validate_generator_cfg(cfg: SkyRLConfig):
+def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     """Validates the correctness of generator-related config.
 
     Args:
@@ -488,7 +495,7 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
-def prepare_runtime_environment(cfg: SkyRLConfig) -> dict[str, str]:
+def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
 
@@ -632,7 +639,7 @@ def configure_ray_worker_logging() -> None:
     logging.root.setLevel(level)
 
 
-def initialize_ray(cfg: SkyRLConfig):
+def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Initialize Ray cluster with prepared runtime environment.
 

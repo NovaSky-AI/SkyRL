@@ -32,6 +32,7 @@ from skyrl_train.config.config import (
     MegatronDDPConfig,
     MegatronLoraConfig,
     GSM8kLLMJudgeEnvConfig,
+    get_config_as_dict,
 )
 
 __all__ = [
@@ -68,4 +69,5 @@ __all__ = [
     "MegatronDDPConfig",
     "MegatronLoraConfig",
     "GSM8kLLMJudgeEnvConfig",
+    "get_config_as_dict",
 ]

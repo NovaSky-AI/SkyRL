@@ -208,12 +208,12 @@ class FSDPStrategy(DistributedStrategy):
         # Initialize FSDP wrapping policy
         wrap_policy = get_fsdp_wrap_policy(
             module=model.model if is_wrapped else model,
-            config=self.fsdp_config.wrap_policy,
+            config=getattr(self.fsdp_config, "wrap_policy", None),
             is_lora=self.is_lora,
         )
 
         # Setup mixed precision
-        mixed_precision_config = self.fsdp_config.mixed_precision
+        mixed_precision_config = getattr(self.fsdp_config, "mixed_precision", None)
         if mixed_precision_config is not None:
             param_dtype = PrecisionType.to_dtype(mixed_precision_config.param_dtype)
             reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.reduce_dtype)

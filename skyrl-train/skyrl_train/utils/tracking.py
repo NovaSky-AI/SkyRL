@@ -23,9 +23,8 @@ from typing import Any, Dict, List, Union, Optional
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import pprint
-from dataclasses import asdict
 
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLConfig, get_config_as_dict
 
 
 # TODO(tgriggs): Test all backends.
@@ -49,7 +48,7 @@ class Tracking:
         if "wandb" in backends:
             import wandb
 
-            wandb.init(project=project_name, name=experiment_name, config=asdict(config))
+            wandb.init(project=project_name, name=experiment_name, config=get_config_as_dict(config))
             self.logger["wandb"] = wandb
 
         if "mlflow" in backends:

@@ -16,7 +16,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Union
 
+from omegaconf import DictConfig
 import torch
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
@@ -25,18 +27,19 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from skyrl_train.config import OptimizerConfig as SkyRLOptimizerConfig
 
 
-def init_megatron_optim_config(optim_config: SkyRLOptimizerConfig, optimizer_config_kwargs: dict) -> OptimizerConfig:
+def init_megatron_optim_config(
+    optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict
+) -> OptimizerConfig:
     optim_args = {
-        "optimizer": optim_config.optimizer,
-        "lr": optim_config.lr,
-        "min_lr": optim_config.min_lr,
-        "clip_grad": optim_config.max_grad_norm,
-        "weight_decay": optim_config.weight_decay,
+        "optimizer": getattr(optim_config, "optimizer", "adam"),
+        "lr": getattr(optim_config, "lr", 1e-6),
+        "min_lr": getattr(optim_config, "min_lr", 0.0),
+        "clip_grad": getattr(optim_config, "max_grad_norm", 1.0),
+        "weight_decay": getattr(optim_config, "weight_decay", 1e-2),
         "bf16": True,
         "params_dtype": torch.bfloat16,
         "use_distributed_optimizer": True,
     }
-
     optim_args.update(optimizer_config_kwargs)
 
     config = OptimizerConfig(**optim_args)
@@ -67,21 +70,23 @@ def get_megatron_optimizer_param_scheduler(
         raise ValueError("Only constant_with_warmup scheduler is supported for Megatron")
 
     lr_warmup_steps = config.num_warmup_steps
-    if config.lr_decay_steps is None:
+    if getattr(config, "lr_decay_steps", None) is None:
         lr_decay_steps = num_training_steps
-    if config.lr_warmup_steps_ratio is not None and (config.lr_warmup_steps is None or config.lr_warmup_steps <= 0):
+    if getattr(config, "lr_warmup_steps_ratio", None) is not None and (
+        getattr(config, "lr_warmup_steps", None) is None or getattr(config, "lr_warmup_steps", None) <= 0
+    ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
     opt_param_scheduler = OptimizerParamScheduler(
         optimizer,
-        init_lr=config.lr_warmup_init,
-        max_lr=config.lr,
-        min_lr=config.min_lr,
+        init_lr=getattr(config, "lr_warmup_init", 0.0),
+        max_lr=getattr(config, "lr", 1e-6),
+        min_lr=getattr(config, "min_lr", 0.0),
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
         lr_decay_style="constant",
-        start_wd=config.weight_decay,
-        end_wd=config.weight_decay,
+        start_wd=getattr(config, "weight_decay", 1e-2),
+        end_wd=getattr(config, "weight_decay", 1e-2),
         wd_incr_steps=num_training_steps,
         wd_incr_style="constant",
         use_checkpoint_opt_param_scheduler=False,

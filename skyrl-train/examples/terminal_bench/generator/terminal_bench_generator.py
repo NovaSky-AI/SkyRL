@@ -80,7 +80,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         )
 
         # Read custom chat template
-        custom_chat_template_path = generator_cfg.engine_init_kwargs.chat_template
+        custom_chat_template_path = generator_cfg.engine_init_kwargs.get("chat_template", None)
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()

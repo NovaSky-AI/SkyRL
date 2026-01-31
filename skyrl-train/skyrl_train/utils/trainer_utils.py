@@ -10,6 +10,7 @@ from dataclasses import asdict
 import torch
 import numpy as np
 from collections import defaultdict
+from omegaconf import DictConfig
 
 from skyrl_train.config import TrainerConfig, SkyRLConfig
 from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
@@ -699,13 +700,17 @@ def build_dataloader(
     return dataloader
 
 
-def get_rope_scaling_config(trainer_cfg: TrainerConfig) -> dict[str, Any]:
-    if trainer_cfg.rope_scaling is None:
-        return None
+def get_rope_scaling_config(trainer_cfg: Union[TrainerConfig, DictConfig]) -> dict[str, Any]:
+    if isinstance(trainer_cfg, DictConfig):
+        if "rope_scaling" not in trainer_cfg:
+            return None
+        return trainer_cfg.rope_scaling
     return asdict(trainer_cfg.rope_scaling)
 
 
-def get_rope_theta_config(trainer_cfg: TrainerConfig) -> int | None:
-    if trainer_cfg.rope_theta is None:
-        return None
-    return asdict(trainer_cfg.rope_theta)
+def get_rope_theta_config(trainer_cfg: Union[TrainerConfig, DictConfig]) -> int | None:
+    if isinstance(trainer_cfg, DictConfig):
+        if "rope_theta" not in trainer_cfg:
+            return None
+        return trainer_cfg.rope_theta
+    return trainer_cfg.rope_theta

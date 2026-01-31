@@ -7,7 +7,7 @@ can be constructed from a Hydra DictConfig via SkyRLConfig.from_dict_config().
 
 from abc import ABC
 import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 import typing
 from typing import Any, Dict, List, Optional, Union, Type, TypeVar, Annotated
 
@@ -526,3 +526,9 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
             # Primitives, None, lists, raw dicts, already-constructed objects
             kwargs[f.name] = value
     return datacls(**kwargs)
+
+
+def get_config_as_dict(cfg: Union[BaseConfig, DictConfig]) -> dict:
+    if isinstance(cfg, DictConfig):
+        return OmegaConf.to_container(cfg, resolve=True)
+    return asdict(cfg)
