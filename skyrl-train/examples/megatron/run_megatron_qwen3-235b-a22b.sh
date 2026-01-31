@@ -26,8 +26,8 @@ MEGATRON_PP=4
 MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
-# Qwen3-235B-A22B has 94 blocks, so we need to set the last pipeline stage layer to use 4 blocks
-MEGATRON_LAST_PIPELINE_STAGE_LAYER=10
+# Qwen3-235B-A22B has 94 blocks, so we set the last pipeline stage layer to use 16 blocks
+MEGATRON_LAST_PIPELINE_STAGE_LAYER=16
 FLASH_ATTN=true
 # configure optimizer offloading
 OPTIMIZER_OFFLOAD=false

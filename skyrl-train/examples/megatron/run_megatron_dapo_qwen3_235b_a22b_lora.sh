@@ -27,7 +27,7 @@ MEGATRON_PP=4
 MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
-# Qwen3-235B-A22B has 94 blocks, so we need to set the last pipeline stage layer to use 4 blocks
+# Qwen3-235B-A22B has 94 blocks, so we set the last pipeline stage layer to use 16 blocks
 MEGATRON_LAST_PIPELINE_STAGE_LAYER=16
 FLASH_ATTN=true
 # configure optimizer offloading
@@ -44,9 +44,6 @@ INFERENCE_ENGINE_TP=16
 # the KV cache memory allocated is enough to serve 1 request with max model len. Lowering to the actual
 # max model len value for this script.
 INFERENCE_ENGINE_MAX_MODEL_LEN=12000
-
-# no kl loss, so just use the policy model
-USE_KL_LOSS=false
 
 # LoRA configuration
 LORA_RANK=128
