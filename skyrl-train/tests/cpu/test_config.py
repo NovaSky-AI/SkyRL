@@ -49,6 +49,13 @@ def test_build_nested_dataclass_full_config():
     assert cfg.trainer.policy.model.path == "path/to/model"
 
 
+def test_build_nested_dataclass_invalid_config():
+    # test invalid config
+    d = {"path": "path/to/model"}
+    with pytest.raises(ValueError):
+        build_nested_dataclass(SkyRLConfig, d)
+
+
 def test_build_config_from_yaml():
     config = get_default_config()
     # custom override
@@ -59,11 +66,27 @@ def test_build_config_from_yaml():
     assert cfg.trainer.policy.model.path == "path/to/model"
 
 
-def test_build_nested_dataclass_invalid_config():
-    # test invalid config
-    d = {"path": "path/to/model"}
+def test_build_config_from_dict_config():
+    cfg = OmegaConf.create({"a": 1})
+    cfg = TestConfigSimple.from_dict_config(cfg)
+    assert cfg.a == 1
+
+    cfg = OmegaConf.create({"b": 1, "c": {"a": 2}})
+    cfg = TestConfigNested.from_dict_config(cfg)
+    assert cfg.b == 1
+    assert cfg.c.a == 2
+
+
+def test_build_skyrl_config_from_dict_config():
+    cfg = get_default_config()
+    cfg = SkyRLConfig.from_dict_config(cfg)
+    assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_build_config_from_dict_config_invalid_config():
+    cfg = OmegaConf.create({"path": "path/to/model"})
     with pytest.raises(ValueError):
-        build_nested_dataclass(SkyRLConfig, d)
+        TestConfigSimple.from_dict_config(cfg)
 
 
 def test_dtype_resolution():

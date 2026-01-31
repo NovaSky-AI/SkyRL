@@ -23,7 +23,12 @@ from skyrl_gym.envs.sql.env import Text2SQLEnvConfig
 
 @dataclass
 class BaseConfig(ABC):
-    pass
+
+    @classmethod
+    def from_dict_config(cls, cfg: DictConfig) -> "BaseConfig":
+        """Construct a typed BaseConfig from a Hydra DictConfig."""
+        raw = OmegaConf.to_container(cfg, resolve=True)
+        return build_nested_dataclass(cls, raw)
 
 
 @dataclass
@@ -37,8 +42,9 @@ class DataConfig(BaseConfig):
 # ---------------------------------------------------------------------------
 
 
+# added prefix SkyRL to avoid conflict with peft.LoraConfig
 @dataclass
-class LoraConfig(BaseConfig):
+class SkyRLLoraConfig(BaseConfig):
     rank: int = 0
     alpha: int = 16
     dropout: float = 0.0
@@ -51,7 +57,7 @@ class LoraConfig(BaseConfig):
 @dataclass
 class ModelConfig(BaseConfig):
     path: str = "Qwen/Qwen2.5-1.5B-Instruct"
-    lora: LoraConfig = field(default_factory=LoraConfig)
+    lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +372,7 @@ class GeneratorConfig(BaseConfig):
 # ---------------------------------------------------------------------------
 
 
-# redefinition of Judge Env configuration because this is currently only available in examples/
+# NOTE: Redefinition of Judge Env configuration because this is currently only available in examples/
 @dataclass
 class GSM8kLLMJudgeEnvConfig(BaseConfig):
     model: str = "gpt-4o-mini"
@@ -448,12 +454,6 @@ class SkyRLConfig(BaseConfig):
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
-
-    @classmethod
-    def from_dict_config(cls, cfg: DictConfig) -> "SkyRLConfig":
-        """Construct a typed SkyRLConfig from a Hydra DictConfig."""
-        raw = OmegaConf.to_container(cfg, resolve=True)
-        return build_nested_dataclass(SkyRLConfig, raw)
 
 
 def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
