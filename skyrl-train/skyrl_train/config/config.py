@@ -89,7 +89,8 @@ class FSDPConfig(BaseConfig):
     reshard_after_forward: Union[bool, int] = True
     fsdp_size: int = -1
     mixed_precision: Optional[MixedPrecisionConfig] = None
-    wrap_policy: Optional[str] = None
+    # specify wrap policy as a dict with `transformer_layer_cls_to_wrap` key for custom module based wrapping
+    wrap_policy: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

@@ -363,8 +363,8 @@ def apply_fsdp2(model, fsdp_kwargs, config: Union[FSDPConfig, DictConfig]):
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
     default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
     fsdp_transformer_layer_cls_to_wrap = (
-        config.transformer_layer_cls_to_wrap
-        if getattr(config, "transformer_layer_cls_to_wrap", None)
+        config.wrap_policy.get("transformer_layer_cls_to_wrap", None)
+        if getattr(config, "wrap_policy", None)
         else default_transformer_cls_names_to_wrap
     )
 
