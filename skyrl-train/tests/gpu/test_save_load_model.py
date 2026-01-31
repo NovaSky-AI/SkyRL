@@ -23,8 +23,8 @@ from tests.gpu.utils import (
     make_dummy_training_batch,
     get_model_logits_from_actor,
     ray_init_for_tests,
-    validate_cfg,
 )
+from skyrl_train.utils.utils import validate_cfg
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MODEL_ARCH = "Qwen3ForCausalLM"

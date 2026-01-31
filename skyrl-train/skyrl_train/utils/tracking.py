@@ -36,7 +36,7 @@ class Tracking:
         project_name,
         experiment_name,
         backends: Union[str, List[str]] = "console",
-        config: Optional[SkyRLConfig] = None,
+        config: Optional[Union[SkyRLConfig, DictConfig]] = None,
     ):
         if isinstance(backends, str):
             backends = [backends]
@@ -150,7 +150,7 @@ class _TensorboardAdapter:
 
 
 class _MlflowLoggingAdapter:
-    def __init__(self, project_name, experiment_name, config: Optional[SkyRLConfig] = None):
+    def __init__(self, project_name, experiment_name, config: Optional[Union[SkyRLConfig, DictConfig]] = None):
         import os
 
         import mlflow

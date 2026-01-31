@@ -74,9 +74,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
     """
     cfg = get_test_actor_config(strategy)
     if lora:
-        from skyrl_train.config import LoraConfig
+        from skyrl_train.config import SkyRLLoraConfig
 
-        cfg.trainer.policy.model.lora = LoraConfig(rank=32, alpha=32)
+        cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32)
 
     try:
         actor_group = init_worker_with_type(

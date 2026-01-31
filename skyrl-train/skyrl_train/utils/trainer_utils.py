@@ -6,7 +6,6 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 import os
 from loguru import logger
 import json
-from dataclasses import asdict
 import torch
 import numpy as np
 from collections import defaultdict
@@ -705,7 +704,7 @@ def get_rope_scaling_config(trainer_cfg: Union[TrainerConfig, DictConfig]) -> di
         if "rope_scaling" not in trainer_cfg:
             return None
         return trainer_cfg.rope_scaling
-    return asdict(trainer_cfg.rope_scaling)
+    return trainer_cfg.rope_scaling
 
 
 def get_rope_theta_config(trainer_cfg: Union[TrainerConfig, DictConfig]) -> int | None:

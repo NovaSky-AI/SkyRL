@@ -20,7 +20,7 @@ from tests.gpu.utils import (
 from skyrl_train.utils.utils import print_mem, validate_cfg
 from skyrl_train.config import (
     SkyRLConfig,
-    LoraConfig,
+    SkyRLLoraConfig,
     MegatronTransformerKwargs,
     MegatronOptimizerKwargs,
     MegatronTorchProfilerConfig,
@@ -126,7 +126,7 @@ def test_megatron_policy_weight_sync(
     try:
         cfg = get_test_actor_config(model_name=MODEL_NAME)
         if lora:
-            cfg.trainer.policy.model.lora = LoraConfig(rank=16, alpha=16)
+            cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
         cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
@@ -229,7 +229,7 @@ async def test_megatron_forward(
         cfg.trainer.policy.megatron_config.transformer_config_kwargs.num_layers = 2
 
     if lora:
-        cfg.trainer.policy.model.lora = LoraConfig(rank=16, alpha=16)
+        cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
 
     actor_group = init_worker_with_type(
         worker_type,
@@ -377,7 +377,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
     batch = get_test_training_batch(max(4, gpus_per_node))
 
     # set lora this time
-    cfg.trainer.policy.model.lora = LoraConfig(rank=16, alpha=16)
+    cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
 
     if ep > 1:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
@@ -455,7 +455,7 @@ async def test_megatron_train(
         cfg.trainer.algorithm.use_entropy_loss = True
         cfg.trainer.algorithm.entropy_loss_coef = 0.01
     if lora:
-        cfg.trainer.policy.model.lora = LoraConfig(rank=16, alpha=16)
+        cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
 
     if ep > 1:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:

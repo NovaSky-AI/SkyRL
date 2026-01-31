@@ -8,7 +8,7 @@ import asyncio
 import ray
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
-from skyrl_train.config import SkyRLConfig, LoraConfig
+from skyrl_train.config import SkyRLConfig, SkyRLLoraConfig
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -26,7 +26,7 @@ def get_test_actor_config(enable_lora: bool = False) -> SkyRLConfig:
 
     # LoRA configuration
     if enable_lora:
-        cfg.trainer.policy.model.lora = LoraConfig(
+        cfg.trainer.policy.model.lora = SkyRLLoraConfig(
             rank=32,
             alpha=32,
             dropout=0.1,
