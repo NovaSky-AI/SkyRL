@@ -13,7 +13,6 @@ from typing import Callable
 
 from flax import nnx
 import jax
-from jax import numpy as jnp
 
 from tx.utils.generator import KVCache
 
@@ -88,16 +87,16 @@ def forward_layers(
     is_decode = kv_cache is not None
 
     def body_fn(hs, xs):
-        # Unpack xs based on mode (structure differs between prefill and decode)
+        # Unpack xs: scan automatically slices the leading dimension of layer_state
         if is_decode:
-            layer_idx, layer_k, layer_v = xs
+            layer_params, layer_k, layer_v = xs
             layer_kv = (layer_k, layer_v)
         else:
-            layer_idx = xs
+            layer_params = xs
             layer_kv = None
 
-        # Reconstruct layer module from stacked weights
-        layer = nnx.merge(layer_graphdef, jax.tree.map(lambda x: x[layer_idx], layer_state))
+        # Merge using the sliced params directly - no manual gather needed
+        layer = nnx.merge(layer_graphdef, layer_params)
         new_hs, (k, v) = layer(
             hs,
             attention_mask=attention_mask,
@@ -115,10 +114,10 @@ def forward_layers(
     if gradient_checkpointing:
         body_fn = jax.checkpoint(body_fn)
 
-    # Prepare scan inputs: in decode mode, pass per-layer caches via xs
-    # Scan automatically slices along axis 0, so each iteration gets one layer's cache
-    layer_indices = jnp.arange(num_layers)
-    xs = (layer_indices, kv_cache.keys, kv_cache.values) if is_decode else layer_indices
+    # Pass layer_state as xs so scan handles the slicing automatically.
+    # This avoids capturing layer_state as a closure and manually gathering,
+    # which causes slow XLA compilation with jax.checkpoint.
+    xs = (layer_state, kv_cache.keys, kv_cache.values) if is_decode else layer_state
 
     final_hs, (all_hs, all_keys, all_values) = jax.lax.scan(body_fn, hidden_states, xs)
 
