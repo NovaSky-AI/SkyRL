@@ -125,15 +125,23 @@ class KVCache:
             layers [0, layer_idx) and second_cache contains layers [layer_idx, num_layers).
             Returns None for empty splits.
         """
-        first = None if layer_idx == 0 else KVCache(
-            keys=self.keys[:layer_idx],
-            values=self.values[:layer_idx],
-            cache_position=self.cache_position,
+        first = (
+            None
+            if layer_idx == 0
+            else KVCache(
+                keys=self.keys[:layer_idx],
+                values=self.values[:layer_idx],
+                cache_position=self.cache_position,
+            )
         )
-        second = None if layer_idx == self.num_layers else KVCache(
-            keys=self.keys[layer_idx:],
-            values=self.values[layer_idx:],
-            cache_position=self.cache_position,
+        second = (
+            None
+            if layer_idx == self.num_layers
+            else KVCache(
+                keys=self.keys[layer_idx:],
+                values=self.values[layer_idx:],
+                cache_position=self.cache_position,
+            )
         )
         return first, second
 
