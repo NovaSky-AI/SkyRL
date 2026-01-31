@@ -31,7 +31,7 @@ class Llama3Attention(nnx.Module):
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_heads * self.head_dim,
-            sharding=(None, tp_shard),
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
@@ -44,7 +44,7 @@ class Llama3Attention(nnx.Module):
         self.k_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
-            sharding=(None, tp_shard),
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
@@ -57,7 +57,7 @@ class Llama3Attention(nnx.Module):
         self.v_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
-            sharding=(None, tp_shard),
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
@@ -70,7 +70,7 @@ class Llama3Attention(nnx.Module):
         self.o_proj = LoRALinear(
             in_features=self.num_heads * self.head_dim,
             out_features=config.hidden_size,
-            sharding=(tp_shard, None),
+            sharding=(tp_shard, "fsdp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
@@ -119,7 +119,7 @@ class Llama3MLP(nnx.Module):
         self.gate_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
-            sharding=(None, "tp"),
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -131,7 +131,7 @@ class Llama3MLP(nnx.Module):
         self.up_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
-            sharding=(None, "tp"),
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
@@ -143,7 +143,7 @@ class Llama3MLP(nnx.Module):
         self.down_proj = LoRALinear(
             config.intermediate_size,
             config.hidden_size,
-            sharding=("tp", None),
+            sharding=("tp", "fsdp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
