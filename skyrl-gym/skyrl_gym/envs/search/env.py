@@ -3,8 +3,9 @@ from typing import Any
 from skyrl_gym.envs.search.utils import compute_score
 from skyrl_gym.tools import SearchToolGroup
 import re
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Union
 from dataclasses import dataclass
+from omegaconf import DictConfig
 
 
 @dataclass
@@ -22,7 +23,7 @@ class SearchEnv(BaseTextEnv):
     Based on Verl + Search-R1 integration
     """
 
-    def __init__(self, env_config: SearchEnvConfig, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: Union[SearchEnvConfig, DictConfig], extras: Dict[str, Any] = {}):
         super().__init__()
 
         assert "reward_spec" in extras, "reward_spec field is required"
