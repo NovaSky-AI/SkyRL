@@ -51,7 +51,7 @@ class LoraConfig(BaseConfig):
 @dataclass
 class ModelConfig(BaseConfig):
     path: str = "Qwen/Qwen2.5-1.5B-Instruct"
-    lora: Optional[LoraConfig] = None
+    lora: LoraConfig = field(default_factory=LoraConfig)
 
 
 # ---------------------------------------------------------------------------

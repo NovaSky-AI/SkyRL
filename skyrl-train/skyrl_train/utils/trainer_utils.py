@@ -706,6 +706,6 @@ def get_rope_scaling_config(trainer_cfg: TrainerConfig) -> dict[str, Any]:
 
 
 def get_rope_theta_config(trainer_cfg: TrainerConfig) -> int | None:
-    if "rope_theta" not in trainer_cfg:
+    if trainer_cfg.rope_theta is None:
         return None
     return asdict(trainer_cfg.rope_theta)
