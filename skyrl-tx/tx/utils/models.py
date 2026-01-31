@@ -105,29 +105,6 @@ def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
     return (adapter_index,)
 
 
-def _is_stacked_layer_param(path: tuple) -> bool:
-    """Check if a parameter path corresponds to a STACKED decoder layer weight.
-
-    Stacked layers have paths like:
-    - Qwen3/Llama3: ('model', 'layers', 'self_attn', ...)
-    - DeepSeekV3 dense: ('model', 'dense_layers', 'self_attn', ...)
-    - DeepSeekV3 MoE: ('model', 'moe_layers', 'self_attn', ...)
-
-    Non-stacked layers have paths like: ('model', 'layers', '0', 'self_attn', ...)
-    """
-    path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
-    # Check for split stacked layer names (DeepSeekV3)
-    if "dense_layers" in path_strs or "moe_layers" in path_strs:
-        return True
-    # Check for regular stacked layers (Qwen3/Llama3)
-    if "layers" not in path_strs:
-        return False
-    layers_idx = path_strs.index("layers")
-    if layers_idx + 1 < len(path_strs) and path_strs[layers_idx + 1].isdigit():
-        return False  # Non-stacked: path already contains layer index
-    return True  # Stacked: no layer index in path
-
-
 def _get_layer_group_info(path: tuple, config: ModelConfig) -> tuple[str, int]:
     """Get layer group name and starting layer index for a stacked param path.
 
@@ -226,7 +203,7 @@ def load_safetensors(
         if skip_lora and any(k in path_keys for k in ("lora_A", "lora_B", "lora_scaling", "lora_ranks")):
             continue
 
-        if _is_stacked_layer_param(path):
+        if is_stacked_lora_path(path):
             # Stack per-layer weights from HF format
             # Infer layer count from param shape and get offset for split stacked layers
             stacked_layer_count = param.shape[0]
@@ -265,7 +242,7 @@ def save_safetensors(
         if filter_fn is not None and not filter_fn(path):
             continue
 
-        if _is_stacked_layer_param(path):
+        if is_stacked_lora_path(path):
             # Unstack and save as individual layer weights
             # Infer layer count from param shape and get offset for split stacked layers
             stacked_layer_count = param.shape[0]
