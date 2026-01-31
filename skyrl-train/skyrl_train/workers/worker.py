@@ -6,8 +6,9 @@ from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 from dataclasses import asdict
+from omegaconf import DictConfig
 
 import ray
 import torch
@@ -208,7 +209,7 @@ class DistributedTorchRayActor:
 
 
 class Worker(DistributedTorchRayActor):
-    def __init__(self, cfg: SkyRLConfig, *args, **kwargs):
+    def __init__(self, cfg: Union[SkyRLConfig, DictConfig], *args, **kwargs):
         from skyrl_train.weight_sync import get_transfer_strategy_cls
 
         super().__init__(*args, **kwargs)

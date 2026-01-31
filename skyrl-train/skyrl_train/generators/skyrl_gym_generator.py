@@ -10,6 +10,7 @@ import copy
 from uuid import uuid4
 from dataclasses import asdict
 import skyrl_gym
+from omegaconf import DictConfig
 from typing import List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
@@ -101,8 +102,8 @@ class TurnOutput:
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: GeneratorConfig,
-        skyrl_gym_cfg: SkyRLGymConfig,
+        generator_cfg: Union[GeneratorConfig, DictConfig],
+        skyrl_gym_cfg: Union[SkyRLGymConfig, DictConfig],
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,

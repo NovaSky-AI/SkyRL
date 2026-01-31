@@ -115,7 +115,8 @@ class BasePPOExp:
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
-        self.cfg = SkyRLConfig.from_dict_config(cfg)
+        # TODO (sumanthrh): Migrate to using SkyRLConfig
+        self.cfg = cfg
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()

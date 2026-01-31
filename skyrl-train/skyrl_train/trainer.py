@@ -5,6 +5,7 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from omegaconf import DictConfig
 
 import numpy as np
 import ray
@@ -77,7 +78,7 @@ from skyrl_train.workers.worker_utils import reduce_metrics
 class RayPPOTrainer:
     def __init__(
         self,
-        cfg: SkyRLConfig,
+        cfg: Union[SkyRLConfig, DictConfig],
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],

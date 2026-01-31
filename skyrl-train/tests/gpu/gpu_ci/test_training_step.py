@@ -6,8 +6,8 @@ uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_training_step.py
 import ray
 import pytest
 
-from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, validate_cfg
-from skyrl_train.utils.utils import print_mem
+from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch
+from skyrl_train.utils.utils import print_mem, validate_cfg
 from skyrl_train.config import SkyRLConfig
 
 

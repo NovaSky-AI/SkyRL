@@ -456,11 +456,6 @@ class SkyRLConfig(BaseConfig):
         return build_nested_dataclass(SkyRLConfig, raw)
 
 
-# ---------------------------------------------------------------------------
-# Construction helpers
-# ---------------------------------------------------------------------------
-
-
 def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
     """
     Validate the keys of a dict against fields of a dataclass.
