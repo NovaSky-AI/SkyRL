@@ -9,7 +9,7 @@ set -x
 LOGGER="wandb"  # change to "console" to print to stdout
 
 # Make sure these paths are accessible by or present on all nodes
-DATA_DIR="/mnt/cluster_storage/data/dapo"
+DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 # download Qwen/Qwen3-235B-A22B-Instruct-2507 from huggingface

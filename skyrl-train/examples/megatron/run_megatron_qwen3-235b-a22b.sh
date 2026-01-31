@@ -10,7 +10,7 @@ set -x
 LOGGER="wandb"  # change to "console" to print to stdout
 
 # Make sure these paths are accessible by or present on all nodes
-DATA_DIR="/mnt/cluster_storage/data/gsm8k"
+DATA_DIR="$HOME/data/gsm8k"
 # download Qwen/Qwen3-235B-A22B-Instruct-2507 from huggingface
 # `pip install huggingface_hub hf_transfer`
 # `HF_HUB_ENABLE_HF_TRANSFER=1 hf download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
@@ -22,20 +22,20 @@ NUM_GPUS=8
 ### Megatron configuration
 # the max TP that can be used is 4, since Qwen3-235B-A22B uses Grouped Query Attention with 4 groups
 MEGATRON_TP=4
-MEGATRON_PP=4
+MEGATRON_PP=8
 MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
-# Qwen3-235B-A22B has 94 blocks, so we set the last pipeline stage layer to use 16 blocks
-MEGATRON_LAST_PIPELINE_STAGE_LAYER=16
+# Qwen3-235B-A22B has 94 blocks, so we set the last pipeline stage layer to use 4 blocks
+MEGATRON_LAST_PIPELINE_STAGE_LAYER=4
 FLASH_ATTN=true
 # configure optimizer offloading
-OPTIMIZER_OFFLOAD=false
-OPTIMIZER_OFFLOAD_FRACTION=0.0
+OPTIMIZER_OFFLOAD=true
+OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 ### Inference engine configuration
 INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
-NUM_INFERENCE_ENGINES=2
+NUM_INFERENCE_ENGINES=4
 # this is not ideal at the moment - enable inference engine pp in order to avoid this
 # https://github.com/NovaSky-AI/SkyRL/issues/353
 INFERENCE_ENGINE_TP=16
@@ -46,10 +46,6 @@ INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 
 # no kl loss, so just use the policy model
 USE_KL_LOSS=false
-
-# LoRA configuration
-LORA_RANK=128
-LORA_ALPHA=128
 
 
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
