@@ -513,18 +513,7 @@ class DeepseekV3Model(nnx.Module):
         dense_kv_cache = None
         moe_kv_cache = None
         if kv_cache is not None:
-            if self.num_dense_layers > 0:
-                dense_kv_cache = KVCache(
-                    keys=kv_cache.keys[: self.num_dense_layers],
-                    values=kv_cache.values[: self.num_dense_layers],
-                    cache_position=kv_cache.cache_position,
-                )
-            if self.num_moe_layers > 0:
-                moe_kv_cache = KVCache(
-                    keys=kv_cache.keys[self.num_dense_layers :],
-                    values=kv_cache.values[self.num_dense_layers :],
-                    cache_position=kv_cache.cache_position,
-                )
+            dense_kv_cache, moe_kv_cache = kv_cache.split(self.num_dense_layers)
 
         # Forward through dense layers
         dense_kv_result = None
@@ -563,18 +552,7 @@ class DeepseekV3Model(nnx.Module):
             all_hidden_states.append(hidden_states)
 
         # Merge KV caches from dense and MoE layers
-        if dense_kv_result is not None and moe_kv_result is not None:
-            new_kv_cache = KVCache(
-                keys=jnp.concatenate([dense_kv_result.keys, moe_kv_result.keys], axis=0),
-                values=jnp.concatenate([dense_kv_result.values, moe_kv_result.values], axis=0),
-                cache_position=moe_kv_result.cache_position,
-            )
-        elif dense_kv_result is not None:
-            new_kv_cache = dense_kv_result
-        elif moe_kv_result is not None:
-            new_kv_cache = moe_kv_result
-        else:
-            new_kv_cache = None
+        new_kv_cache = KVCache.concatenate(dense_kv_result, moe_kv_result)
 
         return ModelOutput(
             last_hidden_state=hidden_states,
