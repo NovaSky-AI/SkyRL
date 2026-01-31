@@ -18,7 +18,6 @@ import torch
 import os
 import shutil
 import tempfile
-from omegaconf import DictConfig
 from torch.utils.data import Dataset
 from unittest.mock import MagicMock
 from transformers import AutoTokenizer
@@ -95,7 +94,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> S
     return cfg
 
 
-def create_minimal_trainer(cfg: DictConfig):
+def create_minimal_trainer(cfg: SkyRLConfig):
     """Create a minimal trainer setup for testing"""
     # Create minimal tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
