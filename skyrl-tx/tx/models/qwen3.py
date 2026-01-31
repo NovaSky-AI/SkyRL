@@ -192,8 +192,8 @@ class Qwen3Experts(nnx.Module):
     def __call__(
         self, hidden_states: jax.Array, router_logits: jax.Array, adapter_indices: jax.Array | None = None
     ) -> jax.Array:
-        routing_weights = nnx.softmax(router_logits, axis=-1)
-        routing_weights, selected_experts = jax.lax.top_k(routing_weights, k=self.config.num_experts_per_tok)
+        routing_weights, selected_experts = jax.lax.top_k(router_logits, k=self.config.num_experts_per_tok)
+        routing_weights = nnx.softmax(routing_weights, axis=-1)
 
         num_experts = self.config.num_experts
         num_experts_per_tok = self.config.num_experts_per_tok
