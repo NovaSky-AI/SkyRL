@@ -1,8 +1,8 @@
 """Utility functions for model forward passes with stacked decoder layers.
 
-This module provides a unified forward_layers function that works for both training
-(with gradient checkpointing) and inference. The key insight is that jax.checkpoint
-is a no-op when not computing gradients, so we can use the same scan-based code path.
+This module provides:
+- create_stacked_layers: Create decoder layers with stacked weights using nnx.vmap
+- forward_layers: Unified forward pass using scan (skips KV cache during training)
 
 Prerequisites:
 - Layers must be created with nnx.vmap (stacked weights)
@@ -62,12 +62,9 @@ def forward_layers(
     kv_cache: KVCache | None,
     output_hidden_states: bool,
     gradient_checkpointing: bool,
-) -> tuple[jax.Array, list[jax.Array], KVCache]:
-    """Unified forward pass through stacked decoder layers.
-
-    Uses jax.lax.scan for both training and inference. When gradient_checkpointing=True,
-    wraps the body function with jax.checkpoint. This is a no-op during inference
-    (when not computing gradients), so we can use a single code path.
+    is_training: bool = False,
+) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
+    """Unified forward pass through stacked decoder layers using scan.
 
     Args:
         layers: Stacked decoder layers (created with create_stacked_layers/nnx.vmap).
@@ -78,10 +75,12 @@ def forward_layers(
         adapter_indices: Optional LoRA adapter indices of shape (batch,).
         kv_cache: Optional KV cache for decode mode (None for prefill).
         output_hidden_states: Whether to return intermediate hidden states.
-        gradient_checkpointing: Whether to use gradient checkpointing.
+        gradient_checkpointing: Whether to use gradient checkpointing (training only).
+        is_training: Whether in training mode. Skips KV cache to save memory.
 
     Returns:
         Tuple of (final_hidden_states, all_hidden_states, kv_cache).
+        kv_cache is None when is_training=True.
     """
     assert num_layers > 0, "num_layers must be positive"
 
@@ -99,7 +98,6 @@ def forward_layers(
 
         # Reconstruct layer module from stacked weights
         layer = nnx.merge(layer_graphdef, jax.tree.map(lambda x: x[layer_idx], layer_state))
-
         new_hs, (k, v) = layer(
             hs,
             attention_mask=attention_mask,
@@ -107,8 +105,11 @@ def forward_layers(
             adapter_indices=adapter_indices,
             kv_cache=layer_kv,
         )
-
         hs_output = new_hs if output_hidden_states else None
+
+        if is_training:
+            # Avoid accumulating large KV tensors for training.
+            k = v = None
         return new_hs, (hs_output, k, v)
 
     if gradient_checkpointing:
@@ -124,7 +125,9 @@ def forward_layers(
     # [embed, layer0_out, ..., layer(N-2)_out]; final layer output gets normed by caller
     all_hidden_states = [hidden_states] + list(all_hs[:-1]) if output_hidden_states else []
 
-    if is_decode:
+    if is_training:
+        new_kv_cache = None
+    elif is_decode:
         # Decode mode: scan stacked the per-layer updated caches into (num_layers, ...)
         new_kv_cache = KVCache(
             keys=all_keys,
