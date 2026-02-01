@@ -282,7 +282,6 @@ class MegatronStrategy(DistributedStrategy):
             optimizer.load_state_dict(state_dict["optimizer"])
             self.print("Loaded optimizer state dict.")
 
-
         # Load RNG state, if present.
         if "rng" in state_dict:
             self.load_rng_state(state_dict["rng"])

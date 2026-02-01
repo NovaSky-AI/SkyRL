@@ -16,7 +16,6 @@ from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 import megatron.core.parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer, ChainedOptimizer
-from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
 from skyrl_train.distributed.megatron.optimizer import (
     init_megatron_optim_config,

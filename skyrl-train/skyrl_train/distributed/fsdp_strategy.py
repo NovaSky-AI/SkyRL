@@ -442,7 +442,6 @@ class FSDPStrategy(DistributedStrategy):
                     with io.open_file(optim_path, "wb") as f:
                         torch.save(optimizer_state_dict, f)
 
-
                     # Create extra state dict with client state and any additional info
                     extra_state_dict = {
                         "lr_scheduler": {},
@@ -559,7 +558,6 @@ class FSDPStrategy(DistributedStrategy):
                 if optimizer is not None and load_optimizer_states and optimizer_state_dict:
                     optimizer.load_state_dict(optimizer_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
-
 
         # Load RNG state for reproducibility
         if "rng" in extra_state_dict:
