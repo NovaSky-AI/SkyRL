@@ -120,13 +120,13 @@ class MegatronStrategy(DistributedStrategy):
         self,
         optimizer: optim.Optimizer,
         model,
-        scheduler,
+        scheduler=None,
         name="model",
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
         """Perform optimizer step"""
         _, grad_norm, _ = optimizer.step()
-        scheduler.step(1)
+        # Do not call scheduler.step() - Tinker controls LR
         optimizer.zero_grad()
         return grad_norm
 
@@ -158,15 +158,13 @@ class MegatronStrategy(DistributedStrategy):
         # All ranks wait for the checkpoint directory to be created before saving.
         dist.barrier()
 
-        # Collect the sharded state dicts for model and optimizer, and full state dict for the scheduler.
+        # Collect the sharded state dicts for model and optimizer.
         sharded_state_dict = {}
         model_sharded_state_dict = unwrapped_model.sharded_state_dict()
         if not self.is_lora:
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
-        if scheduler:
-            sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
         # Save RNG state.
         sharded_state_dict["rng"] = self.get_rng_state()
@@ -257,8 +255,6 @@ class MegatronStrategy(DistributedStrategy):
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
-        if scheduler and load_lr_scheduler_states:
-            sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
         with io.local_read_dir(ckpt_dir) as read_dir:
             # Load the checkpoint in parallel.
@@ -286,12 +282,6 @@ class MegatronStrategy(DistributedStrategy):
             optimizer.load_state_dict(state_dict["optimizer"])
             self.print("Loaded optimizer state dict.")
 
-        if scheduler and load_lr_scheduler_states:
-            assert (
-                "lr_scheduler" in state_dict
-            ), f"LR scheduler state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
-            scheduler.load_state_dict(state_dict["lr_scheduler"])
-            self.print("Loaded LR scheduler state dict.")
 
         # Load RNG state, if present.
         if "rng" in state_dict:

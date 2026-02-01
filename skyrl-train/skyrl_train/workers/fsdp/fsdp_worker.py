@@ -148,12 +148,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                     }
                 )
 
-        self.model, self.optimizer, self.scheduler = strategy.prepare(
+        self.model, self.optimizer, _ = strategy.prepare(
             (wrapped_model, None, None),
         )
-        assert (
-            self.optimizer is not None and self.scheduler is not None
-        ), "FSDP preparation should create optimizer and scheduler"
+        assert self.optimizer is not None, "FSDP preparation should create optimizer"
 
         # Initialize weight extractor
         # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
@@ -306,7 +304,7 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
                 )
 
         # prepare models/optimizers...
-        self.model, self.optimizer, self.scheduler = strategy.prepare(
+        self.model, self.optimizer, _ = strategy.prepare(
             (critic, None, None),
         )
         assert self.optimizer is not None

@@ -30,7 +30,7 @@ class DistributedStrategy(ABC):
         self,
         optimizer: optim.Optimizer,
         model,
-        scheduler,
+        scheduler=None,
         name="model",
         **kwargs,
     ) -> Optional[Float[torch.Tensor, "1"]]:
@@ -38,13 +38,13 @@ class DistributedStrategy(ABC):
         pass
 
     @abstractmethod
-    def save_checkpoint(self, model, ckpt_dir, node_local_rank, optimizer, scheduler, tokenizer):
+    def save_checkpoint(self, model, ckpt_dir, node_local_rank, optimizer, scheduler=None, tokenizer=None):
         """Save checkpoint"""
         pass
 
     @abstractmethod
     def load_checkpoint(
-        self, model, ckpt_dir, optimizer, scheduler, load_module_strict, load_optimizer_states, load_lr_scheduler_states
+        self, model, ckpt_dir, optimizer, scheduler=None, load_module_strict=True, load_optimizer_states=True, load_lr_scheduler_states=False
     ):
         """Load checkpoint"""
         pass

@@ -39,7 +39,6 @@ from skyrl_train.distributed.fsdp_utils import (
     fsdp_version,
     fsdp2_load_full_state_dict,
 )
-from transformers.trainer import get_scheduler
 
 from packaging import version
 
@@ -186,8 +185,6 @@ class FSDPStrategy(DistributedStrategy):
             return grad_norm
 
         optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
         optimizer.zero_grad()
         return grad_norm
 
@@ -288,23 +285,15 @@ class FSDPStrategy(DistributedStrategy):
                 betas=optim_config.adam_betas,
                 weight_decay=optim_config.weight_decay,
             )
-
-            lr_scheduler = get_scheduler(
-                optim_config.scheduler,
-                new_optimizer,
-                num_warmup_steps=optim_config.num_warmup_steps,
-                num_training_steps=self.total_training_steps,
-            )
         else:
             new_optimizer = None
-            lr_scheduler = None
 
         if is_wrapped:
             model.model = fsdp_module
         else:
             model = fsdp_module
-
-        return model, new_optimizer, lr_scheduler
+        # backwards compatibility, return None for lr_scheduler (now controlled by Tinker)
+        return model, new_optimizer, None
 
     def _fsdp_init_eval_model(self, model):
         """Initialize a model for evaluation with FSDP"""
@@ -453,14 +442,10 @@ class FSDPStrategy(DistributedStrategy):
                     with io.open_file(optim_path, "wb") as f:
                         torch.save(optimizer_state_dict, f)
 
-                    # Get scheduler state dict if scheduler is provided
-                    lr_scheduler_state_dict = {}
-                    if scheduler is not None:
-                        lr_scheduler_state_dict = scheduler.state_dict()
 
                     # Create extra state dict with client state and any additional info
                     extra_state_dict = {
-                        "lr_scheduler": lr_scheduler_state_dict,
+                        "lr_scheduler": {},
                         "client_state": client_state,
                         "tag": tag,
                         "fsdp_strategy": self.fsdp_strategy,
@@ -575,10 +560,6 @@ class FSDPStrategy(DistributedStrategy):
                     optimizer.load_state_dict(optimizer_state_dict)
                     self.print(f"[rank-{rank}]: Successfully loaded optimizer state")
 
-                # Load scheduler state dict if scheduler object is provided and loading is requested
-                if scheduler is not None and load_lr_scheduler_states:
-                    scheduler.load_state_dict(lr_scheduler_state_dict)
-                    self.print(f"[rank-{rank}]: Successfully loaded scheduler state")
 
         # Load RNG state for reproducibility
         if "rng" in extra_state_dict:
