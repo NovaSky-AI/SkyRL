@@ -541,7 +541,7 @@ class FSDPStrategy(DistributedStrategy):
                     optimizer_state_dict = torch.load(f, map_location="cpu", weights_only=False)
 
         # Extract scheduler state from extra state
-        lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})
+        # lr_scheduler_state_dict = extra_state_dict.get("lr_scheduler", {})
 
         # Set up state dict configurations for sharded loading
         state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
