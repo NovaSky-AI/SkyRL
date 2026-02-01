@@ -599,40 +599,15 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
 def configure_ray_worker_logging() -> None:
     """
+    Configure logging for Ray workers.
+
     In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
-    This method forces color and formatting (e.g., bold) and routes stdlib `logging`
-    through Loguru so third-party logs match formatting
+    This method forces color and formatting and routes stdlib logging
+    through Loguru so third-party logs match formatting.
     """
-    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    from skyrl_train.utils.logging import configure_worker_logging
 
-    # 1) Loguru formatting (force colors)
-    logger.remove()
-    logger.level("INFO", color="<bold><green>")
-    logger.add(
-        sys.stderr,
-        colorize=True,  # keep ANSI even without a TTY
-        level=level_name,  # ensure Loguru filters below this level
-        enqueue=True,
-        backtrace=False,
-        diagnose=False,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-        "<level>{level: <8}</level> | "
-        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-        "<level>{message}</level>",
-    )
-
-    # 2) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted)
-    class _InterceptHandler(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            try:
-                level = logger.level(record.levelname).name
-            except ValueError:
-                level = record.levelno
-            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
-
-    logging.root.handlers = [_InterceptHandler()]
-    level = getattr(logging, level_name, logging.INFO)
-    logging.root.setLevel(level)
+    configure_worker_logging()
 
 
 def initialize_ray(cfg: DictConfig):
@@ -643,9 +618,19 @@ def initialize_ray(cfg: DictConfig):
         cfg: Training config
     """
     from .ppo_utils import sync_registries
+    from skyrl_train.env_vars import SKYRL_LOG_LEVEL
+
+    # SKYRL_LOG_LEVEL=DEBUG enables verbose Ray logging
+    verbose_logging = SKYRL_LOG_LEVEL == "DEBUG"
+
+    if not verbose_logging:
+        # Suppress C++ logs (metrics exporter errors) on stdout
+        os.environ["RAY_BACKEND_LOG_LEVEL"] = "fatal"
 
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+
+    # log_to_driver=False suppresses worker/raylet logs forwarding to driver stdout
+    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=verbose_logging)
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()
