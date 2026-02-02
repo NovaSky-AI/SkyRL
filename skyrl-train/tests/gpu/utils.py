@@ -340,7 +340,7 @@ async def run_inference(client, prompts, sampling_params):
 # TODO: this is kind of messy. All these information are inside cfg but we are passing them in
 # again. Make a global get_test_config function that is parametrized.
 def init_inference_engines(
-    cfg,
+    cfg: SkyRLConfig,
     model,
     use_local,
     async_engine,
@@ -366,7 +366,7 @@ def init_inference_engines(
         pg, sleep = None, False
 
     # Extract served_model_name from config if set
-    served_model_name = cfg.generator.get("served_model_name", None)
+    served_model_name = cfg.generator.served_model_name
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     eps = create_ray_wrapped_inference_engines(
