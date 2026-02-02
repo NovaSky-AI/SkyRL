@@ -373,6 +373,9 @@ class GeneratorConfig(BaseConfig):
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
 
+    external_proxy_url: Optional[str] = None
+    external_server_urls: Optional[List[str]] = None
+
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -535,8 +538,10 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
     return datacls(**kwargs)
 
 
-def get_config_as_dict(cfg: Union[BaseConfig, DictConfig]) -> dict:
-    if isinstance(cfg, DictConfig):
+def get_config_as_dict(cfg: Union[dict, BaseConfig, DictConfig]) -> dict:
+    if isinstance(cfg, dict):
+        return cfg
+    elif isinstance(cfg, DictConfig):
         return OmegaConf.to_container(cfg, resolve=True)
     return asdict(cfg)
 

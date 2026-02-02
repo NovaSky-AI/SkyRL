@@ -7,7 +7,7 @@ from huggingface_hub import snapshot_download
 
 import os
 from datetime import timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from collections import defaultdict
 from omegaconf import OmegaConf
 
@@ -18,6 +18,7 @@ import megatron.core.parallel_state as mpu
 from megatron.core.optimizer import DistributedOptimizer, ChainedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+from skyrl_train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl_train.distributed.megatron.optimizer import (
     init_megatron_optim_config,
     get_megatron_optimizer,
@@ -286,7 +287,7 @@ class MegatronWorker:
     def make_megatron_module(
         self,
         wrap_with_ddp: bool = True,
-        ddp_config: Optional[Dict[str, Any]] = None,
+        ddp_config: Optional[Union[MegatronDDPConfig, Dict[str, Any]]] = None,
         lora_config: Optional[Dict[str, Any]] = None,
         lora_type: Optional[str] = "lora",
         bf16: bool = True,
@@ -311,7 +312,7 @@ class MegatronWorker:
         if wrap_with_ddp:
             default_ddp_config.use_distributed_optimizer = True
         if ddp_config is not None:
-            for k, v in ddp_config.items():
+            for k, v in get_config_as_dict(ddp_config).items():
                 setattr(default_ddp_config, k, v)
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
