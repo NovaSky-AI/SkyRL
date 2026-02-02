@@ -140,12 +140,6 @@ class Trainer:
             torch.distributed.broadcast(param.data, src=0, group=self.pg)
         torch.cuda.synchronize()
 
-    def teardown(self):
-        """Clean up the process group."""
-        if self.pg is not None:
-            torch.distributed.destroy_process_group(self.pg)
-            self.pg = None
-
 
 @pytest.fixture(scope="class")
 def weight_update_env(ray_init_fixture):
@@ -219,8 +213,6 @@ def weight_update_env(ray_init_fixture):
 
     asyncio.get_event_loop().run_until_complete(client.teardown())
     router.shutdown()
-    group.shutdown()
-    ray.get(trainer.teardown.remote())
 
 
 @pytest.mark.vllm
