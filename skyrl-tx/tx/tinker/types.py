@@ -256,3 +256,13 @@ class PreparedSampleBatch(BaseModel):
 
     # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
     request_batch_slices: list[tuple[str, str, int, int, bool]]
+
+
+# Loss function type mappings (used for validation and backend dispatch)
+# This is just a name-to-index mapping - actual implementations are in loss_fns.py (JAX backend)
+# NOTE: Must stay in sync with LOSS_FUNCTION_MAP in loss_fns.py
+LOSS_TYPES = {
+    "cross_entropy": 0,
+    "importance_sampling": 1,
+    "ppo": 2,
+}

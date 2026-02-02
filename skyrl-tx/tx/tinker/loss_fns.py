@@ -1,4 +1,4 @@
-"""Loss functions for training."""
+"""Loss functions for training (JAX implementations)."""
 
 import jax
 import jax.numpy as jnp

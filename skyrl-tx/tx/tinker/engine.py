@@ -14,10 +14,8 @@ from sqlmodel import create_engine, Session, select, update, func
 from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, ModelDB, SessionDB
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
-from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
-from tx.tinker.backends.skyrl_train import SkyRLTrainBackend, SkyRLTrainBackendConfig
 from tx.tinker.backends.utils import log_timing
-from tx.tinker.loss_fns import LOSS_TYPES
+from tx.tinker.types import LOSS_TYPES
 from tx.utils.log import logger
 
 
@@ -130,10 +128,21 @@ def prepare_model_pass_batch(
     )
 
 
-BACKENDS = {
-    "jax": (JaxBackend, JaxBackendConfig),
-    "skyrl_train": (SkyRLTrainBackend, SkyRLTrainBackendConfig),
-}
+def get_backend_classes(backend_name: str):
+    """Lazy import backends to avoid importing unused backend dependencies (e.g., JAX, Ray)."""
+    if backend_name == "jax":
+        from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
+
+        return JaxBackend, JaxBackendConfig
+    elif backend_name == "skyrl_train":
+        from tx.tinker.backends.skyrl_train import SkyRLTrainBackend, SkyRLTrainBackendConfig
+
+        return SkyRLTrainBackend, SkyRLTrainBackendConfig
+    else:
+        raise ValueError(
+            f"Unknown backend: {backend_name}. Available backends: jax, skyrl_train. "
+            f"Make sure the backend's dependencies are installed (e.g., pip install skyrl-tx[jax])"
+        )
 
 
 class TinkerEngine:
@@ -189,10 +198,7 @@ class TinkerEngine:
         self.db_engine = create_engine(config.database_url, echo=False)
 
         # Initialize the backend (handles model state, computation, and adapter management)
-        if config.backend not in BACKENDS:
-            raise ValueError(f"Unknown backend: {config.backend}. Available backends: {list(BACKENDS.keys())}")
-
-        backend_class, backend_config_class = BACKENDS[config.backend]
+        backend_class, backend_config_class = get_backend_classes(config.backend)
         backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
 
@@ -312,7 +318,7 @@ class TinkerEngine:
 
         # TODO: This leaks the abstraction by accessing backend-specific config.
         # We should find a better way to handle this going forward.
-        if isinstance(self.backend, JaxBackend) and self.backend.config.sample_max_num_sequences > 0:
+        if self.config.backend == "jax" and self.backend.config.sample_max_num_sequences > 0:
             batchable = batchable[: self.backend.config.sample_max_num_sequences]
 
         return {str(f.request_id): (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
