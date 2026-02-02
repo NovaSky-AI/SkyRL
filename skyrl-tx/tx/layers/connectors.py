@@ -9,7 +9,11 @@ from tx.layers.layernorm import RMSNorm
 
 
 class Connector(nnx.Module):
-    """General implementation of (m?)Hyper Connections"""
+    """
+    Implementation of Manifold constrained HyperConnections (https://arxiv.org/pdf/2512.24880)
+
+    Weights initialized with identity mapping; Default behaviour equates to residual networks.
+    """
 
     def __init__(
         self,
@@ -51,7 +55,6 @@ class Connector(nnx.Module):
         # M = sinkhorn(exp(b_res)) = I  =>  b_res = large diagonal matrix
         self.b_res = nnx.Param(10.0 * jnp.eye(n, dtype=dtype))
 
-        # Alpha = 0 so phi matrices don't contribute initially
         self.alpha_pre = nnx.Param(jnp.array(0.0, dtype=dtype))
         self.alpha_post = nnx.Param(jnp.array(0.0, dtype=dtype))
         self.alpha_res = nnx.Param(jnp.array(0.0, dtype=dtype))
@@ -63,6 +66,16 @@ class Connector(nnx.Module):
             M = M / (M.sum(axis=-2, keepdims=True) + self.eps)
         return M
 
+    def _get_params(self):
+        """Get all connector params, with stop_gradient applied if not trainable."""
+        sg = (lambda x: x) if self.trainable else jax.lax.stop_gradient
+        return (
+            sg(self.alpha_pre[...]), sg(self.alpha_post[...]), sg(self.alpha_res[...]),
+            sg(self.phi_pre[...]), sg(self.phi_post[...]), sg(self.phi_res[...]),
+            sg(self.b_pre[...]), sg(self.b_post[...]), sg(self.b_res[...]),
+            sg(self.norm.weight[...]),
+        )
+
     def pre(self, x: jax.Array) -> jax.Array:
         *batch_dims, n, C = x.shape
 
@@ -70,16 +83,20 @@ class Connector(nnx.Module):
         rms = jnp.sqrt(jnp.mean(x_flat * x_flat, axis=-1, keepdims=True) + self.eps)
         x_norm = x_flat / rms
 
-        tilde_H_pre = self.alpha_pre[...] * (x_norm @ self.phi_pre[...]) + self.b_pre[...]
-        tilde_H_post = self.alpha_post[...] * (x_norm @ self.phi_post[...]) + self.b_post[...]
-        tilde_H_res = self.alpha_res[...] * (x_norm @ self.phi_res[...]).reshape(*batch_dims, n, n) + self.b_res[...]
+        (alpha_pre, alpha_post, alpha_res, phi_pre, phi_post, phi_res,
+         b_pre, b_post, b_res, norm_weight) = self._get_params()
+
+        tilde_H_pre = alpha_pre * (x_norm @ phi_pre) + b_pre
+        tilde_H_post = alpha_post * (x_norm @ phi_post) + b_post
+        tilde_H_res = alpha_res * (x_norm @ phi_res).reshape(*batch_dims, n, n) + b_res
 
         H_pre = jax.nn.sigmoid(tilde_H_pre)
         self._H_post = 2.0 * jax.nn.sigmoid(tilde_H_post)
         self._M = self._sinkhorn_knopp(tilde_H_res)
 
         x_agg = jnp.einsum("...i,...ic->...c", H_pre, x)
-        x_normed = self.norm(x_agg)
+        rms_norm = jnp.sqrt(jnp.mean(x_agg**2, axis=-1, keepdims=True) + self.norm.eps)
+        x_normed = norm_weight * x_agg / rms_norm
 
         return x_normed
 
