@@ -11,6 +11,7 @@ import dataclasses
 from dataclasses import asdict
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
+from omegaconf import OmegaConf
 
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.lora import LoRA
@@ -212,7 +213,7 @@ class MegatronWorker:
         transformer_config_kwargs = (
             asdict(transformer_config_kwargs)
             if dataclasses.is_dataclass(transformer_config_kwargs)
-            else dict(transformer_config_kwargs)
+            else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         )
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
