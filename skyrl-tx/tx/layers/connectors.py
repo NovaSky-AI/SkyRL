@@ -36,13 +36,25 @@ class Connector(nnx.Module):
         self.phi_post = Param(n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs)
         self.phi_res = Param(n * C, n * n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs)
 
-        self.b_pre = Param(n, dtype=dtype, rngs=rngs, kernel_init=nnx.initializers.zeros_init())
-        self.b_post = Param(n, dtype=dtype, rngs=rngs, kernel_init=nnx.initializers.zeros_init())
-        self.b_res = Param(n, n, dtype=dtype, rngs=rngs, kernel_init=nnx.initializers.zeros_init())
+        # Initialize biases for identity-like behavior:
+        # H_pre = 1/n (uniform aggregation), H_post = 1 (full distribution), M = I (identity mixing)
 
-        self.alpha_pre = nnx.Param(jnp.array(0.01, dtype=dtype))
-        self.alpha_post = nnx.Param(jnp.array(0.01, dtype=dtype))
-        self.alpha_res = nnx.Param(jnp.array(0.01, dtype=dtype))
+        # H_pre = sigmoid(b_pre) = 1/n  =>  b_pre = logit(1/n)
+        target_h_pre = jnp.array(1.0 / n, dtype=dtype)
+        clamped = jnp.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
+        logit_1_over_n = jnp.log(clamped) - jnp.log(1.0 - clamped)
+        self.b_pre = nnx.Param(jnp.full((n,), logit_1_over_n, dtype=dtype))
+
+        # H_post = 2 * sigmoid(b_post) = 1  =>  b_post = 0
+        self.b_post = nnx.Param(jnp.zeros((n,), dtype=dtype))
+
+        # M = sinkhorn(exp(b_res)) = I  =>  b_res = large diagonal matrix
+        self.b_res = nnx.Param(10.0 * jnp.eye(n, dtype=dtype))
+
+        # Alpha = 0 so phi matrices don't contribute initially
+        self.alpha_pre = nnx.Param(jnp.array(0.0, dtype=dtype))
+        self.alpha_post = nnx.Param(jnp.array(0.0, dtype=dtype))
+        self.alpha_res = nnx.Param(jnp.array(0.0, dtype=dtype))
 
     def _sinkhorn_knopp(self, M: jax.Array) -> jax.Array:
         M = jnp.exp(M)
