@@ -2,6 +2,7 @@ import asyncio
 import os
 import ray
 import torch
+from typing import Any, Dict
 import time
 import requests
 import importlib
@@ -341,18 +342,18 @@ async def run_inference(client, prompts, sampling_params):
 # again. Make a global get_test_config function that is parametrized.
 def init_inference_engines(
     cfg: SkyRLConfig,
-    model,
-    use_local,
-    async_engine,
-    tp_size,
-    colocate_all,
-    backend,
-    gpu_memory_utilization=0.6,
-    num_inference_engines=1,
-    sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
-    enable_lora=False,
-    max_num_seqs=1024,
-    engine_init_kwargs={},
+    model: str,
+    use_local: bool,
+    async_engine: bool,
+    tp_size: int,
+    colocate_all: bool,
+    backend: str,
+    gpu_memory_utilization: float = 0.6,
+    num_inference_engines: int = 1,
+    sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
+    enable_lora: bool = False,
+    max_num_seqs: int = 1024,
+    engine_init_kwargs: Dict[str, Any] = {},
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]

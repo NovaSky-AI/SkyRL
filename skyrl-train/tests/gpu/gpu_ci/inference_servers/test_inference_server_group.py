@@ -130,7 +130,6 @@ class TestServerGroupAndRouter:
         assert resp.status_code == 200
         assert len(resp.json()["servers"]) == 2
 
-    @pytest.mark.asyncio
     async def test_get_world_size(self, server_group_and_router):
         """get_world_size returns total world size across all servers."""
         client = server_group_and_router["client"]
@@ -159,7 +158,6 @@ class TestServerGroupAndRouter:
         assert "text" in data["choices"][0]
         print(f"Completion: {data['choices'][0]['text']}")
 
-    @pytest.mark.asyncio
     async def test_pause_resume(self, server_group_and_router):
         """Pause/resume control plane operations work via RemoteInferenceClient."""
         router_url = server_group_and_router["router_url"]
@@ -169,7 +167,7 @@ class TestServerGroupAndRouter:
         result = await client.pause()
         # All servers should report success
         for server_url, resp in result.items():
-            assert resp["status"] == 200, f"Server {server_url} failed to pause"
+            assert resp["status"] == 200, f"Server {server_url} failed to pause: {resp}"
 
         # Send a request while paused (should block)
         async def send_request():

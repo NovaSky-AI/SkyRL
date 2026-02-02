@@ -17,6 +17,7 @@ import ray
 import torch
 
 from skyrl_train.distributed.utils import init_custom_process_group
+from skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils import get_tcp_url
 from skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
@@ -204,21 +205,33 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(cfg: "Union[SkyRLConfig, DictConfig]") -> BroadcastInitInfo:
+    def create_init_info(
+        cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
+    ) -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:
             cfg: Configuration object containing generator settings.
+            inference_world_size: Total number of inference workers (from client.get_world_size()).
+                If provided, uses this instead of calculating from config.
+                This is the preferred approach for HTTP inference path.
 
         Returns:
             BroadcastInitInfo containing all args needed for sender/receiver creation.
         """
 
-        num_inference_engines = cfg.generator.num_inference_engines
-        tensor_parallel_size = cfg.generator.inference_engine_tensor_parallel_size
-        pipeline_parallel_size = cfg.generator.inference_engine_pipeline_parallel_size
-        data_parallel_size = cfg.generator.inference_engine_data_parallel_size
-        world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
+        if _SKYRL_USE_NEW_INFERENCE:
+            # New inference path: use world_size from servers
+            if inference_world_size is None:
+                raise ValueError("inference_world_size must be provided when using new inference path")
+            world_size = inference_world_size + 1  # +1 for trainer rank 0
+        else:
+            # Legacy path: calculate from config
+            num_inference_engines = cfg.generator.num_inference_engines
+            tensor_parallel_size = cfg.generator.inference_engine_tensor_parallel_size
+            pipeline_parallel_size = cfg.generator.inference_engine_pipeline_parallel_size
+            data_parallel_size = cfg.generator.inference_engine_data_parallel_size
+            world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
 
         master_addr = ray._private.services.get_node_ip_address()
         with socket.socket() as sock:
