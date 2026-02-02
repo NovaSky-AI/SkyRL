@@ -17,9 +17,8 @@ from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeou
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import DictConfig
-from skyrl_train.config import SkyRLConfig, get_config_as_dict
+from skyrl_train.config import SkyRLConfig, get_config_as_yaml_str
 from pathlib import Path
-import pprint
 import ray
 
 import os
@@ -129,7 +128,7 @@ class BasePPOExp:
 
     @staticmethod
     def get_cfg_as_str(cfg: Union[SkyRLConfig, DictConfig]) -> str:
-        return pprint.pformat(get_config_as_dict(cfg))
+        return get_config_as_yaml_str(cfg)
 
     def get_tokenizer(self, padding_side="left"):
         """Initializes a tokenizer for the given model."""

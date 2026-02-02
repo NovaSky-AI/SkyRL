@@ -59,14 +59,14 @@ def get_megatron_optimizer(
 
 def get_megatron_optimizer_param_scheduler(
     optimizer,
-    config: SkyRLOptimizerConfig,
+    config: Union[SkyRLOptimizerConfig, DictConfig],
     num_training_steps: int = 1e9,  # default to a large number for constant lr/wd
 ):
     """
     Get the optimizer parameter scheduler for Megatron.
     """
     # TODO: support other schedulers for Megatron
-    if config.scheduler != "constant_with_warmup":
+    if getattr(config, "scheduler", "constant_with_warmup") != "constant_with_warmup":
         raise ValueError("Only constant_with_warmup scheduler is supported for Megatron")
 
     lr_warmup_steps = config.num_warmup_steps
@@ -85,8 +85,8 @@ def get_megatron_optimizer_param_scheduler(
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
         lr_decay_style="constant",
-        start_wd=getattr(config, "weight_decay", 1e-2),
-        end_wd=getattr(config, "weight_decay", 1e-2),
+        start_wd=config.weight_decay,
+        end_wd=config.weight_decay,
         wd_incr_steps=num_training_steps,
         wd_incr_style="constant",
         use_checkpoint_opt_param_scheduler=False,

@@ -10,6 +10,7 @@ import dataclasses
 from dataclasses import dataclass, field, asdict
 import typing
 from typing import Any, Dict, List, Optional, Union, Type, TypeVar, Annotated
+import yaml
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -536,3 +537,9 @@ def get_config_as_dict(cfg: Union[BaseConfig, DictConfig]) -> dict:
     if isinstance(cfg, DictConfig):
         return OmegaConf.to_container(cfg, resolve=True)
     return asdict(cfg)
+
+
+def get_config_as_yaml_str(cfg: Union[BaseConfig, DictConfig]) -> str:
+    if isinstance(cfg, DictConfig):
+        return OmegaConf.to_yaml(cfg)
+    return yaml.dump(asdict(cfg))
