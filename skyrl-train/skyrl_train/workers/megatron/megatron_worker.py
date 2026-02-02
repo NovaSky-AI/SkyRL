@@ -7,8 +7,6 @@ from huggingface_hub import snapshot_download
 
 import os
 from datetime import timedelta
-import dataclasses
-from dataclasses import asdict
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from omegaconf import OmegaConf
@@ -211,8 +209,8 @@ class MegatronWorker:
 
         # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = (
-            asdict(transformer_config_kwargs)
-            if dataclasses.is_dataclass(transformer_config_kwargs)
+            transformer_config_kwargs
+            if isinstance(transformer_config_kwargs, dict)
             else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         )
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"

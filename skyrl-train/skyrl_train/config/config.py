@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, asdict
 import typing
 from typing import Any, Dict, List, Optional, Union, Type, TypeVar, Annotated
 import yaml
+import copy
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -122,22 +123,19 @@ class MegatronLoraConfig(BaseConfig):
     lora_type: str = "lora"
 
 
-@dataclass
-class MegatronOptimizerKwargs(BaseConfig):
-    overlap_cpu_optimizer_d2h_h2d: bool = False
-    use_precision_aware_optimizer: bool = False
-    optimizer_cpu_offload: bool = False
-    optimizer_offload_fraction: float = 0.0
+DEFAULT_MEGATRON_OPTIMIZER_KWARGS = {
+    "overlap_cpu_optimizer_d2h_h2d": False,
+    "use_precision_aware_optimizer": False,
+    "optimizer_cpu_offload": False,
+    "optimizer_offload_fraction": 0.0,
+}
 
-
-@dataclass
-class MegatronTransformerKwargs(BaseConfig):
-    recompute_granularity: Optional[str] = "full"
-    recompute_modules: Optional[List[str]] = field(default_factory=lambda: ["core_attn"])
-    recompute_method: Optional[str] = "uniform"
-    recompute_num_layers: Optional[int] = 1
-    num_layers: Optional[int] = None
-    num_layers_in_last_pipeline_stage: Optional[int] = None
+DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
+    "recompute_granularity": "full",
+    "recompute_modules": ["core_attn"],
+    "recompute_method": "uniform",
+    "recompute_num_layers": 1,
+}
 
 
 @dataclass
@@ -150,8 +148,12 @@ class MegatronConfig(BaseConfig):
     ddp_config: Optional[MegatronDDPConfig] = None
     torch_profiler_config: Optional[MegatronTorchProfilerConfig] = None
     lora_config: Optional[MegatronLoraConfig] = None
-    optimizer_config_kwargs: Optional[MegatronOptimizerKwargs] = None
-    transformer_config_kwargs: Optional[MegatronTransformerKwargs] = None
+    optimizer_config_kwargs: Dict[str, Any] = field(
+        default_factory=lambda: copy.deepcopy(DEFAULT_MEGATRON_OPTIMIZER_KWARGS)
+    )
+    transformer_config_kwargs: Dict[str, Any] = field(
+        default_factory=lambda: copy.deepcopy(DEFAULT_TRANSFORMER_CONFIG_KWARGS)
+    )
     empty_cuda_cache: Optional[bool] = None
     model_config_kwargs: dict = field(default_factory=dict)
 

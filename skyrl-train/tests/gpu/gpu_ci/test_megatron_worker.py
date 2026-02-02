@@ -21,8 +21,6 @@ from skyrl_train.utils.utils import print_mem, validate_cfg
 from skyrl_train.config import (
     SkyRLConfig,
     SkyRLLoraConfig,
-    MegatronTransformerKwargs,
-    MegatronOptimizerKwargs,
     MegatronTorchProfilerConfig,
 )
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
@@ -47,8 +45,8 @@ def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLConfig:
     cfg.trainer.logger = "console"
     if "moonlight" in model_name:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs = MegatronTransformerKwargs()
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs.num_layers_in_last_pipeline_stage = 13
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers_in_last_pipeline_stage"] = 13
     if "Qwen3-30B" in model_name or "Qwen1.5-MoE" in model_name:
         cfg.trainer.gradient_checkpointing_use_reentrant = True
 
@@ -225,8 +223,8 @@ async def test_megatron_forward(
 
     if ep > 1:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs = MegatronTransformerKwargs()
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs.num_layers = 2
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
 
     if lora:
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
@@ -345,8 +343,8 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     if ep > 1:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs = MegatronTransformerKwargs()
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs.num_layers = 4
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 4
 
     actor_group = init_worker_with_type(
         "policy",
@@ -381,8 +379,8 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     if ep > 1:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs = MegatronTransformerKwargs()
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs.num_layers = 4
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 4
 
     actor_group = init_worker_with_type(
         "policy",
@@ -459,8 +457,8 @@ async def test_megatron_train(
 
     if ep > 1:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs = MegatronTransformerKwargs()
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs.num_layers = 2
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = gpus_per_node
@@ -686,12 +684,10 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 2
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
-    cfg.trainer.policy.megatron_config.optimizer_config_kwargs = MegatronOptimizerKwargs(
-        use_precision_aware_optimizer=False
-    )
+    cfg.trainer.policy.megatron_config.optimizer_config_kwargs = dict(use_precision_aware_optimizer=False)
     if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs = MegatronTransformerKwargs()
-    cfg.trainer.policy.megatron_config.transformer_config_kwargs.num_layers = 2
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
     actor_group = init_worker_with_type(
         worker_type,
         shared_pg=None,
