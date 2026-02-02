@@ -214,9 +214,9 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
 
         # Check key configuration values are preserved
         assert (
-            loaded_trainer_state["config"]["trainer"]["train_batch_size"] == cfg.trainer.train_batch_size
+            loaded_trainer_state["config"].trainer.train_batch_size == cfg.trainer.train_batch_size
         ), "train_batch_size not preserved in checkpoint"
-        assert loaded_trainer_state["config"]["trainer"]["strategy"] == strategy, "strategy not preserved in checkpoint"
+        assert loaded_trainer_state["config"].trainer.strategy == strategy, "strategy not preserved in checkpoint"
         assert loaded_trainer_state["global_step"] == saved_global_step, "global_step not preserved in checkpoint"
 
         # Cleanup first trainer
