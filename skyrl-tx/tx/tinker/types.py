@@ -258,10 +258,12 @@ class PreparedSampleBatch(BaseModel):
     request_batch_slices: list[tuple[str, str, int, int, bool]]
 
 
-# Loss function type mappings (used for validation and backend dispatch)
-# NOTE: Must stay in sync with LOSS_FUNCTION_MAP in loss_fns.py
-LOSS_TYPES = {
-    "cross_entropy": 0,
-    "importance_sampling": 1,
-    "ppo": 2,
-}
+# Loss function type names (canonical list - single source of truth)
+LOSS_TYPE_NAMES = [
+    "cross_entropy",
+    "importance_sampling",
+    "ppo",
+]
+
+# Derived mapping (name -> index)
+LOSS_TYPES = {name: idx for idx, name in enumerate(LOSS_TYPE_NAMES)}
