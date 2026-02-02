@@ -259,7 +259,6 @@ class PreparedSampleBatch(BaseModel):
 
 
 # Loss function type mappings (used for validation and backend dispatch)
-# NOTE: Must stay in sync with LOSS_FUNCTION_MAP in loss_fns.py
 LOSS_TYPES = {
     "cross_entropy": 0,
     "importance_sampling": 1,

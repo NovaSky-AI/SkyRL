@@ -47,7 +47,4 @@ from tx.tinker.types import LOSS_TYPES
 
 # Build list of functions indexed by LOSS_TYPES values (for jax.lax.switch)
 # Sort by index to ensure LOSS_FUNCTIONS[idx] corresponds to the correct function
-LOSS_FUNCTIONS = [
-    LOSS_FUNCTION_MAP[name]
-    for name, idx in sorted(LOSS_TYPES.items(), key=lambda x: x[1])
-]
+LOSS_FUNCTIONS = [LOSS_FUNCTION_MAP[name] for name, idx in sorted(LOSS_TYPES.items(), key=lambda x: x[1])]
