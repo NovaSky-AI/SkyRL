@@ -219,7 +219,6 @@ def weight_update_env(ray_init_fixture):
 
     asyncio.get_event_loop().run_until_complete(client.teardown())
     router.shutdown()
-    group.shutdown()
     ray.get(trainer.teardown.remote())
 
 
@@ -288,7 +287,7 @@ class TestWeightUpdateFlow:
             trainer_init_ref = trainer.init_weight_sync.remote(master_address, master_port, world_size, group_name)
 
             # Await server init via client (fans out to all backends)
-            result = await client.init_weight_transfer(init_info)
+            result = await client.init_weight_update_communicator(init_info)
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} init failed: {resp}"
 
@@ -312,7 +311,7 @@ class TestWeightUpdateFlow:
                 dtypes=weight_info["dtypes"],
                 shapes=weight_info["shapes"],
             )
-            result = await client.update_weights(update_request)
+            result = await client.update_named_weights(update_request)
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} update weights failed: {resp}"
 

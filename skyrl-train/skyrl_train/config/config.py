@@ -145,9 +145,9 @@ class MegatronConfig(BaseConfig):
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: Optional[int] = None
-    ddp_config: Optional[MegatronDDPConfig] = None
-    torch_profiler_config: Optional[MegatronTorchProfilerConfig] = None
-    lora_config: Optional[MegatronLoraConfig] = None
+    ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
+    torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
+    lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
     optimizer_config_kwargs: Dict[str, Any] = field(
         default_factory=lambda: copy.deepcopy(DEFAULT_MEGATRON_OPTIMIZER_KWARGS)
     )
