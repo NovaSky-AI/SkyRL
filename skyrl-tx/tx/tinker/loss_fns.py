@@ -3,6 +3,8 @@
 import jax
 import jax.numpy as jnp
 
+from tx.tinker.types import LOSS_TYPES
+
 
 def safe_loss_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
     "Strongly mask the loss_output to 0.0 if the loss_mask is zero."
@@ -41,9 +43,6 @@ LOSS_FUNCTION_MAP = {
     "importance_sampling": importance_sampling_loss,
     "ppo": ppo_loss,
 }
-
-# Import canonical loss type indices from types.py
-from tx.tinker.types import LOSS_TYPES
 
 # Build list of functions indexed by LOSS_TYPES values (for jax.lax.switch)
 # Sort by index to ensure LOSS_FUNCTIONS[idx] corresponds to the correct function
