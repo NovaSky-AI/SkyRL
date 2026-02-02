@@ -13,7 +13,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_HTTP_INFERENCE
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
@@ -119,7 +119,7 @@ class BasePPOExp:
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
 
-        # HTTP inference resources (created lazily when _SKYRL_USE_HTTP_INFERENCE=1)
+        # New inference resources (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
         self._server_group = None
         self._inference_router = None
 
@@ -264,8 +264,8 @@ class BasePPOExp:
         Returns:
             InferenceEngineInterface: The inference engine client.
         """
-        if _SKYRL_USE_HTTP_INFERENCE:
-            return self._get_http_inference_client()
+        if _SKYRL_USE_NEW_INFERENCE:
+            return self._get_new_inference_client()
         else:
             return self._get_legacy_inference_client()
 
@@ -280,8 +280,8 @@ class BasePPOExp:
 
         return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
-    def _get_http_inference_client(self):
-        """New HTTP-based inference client.
+    def _get_new_inference_client(self):
+        """New inference client using HTTP endpoints.
 
         Config combinations:
         - Colocated + external URLs → ERROR (validated earlier)
@@ -291,7 +291,7 @@ class BasePPOExp:
         - Both set → Fully external (proxy for data plane, servers for control plane)
 
         Returns:
-            RemoteInferenceClient: The HTTP-based inference client.
+            RemoteInferenceClient: The new inference client.
         """
         from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
         from skyrl_train.inference_servers.router import InferenceRouter

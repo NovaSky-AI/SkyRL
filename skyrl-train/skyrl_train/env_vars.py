@@ -69,19 +69,19 @@ See https://github.com/ray-project/ray/issues/56697 for details on why this is n
 # Feature Flags (Private)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SKYRL_USE_HTTP_INFERENCE = str(os.environ.get("_SKYRL_USE_HTTP_INFERENCE", "0")).lower() in (
+_SKYRL_USE_NEW_INFERENCE = str(os.environ.get("_SKYRL_USE_NEW_INFERENCE", "0")).lower() in (
     "true",
     "1",
     "yes",
 )
 """
-**Private feature flag** - Enables the new HTTP-based inference layer.
+**Private feature flag** - Enables the new inference layer.
 
 When enabled, uses `RemoteInferenceClient` with HTTP endpoints for inference
 instead of the legacy `InferenceEngineClient` with Ray actors.
 
 Default: False (uses legacy code path).
-Set `_SKYRL_USE_HTTP_INFERENCE=1` to enable the new HTTP-based inference.
+Set `_SKYRL_USE_NEW_INFERENCE=1` to enable the new inference layer.
 
 This flag is intended for internal testing and will be removed once the new
 inference layer is validated and made the default.

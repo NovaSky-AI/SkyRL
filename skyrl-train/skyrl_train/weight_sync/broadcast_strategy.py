@@ -16,7 +16,7 @@ import ray
 import torch
 
 from skyrl_train.distributed.utils import init_custom_process_group
-from skyrl_train.env_vars import _SKYRL_USE_HTTP_INFERENCE
+from skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.utils import get_tcp_url
 from skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
@@ -217,11 +217,10 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             BroadcastInitInfo containing all args needed for sender/receiver creation.
         """
 
-        if _SKYRL_USE_HTTP_INFERENCE and inference_world_size is None:
-            raise ValueError("inference_world_size must be provided when using HTTP inference path")
-
-        if inference_world_size is not None:
-            # HTTP inference path: use world_size from servers
+        if _SKYRL_USE_NEW_INFERENCE:
+            # New inference path: use world_size from servers
+            if inference_world_size is None:
+                raise ValueError("inference_world_size must be provided when using new inference path")
             world_size = inference_world_size + 1  # +1 for trainer rank 0
         else:
             # Legacy path: calculate from config

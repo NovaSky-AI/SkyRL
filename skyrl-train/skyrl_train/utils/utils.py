@@ -21,7 +21,7 @@ from skyrl_train.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_PYTHONPATH_EXPORT,
-    _SKYRL_USE_HTTP_INFERENCE,
+    _SKYRL_USE_NEW_INFERENCE,
 )
 
 
@@ -457,14 +457,14 @@ def validate_generator_cfg(cfg: DictConfig):
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
 
-    # Validate new HTTP inference config options
-    _validate_http_inference_cfg(cfg)
+    # Validate new inference config options
+    _validate_new_inference_cfg(cfg)
 
 
-def _validate_http_inference_cfg(cfg: DictConfig):
-    """Validates config options for the new HTTP-based inference layer.
+def _validate_new_inference_cfg(cfg: DictConfig):
+    """Validates config options for the new inference layer.
 
-    This validation only applies when _SKYRL_USE_HTTP_INFERENCE=1.
+    This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
 
     Config combinations:
     - Colocated + external URLs → ERROR (requires driver-managed servers for PG sharing)
@@ -479,8 +479,8 @@ def _validate_http_inference_cfg(cfg: DictConfig):
     Raises:
         ValueError: If colocated mode is used with external URLs.
     """
-    if not _SKYRL_USE_HTTP_INFERENCE:
-        # Only validate when using the new HTTP inference path
+    if not _SKYRL_USE_NEW_INFERENCE:
+        # Only validate when using the new inference path
         return
 
     is_colocated = cfg.trainer.placement.colocate_all

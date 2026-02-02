@@ -38,7 +38,7 @@ from skyrl_train.distributed.ulysses import (
     set_ulysses_sequence_parallel_group,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.env_vars import _SKYRL_USE_HTTP_INFERENCE
+from skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.utils import (
     get_ray_pg_ready_with_timeout,
@@ -298,10 +298,10 @@ class Worker(DistributedTorchRayActor):
 
         assert inference_engine_client is not None
 
-        # For HTTP inference path, fetch world_size from servers
+        # For new inference path, fetch world_size from servers
         # For legacy path, calculate from config
         inference_world_size = None
-        if _SKYRL_USE_HTTP_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
+        if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
             inference_world_size = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
