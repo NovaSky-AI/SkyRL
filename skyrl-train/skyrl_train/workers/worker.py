@@ -7,7 +7,6 @@ from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type, Union
-from dataclasses import asdict
 from omegaconf import DictConfig, OmegaConf
 
 import ray
@@ -772,15 +771,13 @@ class PolicyWorkerBase(Worker):
         loss_config = self.cfg.trainer.algorithm
         if loss_fn_config is not None:
             # Create a copy of the config and apply overrides
-            # NOTE (sumanthrh): This doesn't work like OmegaConf for nested dataclasses - only top level fields are merged
             # TODO: Fix nested overrides
             if isinstance(loss_config, DictConfig):
                 loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
             else:
                 assert isinstance(loss_config, AlgorithmConfig)
-                new_loss_config_as_dict = asdict(loss_config)
-                new_loss_config_as_dict.update(loss_fn_config)
-                loss_config = AlgorithmConfig(**new_loss_config_as_dict)
+                new_loss_config = OmegaConf.merge(OmegaConf.create(loss_config), OmegaConf.create(loss_fn_config))
+                loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
