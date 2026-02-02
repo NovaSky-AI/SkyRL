@@ -61,7 +61,7 @@ class SkyRLLoraConfig(BaseConfig):
 
 @dataclass
 class ModelConfig(BaseConfig):
-    path: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    path: Optional[str] = None
     lora: SkyRLLoraConfig = field(default_factory=SkyRLLoraConfig)
 
 
@@ -182,7 +182,7 @@ class PlacementConfig(BaseConfig):
 
 @dataclass
 class PolicyConfig(BaseConfig):
-    model: ModelConfig = field(default_factory=ModelConfig)
+    model: ModelConfig = field(default_factory=lambda: copy.deepcopy(ModelConfig(path="Qwen/Qwen2.5-1.5B-Instruct")))
     optimizer_config: OptimizerConfig = field(default_factory=OptimizerConfig)
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
     sequence_parallel_size: int = 1
@@ -201,9 +201,10 @@ class CriticConfig(BaseConfig):
     model_config_kwargs: dict = field(default_factory=dict)
 
 
+# TODO: Have global config init so that the default value for the ref model path is the policy model path
 @dataclass
 class RefConfig(BaseConfig):
-    model: ModelConfig = field(default_factory=ModelConfig)
+    model: ModelConfig = field(default_factory=lambda: copy.deepcopy(ModelConfig(path="Qwen/Qwen2.5-1.5B-Instruct")))
     sequence_parallel_size: int = 1
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
     megatron_config: MegatronConfig = field(default_factory=MegatronConfig)
