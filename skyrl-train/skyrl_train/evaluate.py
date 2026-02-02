@@ -101,6 +101,9 @@ async def evaluate(
         }
     )
 
+    for key, value in concat_generator_outputs["rollout_metrics"].items():
+        eval_metrics[f"eval/all/{key}"] = value
+
     # 4. Prepare dumping data
     # TODO[Ben] update this to be cloud-compatible
     if cfg.trainer.dump_eval_results:

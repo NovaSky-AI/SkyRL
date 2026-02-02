@@ -13,7 +13,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import OmegaConf, DictConfig
 from pathlib import Path
@@ -118,6 +118,10 @@ class BasePPOExp:
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
+
+        # New inference resources (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
+        self._server_group = None
+        self._inference_router = None
 
     @staticmethod
     def get_cfg_as_str(dict_cfg: DictConfig) -> str:
@@ -260,6 +264,13 @@ class BasePPOExp:
         Returns:
             InferenceEngineInterface: The inference engine client.
         """
+        if _SKYRL_USE_NEW_INFERENCE:
+            return self._get_new_inference_client()
+        else:
+            return self._get_legacy_inference_client()
+
+    def _get_legacy_inference_client(self) -> InferenceEngineInterface:
+        """Legacy inference client using Ray actors."""
         if self.cfg.generator.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config(
                 self.cfg, self.colocate_pg, self.tokenizer
@@ -268,6 +279,116 @@ class BasePPOExp:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
 
         return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+
+    def _get_new_inference_client(self):
+        """New inference client using HTTP endpoints.
+
+        Config combinations:
+        - Colocated + external URLs → ERROR (validated earlier)
+        - Neither set → Build servers internally
+        - external_server_urls only → Create router over external servers
+        - external_proxy_url only → Use proxy for both data + control plane
+        - Both set → Fully external (proxy for data plane, servers for control plane)
+
+        Returns:
+            RemoteInferenceClient: The new inference client.
+        """
+        from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+        from skyrl_train.inference_servers.router import InferenceRouter
+        from skyrl_train.inference_servers.server_group import ServerGroup
+
+        is_colocated = self.cfg.trainer.placement.colocate_all
+        external_proxy_url = self.cfg.generator.get("external_proxy_url")
+        external_server_urls = self.cfg.generator.get("external_server_urls")
+
+        has_external_proxy = external_proxy_url is not None
+        has_external_servers = external_server_urls is not None
+
+        if has_external_proxy and has_external_servers:
+            # Case: Both external - fully external setup
+            proxy_url = external_proxy_url
+            server_urls = list(external_server_urls)
+            logger.info(
+                f"HTTP Inference: Using fully external setup - " f"proxy_url={proxy_url}, server_urls={server_urls}"
+            )
+
+        elif has_external_proxy and not has_external_servers:
+            # Case: Proxy only - assume proxy handles control plane too
+            proxy_url = external_proxy_url
+            server_urls = [proxy_url]
+            logger.info(
+                f"HTTP Inference: Using external proxy for both data and " f"control plane - proxy_url={proxy_url}"
+            )
+
+        elif has_external_servers and not has_external_proxy:
+            # Case: Servers only - create internal router over them
+            server_urls = list(external_server_urls)
+            self._inference_router = InferenceRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Created internal router over external "
+                f"servers - server_urls={server_urls}, proxy_url={proxy_url}"
+            )
+
+        else:
+            # Case: Neither - build servers and router internally
+            cli_args = self._build_vllm_cli_args()
+
+            self._server_group = ServerGroup(
+                cli_args=cli_args,
+                num_servers=self.cfg.generator.num_inference_engines,
+                placement_group=self.colocate_pg if is_colocated else None,
+                enable_dp=self.cfg.generator.inference_engine_data_parallel_size > 1,
+            )
+            server_infos = self._server_group.start()
+            server_urls = [info.url for info in server_infos]
+
+            self._inference_router = InferenceRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Built servers and router internally - "
+                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
+            )
+
+        return RemoteInferenceClient(
+            proxy_url=proxy_url,
+            server_urls=server_urls,
+            model_name=self.cfg.trainer.policy.model.path,
+        )
+
+    def _build_vllm_cli_args(self):
+        """Build CLI args for vLLM server from config."""
+        from argparse import Namespace
+
+        cfg = self.cfg
+        args = Namespace(
+            model=cfg.trainer.policy.model.path,
+            tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+            pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
+            dtype=cfg.generator.model_dtype,
+            data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
+            seed=cfg.trainer.seed,
+            gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
+            enable_prefix_caching=cfg.generator.enable_prefix_caching,
+            enforce_eager=cfg.generator.enforce_eager,
+            max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
+            max_num_seqs=cfg.generator.max_num_seqs,
+            enable_sleep_mode=cfg.trainer.placement.colocate_all,
+        )
+
+        # Add LoRA params if enabled
+        if cfg.trainer.policy.model.lora.rank > 0:
+            args.enable_lora = True
+            args.max_lora_rank = cfg.trainer.policy.model.lora.rank
+            args.max_loras = 1
+            args.fully_sharded_loras = cfg.generator.fully_sharded_loras
+
+        # Add any extra engine_init_kwargs
+        engine_kwargs = OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True)
+        for key, value in engine_kwargs.items():
+            setattr(args, key, value)
+
+        return args
 
     def _setup_trainer(self):
         """Setup and return the trainer.
