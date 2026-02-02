@@ -7,33 +7,27 @@ so this test is best run with >16 GPUs to actually see that ordering is correct
 
 import ray
 import pytest
-import hydra
-from omegaconf import DictConfig
 from ray.util.placement_group import placement_group
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.utils.utils import validate_cfg
-from skyrl_train.entrypoints.main_base import config_dir
 
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
-def get_test_actor_config() -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
+def get_test_actor_config() -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.generator.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
-    validate_cfg(cfg)
-
     return cfg
 
 
 @pytest.fixture
-def cfg() -> DictConfig:
+def cfg() -> SkyRLConfig:
     return get_test_actor_config()
 
 

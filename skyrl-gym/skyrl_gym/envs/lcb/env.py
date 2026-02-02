@@ -2,7 +2,6 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any, Dict
 from skyrl_gym.envs.lcb.livecodebench import compute_score
 import json
-from omegaconf import DictConfig
 
 
 class LCBEnv(BaseTextEnv):
@@ -12,7 +11,7 @@ class LCBEnv(BaseTextEnv):
 
     def __init__(
         self,
-        env_config: DictConfig,
+        env_config: Any = None,
         extras: Dict[str, Any] = {},
     ):
         super().__init__()

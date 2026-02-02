@@ -8,17 +8,15 @@ uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_save
 
 import ray
 import pytest
-import hydra
 import torch
 import os
 import shutil
 import json
-from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-from skyrl_train.utils.utils import print_mem
-from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, get_model_logits_from_actor, validate_cfg
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.config import SkyRLConfig
+from skyrl_train.utils.utils import print_mem, validate_cfg
+from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, get_model_logits_from_actor
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 CKPT_PATH = "$HOME/ckpts/test/"
@@ -39,10 +37,8 @@ def run_one_training_step(
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
-def get_test_actor_config(strategy: str) -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+def get_test_actor_config(strategy: str) -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.strategy = strategy
@@ -76,8 +72,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
     """
     cfg = get_test_actor_config(strategy)
     if lora:
-        cfg.trainer.policy.model.lora.rank = 32
-        cfg.trainer.policy.model.lora.alpha = 32
+        from skyrl_train.config import SkyRLLoraConfig
+
+        cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32)
 
     try:
         actor_group = init_worker_with_type(

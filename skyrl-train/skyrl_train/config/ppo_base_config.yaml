@@ -250,9 +250,18 @@ generator:
   run_engines_locally: true
   num_inference_engines: 1
   backend: "vllm"
+  
+  # Weight sync configuration
   weight_sync_backend: "nccl"
   # if using cuda_ipc, we send in batches of this size in GB
   weight_transfer_threshold_cuda_ipc_GB: 1.0
+
+  # New inference layer configuration (used with _SKYRL_USE_NEW_INFERENCE=1)
+  # If both are null, servers are built internally based on placement group config.
+  # See docs for valid combinations.
+  external_proxy_url: null       # Data plane URL (load-balanced router)
+  external_server_urls: null     # Control plane URLs (direct backend access)
+
   inference_engine_tensor_parallel_size: 4
   inference_engine_pipeline_parallel_size: 1
   inference_engine_expert_parallel_size: 1

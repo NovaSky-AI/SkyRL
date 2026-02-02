@@ -5,18 +5,19 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from omegaconf import DictConfig
 
 import numpy as np
 import ray
 import torch
 from jaxtyping import Float
 from loguru import logger
-from omegaconf import DictConfig
 from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
@@ -77,7 +78,7 @@ from skyrl_train.workers.worker_utils import reduce_metrics
 class RayPPOTrainer:
     def __init__(
         self,
-        cfg: DictConfig,
+        cfg: Union[SkyRLConfig, DictConfig],
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],

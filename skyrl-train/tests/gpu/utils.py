@@ -2,27 +2,26 @@ import asyncio
 import os
 import ray
 import torch
+from typing import Any, Dict
 import time
 import requests
 import importlib
 from loguru import logger
 from ray.util.placement_group import placement_group
-from omegaconf import DictConfig
-import hydra
 from typing import List, Tuple
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from functools import lru_cache
 import subprocess
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.training_batch import TensorBatch, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType, TrajectoryID
-from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
+from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
@@ -32,16 +31,12 @@ from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
 
-def get_test_actor_config() -> DictConfig:
+def get_test_actor_config() -> SkyRLConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
-        cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
-        cfg.trainer.logger = "console"
-        validate_cfg(cfg)
-
-        return cfg
+    cfg = SkyRLConfig()
+    cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
+    cfg.trainer.logger = "console"
+    return cfg
 
 
 def get_rank_0_memory(actor_group, message: str):
@@ -347,19 +342,19 @@ async def run_inference(client, prompts, sampling_params):
 # TODO: this is kind of messy. All these information are inside cfg but we are passing them in
 # again. Make a global get_test_config function that is parametrized.
 def init_inference_engines(
-    cfg,
-    model,
-    use_local,
-    async_engine,
-    tp_size,
-    colocate_all,
-    backend,
-    gpu_memory_utilization=0.6,
-    num_inference_engines=1,
-    sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
-    enable_lora=False,
-    max_num_seqs=1024,
-    engine_init_kwargs={},
+    cfg: SkyRLConfig,
+    model: str,
+    use_local: bool,
+    async_engine: bool,
+    tp_size: int,
+    colocate_all: bool,
+    backend: str,
+    gpu_memory_utilization: float = 0.6,
+    num_inference_engines: int = 1,
+    sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
+    enable_lora: bool = False,
+    max_num_seqs: int = 1024,
+    engine_init_kwargs: Dict[str, Any] = {},
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
@@ -373,7 +368,7 @@ def init_inference_engines(
         pg, sleep = None, False
 
     # Extract served_model_name from config if set
-    served_model_name = cfg.generator.get("served_model_name", None)
+    served_model_name = cfg.generator.served_model_name
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     eps = create_ray_wrapped_inference_engines(
@@ -408,7 +403,7 @@ def init_remote_inference_servers(
     tp_size: int,
     backend: str,
     tokenizer: PreTrainedTokenizerBase,
-    config: DictConfig,
+    config: SkyRLConfig,
     model: str,
 ) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()

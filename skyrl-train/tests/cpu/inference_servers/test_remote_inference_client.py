@@ -301,8 +301,8 @@ class TestWeightSync:
     """Test weight sync methods."""
 
     @pytest.mark.asyncio
-    async def test_init_weight_transfer(self, client):
-        """Test init_weight_transfer fans out to all servers."""
+    async def test_init_weight_update_communicator(self, client):
+        """Test init_weight_update_communicator fans out to all servers."""
         from skyrl_train.weight_sync import BroadcastInitInfo
 
         init_info = BroadcastInitInfo(
@@ -315,11 +315,11 @@ class TestWeightSync:
             model_dtype_str="torch.bfloat16",
             override_existing_receiver=True,
         )
-        result = await client.init_weight_transfer(init_info)
+        result = await client.init_weight_update_communicator(init_info)
         assert len(result) == 2
 
     @pytest.mark.asyncio
-    async def test_update_weights(self, client):
+    async def test_update_named_weights(self, client):
         """Test update_weights fans out to all servers."""
         from skyrl_train.weight_sync import BroadcastWeightUpdateRequest
 
@@ -328,7 +328,7 @@ class TestWeightSync:
             dtypes=["torch.bfloat16"],
             shapes=[[1024, 1024]],
         )
-        result = await client.update_weights(request)
+        result = await client.update_named_weights(request)
         assert len(result) == 2
 
     @pytest.mark.asyncio

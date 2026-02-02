@@ -1,6 +1,5 @@
 import asyncio
-from typing import Dict, List, Optional, Any, Tuple
-from omegaconf import DictConfig
+from typing import Dict, List, Optional, Any, Tuple, Union
 import yaml
 import traceback
 import ray
@@ -12,6 +11,8 @@ from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
 from .mini_swe_utils import evaluate_trajectory, get_sb_environment
 
+from omegaconf import DictConfig
+from skyrl_train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
 from skyrl_train.generators.base import TrajectoryID, TrainingPhase, BatchMetadata
 from skyrl_train.inference_engines.base import ConversationType
@@ -44,7 +45,7 @@ def init_and_run(
     instance: dict,
     litellm_model_name: str,
     sweagent_config: dict,
-    generator_cfg: DictConfig,
+    generator_cfg: Union[GeneratorConfig, DictConfig],
     data_source: str,
     sampling_params: dict,
     trajectory_id: TrajectoryID,
@@ -105,8 +106,8 @@ def init_and_run(
 class MiniSweAgentGenerator(SkyRLGymGenerator):
     def __init__(
         self,
-        generator_cfg: DictConfig,
-        skyrl_gym_cfg: DictConfig,
+        generator_cfg: Union[GeneratorConfig, DictConfig],
+        skyrl_gym_cfg: Union[SkyRLGymConfig, DictConfig],
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,
@@ -115,12 +116,10 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         # Call parent constructor first
         super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
 
-        self.http_server_inference_engine_client_host = generator_cfg.get(
-            "http_server_inference_engine_client_host", "127.0.0.1"
-        )
-        self.http_server_inference_engine_client_port = generator_cfg.get(
-            "http_server_inference_engine_client_port", 8000
-        )
+        self.http_server_inference_engine_client_host = generator_cfg.http_endpoint_host
+
+        self.http_server_inference_engine_client_port = generator_cfg.http_endpoint_port
+
         self.base_url = (
             f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
         )
