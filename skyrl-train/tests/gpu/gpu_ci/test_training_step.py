@@ -172,13 +172,22 @@ async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
 
 
 @pytest.mark.asyncio
-async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg):
+@pytest.mark.parametrize(
+    ("strategy"),
+    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp2", "megatron"],
+)
+async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, strategy):
     """
     Test SFT path: forward_backward with loss_fn="cross_entropy" returns loss_fn_outputs.
     Uses DP=2 to verify each rank returns outputs for its data chunk.
     """
     cfg.trainer.use_sample_packing = False
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = strategy
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = 2
     validate_cfg(cfg)
 
     try:
