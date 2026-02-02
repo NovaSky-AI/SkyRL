@@ -8,7 +8,7 @@ class GSM8kEnv(BaseTextEnv):
     Environment for Math execution tasks.
     """
 
-    def __init__(self, env_config: Any, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: Any = None, extras: Dict[str, Any] = {}):
         super().__init__()
 
         assert "reward_spec" in extras, "reward_spec field is required"

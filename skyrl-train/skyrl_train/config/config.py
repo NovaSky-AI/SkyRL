@@ -23,6 +23,9 @@ from skyrl_gym.envs.sql.env import Text2SQLEnvConfig
 
 @dataclass
 class BaseConfig(ABC):
+    """
+    Base configuration class for SkyRL-Train
+    """
 
     @classmethod
     def from_dict_config(cls, cfg: DictConfig) -> "BaseConfig":
