@@ -1,5 +1,3 @@
-"""Connection mechanisms for transformer layers (residual, learned connectors, etc.)."""
-
 from flax import nnx
 import jax
 from jax import numpy as jnp
