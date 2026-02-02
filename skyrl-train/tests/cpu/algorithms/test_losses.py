@@ -6,19 +6,26 @@ uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_losses.py
 
 import pytest
 import torch
-from skyrl_train.config import AlgorithmConfig, SAPOConfig, CISPOConfig, ClipCovConfig, KLCovConfig
+from skyrl_train.config import (
+    AlgorithmConfig,
+    SAPOConfig,
+    CISPOConfig,
+    ClipCovConfig,
+    KLCovConfig,
+    OffPolicyCorrectionConfig,
+)
 
 from skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
 )
 from skyrl_train.utils.torch_utils import masked_mean
 
-NULL_OFF_POLICY_CORR = {
-    "tis_ratio_type": None,
-    "sequence_mask_metric": None,
-    "outlier_token_is_threshold_low": None,
-    "outlier_token_is_threshold_high": None,
-}
+NULL_OFF_POLICY_CORR = OffPolicyCorrectionConfig(
+    tis_ratio_type=None,
+    sequence_mask_metric=None,
+    outlier_token_is_threshold_low=None,
+    outlier_token_is_threshold_high=None,
+)
 
 
 # Adapted a good test from NeMO-RL

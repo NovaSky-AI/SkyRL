@@ -6,7 +6,7 @@ uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_off_policy_cor
 
 import pytest
 import torch
-from omegaconf import DictConfig
+from skyrl_train.config import OffPolicyCorrectionConfig, AlgorithmConfig
 
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry
 from skyrl_train.utils.off_policy_correction_utils import (
@@ -27,11 +27,9 @@ def test_compute_tis_ratio_token_level():
     rollout_logprobs = torch.tensor([[-1.5, -1.0, -1.5]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": "token",
-            "token_tis_ratio_clip_high": 2.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type="token",
+        token_tis_ratio_clip_high=2.0,
     )
 
     tis_ratio, metrics = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "token", config)
@@ -55,11 +53,9 @@ def test_compute_tis_ratio_sequence_level():
     rollout_logprobs = torch.tensor([[-1.5, -1.0, -1.5]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": "sequence",
-            "sequence_tis_ratio_clip_high": 5.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type="sequence",
+        sequence_tis_ratio_clip_high=5.0,
     )
 
     tis_ratio, metrics = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
@@ -83,11 +79,9 @@ def test_compute_tis_ratio_sequence_level_with_cap():
     rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": "sequence",
-            "sequence_tis_ratio_clip_high": 5.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type="sequence",
+        sequence_tis_ratio_clip_high=5.0,
     )
 
     tis_ratio, metrics = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
@@ -110,11 +104,9 @@ def test_compute_tis_ratio_with_mask():
     rollout_logprobs = torch.tensor([[-1.5, -1.0, -1.5]], device=device)
     loss_mask = torch.tensor([[1.0, 0.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": "sequence",
-            "sequence_tis_ratio_clip_high": 10.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type="sequence",
+        sequence_tis_ratio_clip_high=10.0,
     )
 
     tis_ratio, metrics = compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "sequence", config)
@@ -137,12 +129,10 @@ def test_compute_sequence_mask_geometric():
     rollout_logprobs = torch.tensor([[-1.1, -1.0, -1.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "sequence_mask_metric": "geometric",
-            "geo_mask_high": 1.1,
-            "geo_mask_low": 0.9,
-        }
+    config = OffPolicyCorrectionConfig(
+        sequence_mask_metric="geometric",
+        geo_mask_high=1.1,
+        geo_mask_low=0.9,
     )
 
     sequence_mask, metrics = compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "geometric", config)
@@ -166,12 +156,10 @@ def test_compute_sequence_mask_geometric_rejects():
     rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "sequence_mask_metric": "geometric",
-            "geo_mask_high": 1.1,
-            "geo_mask_low": 0.9,
-        }
+    config = OffPolicyCorrectionConfig(
+        sequence_mask_metric="geometric",
+        geo_mask_high=1.1,
+        geo_mask_low=0.9,
     )
 
     sequence_mask, metrics = compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "geometric", config)
@@ -195,12 +183,10 @@ def test_compute_sequence_mask_product():
     rollout_logprobs = torch.tensor([[-1.2, -1.2, -1.2]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "sequence_mask_metric": "product",
-            "product_mask_high": 2.0,
-            "product_mask_low": 0.5,
-        }
+    config = OffPolicyCorrectionConfig(
+        sequence_mask_metric="product",
+        product_mask_high=2.0,
+        product_mask_low=0.5,
     )
 
     sequence_mask, metrics = compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "product", config)
@@ -224,12 +210,10 @@ def test_compute_sequence_mask_product_rejects_by_seq_ratio():
     rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "sequence_mask_metric": "product",
-            "product_mask_high": 2.0,
-            "product_mask_low": 0.5,
-        }
+    config = OffPolicyCorrectionConfig(
+        sequence_mask_metric="product",
+        product_mask_high=2.0,
+        product_mask_low=0.5,
     )
 
     sequence_mask, metrics = compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "product", config)
@@ -254,11 +238,9 @@ def test_compute_outlier_token_mask_masks_by_token_bounds():
     rollout_logprobs = torch.tensor([[-1.0, -1.0, -6.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "outlier_token_is_threshold_low": 1e-4,
-            "outlier_token_is_threshold_high": 100.0,  # This should cause masking
-        }
+    config = OffPolicyCorrectionConfig(
+        outlier_token_is_threshold_low=1e-4,
+        outlier_token_is_threshold_high=100.0,  # This should cause masking
     )
 
     outlier_mask, metrics = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
@@ -283,11 +265,9 @@ def test_compute_outlier_token_mask_accepts_in_bounds():
     rollout_logprobs = torch.tensor([[-1.5, -1.0, -1.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "outlier_token_is_threshold_low": 1e-4,
-            "outlier_token_is_threshold_high": 100.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        outlier_token_is_threshold_low=1e-4,
+        outlier_token_is_threshold_high=100.0,
     )
 
     outlier_mask, metrics = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
@@ -312,11 +292,9 @@ def test_compute_outlier_token_mask_respects_loss_mask():
     rollout_logprobs = torch.tensor([[-1.0, -1.0, -6.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 0.0]], device=device)  # Third token masked
 
-    config = DictConfig(
-        {
-            "outlier_token_is_threshold_low": 1e-4,
-            "outlier_token_is_threshold_high": 100.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        outlier_token_is_threshold_low=1e-4,
+        outlier_token_is_threshold_high=100.0,
     )
 
     outlier_mask, metrics = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
@@ -338,11 +316,9 @@ def test_compute_outlier_token_mask_null_thresholds():
     rollout_logprobs = torch.tensor([[-1.0, -1.0, -6.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "outlier_token_is_threshold_low": None,
-            "outlier_token_is_threshold_high": None,
-        }
+    config = OffPolicyCorrectionConfig(
+        outlier_token_is_threshold_low=None,
+        outlier_token_is_threshold_high=None,
     )
 
     outlier_mask, metrics = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
@@ -366,11 +342,9 @@ def test_compute_outlier_token_mask_only_high_threshold():
     rollout_logprobs = torch.tensor([[-1.0, -1.0, -6.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "outlier_token_is_threshold_low": None,  # No low threshold
-            "outlier_token_is_threshold_high": 100.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        outlier_token_is_threshold_low=None,  # No low threshold
+        outlier_token_is_threshold_high=100.0,
     )
 
     outlier_mask, metrics = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
@@ -393,11 +367,9 @@ def test_compute_outlier_token_mask_only_low_threshold():
     rollout_logprobs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "outlier_token_is_threshold_low": 1e-4,  # Third token ratio ~4.5e-5 < 1e-4
-            "outlier_token_is_threshold_high": None,  # No high threshold
-        }
+    config = OffPolicyCorrectionConfig(
+        outlier_token_is_threshold_low=1e-4,  # Third token ratio ~4.5e-5 < 1e-4
+        outlier_token_is_threshold_high=None,  # No high threshold
     )
 
     outlier_mask, metrics = compute_outlier_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
@@ -418,11 +390,9 @@ def test_compute_off_policy_correction_null_configs():
     rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": None,
-            "sequence_mask_metric": None,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type=None,
+        sequence_mask_metric=None,
     )
 
     tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
@@ -443,14 +413,12 @@ def test_compute_off_policy_correction_tis_only():
     rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": "token",
-            "token_tis_ratio_clip_high": 2.0,
-            "sequence_mask_metric": None,
-            "outlier_token_is_threshold_low": 1e-4,
-            "outlier_token_is_threshold_high": 100.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type="token",
+        token_tis_ratio_clip_high=2.0,
+        sequence_mask_metric=None,
+        outlier_token_is_threshold_low=1e-4,
+        outlier_token_is_threshold_high=100.0,
     )
 
     tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
@@ -476,15 +444,13 @@ def test_compute_off_policy_correction_sequence_mask_only():
     rollout_logprobs = torch.tensor([[-1.0, -1.0, -1.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": None,
-            "sequence_mask_metric": "geometric",
-            "geo_mask_high": 1.1,
-            "geo_mask_low": 0.9,
-            "outlier_token_is_threshold_low": 1e-4,
-            "outlier_token_is_threshold_high": 100.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type=None,
+        sequence_mask_metric="geometric",
+        geo_mask_high=1.1,
+        geo_mask_low=0.9,
+        outlier_token_is_threshold_low=1e-4,
+        outlier_token_is_threshold_high=100.0,
     )
 
     tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
@@ -510,16 +476,14 @@ def test_compute_off_policy_correction_both_enabled():
     rollout_logprobs = torch.tensor([[-1.1, -1.1, -1.1]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": "token",
-            "token_tis_ratio_clip_high": 2.0,
-            "sequence_mask_metric": "geometric",
-            "geo_mask_high": 1.2,
-            "geo_mask_low": 0.8,
-            "outlier_token_is_threshold_low": 1e-4,
-            "outlier_token_is_threshold_high": 100.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type="token",
+        token_tis_ratio_clip_high=2.0,
+        sequence_mask_metric="geometric",
+        geo_mask_high=1.2,
+        geo_mask_low=0.8,
+        outlier_token_is_threshold_low=1e-4,
+        outlier_token_is_threshold_high=100.0,
     )
 
     tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
@@ -545,15 +509,13 @@ def test_compute_off_policy_correction_sequence_mask_zeros_loss():
     rollout_logprobs = torch.tensor([[-2.0, -2.0, -2.0]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "tis_ratio_type": None,
-            "sequence_mask_metric": "geometric",
-            "geo_mask_high": 1.1,
-            "geo_mask_low": 0.9,
-            "outlier_token_is_threshold_low": 1e-4,
-            "outlier_token_is_threshold_high": 100.0,
-        }
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type=None,
+        sequence_mask_metric="geometric",
+        geo_mask_high=1.1,
+        geo_mask_low=0.9,
+        outlier_token_is_threshold_low=1e-4,
+        outlier_token_is_threshold_high=100.0,
     )
 
     tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
@@ -577,21 +539,19 @@ def test_ppo_policy_loss_with_off_policy_correction():
     rollout_logprobs = torch.tensor([[-1.05, -1.05, -1.05]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig(
-        {
-            "eps_clip_low": 0.2,
-            "eps_clip_high": 0.2,
-            "policy_loss_type": "regular",
-            "loss_reduction": "token_mean",
-            "max_seq_len": 4,
-            "off_policy_correction": {
-                "tis_ratio_type": "token",
-                "token_tis_ratio_clip_high": 2.0,
-                "sequence_mask_metric": None,
-                "outlier_token_is_threshold_low": 1e-4,
-                "outlier_token_is_threshold_high": 100.0,
-            },
-        }
+    config = AlgorithmConfig(
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="regular",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        off_policy_correction=OffPolicyCorrectionConfig(
+            tis_ratio_type="token",
+            token_tis_ratio_clip_high=2.0,
+            sequence_mask_metric=None,
+            outlier_token_is_threshold_low=1e-4,
+            outlier_token_is_threshold_high=100.0,
+        ),
     )
 
     loss_fn = PolicyLossRegistry.get("regular")
@@ -607,18 +567,16 @@ def test_ppo_policy_loss_with_off_policy_correction():
     )
 
     # Loss without rollout correction
-    config_no_correction = DictConfig(
-        {
-            "eps_clip_low": 0.2,
-            "eps_clip_high": 0.2,
-            "policy_loss_type": "regular",
-            "loss_reduction": "token_mean",
-            "max_seq_len": 4,
-            "off_policy_correction": {
-                "tis_ratio_type": None,
-                "sequence_mask_metric": None,
-            },
-        }
+    config_no_correction = AlgorithmConfig(
+        eps_clip_low=0.2,
+        eps_clip_high=0.2,
+        policy_loss_type="regular",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        off_policy_correction=OffPolicyCorrectionConfig(
+            tis_ratio_type=None,
+            sequence_mask_metric=None,
+        ),
     )
 
     loss_without_correction, _ = loss_fn(
@@ -645,7 +603,7 @@ def test_compute_tis_ratio_invalid_type():
     rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig({"tis_ratio_type": "invalid"})
+    config = OffPolicyCorrectionConfig(tis_ratio_type="invalid")
 
     with pytest.raises(ValueError, match="Unknown tis_ratio_type"):
         compute_tis_ratio(old_log_probs, rollout_logprobs, loss_mask, "invalid", config)
@@ -659,7 +617,7 @@ def test_compute_sequence_mask_invalid_type():
     rollout_logprobs = torch.tensor([[-1.5, -1.5, -1.5]], device=device)
     loss_mask = torch.tensor([[1.0, 1.0, 1.0]], device=device)
 
-    config = DictConfig({"sequence_mask_metric": "invalid"})
+    config = OffPolicyCorrectionConfig(sequence_mask_metric="invalid")
 
     with pytest.raises(ValueError, match="Unknown sequence_mask_metric"):
         compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "invalid", config)
