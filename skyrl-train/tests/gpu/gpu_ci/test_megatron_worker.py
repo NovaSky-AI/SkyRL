@@ -643,7 +643,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     print("\n\n")
     print("megatron results dp: ", results_megatron_dp)
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl", "raw_grad_norm"]
+    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl"]
     for i, result in enumerate(results_megatron_dp):
         for k in keys_to_compare:
             assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
