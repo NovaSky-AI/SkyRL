@@ -312,7 +312,7 @@ class TestWeightUpdateFlow:
                 dtypes=weight_info["dtypes"],
                 shapes=weight_info["shapes"],
             )
-            result = await client.update_weights(update_request)
+            result = await client.update_named_weights(update_request)
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} update weights failed: {resp}"
 
