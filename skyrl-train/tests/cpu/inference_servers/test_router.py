@@ -92,17 +92,6 @@ def test_session_affinity(env):
     assert len(set(ids)) == 1
 
 
-def test_control_plane_fanout(env):
-    """Control plane routes fan out to all servers."""
-    resp = httpx.post(f"{env}/sleep", json={})
-    assert resp.status_code == 200
-    # Response is a mapping of server_url -> {status, body}
-    response_map = resp.json()
-    assert len(response_map) == 2  # Both servers received the request
-    for server_url, result in response_map.items():
-        assert result["status"] == 200
-
-
 def test_list_servers(env):
     """/servers returns all server URLs."""
     resp = httpx.get(f"{env}/servers")

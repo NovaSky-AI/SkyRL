@@ -641,23 +641,6 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-
-    def _normalize_mini_batch_size(self):
-        """
-        Initialize micro batch tracking for gradient accumulation.
-
-        The worker no longer needs to know mini batch size - it processes whatever
-        batch it receives, breaking it into micro batches. Gradient scaling happens
-        at optim_step time based on how many micro batches were accumulated.
-
-        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
-        requires mini-batch normalization in its override. The name is kept for
-        backwards compatibility with Megatron which still does actual normalization.
-        """
-        if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
-            raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
-
-        # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
     def forward_backward(
@@ -704,6 +687,35 @@ class PolicyWorkerBase(Worker):
             result["loss_fn_outputs"] = all_loss_fn_outputs
 
         return result
+
+    def forward_backward_from_staged(
+        self,
+        data: TrainingInputBatch,
+        start_idx: int,
+        end_idx: int,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
+        """
+        Perform forward/backward using pre-staged data from object store.
+
+        Fetches the full batch from object store and slices locally to avoid
+        repeated serialization during the training loop.
+
+        Args:
+            data: TrainingInputBatch via the ray object store
+            start_idx: Start index for this worker's slice
+            end_idx: End index for this worker's slice
+            loss_fn: Optional loss function name to use instead of config default
+            loss_fn_config: Optional config overrides for the loss function
+
+        Returns:
+            Aggregated metrics dict across all micro batches
+        """
+        # Slice to get this worker's portion
+        data = data[start_idx:end_idx]
+        # Delegate to regular forward_backward
+        return self.forward_backward(data, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
 
     def _forward_backward_micro(
         self,
@@ -910,9 +922,19 @@ class PolicyWorkerBase(Worker):
 
     def get_lr(self) -> float:
         """
-        Get current learning rate from scheduler.
+        Get current learning rate from optimizer.
         """
-        return self.scheduler.get_last_lr()[0]
+        return self.optimizer.param_groups[0]["lr"]
+
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        This directly updates the optimizer's param_groups, bypassing the scheduler.
+        Useful for external learning rate schedules (e.g., from Tinker).
+        """
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
 
     def barrier(self) -> None:
         """
@@ -988,23 +1010,6 @@ class CriticWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
-
-    def _normalize_mini_batch_size(self):
-        """
-        Initialize micro batch tracking for gradient accumulation.
-
-        The worker no longer needs to know mini batch size - it processes whatever
-        batch it receives, breaking it into micro batches. Gradient scaling happens
-        at optim_step time based on how many micro batches were accumulated.
-
-        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
-        requires mini-batch normalization in its override. The name is kept for
-        backwards compatibility with Megatron which still does actual normalization.
-        """
-        if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
-            raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
-
-        # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
@@ -1030,6 +1035,26 @@ class CriticWorkerBase(Worker):
                 all_metrics[k].append(v)
 
         return reduce_metrics(dict(all_metrics))
+
+    def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
+        """
+        Perform forward/backward using pre-staged data from object store.
+
+        Fetches the full batch from object store and slices locally to avoid
+        repeated serialization during the training loop.
+
+        Args:
+            data: TrainingInputBatch via the ray object store
+            start_idx: Start index for this worker's slice
+            end_idx: End index for this worker's slice
+
+        Returns:
+            Aggregated metrics dict across all micro batches
+        """
+        # Slice to get this worker's portion
+        data = data[start_idx:end_idx]
+        # Delegate to regular forward_backward
+        return self.forward_backward(data)
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
@@ -1117,9 +1142,19 @@ class CriticWorkerBase(Worker):
 
     def get_lr(self) -> float:
         """
-        Get current learning rate from scheduler.
+        Get current learning rate from optimizer.
         """
-        return self.scheduler.get_last_lr()[0]
+        return self.optimizer.param_groups[0]["lr"]
+
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        This directly updates the optimizer's param_groups, bypassing the scheduler.
+        Useful for external learning rate schedules (e.g., from Tinker).
+        """
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = learning_rate
 
     def barrier(self) -> None:
         """

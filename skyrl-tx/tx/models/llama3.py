@@ -31,48 +31,52 @@ class Llama3Attention(nnx.Module):
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
         self.k_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
         self.v_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
         self.o_proj = LoRALinear(
             in_features=self.num_heads * self.head_dim,
             out_features=config.hidden_size,
+            sharding=(tp_shard, "fsdp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (tp_shard, None)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
@@ -115,10 +119,11 @@ class Llama3MLP(nnx.Module):
         self.gate_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -126,10 +131,11 @@ class Llama3MLP(nnx.Module):
         self.up_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -137,10 +143,11 @@ class Llama3MLP(nnx.Module):
         self.down_proj = LoRALinear(
             config.intermediate_size,
             config.hidden_size,
+            sharding=("tp", "fsdp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -196,11 +203,12 @@ class Llama3Model(nnx.Module):
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
+            sharding=("tp", None),
             dtype=dtype,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
+            embedding_init=nnx.initializers.normal(),
             rngs=rngs,
         )
         self.layers = nnx.List(
@@ -263,10 +271,11 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
             self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
+                sharding=(None, "tp"),
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+                kernel_init=nnx.initializers.lecun_normal(),
                 max_lora_adapters=config.max_lora_adapters,
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,

@@ -4,6 +4,9 @@ Uses SkyRL-Train infrastructure for supervised training with cross-entropy loss.
 Currently supports a single model only.
 """
 
+import os
+import tarfile
+import tempfile
 from typing import Any
 
 import torch
@@ -49,6 +52,11 @@ def _build_config(base_model: str, config: SkyRLTrainBackendConfig, lora_config:
     """Build config for SkyRL-Train workers using default config."""
     cfg = get_default_config()
     cfg.trainer.policy.model.path = base_model
+
+    # Disable scheduler - Tinker manages learning rate externally via set_lr()
+    cfg.trainer.policy.optimizer_config.scheduler = "constant"
+    cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
+
     return cfg
 
 
@@ -200,8 +208,14 @@ class SkyRLTrainBackend(AbstractBackend):
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         if model_id != self._model_id:
             raise ValueError(f"Model {model_id} not found")
+
+        # Apply learning rate from AdamParams before optimizer step
+        # Note: beta1, beta2, eps are fixed at optimizer creation and cannot be changed dynamically
+        adam_params = request_data.adam_params
+        self._dispatch.set_lr("policy", adam_params.learning_rate)
+
         grad_norm = self._dispatch.optim_step("policy")
-        logger.info(f"grad_norm: {grad_norm}")
+        logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")
         return types.OptimStepOutput()
 
     def sample(
@@ -210,11 +224,66 @@ class SkyRLTrainBackend(AbstractBackend):
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
         raise NotImplementedError("Sampling not supported")
 
+    def _validate_model_state(self, model_id: str) -> None:
+        """Validate that model exists and is initialized."""
+        if model_id != self._model_id:
+            raise ValueError(f"Model {model_id} not found")
+        if self._dispatch is None:
+            raise RuntimeError("Model not initialized")
+
+    def _create_tar_from_directory(self, source_dir: str, output_path: str) -> None:
+        """Create an uncompressed tar archive from a directory."""
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        # Use uncompressed tar - gzip adds 5-10min CPU time on 6-7GB FSDP checkpoints
+        with tarfile.open(output_path, "w") as tar:
+            tar.add(source_dir, arcname=".")
+
     def save_checkpoint(self, output_path, model_id: str) -> None:
-        raise NotImplementedError("Saving checkpoints not supported")
+        """Save full training checkpoint (model + optimizer + scheduler) as tar."""
+        self._validate_model_state(model_id)
+
+        # Create temp directory for checkpoint
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ckpt_dir = os.path.join(temp_dir, "checkpoint")
+
+            # Save checkpoint directory (includes optimizer state automatically)
+            self._dispatch.save_checkpoint(model="policy", ckpt_dir=ckpt_dir, tokenizer=self._tokenizer)
+
+            # Create tar archive
+            self._create_tar_from_directory(ckpt_dir, output_path)
+
+        logger.info(f"Saved checkpoint for {model_id} to {output_path}")
 
     def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
-        raise NotImplementedError("Loading checkpoints not supported")
+        """Load full training checkpoint (model + optimizer + scheduler) from tar."""
+        self._validate_model_state(model_id)
+
+        # Extract tar to temp directory (filter='data' prevents path traversal attacks)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with tarfile.open(checkpoint_path, "r") as tar:
+                tar.extractall(temp_dir, filter="data")
+
+            # Load checkpoint (includes optimizer and scheduler states)
+            self._dispatch.load_checkpoint(
+                model="policy", ckpt_dir=temp_dir, load_optimizer_states=True, load_lr_scheduler_states=True
+            )
+
+        logger.info(f"Loaded checkpoint for {model_id} from {checkpoint_path}")
 
     def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
-        raise NotImplementedError("Sampler checkpoints not supported")
+        """Save sampler checkpoint as tar (model only, no optimizer)."""
+        self._validate_model_state(model_id)
+
+        # Create temp directory for HuggingFace export
+        with tempfile.TemporaryDirectory() as temp_dir:
+            hf_dir = os.path.join(temp_dir, "model")
+
+            # Save in HuggingFace format (model weights + tokenizer only)
+            self._dispatch.save_hf_model(model="policy", hf_model_dir=hf_dir, tokenizer=self._tokenizer)
+
+            # Create tar archive
+            self._create_tar_from_directory(hf_dir, output_path)
+
+        logger.info(f"Saved sampler checkpoint for {model_id} to {output_path}")

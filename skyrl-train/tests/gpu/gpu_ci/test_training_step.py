@@ -131,13 +131,59 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
 
 
 @pytest.mark.asyncio
-async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg):
+async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
+    """
+    Test that set_lr updates the optimizer's learning rate.
+    """
+    cfg.trainer.use_sample_packing = False
+    cfg.trainer.strategy = "fsdp2"
+    validate_cfg(cfg)
+
+    try:
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        # Get initial learning rate
+        initial_lrs = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+        initial_lr = initial_lrs[0]
+
+        # Set a new learning rate
+        new_lr = 1e-5
+        assert new_lr != initial_lr, "New LR should differ from initial for valid test"
+
+        ray.get(actor_group.async_run_ray_method("pass_through", "set_lr", learning_rate=new_lr))
+
+        # Verify the learning rate was updated
+        updated_lrs = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+        for updated_lr in updated_lrs:
+            assert updated_lr == new_lr, f"Expected LR {new_lr}, got {updated_lr}"
+
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("strategy"),
+    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp2", "megatron"],
+)
+async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, strategy):
     """
     Test SFT path: forward_backward with loss_fn="cross_entropy" returns loss_fn_outputs.
     Uses DP=2 to verify each rank returns outputs for its data chunk.
     """
     cfg.trainer.use_sample_packing = False
-    cfg.trainer.strategy = "fsdp2"
+    cfg.trainer.strategy = strategy
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.placement.policy_num_gpus_per_node = 2
     validate_cfg(cfg)
 
     try:

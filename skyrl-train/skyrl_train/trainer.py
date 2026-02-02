@@ -1027,6 +1027,9 @@ class RayPPOTrainer:
         The trainer loops over epochs and mini-batches. Workers handle micro-batching
         internally for gradient accumulation (memory efficiency).
 
+        Uses staged data approach: the full batch is put in Ray object store once,
+        and workers fetch + slice locally to avoid repeated serialization.
+
         Args:
             model: Model name ("policy" or "critic")
             data: Training data batch
@@ -1043,15 +1046,18 @@ class RayPPOTrainer:
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
 
+        # Stage full batch in object store ONCE to avoid repeated serialization
+        data_ref = self.dispatch.stage_data(data)
+
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             num_mini_batches = len(data) // mini_batch_size
             for local_step in range(num_mini_batches):
                 start_idx = local_step * mini_batch_size
                 end_idx = (local_step + 1) * mini_batch_size
-                mini_batch = data[start_idx:end_idx]
 
-                status = self.dispatch.forward_backward(model, mini_batch)
+                # Workers fetch from object store and slice locally
+                status = self.dispatch.forward_backward_from_staged(model, data_ref, start_idx, end_idx)
                 for k, v in status.items():
                     all_metrics[k].append(v)
 
@@ -1068,26 +1074,17 @@ class RayPPOTrainer:
         """
         Run the training step for the policy and critic models.
 
-        For Megatron strategy: uses ppo_train (training loop inside worker)
-        For FSDP strategy: uses forward_backward + optim_step (training loop in trainer)
+        Uses forward_backward + optim_step for both FSDP and Megatron strategies.
         """
         data.metadata["global_step"] = self.global_step
         critic_status = None
 
-        if self.cfg.trainer.strategy == "megatron":
-            # Megatron: training loop inside worker via ppo_train
-            if self.has_critic:
-                with Timer("critic_train", self.all_timings):
-                    critic_status = self.dispatch.ppo_train("critic", data)
-            with Timer("policy_train", self.all_timings):
-                policy_status = self.dispatch.ppo_train("policy", data)
-        else:
-            # FSDP: training loop in trainer via forward_backward + optim_step
-            if self.has_critic:
-                with Timer("critic_train", self.all_timings):
-                    critic_status = self._execute_training_step("critic", data)
-            with Timer("policy_train", self.all_timings):
-                policy_status = self._execute_training_step("policy", data)
+        # Unified training interface for both FSDP and Megatron
+        if self.has_critic:
+            with Timer("critic_train", self.all_timings):
+                critic_status = self._execute_training_step("critic", data)
+        with Timer("policy_train", self.all_timings):
+            policy_status = self._execute_training_step("policy", data)
 
         # Update metrics
         if critic_status is not None:

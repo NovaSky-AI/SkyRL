@@ -30,13 +30,11 @@ def run_one_training_step(
     megatron_batch=None,
 ):
     """Run forward_backward + optim_step to perform one training step."""
-    if strategy == "megatron":
-        assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
-        return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
-    else:
-        assert data is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
-        ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=data))
-        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+    # Unified interface for all strategies (megatron, fsdp, fsdp2)
+    batch = megatron_batch if strategy == "megatron" else data
+    assert batch is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
+    ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
 def get_test_actor_config(strategy: str) -> SkyRLConfig:

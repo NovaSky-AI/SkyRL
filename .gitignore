@@ -39,6 +39,8 @@ docs/_spelling/
 /skyrl-gym/dist
 
 *.log
+nohup.out
+tensorboard_log/
 
 # SQLite database files
 *.db

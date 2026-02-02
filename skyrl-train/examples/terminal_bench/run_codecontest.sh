@@ -2,17 +2,19 @@
 export DAYTONA_API_KEY=YOUR_KEY_HERE
 export WANDB_API_KEY=YOUR_KEY_HERE
 
-# Got after hf download open-thoughts/OpenThoughts-Agent-v1-RL --repo-type=dataset
-# cd into the downloaded folder, say /path/to/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/hash_code
+# Got after hf download DCAgent/code-contests-sandboxes-with-tests --repo-type=dataset
+# cd into the downloaded folder, and do:
 # python extract_parquet_tasks.py tasks_new.parquet ./extracted_tasks
 TRAIN_DATA="['/home/ray/.cache/huggingface/hub/datasets--DCAgent--code-contests-sandboxes-with-tests/snapshots/23155a8cc2da4e0cbeea3b99fe78f8fc80c1aed4/extracted_tasks']"
-# Got after hf download open-thoughts/OpenThoughts-TB-dev --repo-type=dataset
-EVAL_DATA="['/home/ray/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-TB-dev/snapshots/0d54f719f34dca712c8d6ef0f51df4670a2a287a']"
+# Got after hf download DCAgent/code-contests-sandboxes-with-tests-dev --repo-type=dataset
+EVAL_DATA="['/home/ray/.cache/huggingface/hub/datasets--DCAgent--code-contests-sandboxes-with-tests-dev/snapshots/23155a8cc2da4e0cbeea3b99fe78f8fc80c1aed4/extracted_tasks']"
 
 TRIALS_DIR="/home/ray/trials_run"
 CKPTS_DIR="/home/ray/otagent/ckpts"
 EXPORTS_DIR="/home/ray/otagent/exports"
 CHAT_TEMPLATE_PATH="/home/ray/default/SkyRLHarbor3/skyrl-train/skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+
+NUM_GPUS=4
 
 # Run SkyRL command
 uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypoints.main_tbench \
@@ -21,14 +23,8 @@ uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypo
   trainer.policy.model.path=Qwen/Qwen3-8B \
   generator.served_model_name=Qwen3-8B \
   hydra.searchpath=['file://examples/terminal_bench'] \
-  +terminal_bench_config=terminal_bench \
-  +terminal_bench_config.agent_name=terminus \
-  +terminal_bench_config.max_episodes=32 \
-  +terminal_bench_config.trials_dir=$TRIALS_DIR \
-  +terminal_bench_config.override_memory_mb=1024 \
-  +terminal_bench_config.override_storage_mb=1024 \
-  +terminal_bench_config.override_cpus=1 \
-  +terminal_bench_config.enable_summarize=false \
+  +terminal_bench_config=default \
+  ++terminal_bench_config.trials_dir=$TRIALS_DIR \
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.algorithm.advantage_estimator=grpo \
@@ -36,9 +32,9 @@ uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypo
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_nodes=1 \
   trainer.placement.ref_num_nodes=1 \
-  trainer.placement.policy_num_gpus_per_node=8 \
-  trainer.placement.ref_num_gpus_per_node=8 \
-  generator.num_inference_engines=8 \
+  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \
   +generator.engine_init_kwargs.chat_template=$CHAT_TEMPLATE_PATH \
   trainer.epochs=3 \

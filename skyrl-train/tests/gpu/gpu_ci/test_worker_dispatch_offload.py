@@ -17,6 +17,7 @@ from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.workers.worker_dispatch import WorkerDispatch, GPUState
+from tests.gpu.utils import import_worker
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, RefWorker, CriticWorker
 from skyrl_train.workers.worker import PPORayActorGroup
 
@@ -284,6 +285,48 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
         assert (
             critic_mem_after_offload < critic_mem
         ), f"Critic memory should decrease after offload: {critic_mem_after_offload} < {critic_mem}"
+
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("strategy"),
+    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp2", "megatron"],
+)
+async def test_dispatch_set_lr(ray_init_fixture, strategy):
+    """
+    Test that WorkerDispatch.set_lr updates the optimizer's learning rate.
+    """
+    cfg = get_test_config()
+    cfg.trainer.strategy = strategy
+
+    try:
+        # Create placement group and policy actor
+        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(pg, timeout=30)
+
+        policy_group = init_colocated_actor_group(import_worker(strategy, "policy"), pg, cfg)
+        ray.get(policy_group.async_init_model(MODEL_NAME))
+
+        dispatch = WorkerDispatch(cfg, policy_actor_group=policy_group)
+
+        # Get initial learning rate
+        initial_lrs = ray.get(policy_group.async_run_ray_method("pass_through", "get_lr"))
+        initial_lr = initial_lrs[0]
+
+        # Set a new learning rate via dispatch
+        new_lr = 1e-5
+        assert new_lr != initial_lr, "New LR should differ from initial for valid test"
+
+        dispatch.set_lr("policy", new_lr)
+
+        # Verify the learning rate was updated
+        updated_lrs = ray.get(policy_group.async_run_ray_method("pass_through", "get_lr"))
+        for updated_lr in updated_lrs:
+            assert updated_lr == new_lr, f"Expected LR {new_lr}, got {updated_lr}"
 
     finally:
         ray.shutdown()

@@ -11,7 +11,6 @@ from jaxtyping import Float, Integer
 from pytest import approx
 
 from skyrl_train.config import SkyRLConfig
-from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils.utils import validate_batch_sizes
@@ -170,15 +169,8 @@ def test_calc_advantages_and_returns(mock_compute_adv_and_ret, dummy_config):
     )
 
 
-def test_normalize_mini_batch_size():
-    """Test the _normalize_mini_batch_size method initializes micro batch tracking.
-
-    Workers don't need to know mini batch sizes per GPU.
-    They receive batches from the trainer and split them into micro batches.
-    _normalize_mini_batch_size only initializes micro batch tracking for gradient scaling.
-
-    # TODO: Update naming once Megatron is updated to not be aware of mini batch sizes.
-    """
+def test_micro_batches_accumulated_initialized():
+    """Test that _micro_batches_accumulated is initialized to 0 in worker __init__."""
 
     # Create minimal worker instances for testing
     class TestPolicyWorker(PolicyWorkerBase):
@@ -207,72 +199,34 @@ def test_normalize_mini_batch_size():
         def _forward_micro_batch(self, micro_batch):
             pass
 
-    def create_policy_worker_with_config(dp_size):
-        """Helper to create policy worker with specific config."""
-        cfg = SkyRLConfig()
-        cfg.trainer.algorithm.policy_loss_type = "regular"
+    cfg = SkyRLConfig()
+    cfg.trainer.algorithm.policy_loss_type = "regular"
 
-        worker = TestPolicyWorker(
-            cfg=cfg,
-            world_size=dp_size,
-            rank=0,
-            local_rank=0,
-            master_addr="localhost",
-            master_port=12345,
-            sequence_parallel_size=1,
-        )
-
-        # Mock mesh_rank
-        worker.mesh_rank = MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1)
-
-        return worker
-
-    def create_critic_worker_with_config(dp_size):
-        """Helper to create critic worker with specific config."""
-        cfg = SkyRLConfig()
-
-        worker = TestCriticWorker(
-            cfg=cfg,
-            world_size=dp_size,
-            rank=0,
-            local_rank=0,
-            master_addr="localhost",
-            master_port=12345,
-            sequence_parallel_size=1,
-        )
-
-        # Mock mesh_rank
-        worker.mesh_rank = MeshRank(dp=0, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1)
-
-        return worker
-
-    # Test Case 1: PolicyWorker initializes _micro_batches_accumulated
-    policy_worker = create_policy_worker_with_config(dp_size=4)
-    policy_worker._normalize_mini_batch_size()
-
+    # PolicyWorker has _micro_batches_accumulated initialized at construction
+    policy_worker = TestPolicyWorker(
+        cfg=cfg,
+        world_size=4,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+    )
     assert hasattr(policy_worker, "_micro_batches_accumulated")
     assert policy_worker._micro_batches_accumulated == 0
 
-    # Test Case 2: CriticWorker initializes _micro_batches_accumulated
-    critic_worker = create_critic_worker_with_config(dp_size=4)
-    critic_worker._normalize_mini_batch_size()
-
+    # CriticWorker has _micro_batches_accumulated initialized at construction
+    critic_worker = TestCriticWorker(
+        cfg=cfg,
+        world_size=4,
+        rank=0,
+        local_rank=0,
+        master_addr="localhost",
+        master_port=12345,
+        sequence_parallel_size=1,
+    )
     assert hasattr(critic_worker, "_micro_batches_accumulated")
     assert critic_worker._micro_batches_accumulated == 0
-
-    # Test Case 3: Single GPU (dp_size=1) for PolicyWorker
-    policy_worker = create_policy_worker_with_config(dp_size=1)
-    policy_worker._normalize_mini_batch_size()
-
-    assert hasattr(policy_worker, "_micro_batches_accumulated")
-    assert policy_worker._micro_batches_accumulated == 0
-
-    # Test Case 4: Error case - mesh_rank not initialized
-    policy_worker_no_mesh = create_policy_worker_with_config(dp_size=4)
-    policy_worker_no_mesh.mesh_rank = None
-
-    with pytest.raises(RuntimeError, match="mesh_rank must be initialized"):
-        policy_worker_no_mesh._normalize_mini_batch_size()
 
 
 def test_validate_batch_sizes():
@@ -504,7 +458,7 @@ def test_forward_backward_batch_calculations():
     # Test PolicyWorkerBase
     policy_worker = create_test_worker(PolicyWorkerBase)
 
-    # Initialize _micro_batches_accumulated (normally done in _normalize_mini_batch_size)
+    # Reset _micro_batches_accumulated (initialized in __init__, reset here for test isolation)
     policy_worker._micro_batches_accumulated = 0
 
     # Mock _forward_backward_micro to track calls
@@ -542,7 +496,7 @@ def test_forward_backward_batch_calculations():
     # Test CriticWorkerBase with same pattern
     critic_worker = create_test_worker(CriticWorkerBase)
 
-    # Initialize _micro_batches_accumulated (normally done in _normalize_mini_batch_size)
+    # Reset _micro_batches_accumulated (initialized in __init__, reset here for test isolation)
     critic_worker._micro_batches_accumulated = 0
 
     # Mock _forward_backward_micro for critic

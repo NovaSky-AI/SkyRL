@@ -60,6 +60,22 @@ class LoRAMixin:
                 rngs=rngs,
             )
 
+    def _apply_lora_weight(
+        self,
+        lora_weight: jax.Array,
+        x_sorted: jax.Array,
+        adapter_indices_sorted: jax.Array,
+        group_sizes: jax.Array,
+    ) -> jax.Array:
+        """Apply a LoRA weight matrix to input. Default is linear case: x @ weight.
+
+        Subclasses (e.g., LoRAEmbed) override this for different computation patterns.
+        """
+        assert lora_weight.ndim == 3
+        assert x_sorted.ndim == 2  # (tokens, in_features)
+        assert x_sorted.shape[1] == lora_weight.shape[1]
+        return jax.lax.ragged_dot(x_sorted, lora_weight, group_sizes)
+
     def apply_lora(
         self,
         x: jax.Array,
@@ -73,8 +89,6 @@ class LoRAMixin:
             raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
         (batch_size, seq_len, *dims) = x.shape
-        assert len(self.lora_A.shape) == 3
-        assert len(dims) == 0 if isinstance(self, nnx.Embed) else tuple(dims) == self.lora_A[...].shape[1:-1]
         assert adapter_indices.shape[0] == batch_size
 
         x_flat = x.reshape(-1, *dims)
@@ -85,13 +99,8 @@ class LoRAMixin:
             x_flat, adapter_indices_expanded, self.max_lora_adapters, adapter_indices=adapter_indices_expanded
         )
 
-        # Apply LoRA using ragged_dot: x @ A @ B
-        if isinstance(self, nnx.Embed):
-            # Embedding path: A[x]
-            intermediate = self.lora_A[...][adapter_indices_sorted, x_sorted, :]
-        else:
-            # Linear path: x @ A
-            intermediate = jax.lax.ragged_dot(x_sorted, self.lora_A[...], group_sizes)
+        # Apply LoRA: x @ A @ B (or A[x] @ B for embeddings)
+        intermediate = self._apply_lora_weight(self.lora_A[...], x_sorted, adapter_indices_sorted, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
@@ -108,6 +117,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
         num_embeddings: int,
         features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -122,13 +132,9 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             features=features,
             dtype=dtype,
             param_dtype=param_dtype,
-            embedding_init=embedding_init,
+            embedding_init=nnx.with_partitioning(embedding_init, sharding),
             rngs=rngs,
         )
-        assert (
-            self.embedding[...].sharding is not None
-        ), "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
-        sharding = self.embedding[...].sharding.spec
 
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
@@ -140,6 +146,18 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             dtype=param_dtype,
             rngs=rngs,
         )
+
+    def _apply_lora_weight(
+        self,
+        lora_weight: jax.Array,
+        x_sorted: jax.Array,
+        adapter_indices_sorted: jax.Array,
+        group_sizes: jax.Array,
+    ) -> jax.Array:
+        """For embeddings, lookup in weight instead of matmul: weight[adapter, token_id, :]."""
+        assert lora_weight.ndim == 3
+        assert x_sorted.ndim == 1  # (tokens,) integer indices
+        return lora_weight[adapter_indices_sorted, x_sorted, :]
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
         base_out = super().__call__(x)
@@ -160,6 +178,7 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         in_features: int,
         out_features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -179,14 +198,11 @@ class LoRALinear(LoRAMixin, nnx.Linear):
             use_bias=use_bias,
             dtype=dtype,
             param_dtype=param_dtype,
-            kernel_init=kernel_init,
-            bias_init=bias_init,
+            kernel_init=nnx.with_partitioning(kernel_init, sharding),
+            bias_init=nnx.with_partitioning(bias_init, (sharding[-1],)),
             rngs=rngs,
         )
-        assert (
-            self.kernel[...].sharding is not None
-        ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
-        sharding = self.kernel[...].sharding.spec
+
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
@@ -212,6 +228,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         in_features: int,
         out_features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -222,10 +239,15 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        self.weight = Param(num_experts, in_features, out_features, dtype=dtype, kernel_init=kernel_init, rngs=rngs)
+        self.weight = Param(
+            num_experts,
+            in_features,
+            out_features,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(kernel_init, sharding),
+            rngs=rngs,
+        )
 
-        assert self.weight[...].sharding is not None, "LoRAExpert layer needs sharding"
-        sharding = self.weight[...].sharding.spec
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,

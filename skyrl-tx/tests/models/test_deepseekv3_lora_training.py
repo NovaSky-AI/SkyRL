@@ -56,9 +56,9 @@ def test_lora_training_moe_rank_normalized():
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
     mesh = jax.make_mesh(
-        (1, 1),
-        ("fsdp", "tp"),
-        axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto),
+        (1, 1, 1),
+        ("fsdp", "ep", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * 3,
     )
     with jax.set_mesh(mesh):
         model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
@@ -146,9 +146,9 @@ def test_lora_training_high_rank():
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
     mesh = jax.make_mesh(
-        (1, 1),
-        ("fsdp", "tp"),
-        axis_types=(jax.sharding.AxisType.Auto, jax.sharding.AxisType.Auto),
+        (1, 1, 1),
+        ("fsdp", "ep", "tp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * 3,
     )
     with jax.set_mesh(mesh):
         model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
