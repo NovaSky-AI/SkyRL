@@ -9,6 +9,7 @@ from tx.layers.layernorm import RMSNorm
 
 
 class Connector(nnx.Module):
+    """General implementation of (m?)Hyper Connections"""
 
     def __init__(
         self,
