@@ -8,6 +8,25 @@ SkyRL provides built-in utilities for correcting off-policy drift from trainer/i
 2. **Algorithmic corrections** — importance sampling and sequence masking techniques
 3. **Configuration in SkyRL** — how to enable these corrections in your training runs
 
+# TLDR
+
+We recommend adding the following configs in order to your training runs to help address off-policy drift:
+
+```yaml
+# we recommend trying basic TIS correction first
+trainer.algorithm.off_policy_correction.tis_ratio_type="token"
+trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0
+
+# for long context + MoE models, try geometric sequence masking - tune geo_mask_high/geo_mask_low as needed
+trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
+trainer.algorithm.off_policy_correction.geo_mask_high=1.01
+trainer.algorithm.off_policy_correction.geo_mask_low=0.99
+
+# for longer context + MoE, you can also try outlier based sequence masking, which stacks on top of geometric sequence masking
+trainer.algorithm.off_policy_correction.outlier_token_is_threshold_low=1e-4
+trainer.algorithm.off_policy_correction.outlier_token_is_threshold_high=100
+```
+
 # Setup
 For common RL objectives (i.e. PPO/GRPO variants), we typically seek to optimize a token-wise objective of the form:
 

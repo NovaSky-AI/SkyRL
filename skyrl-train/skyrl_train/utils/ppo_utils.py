@@ -895,7 +895,7 @@ def cross_entropy_loss(
     config: Union[AlgorithmConfig, DictConfig],
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, float]:
+) -> Tuple[torch.Tensor, dict[str, float]]:
     """
     Cross-entropy loss for supervised fine-tuning (SFT).
 
@@ -926,7 +926,7 @@ def cross_entropy_loss(
         loss = elementwise_loss.sum()
 
     # No clipping in cross-entropy loss
-    return loss, 0.0
+    return loss, {"clip_ratio": 0.0}
 
 
 def reduce_loss(

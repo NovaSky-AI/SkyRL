@@ -255,6 +255,7 @@ class CISPOConfig(BaseConfig):
     cispo_eps_clip_high: float = 5.0
 
 
+# see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
     tis_ratio_type: Optional[str] = None
