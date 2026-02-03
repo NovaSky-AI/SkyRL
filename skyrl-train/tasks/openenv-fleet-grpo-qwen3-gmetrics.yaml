@@ -46,10 +46,10 @@ envs:
   # GitHub env needs ~26K tokens for 100 tools, so 48K allows multi-turn growth
   MAX_INPUT_LENGTH: 48000
   MAX_GENERATE_LENGTH: 8192  # Increased from 4096 to allow thinking + tool calls
-  NUM_EPOCHS: 20
+  NUM_EPOCHS: 1
   RUN_ID: ""
   # Optional: limit number of tasks for testing
-  MAX_TASKS: ""
+  MAX_TASKS: "2"
   # AWS credentials (required for S3 dataset download, optional for checkpoint upload)
   AWS_ACCESS_KEY_ID: ""
   AWS_SECRET_ACCESS_KEY: ""
@@ -163,8 +163,8 @@ run: |
     generator.inference_engine_tensor_parallel_size=1 \
     trainer.epochs=${NUM_EPOCHS} \
     trainer.eval_batch_size=8 \
-    trainer.eval_before_train=true \
-    trainer.eval_interval=10 \
+    trainer.eval_before_train=false \
+    trainer.eval_interval=20 \
     trainer.update_epochs_per_batch=1 \
     trainer.train_batch_size=4 \
     trainer.policy_mini_batch_size=4 \
