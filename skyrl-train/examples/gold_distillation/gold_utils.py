@@ -675,7 +675,7 @@ def compute_per_token_gold_loss(
                     if g < len(student_groups):
                         for tok_idx in student_groups[g]:
                             if tok_idx < (end_pos - start_pos):
-                                per_token_losses[i, start_pos + tok_idx] = group_loss / len(student_groups[g])
+                                per_token_losses[i, start_pos + tok_idx] = group_loss / max(1, len(student_groups[g]))
         else:
             # Simple per-token comparison (no alignment)
             min_len = min(student_probs.size(0), teacher_probs.size(0))
