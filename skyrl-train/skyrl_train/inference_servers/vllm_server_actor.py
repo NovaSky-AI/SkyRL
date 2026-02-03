@@ -76,6 +76,7 @@ class VLLMServerActor(ServerActorProtocol):
         # PD disaggregation settings
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
+        colocated_training: bool = False,
     ):
         """
         Initialize the vLLM server actor.
@@ -92,6 +93,7 @@ class VLLMServerActor(ServerActorProtocol):
             dp_rpc_port: DP RPC port (for non-rank-0 servers)
             enable_pd: Enable prefill-decode disaggregation
             nixl_side_channel_base: Base port for NIXL side channel
+            colocated_training: Whether the server is colocated with training workers
         """
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
@@ -101,6 +103,10 @@ class VLLMServerActor(ServerActorProtocol):
 
         # Ensure SkyRL's custom worker extension is used for weight sync
         self._ensure_worker_extension()
+
+        # Ensure vLLM sleep endpoints are enabled by using dev mode
+        os.environ["VLLM_SERVER_DEV_MODE"] = "1"
+        os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
 
         # Ensure Ray executor is used (required for GPU inheritance in placement groups)
         self._ensure_ray_executor()

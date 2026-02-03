@@ -66,7 +66,7 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     cfg.generator.inference_engine_tensor_parallel_size = tp_size
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
-    client, pg = init_inference_engines(
+    client, pg, router, server_group = init_inference_engines(
         model=MODEL,
         cfg=cfg,
         use_local=True,

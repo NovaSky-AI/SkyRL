@@ -385,6 +385,7 @@ def init_inference_engines(
 
     tokenizer = AutoTokenizer.from_pretrained(model)
 
+    # Return both router and server group if created to keep references alive
     router = None
     server_group = None
 

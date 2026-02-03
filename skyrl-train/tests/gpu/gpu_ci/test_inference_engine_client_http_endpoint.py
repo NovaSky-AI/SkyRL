@@ -232,7 +232,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -299,7 +299,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -548,7 +548,7 @@ def test_structured_generation(ray_init_fixture):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -611,7 +611,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -751,7 +751,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             repo_root = Path(__file__).parent.parent.parent.parent
             engine_init_kwargs["chat_template"] = str(repo_root / template_path)
 
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -843,7 +843,7 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         # Set the served_model_name to be different from the model path
         cfg.generator.served_model_name = SERVED_MODEL_NAME
 
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,

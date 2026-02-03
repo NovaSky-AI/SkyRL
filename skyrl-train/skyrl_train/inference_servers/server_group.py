@@ -114,7 +114,7 @@ class ServerGroup:
         )
         return ray_wrapped_actor_cls.options(
             num_gpus=0,  # GPU allocation managed by placement group
-            num_cpus=1,
+            num_cpus=0.2,
             scheduling_strategy=PlacementGroupSchedulingStrategy(pg, start_bundle_idx),
         )
 
@@ -141,6 +141,7 @@ class ServerGroup:
                 dp_rpc_port=dp_rpc_port,
                 enable_pd=self._enable_pd,
                 nixl_side_channel_base=self._nixl_side_channel_base,
+                colocated_training=self._external_pg is not None,
             )
 
             # Get DP info from server 0 which is where DP0 will be

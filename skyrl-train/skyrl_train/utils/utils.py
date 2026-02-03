@@ -6,7 +6,6 @@ import logging
 import math
 import socket
 from argparse import Namespace
-from typing import TYPE_CHECKING
 
 import ray
 import torch
@@ -25,9 +24,6 @@ from skyrl_train.env_vars import (
     SKYRL_PYTHONPATH_EXPORT,
     _SKYRL_USE_NEW_INFERENCE,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 class Timer:
@@ -728,7 +724,7 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-
+    print("Bundles in the placement group: ", num_bundles)
     # use info actor to get the GPU id
     info_actors = []
     for i in range(num_bundles):
