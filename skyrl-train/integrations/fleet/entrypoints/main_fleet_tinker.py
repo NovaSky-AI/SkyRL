@@ -950,6 +950,12 @@ if __name__ == "__main__":
     parser.add_argument("--wandb-project", type=str, default="fleet-tinker-grpo")
     parser.add_argument("--wandb-name", type=str, default=None)
     parser.add_argument("--resume-from", type=str, default=None)
+    parser.add_argument(
+        "--track-extra-gradient-metrics",
+        type=bool,
+        default=False,
+        help="Track additional gradient metrics (for parity with SkyRL config)",
+    )
 
     args = parser.parse_args()
 
