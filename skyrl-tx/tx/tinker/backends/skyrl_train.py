@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - exercised only in non-ray installs
 class SkyRLTrainBackendConfig(BaseModel, extra="forbid"):
     """Configuration for the SkyRL-Train backend.
 
-    Currently uses default config from skyrl-train with colocated training+inference.
+    Currently uses default config from skyrl-train.
     """
 
     pass
@@ -74,7 +74,6 @@ def _build_config(
     cfg.trainer.policy.optimizer_config.scheduler = "constant"
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
 
-    # Use default generator config (don't override)
     return cfg
 
 
@@ -109,12 +108,11 @@ class SkyRLTrainBackend(AbstractBackend):
         # Build config
         self._cfg = _build_config(self.base_model, self.config, lora_config)
 
-        # Initialize Ray with proper runtime environment
         if not ray.is_initialized():
             logger.info("Initializing Ray with runtime environment")
             initialize_ray(self._cfg)
 
-        # Create placement group (following main_base.py pattern)
+        # Create placement group
         colocate_pg = self._create_colocate_pg()
 
         # Create inference engine client
@@ -125,8 +123,7 @@ class SkyRLTrainBackend(AbstractBackend):
             self._cfg,
         )
 
-        # Create trainer (following main_base.py pattern)
-        # Use minimal tracker for tinker (no logging needed)
+        # Create trainer
         tracker = Tracking(
             project_name="tinker",
             experiment_name=model_id,
@@ -141,7 +138,7 @@ class SkyRLTrainBackend(AbstractBackend):
             train_dataset=None,  # Not needed for tinker API
             eval_dataset=None,
             inference_engine_client=inference_engine_client,
-            generator=None,  # Not needed for SFT-only
+            generator=None,  # TODO(tyler): Update for sampling + RL
             colocate_pg=colocate_pg,
         )
 
@@ -153,8 +150,7 @@ class SkyRLTrainBackend(AbstractBackend):
         else:
             raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
-        # Build models using trainer (this handles all placement group logic!)
-        logger.info("Building models via RayPPOTrainer.build_models()")
+        logger.info("Building models.")
         self._trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         self._model_id = model_id
@@ -172,7 +168,6 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Creating placement group with {total_gpu_slots} GPU slots for colocated training+inference")
         pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
 
-        # Wait for placement group to be ready (critical step!)
         logger.info("Waiting for placement group to be ready...")
         get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         logger.info("Placement group ready!")
@@ -287,7 +282,6 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        # Sampling implementation will be merged from tyler/tinker-sampling-main branch
         raise NotImplementedError("Sampling not yet implemented - will be merged from tyler/tinker-sampling-main")
 
     def _validate_model_state(self, model_id: str) -> None:
