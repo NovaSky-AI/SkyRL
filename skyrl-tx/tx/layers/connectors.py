@@ -32,7 +32,8 @@ class Connector(nnx.Module):
         n = expansion_rate
         C = hidden_dim
 
-        self.norm = RMSNorm(hidden_dim, eps=eps, dtype=dtype, rngs=rngs)
+        self.input_norm = RMSNorm(n * C, eps=eps, elementwise_affine=False, dtype=dtype, rngs=rngs)
+        self.output_norm = RMSNorm(hidden_dim, eps=eps, elementwise_affine=trainable, dtype=dtype, rngs=rngs)
 
         self.phi_pre = Param(n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs)
         self.phi_post = Param(n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs)
@@ -64,18 +65,15 @@ class Connector(nnx.Module):
             sg(self.alpha_pre[...]), sg(self.alpha_post[...]), sg(self.alpha_res[...]),
             sg(self.phi_pre[...]), sg(self.phi_post[...]), sg(self.phi_res[...]),
             sg(self.b_pre[...]), sg(self.b_post[...]), sg(self.b_res[...]),
-            sg(self.norm.weight[...]),
         )
 
     def pre(self, x: jax.Array) -> jax.Array:
         *batch_dims, n, C = x.shape
 
-        x_flat = x.reshape(*batch_dims, n * C)
-        rms = jnp.sqrt(jnp.mean(x_flat * x_flat, axis=-1, keepdims=True) + self.eps)
-        x_norm = x_flat / rms
+        x_norm = self.input_norm(x.reshape(*batch_dims, n * C))
 
         (alpha_pre, alpha_post, alpha_res, phi_pre, phi_post, phi_res,
-         b_pre, b_post, b_res, norm_weight) = self._get_params()
+         b_pre, b_post, b_res) = self._get_params()
 
         tilde_H_pre = alpha_pre * (x_norm @ phi_pre) + b_pre
         tilde_H_post = alpha_post * (x_norm @ phi_post) + b_post
@@ -86,10 +84,7 @@ class Connector(nnx.Module):
         self.M = sinkhorn_knopp(tilde_H_res, self.sinkhorn_iters, self.eps)
 
         x_agg = (H_pre[..., None] * x).sum(axis=-2)
-        rms_norm = jnp.sqrt(jnp.mean(x_agg**2, axis=-1, keepdims=True) + self.norm.eps)
-        x_normed = norm_weight * x_agg / rms_norm
-
-        return x_normed
+        return self.output_norm(x_agg)
 
     def post(self, residual: jax.Array, output: jax.Array) -> jax.Array:
         y_dist = self.H_post[..., None] * output[..., None, :]

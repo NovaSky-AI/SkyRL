@@ -13,12 +13,18 @@ class RMSNorm(nnx.Module):
     Reference: https://arxiv.org/abs/1910.07467
     """
 
-    def __init__(self, size: int, *, eps: float = 1e-6, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+    def __init__(
+        self, size: int, *, eps: float = 1e-6, elementwise_affine: bool = True, dtype: jnp.dtype, rngs: nnx.Rngs
+    ) -> None:
         self.eps = eps
-        self.weight = Param(
-            size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.ones_init(), jax.P(None)), rngs=rngs
-        )
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = Param(
+                size, dtype=dtype, kernel_init=nnx.with_partitioning(nnx.initializers.ones_init(), jax.P(None)), rngs=rngs
+            )
 
     def __call__(self, x: jax.Array) -> jax.Array:
         rms = jnp.sqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
-        return self.weight * x / rms
+        if self.elementwise_affine:
+            return self.weight * x / rms
+        return x / rms
