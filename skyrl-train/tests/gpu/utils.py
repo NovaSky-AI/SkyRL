@@ -341,8 +341,13 @@ def ray_init_for_tests():
     ray.init(runtime_env={"env_vars": env_vars})
 
 
-async def run_inference(client, prompts, sampling_params):
+async def run_inference(client, prompts, sampling_params, tokenizer=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
+    if isinstance(client, RemoteInferenceClient):
+        # convert to prompt token ids
+        assert tokenizer is not None
+        prompt_token_ids = tokenizer.apply_chat_template(prompts, add_generation_prompt=True)
+        engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     return await client.generate(engine_input)
 
 
@@ -380,6 +385,9 @@ def init_inference_engines(
 
     tokenizer = AutoTokenizer.from_pretrained(model)
 
+    router = None
+    server_group = None
+
     if use_new_inference:
         # init with internal router and servers
         server_group = ServerGroup(
@@ -391,8 +399,8 @@ def init_inference_engines(
         server_infos = server_group.start()
         server_urls = [info.url for info in server_infos]
 
-        inference_router = InferenceRouter(server_urls=server_urls)
-        proxy_url = inference_router.start()
+        router = InferenceRouter(server_urls=server_urls)
+        proxy_url = router.start()
         logger.info(
             f"HTTP Inference: Built servers and router internally - "
             f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={colocate_all}"
@@ -425,7 +433,7 @@ def init_inference_engines(
 
     if sleep:
         asyncio.run(client.wake_up())
-    return client, pg
+    return client, pg, router, server_group
 
 
 def init_remote_inference_servers(

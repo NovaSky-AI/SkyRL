@@ -6,7 +6,7 @@ from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
 
 import ray
 import torch
@@ -60,6 +60,9 @@ from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
 
 _SET_AFFINITY = False
+
+if TYPE_CHECKING:
+    from skyrl_train.inference_engines.remote_inference_client import RemoteInferenceClient
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -286,7 +289,9 @@ class Worker(DistributedTorchRayActor):
             io.remove(record_memory_path)
         torch.cuda.memory._dump_snapshot(record_memory_path)
 
-    async def init_weight_sync_state(self, inference_engine_client: InferenceEngineClient):
+    async def init_weight_sync_state(
+        self, inference_engine_client: "Union[InferenceEngineClient, RemoteInferenceClient]"
+    ):
         """Initialize state for weight syncing with Inference Engine Client
 
         Creates init info and sender, then sends init info to inference engines

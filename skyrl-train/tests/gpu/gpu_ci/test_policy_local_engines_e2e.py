@@ -9,6 +9,7 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_policy
 import pytest
 import asyncio
 import ray
+from transformers import AutoTokenizer
 import hydra
 from omegaconf import DictConfig
 
@@ -86,8 +87,10 @@ def test_policy_local_engines_e2e(
         cfg.generator.backend = backend
         cfg.generator.inference_engine_tensor_parallel_size = tp_size
 
+        tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             model=MODEL,
             cfg=cfg,
             use_local=True,
@@ -98,7 +101,6 @@ def test_policy_local_engines_e2e(
             sleep_level=2,  # since we explicitly sync weights
             use_new_inference=use_new_inference,
         )
-
         policy = init_worker_with_type(
             "policy",
             shared_pg=pg,
@@ -106,11 +108,15 @@ def test_policy_local_engines_e2e(
             num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
             cfg=cfg,
         )
+        # run inference once first
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        # outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
+
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
+
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:

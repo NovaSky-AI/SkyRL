@@ -265,7 +265,7 @@ class BasePPOExp:
             InferenceEngineInterface: The inference engine client.
         """
         if _SKYRL_USE_NEW_INFERENCE:
-            print("Initializing new inference client", flush=True)
+            logger.info("Initializing new inference client")
             return self._get_new_inference_client()
         else:
             return self._get_legacy_inference_client()

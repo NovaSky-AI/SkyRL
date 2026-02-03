@@ -143,7 +143,8 @@ class RemoteInferenceClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create the aiohttp session."""
-        if self._session is None or self._session.closed:
+        current_loop = asyncio.get_event_loop()
+        if self._session is None or self._session.closed or self._session.loop != current_loop:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
         return self._session
 
