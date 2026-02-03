@@ -724,7 +724,6 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-    print("Bundles in the placement group: ", num_bundles)
     # use info actor to get the GPU id
     info_actors = []
     for i in range(num_bundles):
