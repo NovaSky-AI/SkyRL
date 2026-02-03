@@ -282,7 +282,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        raise NotImplementedError("Sampling not yet implemented - will be merged from tyler/tinker-sampling-main")
+        raise NotImplementedError("Sampling not yet supported.")
 
     def _validate_model_state(self, model_id: str) -> None:
         """Validate that model exists and is initialized."""
