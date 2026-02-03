@@ -154,7 +154,7 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
         # Build models using trainer (this handles all placement group logic!)
-        logger.info(f"Building models via RayPPOTrainer.build_models()")
+        logger.info("Building models via RayPPOTrainer.build_models()")
         self._trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
 
         self._model_id = model_id
@@ -173,9 +173,9 @@ class SkyRLTrainBackend(AbstractBackend):
         pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
 
         # Wait for placement group to be ready (critical step!)
-        logger.info(f"Waiting for placement group to be ready...")
+        logger.info("Waiting for placement group to be ready...")
         get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        logger.info(f"Placement group ready!")
+        logger.info("Placement group ready!")
 
         return pg
 
