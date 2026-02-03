@@ -51,6 +51,8 @@ trainer:
     use_torch_compile: false
     # saves memory snapshots to os.path.join(ckpt_path, "memory_snapshots") - can visualize by dragging pickle files to https://docs.pytorch.org/memory_viz
     record_memory: false
+    # whether to track additional gradient metrics.
+    track_extra_gradient_metrics: false
     # pass through kwargs to the HuggingFace model config for FSDP training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
     model_config_kwargs: {}
   ref:

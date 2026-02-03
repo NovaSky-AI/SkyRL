@@ -4,15 +4,20 @@ from typing import List, Dict
 from skyrl_train.training_batch import TrainingInputBatch
 
 
-def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
+def reduce_metrics(
+    metrics: Dict[str, List[float]], ignore_keys: list[str] = []
+) -> Dict[str, int | float | list[float]]:
     """
     Reduce metrics from a list of entries per key.
     """
-    reduced_metrics = dict()
+    reduced_metrics: dict[str, int | float | list[float]] = dict()
     for k, v in metrics.items():
-        assert len(v) > 0, f"No metrics for key {k}"
-        assert all(isinstance(x, (int, float)) for x in v), f"Metrics for key {k} are not all numbers"
-        reduced_metrics[k] = sum(v) / len(v)
+        if k in ignore_keys:
+            reduced_metrics[k] = v
+        else:
+            assert len(v) > 0, f"No metrics for key {k}"
+            assert all(isinstance(x, (int, float)) for x in v), f"Metrics for key {k} are not all numbers"
+            reduced_metrics[k] = sum(v) / len(v)
     return reduced_metrics
 
 

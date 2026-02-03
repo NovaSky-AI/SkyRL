@@ -24,6 +24,8 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import pprint
 
+import numpy as np
+
 
 # TODO(tgriggs): Test all backends.
 class Tracking:
@@ -136,7 +138,12 @@ class _TensorboardAdapter:
 
     def log(self, data, step):
         for key in data:
-            self.writer.add_scalar(key, data[key], step)
+            value = data[key]
+            if isinstance(value, list):
+                # Log histogram distribution for list values
+                self.writer.add_histogram(key, np.array(value), step)
+            else:
+                self.writer.add_scalar(key, value, step)
 
     def finish(self):
         self.writer.close()

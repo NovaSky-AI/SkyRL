@@ -643,7 +643,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # not needed beyond status logging
         all_metrics.pop("response_length", None)
 
-        status_mean = reduce_metrics(all_metrics)
+        status_mean = reduce_metrics(all_metrics, ignore_keys=["grad:update_diversity"])
         status_mean["policy_update_steps"] = policy_update_steps
 
         output = TrainingOutputBatch()

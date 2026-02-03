@@ -658,6 +658,155 @@ class PolicyWorkerBase(Worker):
         # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
+        # Gradient statistics for cross-step metrics (SNR, bits edited, update diversity)
+        self._grad_stats = {
+            "mean": {},  # Dict[param_name, Tensor] - running mean per param
+            "var_numerator": {},  # Dict[param_name, Tensor] - running M2 for variance.
+            "count": 0,  # int - number of steps accumulated
+            "histograms": [],  # List[Dict[layer, histogram]] - for update diversity
+        }
+        return
+
+    def _accumulate_gradient_stats(self):
+        """Accumulate gradient statistics for cross-step metrics (SNR, bits edited, update diversity)."""
+        self._grad_stats["count"] += 1
+        n = self._grad_stats["count"]
+
+        step_histograms = {}
+
+        for name, param in self.model.named_parameters():
+            if param.grad is None:
+                continue
+            grad = param.grad.detach()
+
+            # Initialize on first step
+            if name not in self._grad_stats["mean"]:
+                self._grad_stats["mean"][name] = torch.zeros_like(grad)
+                self._grad_stats["var_numerator"][name] = torch.zeros_like(
+                    grad
+                )  # stores M2 (sum of squared deviations)
+
+            # Welford's online update for running mean and variance
+            delta = grad - self._grad_stats["mean"][name]
+            self._grad_stats["mean"][name] += delta / n
+            delta2 = grad - self._grad_stats["mean"][name]
+            self._grad_stats["var_numerator"][name] += delta * delta2  # M2 accumulator
+
+            # Histogram for this param
+            hist = torch.histc(grad.flatten(), bins=50)
+            step_histograms[name] = torch.nn.functional.softmax(hist, dim=0).cpu().tolist()
+
+        self._grad_stats["histograms"].append(step_histograms)
+        return
+
+    def compute_gradient_metrics(self) -> Dict[str, float | int | list[float]]:
+        """Compute all 3 gradient-based metrics."""
+        grad_metrics = {
+            "grad:snr": self._compute_snr(),
+            "grad:bits_edited": self._compute_bits_edited(),
+            "grad:update_diversity": self._compute_update_diversity(),
+        }
+        return grad_metrics
+
+    def _compute_snr(self, start_clip: int = 10) -> float:
+        """
+        Compute gradient Signal-to-Noise Ratio across all parameters.
+
+        SNR = |E[∇θ]| / std(∇θ) measures consistency of gradient direction.
+        High SNR = gradients point consistently in same direction across steps.
+        Low SNR = noisy/inconsistent gradient directions.
+        ---
+        Args:
+            1. start_clip: Minimum number of steps before computing SNR.
+        """
+        if self._grad_stats["count"] < start_clip:
+            return 0.0
+
+        snr_values = []
+
+        for name in self._grad_stats["mean"]:
+            mean = self._grad_stats["mean"][name]
+            m2 = self._grad_stats["var_numerator"][name]  # This stores M2, not variance
+
+            # Compute variance from M2 (use Bessel's correction for unbiased estimate)
+            # When count <= 1, variance is undefined, so return 0
+            if self._grad_stats["count"] <= 1:
+                variance = torch.zeros_like(m2)
+            else:
+                variance = m2 / (self._grad_stats["count"] - 1)
+            std = torch.sqrt(variance + 1e-8)  # Add epsilon to avoid division by zero
+
+            # Compute per-element SNR and average
+            snr = torch.abs(mean) / std
+            snr_values.append(snr.mean().item())
+
+        if len(snr_values) == 0:
+            return 0.0
+
+        return sum(snr_values) / len(snr_values)
+
+    def _compute_bits_edited(self) -> int:
+        """
+        Estimate bits of information edited based on significant gradient updates.
+
+        A gradient is "significant" if |grad| > 5% of |param|.
+        Bits edited = floor(3.6 * number of significant gradients).
+        """
+        if self._grad_stats["count"] == 0:
+            return 0
+
+        significant_count = 0
+
+        for name, param in self.model.named_parameters():
+            if name not in self._grad_stats["mean"]:
+                continue
+
+            mean_grad = self._grad_stats["mean"][name]
+            param_magnitude = torch.abs(param.data)
+
+            # Count gradients where |mean_grad| > 5% of |param|
+            threshold = 0.05 * param_magnitude
+            significant = (torch.abs(mean_grad) > threshold).sum().item()
+            significant_count += significant
+
+        # 3.6 bits per significant gradient update
+        # source: http://arxiv.org/abs/2505.24832
+        return int(3.6 * significant_count)  # int() as an approximate for floor.
+
+    def _compute_update_diversity(self) -> list[float]:
+        """
+        Compute update diversity as aggregated gradient histogram distribution.
+
+        Aggregates all mean gradients into a single histogram and returns the
+        normalized probability distribution. This can be used with cosine
+        similarity to measure gradient pattern differences across environments.
+        """
+        if self._grad_stats["count"] == 0:
+            return []
+
+        # Collect all mean gradients into a single tensor
+        all_grads = []
+        for name in self._grad_stats["mean"]:
+            all_grads.append(self._grad_stats["mean"][name].flatten())
+
+        if len(all_grads) == 0:
+            return []
+        all_grads = torch.cat(all_grads)
+        hist = torch.histc(all_grads, bins=50)
+        hist = hist / hist.sum()  # Normalize to probability distribution
+        hist = torch.nn.functional.softmax(hist, dim=0)  # Apply softmax for emphasis
+        # Return probability distribution as list
+        return hist.cpu().tolist()
+
+    def reset_gradient_stats(self):
+        """Reset gradient statistics for next accumulation period."""
+        self._grad_stats = {
+            "mean": {},
+            "var_numerator": {},
+            "count": 0,
+            "histograms": [],
+        }
+
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
@@ -680,7 +829,7 @@ class PolicyWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics(dict(all_metrics))
+        return reduce_metrics(dict(all_metrics), ignore_keys=["grad:update_diversity"])
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
@@ -760,6 +909,10 @@ class PolicyWorkerBase(Worker):
         loss = policy_loss + kl_loss_term - entropy_loss_term
         self.strategy.backward(loss, self.model, self.optimizer)
 
+        # Accumulate gradient statistics for cross-step metrics
+        if self.cfg.trainer.policy.track_extra_gradient_metrics:
+            self._accumulate_gradient_stats()
+
         status = {
             "final_loss": loss.item(),
             "policy_loss": policy_loss.item(),
@@ -800,7 +953,7 @@ class PolicyWorkerBase(Worker):
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
 
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
+    def all_reduce_metrics(self, status: Dict[str, int | float | list[float]]) -> Dict[str, int | float | list[float]]:
         """
         All-reduce metrics across data parallel workers.
         """
@@ -927,7 +1080,7 @@ class CriticWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics(dict(all_metrics))
+        return reduce_metrics(dict(all_metrics), ignore_keys=["grad:update_diversity"])
 
     def _forward_backward_micro(self, experience: Experience) -> Dict[str, float]:
         """
@@ -1007,7 +1160,7 @@ class CriticWorkerBase(Worker):
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
 
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
+    def all_reduce_metrics(self, status: Dict[str, int | float | list[float]]) -> Dict[str, int | float | list[float]]:
         """
         All-reduce metrics across data parallel workers.
         """

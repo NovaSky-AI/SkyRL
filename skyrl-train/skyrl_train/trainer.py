@@ -1084,13 +1084,18 @@ class RayPPOTrainer:
                 for k, v in status.items():
                     all_metrics[k].append(v)
 
+                if self.cfg.trainer.policy.track_extra_gradient_metrics:
+                    grad_metrics = self.dispatch.compute_gradient_metrics(model)
+                    for k, v in grad_metrics.items():
+                        all_metrics[k].append(v)
+
                 # Optimizer step after each mini batch
                 grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
 
         # Reduce metrics across all mini-batches and epochs
-        reduced_metrics = reduce_metrics(all_metrics)
+        reduced_metrics = reduce_metrics(all_metrics, ignore_keys=["grad:update_diversity"])
         return reduced_metrics
 
     def train_critic_and_policy(self, data: TrainingInputBatch):
