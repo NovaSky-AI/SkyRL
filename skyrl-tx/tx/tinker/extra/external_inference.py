@@ -74,6 +74,7 @@ class ExternalInferenceClient:
 
         payload = {
             "model": model_name,
+            "n": request.num_samples,
             "prompt": prompt_tokens,
             "max_tokens": request.sampling_params.max_tokens,
             "temperature": request.sampling_params.temperature,
