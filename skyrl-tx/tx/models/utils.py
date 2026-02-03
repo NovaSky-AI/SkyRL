@@ -1,11 +1,11 @@
 """Utility functions for model forward passes with stacked decoder layers.
 
 This module provides:
-- create_stacked_layers: Create decoder layers with stacked weights using nnx.vmap
+- create_stacked_layers: Create decoder layers with stacked weights
 - forward_layers: Unified forward pass using scan (skips KV cache during training)
 
 Prerequisites:
-- Layers must be created with nnx.vmap (stacked weights)
+- Layers must be created with create_stacked_layers (stacked weights)
 - KVCache must use stacked format: (num_layers, batch, seq, heads, dim)
 """
 
@@ -22,10 +22,14 @@ def create_stacked_layers(
     num_layers: int,
     rngs: nnx.Rngs,
 ) -> nnx.Module:
-    """Create stacked decoder layers using nnx.vmap.
+    """Create stacked decoder layers by creating individual layers and stacking their parameters.
 
     This creates a single module object where all parameters have shape (num_layers, ...).
     This enables efficient scanning over layers without runtime stacking.
+
+    Note: We avoid using nnx.vmap for layer creation because vmap breaks eager sharding,
+    causing ~4x memory overhead. Instead, we create layers individually (which respects
+    eager sharding) and then stack their parameters with jnp.stack.
 
     Args:
         create_layer_fn: Function that takes rngs and returns a single layer module.
@@ -41,13 +45,73 @@ def create_stacked_layers(
         >>> layers = create_stacked_layers(create_layer, config.num_hidden_layers, rngs)
         >>> # layers.self_attn.q_proj.kernel.shape == (num_layers, hidden, head_dim*num_heads)
     """
+    import warnings
+    from functools import partial
 
-    @nnx.split_rngs(splits=num_layers)
-    @nnx.vmap(in_axes=(0,), out_axes=0, transform_metadata={nnx.PARTITION_NAME: None})
-    def vmapped_create(rngs: nnx.Rngs):
-        return create_layer_fn(rngs)
+    import jax.numpy as jnp
+    import jax.random
+    from jax.sharding import NamedSharding, PartitionSpec
 
-    return vmapped_create(rngs)
+    # Split the RNG key to get unique keys for each layer
+    base_key = rngs.params()
+    layer_keys = jax.random.split(base_key, num_layers)
+
+    # Get the current mesh for sharding
+    mesh = jax.sharding.get_mesh()
+
+    # Create all layers individually - this respects eager sharding
+    layers = [create_layer_fn(nnx.Rngs(layer_keys[i])) for i in range(num_layers)]
+
+    # Get graphdef from first layer (all layers have same structure)
+    graphdef, first_state = nnx.split(layers[0])
+
+    # Extract flattened states from all layers
+    states = [nnx.split(layer)[1] for layer in layers]
+    del layers
+
+    flat_states = [jax.tree_util.tree_flatten(s)[0] for s in states]
+    treedef = jax.tree_util.tree_flatten(states[0])[1]
+    del states
+
+    # Stack each parameter array using jit with donate_argnums for memory efficiency.
+    # This tells XLA to try to reuse input buffers for the output, reducing peak memory.
+    stacked_flat = []
+    for i in range(len(flat_states[0])):
+        # Get arrays for this parameter across all layers
+        arrays = [flat_states[j][i] for j in range(num_layers)]
+
+        # Get original sharding spec and extend it for the stacked dimension
+        original_sharding = arrays[0].sharding
+        if hasattr(original_sharding, "spec"):
+            original_spec = original_sharding.spec
+            # Prepend None for the new layer dimension
+            new_spec = PartitionSpec(None, *original_spec)
+            new_sharding = NamedSharding(mesh, new_spec)
+
+            # Use jit with donate_argnums and out_shardings for memory-efficient stacking.
+            # The donation hints help XLA manage memory better during the stacking operation.
+            @partial(jax.jit, donate_argnums=tuple(range(num_layers)), out_shardings=new_sharding)
+            def do_stack(*arrs):
+                return jnp.stack(arrs, axis=0)
+
+            # Suppress donation warnings since we expect some buffers can't be donated
+            # (stacking changes array shapes so direct donation isn't always possible)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="Some donated buffers were not usable")
+                stacked = do_stack(*arrays)
+        else:
+            stacked = jnp.stack(arrays, axis=0)
+        stacked_flat.append(stacked)
+        del arrays
+
+    del flat_states
+
+    # Reconstruct the state tree with stacked arrays
+    stacked_state = jax.tree_util.tree_unflatten(treedef, stacked_flat)
+    del stacked_flat
+
+    # Merge back into a module with stacked parameters
+    return nnx.merge(graphdef, stacked_state)
 
 
 def forward_layers(
