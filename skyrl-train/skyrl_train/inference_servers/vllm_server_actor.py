@@ -2,6 +2,7 @@
 vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 """
 
+import ray
 import asyncio
 import logging
 import os
@@ -359,3 +360,6 @@ class VLLMServerActor(ServerActorProtocol):
                 await self._server_task
             except asyncio.CancelledError:
                 pass
+
+
+VLLMServerActorRay = ray.remote(VLLMServerActor)

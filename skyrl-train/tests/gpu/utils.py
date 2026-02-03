@@ -22,12 +22,15 @@ from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType, TrajectoryID
-from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
+from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg, build_vllm_cli_args
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+from skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl_train.inference_servers.router import InferenceRouter
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -359,6 +362,7 @@ def init_inference_engines(
     enable_lora=False,
     max_num_seqs=1024,
     engine_init_kwargs={},
+    use_new_inference=False,
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
@@ -375,29 +379,50 @@ def init_inference_engines(
     served_model_name = cfg.generator.get("served_model_name", None)
 
     tokenizer = AutoTokenizer.from_pretrained(model)
-    eps = create_ray_wrapped_inference_engines(
-        num_inference_engines=num_inference_engines,
-        tensor_parallel_size=tp_size,
-        model_dtype="bfloat16",
-        pretrain=model,
-        seed=42,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=True,
-        enforce_eager=True,
-        shared_pg=pg,
-        gpu_memory_utilization=gpu_memory_utilization,
-        inference_engine_enable_sleep=sleep,
-        async_engine=async_engine,
-        max_num_batched_tokens=8192,
-        max_num_seqs=max_num_seqs,
-        tokenizer=tokenizer,
-        backend=backend,
-        sleep_level=sleep_level,
-        enable_lora=enable_lora,
-        engine_init_kwargs=engine_init_kwargs,
-        served_model_name=served_model_name,
-    )
-    client = InferenceEngineClient(eps, tokenizer, cfg)
+
+    if use_new_inference:
+        # init with internal router and servers
+        server_group = ServerGroup(
+            cli_args=build_vllm_cli_args(cfg),
+            num_servers=num_inference_engines,
+            placement_group=pg if colocate_all else None,
+            enable_dp=cfg.generator.inference_engine_data_parallel_size > 1,
+        )
+        server_infos = server_group.start()
+        server_urls = [info.url for info in server_infos]
+
+        inference_router = InferenceRouter(server_urls=server_urls)
+        proxy_url = inference_router.start()
+        logger.info(
+            f"HTTP Inference: Built servers and router internally - "
+            f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={colocate_all}"
+        )
+        client = RemoteInferenceClient(proxy_url=proxy_url, server_urls=server_urls, model_name=model)
+    else:
+        eps = create_ray_wrapped_inference_engines(
+            num_inference_engines=num_inference_engines,
+            tensor_parallel_size=tp_size,
+            model_dtype="bfloat16",
+            pretrain=model,
+            seed=42,
+            vllm_v1_disable_multiproc=True,
+            enable_prefix_caching=True,
+            enforce_eager=True,
+            shared_pg=pg,
+            gpu_memory_utilization=gpu_memory_utilization,
+            inference_engine_enable_sleep=sleep,
+            async_engine=async_engine,
+            max_num_batched_tokens=8192,
+            max_num_seqs=max_num_seqs,
+            tokenizer=tokenizer,
+            backend=backend,
+            sleep_level=sleep_level,
+            enable_lora=enable_lora,
+            engine_init_kwargs=engine_init_kwargs,
+            served_model_name=served_model_name,
+        )
+        client = InferenceEngineClient(eps, tokenizer, cfg)
+
     if sleep:
         asyncio.run(client.wake_up())
     return client, pg

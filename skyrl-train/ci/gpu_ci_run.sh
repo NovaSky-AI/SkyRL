@@ -7,24 +7,24 @@ uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 uv run examples/search/searchr1_dataset.py --local_dir $HOME/data/searchR1 --split test
 # Run all non-SGLang tests
 # TODO: enable megatron when tests and dependencies are fixed
-uv run --directory . --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci -m "not (sglang or integrations or megatron)"
+uv run --env-file .env --directory . --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci -m "not (sglang or integrations or megatron)"
 
 # Run tests for "integrations" folder
 if add_integrations=$(uv add --active wordle --index https://hub.primeintellect.ai/will/simple/ 2>&1); then
     echo "Running integration tests"
     uv run --isolated --with verifiers@git+https://github.com/PrimeIntellect-ai/verifiers.git@15f68 -- python integrations/verifiers/prepare_dataset.py --env_id will/wordle
-    uv run --directory . --isolated --extra dev --extra vllm --with verifiers@git+https://github.com/PrimeIntellect-ai/verifiers.git@15f68 pytest -s tests/gpu/gpu_ci/ -m "integrations"
+    uv run  --env-file .env  --directory . --isolated --extra dev --extra vllm --with verifiers@git+https://github.com/PrimeIntellect-ai/verifiers.git@15f68 pytest -s tests/gpu/gpu_ci/ -m "integrations"
 else 
     echo "Skipping integrations tests. Failed to execute uv add command"
     echo "$add_integrations"
 fi
 
 # Run all SGLang tests
-uv run --directory . --isolated --extra dev --extra sglang pytest -s tests/gpu/gpu_ci -m "sglang"
+uv run  --env-file .env  --directory . --isolated --extra dev --extra sglang pytest -s tests/gpu/gpu_ci -m "sglang"
 
 # Run tests for vllm 0.9.2 
 # TODO (sumanthrh): We should have a better way to override without pinning a flash-attn wheel
-uv run --isolated --extra vllm --extra dev \
+uv run  --env-file .env  --isolated --extra vllm --extra dev \
     --with vllm==0.9.2 \
     --with transformers==4.53.0 \
     --with torch==2.7.0 \
