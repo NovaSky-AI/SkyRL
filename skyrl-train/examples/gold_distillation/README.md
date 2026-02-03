@@ -1,6 +1,6 @@
 # GOLD: Cross-Tokenizer On-Policy Distillation
 
-This folder contains scripts for running **GOLD (General On-policy Logit Distillation)** on SkyRL, enabling distillation between models with different tokenizers (e.g., Qwen → Llama).
+This folder contains scripts for running **GOLD (General On-policy Logit Distillation)** on SkyRL, enabling distillation between models with different tokenizers (e.g., Qwen and Llama).
 
 GOLD extends standard on-policy distillation to support student-teacher pairs with **different tokenizers** using ULD (Universal Logit Distillation), which aligns token spans and compares sorted probability distributions.
 
