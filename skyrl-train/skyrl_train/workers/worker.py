@@ -713,18 +713,15 @@ class PolicyWorkerBase(Worker):
         }
         return grad_metrics
 
-    def _compute_snr(self, start_clip: int = 10) -> float:
+    def _compute_snr(self) -> float:
         """
         Compute gradient Signal-to-Noise Ratio across all parameters.
 
         SNR = |E[∇θ]| / std(∇θ) measures consistency of gradient direction.
         High SNR = gradients point consistently in same direction across steps.
         Low SNR = noisy/inconsistent gradient directions.
-        ---
-        Args:
-            1. start_clip: Minimum number of steps before computing SNR.
         """
-        if self._grad_stats["count"] < start_clip:
+        if self._grad_stats["count"] <= 1:
             return 0.0
 
         snr_values = []

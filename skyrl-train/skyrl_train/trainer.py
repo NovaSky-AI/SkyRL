@@ -1063,11 +1063,6 @@ class RayPPOTrainer:
         Returns:
             Dict of reduced metrics from training
         """
-        # Reset gradient stats at start of each training step for per-step metrics
-        # (histograms are preserved to accumulate across the training run)
-        if self.cfg.trainer.policy.track_extra_gradient_metrics:
-            self.dispatch.reset_gradient_stats(model)
-
         # Compute mini batch size from config (algorithm-level concept)
         n_samples = self.cfg.generator.n_samples_per_prompt
         if model == "policy":
