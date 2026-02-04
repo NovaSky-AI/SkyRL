@@ -678,6 +678,9 @@ class PolicyWorkerBase(Worker):
             if param.grad is None:
                 continue
             grad = param.grad.detach()
+            # Handle DTensor (FSDP2) - convert to regular tensor first
+            if hasattr(grad, "full_tensor"):
+                grad = grad.full_tensor()
 
             # Initialize on first step
             if name not in self._grad_stats["mean"]:
