@@ -9,6 +9,23 @@ import jax.numpy as jnp
 from tx.utils.generator import KVCache
 
 
+class ArrayRef(nnx.Variable):
+    """A Variable providing a view into an indexed slice of a parent Variable."""
+
+    def __init__(self, parent: nnx.Variable, idx: int):
+        super().__init__(parent[idx])
+        self.set_metadata("_parent", parent)
+        self.set_metadata("_idx", idx)
+
+    def __getitem__(self, key):
+        parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
+        return parent[idx] if key is Ellipsis else parent[idx][key]
+
+    @property
+    def shape(self):
+        return self.get_metadata("_parent")[self.get_metadata("_idx")].shape
+
+
 class StackedDecoderLayers(nnx.Module):
     """Decoder layers with stacked weights created via nnx.vmap.
 
@@ -36,11 +53,15 @@ class StackedDecoderLayers(nnx.Module):
         return self.num_layers
 
     def __getitem__(self, index: int) -> nnx.Module:
-        """Get individual layer by index (for testing/weight loading)."""
+        """Get view into layer at index (stays synced with stacked state)."""
         if index < 0 or index >= self.num_layers:
             raise IndexError(f"Layer index {index} out of range [0, {self.num_layers})")
         graphdef, state = nnx.split(self._stacked)
-        layer_state = jax.tree.map(lambda x: x[index], state)
+        layer_state = jax.tree.map(
+            lambda x: ArrayRef(x, index),
+            state,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
         return nnx.merge(graphdef, layer_state)
 
     def __iter__(self):
@@ -59,7 +80,7 @@ class StackedDecoderLayers(nnx.Module):
         graphdef, state = nnx.split(self._stacked)
         _, layer_state = nnx.split(layer)
         new_state = jax.tree.map(
-            lambda s, lv: s.replace(s[...].at[index].set(lv[...])),
+            lambda s, lv: s.replace(s[...].at[index].set(lv.get_raw_value())),
             state,
             layer_state,
             is_leaf=lambda x: isinstance(x, nnx.Variable),
