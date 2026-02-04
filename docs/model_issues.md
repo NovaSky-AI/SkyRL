@@ -10,6 +10,70 @@ Analysis of eval trajectories from `s3://skyrl-trajectories/evals/fleet_tool_use
 
 ## Changelog
 
+### v0.2.3 (2026-01-29) - Run `eaqz4o21` Analysis
+
+**Run:** [WandB](https://wandb.ai/thefleet/fleet-task-grpo/runs/eaqz4o21) | Step 69 (running)
+
+#### Eval Performance (Held-out Tasks)
+
+- **Ckpt 0**: Baseline pass@3 before any training (step 0)
+- **Best**: Highest pass@3 achieved during training
+- **pass@3**: % of tasks where at least 1 of 3 rollouts succeeded
+
+| Env | Samples | Avg Turns | Ckpt 0 | Best | Best Step | Δ |
+|-----|---------|-----------|--------|------|-----------|---|
+| hubspot | 4 | 12.8 | 100.0% | 100.0% | 0 | +0.0% |
+| outlook | 4 | 12.8 | 100.0% | 100.0% | 0 | +0.0% |
+| reddit | 8 | 6.9 | 66.7% | 76.2% | 30 | +9.5% |
+| github | 12 | 11.0 | 46.7% | 70.0% | 30 | **+23.3%** |
+| booking | 4 | 8.8 | 53.8% | 61.5% | 60 | +7.7% |
+| fira | 4 | 7.5 | 40.0% | 60.0% | 20 | +20.0% |
+| zillow | 4 | 7.2 | 50.0% | 50.0% | 0 | +0.0% |
+| ticketmaster | 4 | 8.5 | 3.6% | 7.1% | 10 | +3.6% |
+| **OVERALL** | - | - | 43.1% | **49.1%** | 30 | +6.0% |
+
+#### GRPO Signal Analysis (Training)
+
+- **Steps**: Number of training steps where this env was sampled
+- **Signal**: Steps with within-prompt variance (some rollouts pass, some fail → GRPO can learn)
+- **No Signal**: Steps where all 4 rollouts had same result (all pass or all fail → no gradient)
+- **% Signal**: Fraction of steps that provide learning signal
+- **Avg Raw Reward**: Mean success rate per rollout (e.g., 33.6% = ~1.3/4 rollouts succeed on average)
+
+| Env | Steps | Signal | No Signal | % Signal | Avg Raw Reward |
+|-----|-------|--------|-----------|----------|----------------|
+| **github** | 74 | 61 | 13 | **82.4%** | 33.6% |
+| **fira** | 5 | 5 | 0 | **100.0%** | 65.0% |
+| hubspot | 2 | 1 | 1 | 50.0% | 75.0% |
+| booking | 59 | 29 | 30 | 49.2% | 28.2% |
+| reddit | 16 | 7 | 9 | 43.8% | 62.5% |
+| zillow | 3 | 1 | 2 | 33.3% | 16.7% |
+| outlook | 5 | 1 | 4 | 20.0% | 5.0% |
+| **ticketmaster** | 16 | 1 | 15 | **6.2%** | 4.7% |
+
+- **Signal** = within-prompt variance exists (not all 0/4 or all 4/4 rollouts same result)
+- **Avg Raw Reward** = mean success rate per rollout across all steps
+
+#### Error Modes (Step 10 Eval Traces)
+
+| Env | Fail Rate | Top Errors |
+|-----|-----------|------------|
+| ticketmaster | 98% | Resource not found (27%), Token limit (22%), No tool call (21%) |
+| zillow | 100% | No tool call/stuck (17%) |
+| booking | 65% | Token limit (24%), Date in past (10%) |
+| github | 67% | Resource not found (50%), No tool call (10%) |
+| fira | 67% | API error (70%), No tool call (30%) |
+| reddit | 43% | Token limit (26%), API error (11%) |
+
+#### Key Findings
+
+1. **github** is the best learning source (82% signal, +23% eval improvement)
+2. **ticketmaster** provides almost no signal (6%) - always fails, can't learn
+3. **Token limits** are a major issue: booking (24%), ticketmaster (22%), reddit (26%)
+4. **fira** has 100% signal but only 5 training steps (undersampled)
+
+---
+
 ### v0.2.2 (2025-01-27) - Run `mk6nr5ij` Analysis
 
 **Comparison: Baseline (2.9% success) → Current (43.4% pass@3)**

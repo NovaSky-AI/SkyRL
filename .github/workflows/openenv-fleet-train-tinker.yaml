@@ -38,9 +38,9 @@ on:
         type: string
         default: "4"
       data_version:
-        description: "Dataset version in S3 (e.g., v0.1, v0.2)"
+        description: "Dataset version in S3 (e.g., v0.1, v0.2, v0.3)"
         type: string
-        default: "v0.2"
+        default: "v0.3"
 
 permissions:
   contents: read

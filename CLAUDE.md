@@ -9,8 +9,7 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
 
 ## Project Documentation
 
-- `docs/paper.md` - Blog post notes: dataset evolution, baseline results, issues identified, fixes implemented, future directions
-- `docs/model_issues.md` - Detailed analysis of eval trajectories and model failure modes
+- `docs/experiments.md` - Main experiment log: dataset, method, changelog (v0.2→v0.2.4), analysis, future work
 
 ## Critical Rules - DO NOT VIOLATE
 
