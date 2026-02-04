@@ -78,7 +78,15 @@ class Tracking:
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():
             if logger_name == "wandb":
-                logger_instance.log(data=data, step=step, commit=commit)
+                # Convert list metrics to wandb.Histogram for visualization
+                wandb_data = {}
+                for k, v in data.items():
+                    if isinstance(v, list) and len(v) > 0 and all(isinstance(x, (int, float)) for x in v):
+                        # List of numbers → histogram
+                        wandb_data[k] = logger_instance.Histogram(v)
+                    else:
+                        wandb_data[k] = v
+                logger_instance.log(data=wandb_data, step=step, commit=commit)
             else:
                 logger_instance.log(data=data, step=step)
 

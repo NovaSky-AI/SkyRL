@@ -658,7 +658,7 @@ class PolicyWorkerBase(Worker):
         # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
-        # Gradient statistics for cross-step metrics (SNR, bits edited, update diversity)
+        # Gradient statistics for cross-step metrics (SNR, megabytes edited, update diversity)
         self._grad_stats = {
             "mean": {},  # Dict[param_name, Tensor] - running mean per param
             "var_numerator": {},  # Dict[param_name, Tensor] - running M2 for variance.
@@ -668,7 +668,7 @@ class PolicyWorkerBase(Worker):
         return
 
     def _accumulate_gradient_stats(self):
-        """Accumulate gradient statistics for cross-step metrics (SNR, bits edited, update diversity)."""
+        """Accumulate gradient statistics for cross-step metrics (SNR, megabytes edited, update diversity)."""
         self._grad_stats["count"] += 1
         n = self._grad_stats["count"]
 
@@ -707,7 +707,7 @@ class PolicyWorkerBase(Worker):
         """Compute all 3 gradient-based metrics."""
         grad_metrics = {
             "grad:snr": self._compute_snr(),
-            "grad:bits_edited": self._compute_bits_edited(),
+            "grad:megabytes_edited": self._compute_megabytes_edited(),
             "grad:update_diversity": self._compute_update_diversity(),
         }
         return grad_metrics
@@ -749,12 +749,12 @@ class PolicyWorkerBase(Worker):
 
         return sum(snr_values) / len(snr_values)
 
-    def _compute_bits_edited(self) -> int:
+    def _compute_megabytes_edited(self) -> float:
         """
-        Estimate bits of information edited based on significant gradient updates.
+        Estimate megabytes of information edited based on significant gradient updates.
 
         A gradient is "significant" if |grad| > 5% of |param|.
-        Bits edited = floor(3.6 * number of significant gradients).
+        Megabytes edited = floor(3.6 * number of significant gradients) / (8 * 1024 * 1024).
         """
         if self._grad_stats["count"] == 0:
             return 0
@@ -775,7 +775,7 @@ class PolicyWorkerBase(Worker):
 
         # 3.6 bits per significant gradient update
         # source: http://arxiv.org/abs/2505.24832
-        return int(3.6 * significant_count)  # int() as an approximate for floor.
+        return (3.6 * significant_count) / (8 * 1024 * 1024)  # conversion bits -> megabytes.
 
     def _compute_update_diversity(self) -> list[float]:
         """
