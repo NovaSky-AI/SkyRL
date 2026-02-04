@@ -164,6 +164,10 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     unique examples.
 
     Rewards can be either per-trajectory or per-token, and metrics are computed correspondingly.
+
+    Note: For per-group metrics (e.g., per-environment), use the shared functions in
+    skyrl_train.metrics.reward_metrics which provide consistent metric calculation
+    across SkyRL trainer and Tinker integration.
     """
     rewards: Union[List[float], List[List[float]]] = generator_output["rewards"]
     if not len(rewards):

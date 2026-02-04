@@ -9,7 +9,6 @@ from skyrl_train.utils import Timer
 
 from skyrl_train.generators.utils import (
     concatenate_generator_outputs,
-    get_metrics_from_generator_output,
     prepare_generator_input,
 )
 from skyrl_train.generators.base import (
@@ -21,6 +20,7 @@ from skyrl_train.utils.trainer_utils import (
     dump_per_dataset_eval_results,
     validate_generator_output,
 )
+from skyrl_train.metrics import compute_reward_metrics
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.logging_utils import log_example
 
@@ -91,12 +91,18 @@ async def evaluate(
         concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
     )
 
-    # 3. Calculate overall metrics across all datasets
-    overall_metrics = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
+    # 3. Calculate overall metrics across all datasets using shared module
+    overall_metrics = compute_reward_metrics(
+        rewards=concat_generator_outputs["rewards"],
+        uids=concat_uids,
+        n_samples_per_prompt=cfg.generator.eval_n_samples_per_prompt,
+    )
     eval_metrics.update(
         {
-            "eval/all/avg_score": overall_metrics["avg_score"],
-            f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics["pass_at_n"],
+            f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics[
+                f"pass_at_{cfg.generator.eval_n_samples_per_prompt}"
+            ],
+            "eval/all/variance_per_prompt": overall_metrics["variance_per_prompt"],
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
     )
@@ -222,12 +228,18 @@ async def evaluate_step_wise(
     eval_metrics = calculate_per_dataset_metrics(
         generator_output_last_step, uids_last_step, data_sources_last_step, cfg.generator.eval_n_samples_per_prompt
     )
-    # 3. Calculate overall metrics across all datasets
-    overall_metrics = get_metrics_from_generator_output(generator_output_last_step, uids_last_step)
+    # 3. Calculate overall metrics across all datasets using shared module
+    overall_metrics = compute_reward_metrics(
+        rewards=generator_output_last_step["rewards"],
+        uids=uids_last_step,
+        n_samples_per_prompt=cfg.generator.eval_n_samples_per_prompt,
+    )
     eval_metrics.update(
         {
-            "eval/all/avg_score": overall_metrics["avg_score"],
-            f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics["pass_at_n"],
+            f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics[
+                f"pass_at_{cfg.generator.eval_n_samples_per_prompt}"
+            ],
+            "eval/all/variance_per_prompt": overall_metrics["variance_per_prompt"],
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
     )

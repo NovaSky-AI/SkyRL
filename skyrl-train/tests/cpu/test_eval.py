@@ -96,12 +96,15 @@ async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     )
 
     expected_metrics = {
-        "eval/dataset_a/avg_score": 1.0,
         "eval/dataset_a/pass_at_1": 1.0,
-        "eval/dataset_b/avg_score": 0.0,
+        "eval/dataset_a/variance_per_prompt": 0.0,  # single sample per uid
+        "eval/dataset_a/mean_positive_reward": 1.0,
         "eval/dataset_b/pass_at_1": 0.0,
-        "eval/all/avg_score": 0.5,
+        "eval/dataset_b/variance_per_prompt": 0.0,  # single sample per uid
+        "eval/dataset_b/mean_positive_reward": 0.0,
         "eval/all/pass_at_1": 0.5,
+        "eval/all/variance_per_prompt": 0.0,  # single sample per uid
+        "eval/all/mean_positive_reward": 1.0,
     }
 
     for key, expected_value in expected_metrics.items():

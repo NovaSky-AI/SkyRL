@@ -29,15 +29,14 @@ Architecture:
 
 Metrics (matching SkyRL):
     - reward/avg_pass_at_{n}: Pass@k across all prompts
-    - reward/avg_raw_reward: Average raw reward
+    - reward/variance_per_prompt: Mean within-prompt reward variance (GRPO learning signal)
     - reward/{env_key}/pass_at_{n}: Per-environment pass@k
-    - reward/{env_key}/avg_score: Per-environment average reward
+    - reward/{env_key}/variance_per_prompt: Per-environment variance (learning signal)
     - eval/all/pass_at_{n}: Evaluation pass@k
     - eval/{env_key}/pass_at_{n}: Per-environment eval pass@k
 """
 
 import asyncio
-import json
 import logging
 import os
 import random
@@ -65,6 +64,14 @@ from integrations.fleet.env import FleetTaskEnv
 
 # Import SkyRL's overlong filtering for parity
 from skyrl_train.generators.utils import apply_overlong_filtering
+
+# Import shared metrics module for consistent metric calculation with SkyRL trainer
+from skyrl_train.metrics.reward_metrics import (
+    compute_pass_at_n as _compute_pass_at_n,
+    compute_reward_metrics,
+    compute_per_group_metrics,
+    sanitize_metric_key,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -177,44 +184,37 @@ def compute_advantages_grpo(
 
 def compute_pass_at_n(rollouts: List[Dict[str, Any]], n_samples_per_prompt: int) -> float:
     """
-    Compute pass@n metric matching SkyRL's implementation.
+    Compute pass@n metric using the shared metrics module.
 
     For each unique prompt (task_key), if ANY of the n trajectories has reward > 0,
     that counts as a "pass".
+
+    This function is a thin wrapper around the shared compute_pass_at_n for backward
+    compatibility with the rollout dict format.
     """
-    uid_to_rewards = defaultdict(list)
-    for r in rollouts:
-        uid = r.get("task_key", "unknown")
-        uid_to_rewards[uid].append(r.get("reward", 0.0))
-
-    if not uid_to_rewards:
-        return 0.0
-
-    # Count prompts where at least one trajectory passed
-    passed = sum(1 for rewards in uid_to_rewards.values() if any(r > 0 for r in rewards))
-    return passed / len(uid_to_rewards)
+    rewards = [r.get("reward", 0.0) for r in rollouts]
+    uids = [r.get("task_key", "unknown") for r in rollouts]
+    return _compute_pass_at_n(rewards, uids)
 
 
 def compute_per_env_metrics(rollouts: List[Dict[str, Any]], n_samples_per_prompt: int) -> Dict[str, float]:
-    """Compute per-environment metrics matching SkyRL's pattern."""
-    env_to_rollouts = defaultdict(list)
-    for r in rollouts:
-        env_key = r.get("env_key", "unknown")
-        env_to_rollouts[env_key].append(r)
+    """
+    Compute per-environment metrics using the shared metrics module.
 
-    metrics = {}
-    for env_key, env_rollouts in env_to_rollouts.items():
-        rewards = [r.get("reward", 0.0) for r in env_rollouts]
-        pass_at_n = compute_pass_at_n(env_rollouts, n_samples_per_prompt)
-        avg_score = np.mean(rewards) if rewards else 0.0
-        mean_positive = np.mean([r for r in rewards if r > 0]) if any(r > 0 for r in rewards) else 0.0
+    This function is a thin wrapper around the shared compute_per_group_metrics for
+    backward compatibility with the rollout dict format.
+    """
+    rewards = [r.get("reward", 0.0) for r in rollouts]
+    uids = [r.get("task_key", "unknown") for r in rollouts]
+    env_keys = [r.get("env_key", "unknown") for r in rollouts]
 
-        sanitized_env = env_key.replace("/", "_")
-        metrics[f"reward/{sanitized_env}/pass_at_{n_samples_per_prompt}"] = pass_at_n
-        metrics[f"reward/{sanitized_env}/avg_score"] = avg_score
-        metrics[f"reward/{sanitized_env}/mean_positive_reward"] = mean_positive
-
-    return metrics
+    return compute_per_group_metrics(
+        rewards=rewards,
+        uids=uids,
+        groups=env_keys,
+        n_samples_per_prompt=n_samples_per_prompt,
+        prefix="reward",
+    )
 
 
 def compute_rollout_metrics(
@@ -225,7 +225,7 @@ def compute_rollout_metrics(
     n_samples_per_prompt: int,
 ) -> Dict[str, Any]:
     """
-    Compute all rollout metrics (matching SkyRL's pattern).
+    Compute all rollout metrics using the shared metrics module.
 
     Args:
         rollouts: All rollouts (including failed ones)
@@ -239,26 +239,36 @@ def compute_rollout_metrics(
     """
     metrics = {}
 
-    # Core reward metrics
-    pass_at_n = compute_pass_at_n(valid_rollouts, n_samples_per_prompt)
-    mean_positive = np.mean([r for r in rewards if r > 0]) if any(r > 0 for r in rewards) else 0.0
+    # Extract data for shared module
+    uids = [r.get("task_key", "unknown") for r in valid_rollouts]
+    env_keys = [r.get("env_key", "unknown") for r in valid_rollouts]
 
-    metrics[f"reward/avg_pass_at_{n_samples_per_prompt}"] = pass_at_n
-    metrics["reward/avg_raw_reward"] = np.mean(rewards)
-    metrics["reward/mean_positive_reward"] = mean_positive
+    # Core reward metrics using shared module
+    core_metrics = compute_reward_metrics(rewards, uids, n_samples_per_prompt)
+    metrics[f"reward/avg_pass_at_{n_samples_per_prompt}"] = core_metrics[f"pass_at_{n_samples_per_prompt}"]
+    metrics["reward/variance_per_prompt"] = core_metrics["variance_per_prompt"]
+    metrics["reward/mean_positive_reward"] = core_metrics["mean_positive_reward"]
+
+    # Advantage metrics (Tinker-specific)
     metrics["advantage/mean"] = np.mean(advantages)
     metrics["advantage/std"] = np.std(advantages)
     metrics["rollouts/valid"] = len(valid_rollouts)
     metrics["rollouts/total"] = len(rollouts)
 
-    # Per-environment metrics
-    per_env_metrics = compute_per_env_metrics(valid_rollouts, n_samples_per_prompt)
+    # Per-environment reward metrics using shared module
+    per_env_metrics = compute_per_group_metrics(
+        rewards=rewards,
+        uids=uids,
+        groups=env_keys,
+        n_samples_per_prompt=n_samples_per_prompt,
+        prefix="reward",
+    )
     metrics.update(per_env_metrics)
 
-    # Per-environment rollout stats (turns, tool_calls, duration)
+    # Per-environment rollout stats (turns, tool_calls, duration) - Tinker-specific
     rollout_stats = defaultdict(list)
     for r in valid_rollouts:
-        env_key = r.get("env_key", "unknown").replace("/", "_")
+        env_key = sanitize_metric_key(r.get("env_key", "unknown"))
         rollout_stats[f"rollout/{env_key}/turns"].append(r.get("turns", 0))
         rollout_stats[f"rollout/{env_key}/tool_calls"].append(r.get("tool_calls", 0))
         rollout_stats[f"rollout/{env_key}/duration"].append(r.get("duration", 0.0))
@@ -601,34 +611,6 @@ def collate_fn(batch):
     return batch
 
 
-async def save_checkpoint(
-    training_client: tinker.TrainingClient,
-    name: str,
-    save_path: str,
-    step: int,
-) -> Dict[str, str]:
-    """Save training checkpoint."""
-    state_result = await training_client.save_state_async(name)
-    state_path = (await state_result.result_async()).path
-
-    sampler_result = await training_client.save_weights_for_sampler_async(name)
-    sampler_path = (await sampler_result.result_async()).path
-
-    checkpoint_info = {
-        "name": name,
-        "step": step,
-        "state_path": state_path,
-        "sampler_path": sampler_path,
-    }
-
-    checkpoint_file = os.path.join(save_path, "checkpoints.jsonl")
-    with open(checkpoint_file, "a") as f:
-        f.write(json.dumps(checkpoint_info) + "\n")
-
-    logger.info(f"Saved checkpoint {name}: state={state_path}, sampler={sampler_path}")
-    return checkpoint_info
-
-
 async def main(
     model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct",
     tasks_file: str = None,
@@ -644,37 +626,19 @@ async def main(
     max_input_length: int = 30720,
     max_sequence_length: int = 32768,
     n_samples_per_prompt: int = 4,
-    save_every: int = 0,  # Disabled by default - local index file lost on ephemeral runners
     eval_every: int = 20,
     seed: int = 42,
     wandb_project: str = "fleet-tinker-grpo",
     wandb_name: str = None,
-    resume_from: str = None,
 ):
     """
     Main training loop using Tinker for training/inference and Fleet for environments.
     """
     set_seed(seed)
 
-    # Setup paths
+    # Setup WandB run name
     if wandb_name is None:
         wandb_name = f"{model_name.split('/')[-1]}_{datetime.now().strftime('%m%d_%H%M')}"
-    save_path = os.path.join("./tinker_fleet_output", wandb_name)
-    os.makedirs(save_path, exist_ok=True)
-
-    # Check for resume
-    resume_from_step = 0
-    load_state_path = None
-    checkpoint_file = os.path.join(save_path, "checkpoints.jsonl")
-    if resume_from or os.path.exists(checkpoint_file):
-        if os.path.exists(checkpoint_file):
-            with open(checkpoint_file, "r") as f:
-                checkpoints = [json.loads(line) for line in f]
-            if checkpoints:
-                latest = max(checkpoints, key=lambda x: x["step"])
-                resume_from_step = latest["step"]
-                load_state_path = latest["state_path"]
-                logger.info(f"Resuming from step {resume_from_step}")
 
     # Initialize WandB
     wandb.init(
@@ -714,11 +678,6 @@ async def main(
     service_client = tinker.ServiceClient(**service_client_kwargs)
     training_client = await service_client.create_lora_training_client_async(base_model=model_name, rank=lora_rank)
 
-    if load_state_path:
-        future = await training_client.load_state_async(load_state_path)
-        await future.result_async()
-        logger.info(f"Loaded state from {load_state_path}")
-
     adam_params = types.AdamParams(learning_rate=learning_rate, beta1=0.9, beta2=0.95, eps=1e-8)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -733,29 +692,17 @@ async def main(
         )
 
     steps_per_epoch = (len(train_dataset) + batch_size - 1) // batch_size
-    current_epoch = resume_from_step // steps_per_epoch
+    current_epoch = 0
     train_dataloader = create_dataloader(current_epoch)
     train_iterator = iter(train_dataloader)
 
-    # Skip to resume position
-    batch_offset = resume_from_step % steps_per_epoch
-    for _ in range(batch_offset):
-        try:
-            next(train_iterator)
-        except StopIteration:
-            break
-
     # Training loop
-    pbar = tqdm(range(resume_from_step, max_steps), desc="Training", unit="step")
+    pbar = tqdm(range(max_steps), desc="Training", unit="step")
     for step in pbar:
         step_start = time.time()
         metrics = {"step": step, "epoch": step // steps_per_epoch}
 
-        # Save checkpoint
-        if save_every > 0 and step > 0 and step % save_every == 0:
-            await save_checkpoint(training_client, f"step_{step:06d}", save_path, step)
-
-        # Get sampling weights
+        # Get sampler weights for rollout inference
         sampling_path = training_client.save_weights_for_sampler(name=f"step_{step:06d}").result().path
         sampling_client = service_client.create_sampling_client(model_path=sampling_path)
 
@@ -845,9 +792,9 @@ async def main(
             max_sequence_length=max_sequence_length,
         )
 
+        metrics["rollouts/truncated_overlong"] = truncated_count
         if truncated_count > 0:
             logger.info(f"Step {step}: Truncated {truncated_count} overlong sequences")
-            metrics["rollouts/truncated_overlong"] = truncated_count
 
         if not training_datums:
             logger.warning(f"Step {step}: No valid training sequences after filtering, skipping")
@@ -903,7 +850,6 @@ async def main(
                 eval_per_env = compute_per_env_metrics(eval_rollouts_dicts, 1)
 
                 eval_metrics = {
-                    "eval/all/avg_score": np.mean(eval_rewards),
                     "eval/all/pass_at_1": eval_pass_at_1,
                     "eval/all/mean_positive_reward": (
                         np.mean([r for r in eval_rewards if r > 0]) if any(r > 0 for r in eval_rewards) else 0.0
@@ -916,11 +862,7 @@ async def main(
                     eval_metrics[eval_key] = value
 
                 wandb.log(eval_metrics, step=step, commit=True)
-                logger.info(f"Step {step}: eval pass@1={eval_pass_at_1:.3f}, avg_score={np.mean(eval_rewards):.3f}")
-
-    # Save final checkpoint (only if checkpointing enabled)
-    if save_every > 0:
-        await save_checkpoint(training_client, "final", save_path, max_steps)
+                logger.info(f"Step {step}: eval pass@1={eval_pass_at_1:.3f}, num_samples={len(all_eval_rollouts)}")
 
     wandb.finish()
     logger.info("Training completed!")
@@ -944,12 +886,10 @@ if __name__ == "__main__":
     parser.add_argument("--max-input-length", type=int, default=30720, help="Max context length before ending rollout")
     parser.add_argument("--max-sequence-length", type=int, default=32768, help="Max sequence length for training")
     parser.add_argument("--n-samples-per-prompt", type=int, default=4)
-    parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--eval-every", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb-project", type=str, default="fleet-tinker-grpo")
     parser.add_argument("--wandb-name", type=str, default=None)
-    parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument(
         "--track-extra-gradient-metrics",
         type=bool,
@@ -975,11 +915,9 @@ if __name__ == "__main__":
             max_input_length=args.max_input_length,
             max_sequence_length=args.max_sequence_length,
             n_samples_per_prompt=args.n_samples_per_prompt,
-            save_every=args.save_every,
             eval_every=args.eval_every,
             seed=args.seed,
             wandb_project=args.wandb_project,
             wandb_name=args.wandb_name,
-            resume_from=args.resume_from,
         )
     )

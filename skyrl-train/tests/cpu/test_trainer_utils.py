@@ -240,12 +240,15 @@ def test_calculate_per_dataset_metrics_single_source():
     result = calculate_per_dataset_metrics(generator_outputs, uids, data_sources, 2)
 
     # Verify results - actual computed values
-    # Mean reward: (0.5 + 0.7 + 0.9) / 3 = 0.7
     # Pass@N: all rewards > 0, all unique uids, so 3/3 = 1.0
-    assert "eval/dataset1/avg_score" in result
+    # variance_per_prompt: 0.0 (single sample per uid)
+    # mean_positive_reward: (0.5 + 0.7 + 0.9) / 3 = 0.7
     assert "eval/dataset1/pass_at_2" in result
-    assert result["eval/dataset1/avg_score"] == pytest.approx(0.7)
+    assert "eval/dataset1/variance_per_prompt" in result
+    assert "eval/dataset1/mean_positive_reward" in result
     assert result["eval/dataset1/pass_at_2"] == 1.0
+    assert result["eval/dataset1/variance_per_prompt"] == 0.0  # single sample per uid
+    assert result["eval/dataset1/mean_positive_reward"] == pytest.approx(0.7)
 
 
 def test_calculate_per_dataset_metrics_multiple_sources():
@@ -262,17 +265,21 @@ def test_calculate_per_dataset_metrics_multiple_sources():
     result = calculate_per_dataset_metrics(generator_outputs, uids, data_sources, 2)
 
     # Verify results for both datasets - actual computed values
-    # dataset1: indices 0, 2 -> rewards [0.5, 0.9] -> mean = 0.7, pass@n = 2/2 = 1.0
-    # unknown (None): indices 1, 3 -> rewards [0.7, 0.4] -> mean = 0.55, pass@n = 2/2 = 1.0
-    assert "eval/dataset1/avg_score" in result
+    # dataset1: indices 0, 2 -> rewards [0.5, 0.9] -> mean_positive = 0.7, pass@n = 2/2 = 1.0
+    # unknown (None): indices 1, 3 -> rewards [0.7, 0.4] -> mean_positive = 0.55, pass@n = 2/2 = 1.0
     assert "eval/dataset1/pass_at_2" in result
-    assert "eval/unknown/avg_score" in result
+    assert "eval/dataset1/variance_per_prompt" in result
+    assert "eval/dataset1/mean_positive_reward" in result
     assert "eval/unknown/pass_at_2" in result
+    assert "eval/unknown/variance_per_prompt" in result
+    assert "eval/unknown/mean_positive_reward" in result
 
-    assert result["eval/dataset1/avg_score"] == pytest.approx(0.7)
     assert result["eval/dataset1/pass_at_2"] == 1.0
-    assert result["eval/unknown/avg_score"] == pytest.approx(0.55)
+    assert result["eval/dataset1/variance_per_prompt"] == 0.0  # single sample per uid
+    assert result["eval/dataset1/mean_positive_reward"] == pytest.approx(0.7)
     assert result["eval/unknown/pass_at_2"] == 1.0
+    assert result["eval/unknown/variance_per_prompt"] == 0.0  # single sample per uid
+    assert result["eval/unknown/mean_positive_reward"] == pytest.approx(0.55)
 
 
 @patch("builtins.open", new_callable=mock_open)

@@ -19,7 +19,7 @@ Split Strategy:
 v0.3 Changes:
     - Increased eval_ratio from 2% to 10%
     - Added MAX_EVAL_SAMPLES=30 cap per environment
-    - Lowered MIN_EVAL_SAMPLES from 5 to 1
+    - MIN_EVAL_SAMPLES stays at 5
     - Result: ticketmaster now gets ~22 eval samples for trace analysis
 """
 
@@ -39,7 +39,7 @@ HELD_OUT_ENVS = {
 }
 
 # Minimum number of samples required to create an eval split for an env
-MIN_EVAL_SAMPLES = 1
+MIN_EVAL_SAMPLES = 5
 
 # Maximum number of eval samples per environment (v0.3)
 # Ensures small envs like ticketmaster get eval traces without blowing up eval set size
@@ -113,6 +113,34 @@ def prepare_fleet_dataset(
     if not tasks:
         print("No tasks remaining after filtering. Exiting.")
         return
+
+    # Deduplicate by task_key (keep first occurrence)
+    seen_task_keys: set = set()
+    unique_tasks = []
+    duplicate_count = 0
+    env_duplicate_counts: Dict[str, int] = defaultdict(int)
+
+    for task in tasks:
+        task_key = task.get("key") or task.get("task_key")
+        if not task_key:
+            continue
+        if task_key in seen_task_keys:
+            duplicate_count += 1
+            env_key = task.get("env_key") or task.get("env_id") or "unknown"
+            env_duplicate_counts[env_key] += 1
+        else:
+            seen_task_keys.add(task_key)
+            unique_tasks.append(task)
+
+    if duplicate_count > 0:
+        print(f"\n⚠️  WARNING: Removed {duplicate_count} duplicate task_keys")
+        print("  By environment:")
+        for env, count in sorted(env_duplicate_counts.items(), key=lambda x: -x[1]):
+            print(f"    {env}: {count} duplicates removed")
+        print()
+
+    tasks = unique_tasks
+    print(f"After deduplication: {len(tasks)} unique tasks")
 
     # Get held-out envs for this modality
     held_out_envs = set(HELD_OUT_ENVS.get(modality, []))

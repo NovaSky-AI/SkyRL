@@ -10,8 +10,9 @@ import json
 import torch
 import numpy as np
 from collections import defaultdict
-from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
+from skyrl_train.generators.utils import concatenate_generator_outputs
 from skyrl_train.generators.base import GeneratorOutput
+from skyrl_train.metrics.reward_metrics import compute_per_group_metrics, sanitize_metric_key
 from transformers import AutoTokenizer
 from pathlib import Path
 from skyrl_train.utils.io import io
@@ -188,10 +189,38 @@ def validate_consistency_for_latest_checkpoint(
 
 
 def sanitize_data_source(data_source: str) -> str:
-    """Sanitize data source name for use in file paths."""
+    """Sanitize data source name for use in file paths.
+
+    Note: This function is kept for backward compatibility.
+    For new code, use skyrl_train.metrics.sanitize_metric_key instead.
+    """
     if data_source is None:
         return "unknown"
-    return data_source.replace("/", "_")
+    return sanitize_metric_key(data_source)
+
+
+def _extract_trajectory_rewards(generator_output: GeneratorOutput) -> List[float]:
+    """Extract trajectory-level rewards from generator output.
+
+    Handles both token-level rewards (List[List[float]]) and trajectory-level rewards (List[float]).
+    For token-level rewards, sums the rewards to get a single trajectory reward.
+
+    Args:
+        generator_output: Generator output containing rewards
+
+    Returns:
+        List of trajectory-level rewards
+    """
+    rewards = generator_output["rewards"]
+    if not rewards:
+        return []
+
+    if isinstance(rewards[0], list):
+        # Token-level rewards: sum to get trajectory reward
+        return [float(sum(r)) for r in rewards]
+    else:
+        # Already trajectory-level
+        return [float(r) for r in rewards]
 
 
 def calculate_per_dataset_metrics(
@@ -200,38 +229,19 @@ def calculate_per_dataset_metrics(
     concat_data_sources: List[str],
     n_samples_per_prompt: int,
 ) -> Dict[str, float]:
-    """Calculate metrics per data source."""
-    eval_metrics = {}
+    """Calculate metrics per data source for evaluation.
 
-    # Group indices by data source
-    data_source_indices = {}
-    for i, data_source in enumerate(concat_data_sources):
-        if data_source is None:
-            data_source = "unknown"
-        if data_source not in data_source_indices:
-            data_source_indices[data_source] = []
-        data_source_indices[data_source].append(i)
-
-    # Calculate metrics for each data source
-    for data_source, indices in data_source_indices.items():
-        # Extract subset for this data source
-        subset_generator_output = {
-            key: [value[i] for i in indices]
-            for key, value in concat_generator_outputs.items()
-            if isinstance(value, list)
-        }
-        subset_uids = [concat_uids[i] for i in indices]
-
-        # Calculate metrics for this subset
-        overall_metrics = get_metrics_from_generator_output(subset_generator_output, subset_uids)
-
-        # Add to eval metrics with proper naming
-        sanitized_data_source = sanitize_data_source(data_source)
-        eval_metrics[f"eval/{sanitized_data_source}/avg_score"] = overall_metrics["avg_score"]
-        eval_metrics[f"eval/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = overall_metrics["pass_at_n"]
-        eval_metrics[f"eval/{sanitized_data_source}/mean_positive_reward"] = overall_metrics["mean_positive_reward"]
-
-    return eval_metrics
+    Uses the shared compute_per_group_metrics function for consistent metric calculation
+    across SkyRL trainer and Tinker integration.
+    """
+    rewards = _extract_trajectory_rewards(concat_generator_outputs)
+    return compute_per_group_metrics(
+        rewards=rewards,
+        uids=concat_uids,
+        groups=concat_data_sources,
+        n_samples_per_prompt=n_samples_per_prompt,
+        prefix="eval",
+    )
 
 
 def calculate_per_source_reward_metrics(
@@ -242,37 +252,17 @@ def calculate_per_source_reward_metrics(
 ) -> Dict[str, float]:
     """Calculate reward metrics per data source for training.
 
-    Similar to calculate_per_dataset_metrics but outputs reward/ prefix instead of eval/.
+    Uses the shared compute_per_group_metrics function for consistent metric calculation
+    across SkyRL trainer and Tinker integration.
     """
-    reward_metrics = {}
-
-    # Group indices by data source
-    data_source_indices = {}
-    for i, data_source in enumerate(data_sources):
-        if data_source is None:
-            data_source = "unknown"
-        if data_source not in data_source_indices:
-            data_source_indices[data_source] = []
-        data_source_indices[data_source].append(i)
-
-    # Calculate metrics for each data source
-    for data_source, indices in data_source_indices.items():
-        # Extract subset for this data source
-        subset_generator_output = {
-            key: [value[i] for i in indices] for key, value in generator_outputs.items() if isinstance(value, list)
-        }
-        subset_uids = [uids[i] for i in indices]
-
-        # Calculate metrics for this subset
-        overall_metrics = get_metrics_from_generator_output(subset_generator_output, subset_uids)
-
-        # Add to reward metrics with proper naming
-        sanitized_data_source = sanitize_data_source(data_source)
-        reward_metrics[f"reward/{sanitized_data_source}/avg_score"] = overall_metrics["avg_score"]
-        reward_metrics[f"reward/{sanitized_data_source}/pass_at_{n_samples_per_prompt}"] = overall_metrics["pass_at_n"]
-        reward_metrics[f"reward/{sanitized_data_source}/mean_positive_reward"] = overall_metrics["mean_positive_reward"]
-
-    return reward_metrics
+    rewards = _extract_trajectory_rewards(generator_outputs)
+    return compute_per_group_metrics(
+        rewards=rewards,
+        uids=uids,
+        groups=data_sources,
+        n_samples_per_prompt=n_samples_per_prompt,
+        prefix="reward",
+    )
 
 
 def dump_per_dataset_eval_results(
