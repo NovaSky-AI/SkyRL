@@ -16,6 +16,8 @@ from skyrl_train.inference_servers.server_pool import ServerActorPool
 
 logger = logging.getLogger(__name__)
 
+COLOCATED_ACTOR_CPU_FRACTION = 0.2
+
 
 class ServerGroup:
     """
@@ -114,7 +116,7 @@ class ServerGroup:
         )
         return ray_wrapped_actor_cls.options(
             num_gpus=0,  # GPU allocation managed by placement group
-            num_cpus=0.2,
+            num_cpus=COLOCATED_ACTOR_CPU_FRACTION,
             scheduling_strategy=PlacementGroupSchedulingStrategy(
                 placement_group=pg,
                 placement_group_capture_child_tasks=True,
