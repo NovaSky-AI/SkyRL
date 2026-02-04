@@ -59,7 +59,7 @@ class StackedDecoderLayers(nnx.Module):
         graphdef, state = nnx.split(self._stacked)
         _, layer_state = nnx.split(layer)
         new_state = jax.tree.map(
-            lambda s, l: s.replace(s[...].at[index].set(l[...])),
+            lambda s, lv: s.replace(s[...].at[index].set(lv[...])),
             state,
             layer_state,
             is_leaf=lambda x: isinstance(x, nnx.Variable),
