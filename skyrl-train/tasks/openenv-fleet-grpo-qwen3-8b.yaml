@@ -7,6 +7,10 @@
 #
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
 # GPUs: B200:2 (preferred) or H100:4 (fallback)
+#
+# v0.3 OOM fix: gpu_memory_utilization reduced from 0.8 to 0.7
+# v0.3 has 3x more data including google-maps (4.7K tasks) with longer tool schemas
+# This leaves more headroom for training activations before vLLM wake_up
 
 name: fleet-task-grpo-qwen3-8b
 
@@ -188,7 +192,7 @@ run: |
     generator.use_conversation_multi_turn=true \
     generator.n_samples_per_prompt=4 \
     generator.eval_n_samples_per_prompt=3 \
-    generator.gpu_memory_utilization=0.8 \
+    generator.gpu_memory_utilization=0.7 \
     trainer.logger="$LOGGER" \
     trainer.project_name="fleet-task-grpo" \
     trainer.run_name="fleet_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
