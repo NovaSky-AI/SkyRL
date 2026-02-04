@@ -1,5 +1,7 @@
 from argparse import Namespace
-from skyrl_train.config import get_config_as_dict
+from typing import Union
+from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig, get_config_as_dict
 
 
 # TODO: Add a test for validation
