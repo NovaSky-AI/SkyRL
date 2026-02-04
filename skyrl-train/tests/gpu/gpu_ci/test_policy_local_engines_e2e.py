@@ -37,24 +37,19 @@ def get_test_actor_config() -> DictConfig:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy", "backend", "tp_size", "use_new_inference"),
+    ("colocate_all", "weight_sync_backend", "strategy", "backend", "tp_size"),
     [
-        pytest.param(False, "nccl", "fsdp", "vllm", 2, False, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp", "vllm", 2, False, marks=pytest.mark.vllm),
-        pytest.param(False, "gloo", "fsdp", "vllm", 2, False, marks=pytest.mark.vllm),
-        pytest.param(True, "gloo", "fsdp", "vllm", 2, False, marks=pytest.mark.vllm),
-        pytest.param(False, "nccl", "fsdp2", "vllm", 2, False, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp2", "vllm", 2, False, marks=pytest.mark.vllm),
+        pytest.param(False, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
+        pytest.param(True, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
+        pytest.param(False, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
+        pytest.param(True, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
+        pytest.param(False, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
+        pytest.param(True, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
         # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param(False, "nccl", "fsdp2", "sglang", 1, False, marks=pytest.mark.sglang),
-        pytest.param(True, "nccl", "fsdp2", "sglang", 1, False, marks=pytest.mark.sglang),
-        pytest.param(False, "gloo", "fsdp", "sglang", 1, False, marks=pytest.mark.sglang),
-        pytest.param(True, "gloo", "fsdp", "sglang", 1, False, marks=pytest.mark.sglang),
-        # New HTTP server pathway
-        pytest.param(False, "nccl", "fsdp", "vllm", 2, True, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp", "vllm", 2, True, marks=pytest.mark.vllm),
-        pytest.param(False, "nccl", "fsdp2", "vllm", 2, True, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp2", "vllm", 2, True, marks=pytest.mark.vllm),
+        pytest.param(False, "nccl", "fsdp2", "sglang", 1, marks=pytest.mark.sglang),
+        pytest.param(True, "nccl", "fsdp2", "sglang", 1, marks=pytest.mark.sglang),
+        pytest.param(False, "gloo", "fsdp", "sglang", 1, marks=pytest.mark.sglang),
+        pytest.param(True, "gloo", "fsdp", "sglang", 1, marks=pytest.mark.sglang),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -67,15 +62,9 @@ def get_test_actor_config() -> DictConfig:
         "colocate_nccl_fsdp2_sglang",
         "no_colocate_gloo_fsdp_sglang",
         "colocate_gloo_fsdp_sglang",
-        "no_colocate_nccl_fsdp_vllm_new_http_inference",
-        "colocate_nccl_fsdp_vllm_new_http_inference",
-        "no_colocate_nccl_fsdp2_vllm_new_http_inference",
-        "colocate_nccl_fsdp2_vllm_new_http_inference",
     ],
 )
-def test_policy_local_engines_e2e(
-    ray_init_fixture, colocate_all, weight_sync_backend, strategy, backend, tp_size, use_new_inference
-):
+def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, backend, tp_size):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
@@ -99,7 +88,6 @@ def test_policy_local_engines_e2e(
             colocate_all=cfg.trainer.placement.colocate_all,
             backend=backend,
             sleep_level=2,  # since we explicitly sync weights
-            use_new_inference=use_new_inference,
         )
         policy = init_worker_with_type(
             "policy",
@@ -119,3 +107,7 @@ def test_policy_local_engines_e2e(
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
         ray.shutdown()
+        if "router" in locals() and router is not None:
+            router.shutdown()
+        if "server_group" in locals() and server_group is not None:
+            server_group.shutdown()

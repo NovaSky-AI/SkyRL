@@ -27,7 +27,7 @@ from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ra
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT, _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 from skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl_train.inference_servers.router import InferenceRouter
@@ -367,14 +367,20 @@ def init_inference_engines(
     enable_lora=False,
     max_num_seqs=1024,
     engine_init_kwargs={},
-    use_new_inference=False,
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
     if not ray.is_initialized():
         initialize_ray(cfg)
     if colocate_all:
-        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
+        pg = placement_group(
+            [{"GPU": 1, "CPU": 1}]
+            * tp_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+            * num_inference_engines,
+            strategy="PACK",
+        )
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         sleep = True
     else:
@@ -389,11 +395,11 @@ def init_inference_engines(
     router = None
     server_group = None
 
-    if use_new_inference:
+    if _SKYRL_USE_NEW_INFERENCE:
         # init with internal router and servers
         server_group = ServerGroup(
             cli_args=build_vllm_cli_args(cfg),
-            num_servers=num_inference_engines,
+            num_servers=num_inference_engines * cfg.generator.inference_engine_data_parallel_size,
             placement_group=pg if colocate_all else None,
             enable_dp=cfg.generator.inference_engine_data_parallel_size > 1,
         )

@@ -1,6 +1,7 @@
 """Base data structures for weight synchronization."""
 
-from dataclasses import dataclass
+from typing import Any, Dict
+from dataclasses import dataclass, asdict
 from functools import cached_property
 from typing import List
 
@@ -28,6 +29,15 @@ class WeightUpdateRequest:
 
     def __len__(self) -> int:
         return len(self.names)
+
+    def to_json_dict(self) -> Dict[str, Any]:
+        """Serialize the request to JSON."""
+        return asdict(self)
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, Any]) -> "WeightUpdateRequest":
+        """Deserialize the request from JSON."""
+        return cls(**data)
 
 
 class LoraLoadRequest(WeightUpdateRequest):

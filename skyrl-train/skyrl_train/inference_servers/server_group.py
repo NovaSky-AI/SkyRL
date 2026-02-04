@@ -115,7 +115,11 @@ class ServerGroup:
         return ray_wrapped_actor_cls.options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=0.2,
-            scheduling_strategy=PlacementGroupSchedulingStrategy(pg, start_bundle_idx),
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=pg,
+                placement_group_capture_child_tasks=True,
+                placement_group_bundle_index=start_bundle_idx,
+            ),
         )
 
     def _create_actors(self) -> List[Any]:

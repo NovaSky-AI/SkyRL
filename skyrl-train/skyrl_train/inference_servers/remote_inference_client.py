@@ -78,7 +78,7 @@ import aiohttp
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 
 if TYPE_CHECKING:
-    from skyrl_train.weight_sync import BroadcastInitInfo, BroadcastWeightUpdateRequest
+    from skyrl_train.weight_sync import BroadcastInitInfo, WeightUpdateRequest
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +143,9 @@ class RemoteInferenceClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create the aiohttp session."""
+        # Re-use the existing session object if it is not closed.
+        # Note that we also create a new session object if the event loop has changed, since
+        # aiohttp.ClientSession is tied to the event loop.
         current_loop = asyncio.get_event_loop()
         if self._session is None or self._session.closed or self._session.loop != current_loop:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
@@ -434,12 +437,10 @@ class RemoteInferenceClient:
 
         async def call_server(server_url: str) -> tuple:
             url = f"{server_url}{endpoint}"
-            try:
-                async with session.request(method, url, json=json) as resp:
-                    body = await resp.json() if resp.content_length else None
-                    return server_url, {"status": resp.status, "body": body}
-            except Exception as e:
-                return server_url, {"status": 500, "error": str(e)}
+            async with session.request(method, url, json=json) as resp:
+                resp.raise_for_status()
+                body = await resp.json() if resp.content_length else None
+                return server_url, {"status": resp.status, "body": body}
 
         results = await asyncio.gather(*[call_server(url) for url in self.server_urls])
         return {url: resp for url, resp in results}
@@ -547,11 +548,12 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
+        print(f"Initializing weight sync process group on all backends: {asdict(init_info)}")
         return await self._call_all_servers("/init_weight_transfer", asdict(init_info))
 
     async def update_named_weights(
         self,
-        request: "BroadcastWeightUpdateRequest",
+        request: "WeightUpdateRequest",
     ) -> Dict[str, Any]:
         """
         Update weights on all backends.
@@ -562,7 +564,7 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/update_weights", asdict(request))
+        return await self._call_all_servers("/update_weights", request.to_json_dict())
 
     async def finalize_weight_update(self) -> Dict[str, Any]:
         """

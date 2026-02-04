@@ -9,6 +9,7 @@ import os
 import pickle
 import time
 from argparse import Namespace
+from requests.exceptions import HTTPError
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -315,10 +316,20 @@ class VLLMServerActor(ServerActorProtocol):
         @app.post("/init_weight_transfer")
         async def _init_weight_transfer(request: Request):
             """Initialize weight sync process group."""
-            from skyrl_train.weight_sync import BroadcastInitInfo
+            from skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcInitInfo
 
             data = await request.json()
-            init_info = BroadcastInitInfo(**data).for_engine(
+            # simple way to figure out the strategy type: try to load with BroadcastInitInfo else fallback to CudaIpcInitInfo
+            # Can be derived from vllm cli args once https://github.com/vllm-project/vllm/pull/31943/ is merged.
+            try:
+                init_info = BroadcastInitInfo(**data)
+            except Exception:
+                try:
+                    init_info = CudaIpcInitInfo(**data)
+                except Exception:
+                    raise HTTPError(status_code=400, detail="Received invalid init info")
+
+            init_info = init_info.for_engine(
                 engine_index=self._server_idx,
                 tp_size=self._cli_args.tensor_parallel_size,
                 pp_size=self._cli_args.pipeline_parallel_size,
@@ -334,10 +345,17 @@ class VLLMServerActor(ServerActorProtocol):
         @app.post("/update_weights")
         async def _update_weights(request: Request):
             """Update model weights via NCCL broadcast."""
-            from skyrl_train.weight_sync import BroadcastWeightUpdateRequest
+            from skyrl_train.weight_sync import BroadcastWeightUpdateRequest, CudaIpcWeightUpdateRequest
 
             data = await request.json()
-            weight_request = BroadcastWeightUpdateRequest(**data)
+            try:
+                weight_request = BroadcastWeightUpdateRequest.from_json_dict(data)
+            except Exception:
+                try:
+                    weight_request = CudaIpcWeightUpdateRequest.from_json_dict(data)
+                except Exception:
+                    raise HTTPError(status_code=400, detail="Received invalid weight update request")
+
             pickled_request = pickle.dumps(weight_request)
 
             await engine.collective_rpc(
@@ -356,6 +374,12 @@ class VLLMServerActor(ServerActorProtocol):
             details.
             """
             # No-op for now - placeholder for future post-processing
+            return {"status": "ok"}
+
+        @app.post("/reset_prefix_cache")
+        async def _reset_prefix_cache(request: Request):
+            """Reset the prefix cache."""
+            await engine.reset_prefix_cache()
             return {"status": "ok"}
 
     async def shutdown(self) -> None:
