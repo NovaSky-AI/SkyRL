@@ -579,3 +579,5 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
         )
+
+Glm4MoeLiteForCausalLM = DeepseekV3ForCausalLM
