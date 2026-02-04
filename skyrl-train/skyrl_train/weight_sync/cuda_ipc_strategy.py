@@ -249,9 +249,10 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
         cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
     ) -> CudaIpcInitInfo:
         """Create init info with all config-derived args."""
+        ie_cfg = cfg.generator.inference_engine
         return CudaIpcInitInfo(
-            model_dtype_str=cfg.generator.model_dtype,
-            override_existing_receiver=cfg.generator.override_existing_update_group == "enable",
+            model_dtype_str=ie_cfg.model_dtype,
+            override_existing_receiver=ie_cfg.override_existing_update_group == "enable",
         )
 
     @staticmethod

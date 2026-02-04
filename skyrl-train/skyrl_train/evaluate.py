@@ -64,7 +64,7 @@ async def evaluate(
         generator_input, uids = prepare_generator_input(
             prompts,
             cfg.generator.eval_n_samples_per_prompt,
-            get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
+            get_sampling_params_for_backend(cfg.generator.inference_engine.backend, sampling_params),
             cfg.environment.env_class,
             "eval",
             global_step,
@@ -164,7 +164,7 @@ async def evaluate_step_wise(
         generator_input, uids = prepare_generator_input(
             prompts,
             cfg.generator.eval_n_samples_per_prompt,
-            get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
+            get_sampling_params_for_backend(cfg.generator.inference_engine.backend, sampling_params),
             cfg.environment.env_class,
             "eval",
             global_step,

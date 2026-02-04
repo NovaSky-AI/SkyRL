@@ -227,12 +227,14 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             world_size = inference_world_size + 1  # +1 for trainer rank 0
         else:
             # Legacy path: calculate from config
-            num_inference_engines = cfg.generator.num_inference_engines
-            tensor_parallel_size = cfg.generator.inference_engine_tensor_parallel_size
-            pipeline_parallel_size = cfg.generator.inference_engine_pipeline_parallel_size
-            data_parallel_size = cfg.generator.inference_engine_data_parallel_size
+            ie_cfg = cfg.generator.inference_engine
+            num_inference_engines = ie_cfg.num_engines
+            tensor_parallel_size = ie_cfg.tensor_parallel_size
+            pipeline_parallel_size = ie_cfg.pipeline_parallel_size
+            data_parallel_size = ie_cfg.data_parallel_size
             world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
 
+        ie_cfg = cfg.generator.inference_engine
         master_addr = ray._private.services.get_node_ip_address()
         with socket.socket() as sock:
             sock.bind(("", 0))
@@ -244,9 +246,9 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             rank_offset=1,
             world_size=world_size,
             group_name="skyrl",
-            backend=cfg.generator.weight_sync_backend,
-            model_dtype_str=cfg.generator.model_dtype,
-            override_existing_receiver=cfg.generator.override_existing_update_group == "enable",
+            backend=ie_cfg.weight_sync_backend,
+            model_dtype_str=ie_cfg.model_dtype,
+            override_existing_receiver=ie_cfg.override_existing_update_group == "enable",
         )
 
     @staticmethod

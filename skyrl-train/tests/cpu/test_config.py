@@ -97,3 +97,11 @@ def test_dtype_resolution():
     assert _resolve_dataclass_type(typing.Union[None, TestConfigSimple]) is TestConfigSimple
 
     assert _resolve_dataclass_type(typing.Annotated[TestConfigSimple, "test"]) is TestConfigSimple
+
+
+def test_cli_overrides():
+    overrides = ["trainer.policy.model.path=path/to/model", "trainer.policy_mini_batch_size=10"]
+    cfg = SkyRLConfig.from_cli_overrides(overrides)
+
+    assert cfg.trainer.policy.model.path == "path/to/model"
+    assert cfg.trainer.policy_mini_batch_size == 10

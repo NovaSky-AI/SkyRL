@@ -501,7 +501,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bridge=self.bridge,
             actor_module=self.actor_module,
             enable_bucketing=self._transfer_strategy_cls is CudaIpcTransferStrategy,
-            bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
+            bucket_size_threshold_GB=self.cfg.generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
         )
 
@@ -654,8 +654,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 param_group["lr"] = learning_rate
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
-        use_prefix_cache = self.cfg.generator.enable_prefix_caching
-        generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
+        ie_cfg = self.cfg.generator.inference_engine
+        use_prefix_cache = ie_cfg.enable_prefix_caching
+        generator_dtype = str_to_torch_dtype(ie_cfg.model_dtype)
         cache_reset_task = None
         if use_prefix_cache and torch.distributed.get_rank() == 0:
             # clear prefix cache

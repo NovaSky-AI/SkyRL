@@ -102,6 +102,7 @@ class TurnOutput:
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
         self,
+        model_path: str,
         generator_cfg: Union[GeneratorConfig, DictConfig],
         skyrl_gym_cfg: Union[SkyRLGymConfig, DictConfig],
         inference_engine_client: InferenceEngineClient,

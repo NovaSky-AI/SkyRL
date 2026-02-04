@@ -49,8 +49,8 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.policy_loss_type="dual_clip" \
-  +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
-  +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
+  +trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \
+  +trainer.algorithm.overlong_buffer_penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.eps_clip_low=$EPS_CLIP_LOW \
   trainer.algorithm.eps_clip_high=$EPS_CLIP_HIGH \
   trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \

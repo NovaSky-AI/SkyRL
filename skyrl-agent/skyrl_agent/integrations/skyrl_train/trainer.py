@@ -166,7 +166,7 @@ def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> 
         batch_size=batch_size,
         collate_fn=dataset.collate_fn,
         # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        num_workers=0 if cfg.generator.inference_engine.enable_http_endpoint else 8,
         drop_last=True if is_train else False,
         sampler=sampler,
     )
@@ -320,7 +320,9 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                     generator_input, uids = prepare_generator_input(
                         rand_prompts,
                         self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        get_sampling_params_for_backend(
+                            self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
+                        ),
                         self.cfg.environment.env_class,
                         "train",
                         self.global_step,
@@ -487,7 +489,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
             generator_input, uids = prepare_generator_input(
                 prompts,
                 cfg.generator.eval_n_samples_per_prompt,
-                get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
+                get_sampling_params_for_backend(cfg.generator.inference_engine.backend, sampling_params),
                 cfg.environment.env_class,
                 "eval",
                 global_step,

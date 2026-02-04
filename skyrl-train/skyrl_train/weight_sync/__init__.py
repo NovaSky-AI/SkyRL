@@ -46,7 +46,7 @@ def get_transfer_strategy_cls(cfg: "Union[SkyRLConfig, DictConfig]") -> Type[Wei
     Returns:
         The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
     """
-    if cfg.generator.weight_sync_backend == "nccl" and cfg.trainer.placement.colocate_all:
+    if cfg.generator.inference_engine.weight_sync_backend == "nccl" and cfg.trainer.placement.colocate_all:
         return CudaIpcTransferStrategy
     return BroadcastTransferStrategy
 

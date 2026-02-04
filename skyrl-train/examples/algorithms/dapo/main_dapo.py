@@ -3,15 +3,41 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo
 """
 
 import ray
-import hydra
+import sys
 import torch
+from dataclasses import dataclass, field
 from typing import List
-from omegaconf import DictConfig
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 
+from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.utils import initialize_ray, validate_cfg
+from skyrl_train.entrypoints.main_base import BasePPOExp
+from skyrl_train.config import SkyRLConfig, TrainerConfig, AlgorithmConfig
 from skyrl_train.generators.base import GeneratorOutput
+
+
+# ---------------------------------------------------------------------------
+# DAPO-specific config extensions
+# ---------------------------------------------------------------------------
+@dataclass
+class DAPOAlgorithmConfig(AlgorithmConfig):
+    """Extended algorithm config with DAPO-specific overlong buffer settings."""
+
+    overlong_buffer_len: int = 512
+    overlong_buffer_penalty_factor: float = 1.0
+
+
+@dataclass
+class DAPOTrainerConfig(TrainerConfig):
+    """Trainer config using DAPO algorithm config."""
+
+    algorithm: DAPOAlgorithmConfig = field(default_factory=DAPOAlgorithmConfig)
+
+
+@dataclass
+class DAPOSkyRLConfig(SkyRLConfig):
+    """Top-level config for DAPO experiments."""
+
+    trainer: DAPOTrainerConfig = field(default_factory=DAPOTrainerConfig)
 
 
 class DAPOTrainer(RayPPOTrainer):
@@ -33,8 +59,8 @@ class DAPOTrainer(RayPPOTrainer):
         Returns:
             GeneratorOutput
         """
-        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
-        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
+        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
+        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
         # modify rewards here
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
@@ -75,14 +101,16 @@ class DAPOExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: DAPOSkyRLConfig):
     exp = DAPOExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
-    # validate the arguments
+def main() -> None:
+    # Parse CLI args with DAPO-specific config
+    cfg = DAPOSkyRLConfig.from_cli_overrides(sys.argv[1:])
+
+    # Validate the arguments
     validate_cfg(cfg)
 
     initialize_ray(cfg)

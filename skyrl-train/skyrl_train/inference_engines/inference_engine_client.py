@@ -9,8 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
-from omegaconf import DictConfig
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import InferenceEngineConfig, SkyRLLoraConfig
 from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
@@ -46,28 +45,32 @@ class InferenceEngineClient(InferenceEngineInterface):
         self,
         engines: List[InferenceEngineInterface],
         tokenizer: PreTrainedTokenizerBase,
-        full_config: Union[SkyRLConfig, DictConfig],
+        model_path: str,
+        lora_cfg: SkyRLLoraConfig,
+        inference_engine_cfg: InferenceEngineConfig,
     ):
         """
         Args:
             engines: List[InferenceEngineInterface] - The inference engines, remote or local.
             tokenizer: PreTrainedTokenizerBase - The tokenizer to use.
-            full_config: full training configuration
+            model_path: str - The path to the model.
+            lora_cfg: SkyRLLoraConfig - The LoRA configuration.
+            inference_engine_cfg: InferenceEngineConfig - The inference engine configuration.
         """
         self.engines = engines
         self.tokenizer = tokenizer
         # Use served_model_name if provided, otherwise fall back to model path.
         # served_model_name allows using a different model name for HTTP endpoint validation
         # than the actual model path. See ppo_base_config.yaml for details.
-        served_model_name = full_config.generator.served_model_name
+        served_model_name = inference_engine_cfg.served_model_name
         if served_model_name is not None:
             self.model_name = served_model_name
         else:
-            self.model_name = full_config.trainer.policy.model.path
-        self.backend = full_config.generator.backend
-        self.enable_http_endpoint = full_config.generator.enable_http_endpoint
-        self.http_endpoint_host = full_config.generator.http_endpoint_host
-        self.http_endpoint_port = full_config.generator.http_endpoint_port
+            self.model_name = model_path
+        self.backend = inference_engine_cfg.backend
+        self.enable_http_endpoint = inference_engine_cfg.enable_http_endpoint
+        self.http_endpoint_host = inference_engine_cfg.http_endpoint_host
+        self.http_endpoint_port = inference_engine_cfg.http_endpoint_port
         self.generation_paused_event = threading.Event()
         if self.enable_http_endpoint:
             self._spin_up_http_endpoint()

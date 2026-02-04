@@ -165,7 +165,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self.model.model,
             group_by_module=group_by_module,
             batch_size_threshold_gb=(
-                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
+                self.cfg.generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
             ),
         )
 
@@ -199,8 +199,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         torch.distributed.barrier()
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
-        use_prefix_cache = self.cfg.generator.enable_prefix_caching
-        generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
+        ie_cfg = self.cfg.generator.inference_engine
+        use_prefix_cache = ie_cfg.enable_prefix_caching
+        generator_dtype = str_to_torch_dtype(ie_cfg.model_dtype)
         cache_reset_task = None
         if use_prefix_cache and torch.distributed.get_rank() == 0:
             # clear prefix cache
