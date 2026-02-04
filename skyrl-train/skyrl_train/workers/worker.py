@@ -690,17 +690,16 @@ class PolicyWorkerBase(Worker):
                 )  # stores M2 (sum of squared deviations)
 
             # Welford's online update for running mean and variance
+            # (works on DTensors - element-wise ops are supported)
             delta = grad - self._grad_stats["mean"][name]
             self._grad_stats["mean"][name] += delta / n
             delta2 = grad - self._grad_stats["mean"][name]
             self._grad_stats["var_numerator"][name] += delta * delta2  # M2 accumulator
 
-            # Histogram for this param
-            hist = torch.histc(grad.flatten(), bins=10)
+            # Histogram for this param (use local shard - histc doesn't support DTensor)
+            local_grad = grad._local_tensor if hasattr(grad, "_local_tensor") else grad
+            hist = torch.histc(local_grad.flatten(), bins=10)
             hist = hist / hist.sum()  # Normalize to probability distribution
-            # Handle DTensor (FSDP2) - convert to regular tensor first
-            if hasattr(hist, "full_tensor"):
-                hist = hist.full_tensor()
             step_histograms[name] = hist.detach().cpu().tolist()
 
         self._grad_stats["histograms"].append(step_histograms)
@@ -774,6 +773,7 @@ class PolicyWorkerBase(Worker):
             param_magnitude = torch.abs(param_data)
 
             # Count gradients where |mean_grad| > 5% of |param|
+            # Both mean_grad and param.data are DTensors with same sharding
             threshold = 0.05 * param_magnitude
             significant = (torch.abs(mean_grad) > threshold).sum().item()
             significant_count += significant
@@ -793,19 +793,18 @@ class PolicyWorkerBase(Worker):
         if self._grad_stats["count"] == 0:
             return []
 
-        # Collect all mean gradients into a single tensor
+        # Collect all mean gradients into a single tensor (use local shard for histc)
         all_grads = []
         for name in self._grad_stats["mean"]:
-            all_grads.append(self._grad_stats["mean"][name].flatten())
+            g = self._grad_stats["mean"][name]
+            local_g = g._local_tensor if hasattr(g, "_local_tensor") else g
+            all_grads.append(local_g.flatten())
 
         if len(all_grads) == 0:
             return []
         all_grads = torch.cat(all_grads)
         hist = torch.histc(all_grads, bins=10)
         hist = hist / hist.sum()  # Normalize to probability distribution
-        # Handle DTensor (FSDP2) - convert to regular tensor first
-        if hasattr(hist, "full_tensor"):
-            hist = hist.full_tensor()
         # Return probability distribution as list
         return hist.detach().cpu().tolist()
 
@@ -837,9 +836,9 @@ class PolicyWorkerBase(Worker):
             if mean_grad.dim() != 2:
                 continue
 
-            # Handle DTensor (FSDP2)
-            if hasattr(mean_grad, "full_tensor"):
-                mean_grad = mean_grad.full_tensor()
+            # Use local shard for SVD (doesn't support DTensor)
+            if hasattr(mean_grad, "_local_tensor"):
+                mean_grad = mean_grad._local_tensor
 
             # Compute top-k singular values using randomized SVD (faster)
             try:
