@@ -75,10 +75,6 @@ class StackedDecoderLayers(nnx.Module):
         for i in range(self.num_layers):
             yield self[i]
 
-    @property
-    def is_stacked(self) -> bool:
-        return True
-
     def __call__(
         self,
         hidden_states: jax.Array,

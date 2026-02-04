@@ -91,14 +91,9 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
     return ".".join(map(str, path))
 
 
-def is_stacked_path(path: tuple) -> bool:
-    """Check if a parameter path is for stacked layers (contains '_stacked')."""
-    return "_stacked" in str(path)
-
-
 def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
     """Return index tuple for accessing an adapter. Stacked: [:, idx], non-stacked: [idx]."""
-    return (slice(None), adapter_index) if is_stacked_path(path) else (adapter_index,)
+    return (slice(None), adapter_index) if "_stacked" in str(path) else (adapter_index,)
 
 
 def load_safetensors(
