@@ -246,7 +246,8 @@ def test_qwen3_lora():
             )
 
             # Load layer LoRA weights
-            for i, layer in enumerate(model.model.layers):
+            for i in range(len(model.model.layers)):
+                layer = model.model.layers[i]
                 hf_layer = hf_model.base_model.model.model.layers[i]
                 for module, projections in [
                     ("mlp", ["gate_proj", "up_proj", "down_proj"]),
@@ -262,6 +263,8 @@ def test_qwen3_lora():
                             scaling=lora_config.lora_alpha / lora_config.r,
                             rank=lora_config.r,
                         )
+                # Write back the modified layer to update stacked weights
+                model.model.layers[i] = layer
 
         # Use different adapter indices for each input
         adapter_indices = jnp.arange(len(lora_adapters), dtype=jnp.int32)

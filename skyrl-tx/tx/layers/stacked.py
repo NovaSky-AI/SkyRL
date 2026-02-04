@@ -31,6 +31,37 @@ class StackedDecoderLayers(nnx.Module):
 
         self._stacked = vmapped_create(rngs)
 
+    def __len__(self) -> int:
+        """Return the number of layers."""
+        return self.num_layers
+
+    def __getitem__(self, index: int) -> nnx.Module:
+        """Get individual layer by index (for testing/weight loading)."""
+        if index < 0 or index >= self.num_layers:
+            raise IndexError(f"Layer index {index} out of range [0, {self.num_layers})")
+        graphdef, state = nnx.split(self._stacked)
+        layer_state = jax.tree.map(lambda x: x[index], state)
+        return nnx.merge(graphdef, layer_state)
+
+    def __iter__(self):
+        """Iterate over individual layers (for testing/weight loading)."""
+        for i in range(self.num_layers):
+            yield self[i]
+
+    def __setitem__(self, index: int, layer: nnx.Module):
+        """Update stacked state from a modified layer (for testing/weight loading)."""
+        if index < 0 or index >= self.num_layers:
+            raise IndexError(f"Layer index {index} out of range [0, {self.num_layers})")
+        graphdef, state = nnx.split(self._stacked)
+        _, layer_state = nnx.split(layer)
+        new_state = jax.tree.map(
+            lambda s, l: s.replace(s[...].at[index].set(l[...])),
+            state,
+            layer_state,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
+        self._stacked = nnx.merge(graphdef, new_state)
+
     def __call__(
         self,
         hidden_states: jax.Array,
