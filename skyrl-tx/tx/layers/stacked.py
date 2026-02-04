@@ -21,6 +21,12 @@ class ArrayRef(nnx.Variable):
         parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
         return parent[idx] if key is Ellipsis else parent[idx][key]
 
+    def set_raw_value(self, value, **kwargs):
+        """Write through to parent when value is set."""
+        parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
+        parent[...] = parent[...].at[idx].set(value)
+        super().set_raw_value(value, **kwargs)
+
     @property
     def shape(self):
         return self.get_metadata("_parent")[self.get_metadata("_idx")].shape
@@ -72,20 +78,6 @@ class StackedDecoderLayers(nnx.Module):
     @property
     def is_stacked(self) -> bool:
         return True
-
-    def __setitem__(self, index: int, layer: nnx.Module):
-        """Update stacked state from a modified layer (for testing/weight loading)."""
-        if index < 0 or index >= self.num_layers:
-            raise IndexError(f"Layer index {index} out of range [0, {self.num_layers})")
-        graphdef, state = nnx.split(self._stacked)
-        _, layer_state = nnx.split(layer)
-        new_state = jax.tree.map(
-            lambda s, lv: s.replace(s[...].at[index].set(lv.get_raw_value())),
-            state,
-            layer_state,
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
-        self._stacked = nnx.merge(graphdef, new_state)
 
     def __call__(
         self,

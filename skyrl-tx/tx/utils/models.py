@@ -135,9 +135,7 @@ def load_safetensors(
     def load_recursive(module: nnx.Module, key_prefix: str):
         if getattr(module, "is_stacked", False):
             for i in range(len(module)):
-                layer = module[i]
-                load_params(layer, f"{key_prefix}{i}.")
-                module[i] = layer
+                load_params(module[i], f"{key_prefix}{i}.")  # ArrayRef writes through
         elif children := list(nnx.iter_children(module)):
             for name, child in children:
                 load_recursive(child, f"{key_prefix}{name}.")
