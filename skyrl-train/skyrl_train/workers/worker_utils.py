@@ -9,11 +9,29 @@ def reduce_metrics(
 ) -> Dict[str, int | float | list[float]]:
     """
     Reduce metrics from a list of entries per key.
+
+    For ignore_keys containing histograms (list of lists), sum frequencies element-wise
+    and normalize to produce a single aggregated histogram.
     """
     reduced_metrics: dict[str, int | float | list[float]] = dict()
     for k, v in metrics.items():
         if k in ignore_keys:
-            reduced_metrics[k] = v
+            # Check if this is a list of histograms (list of lists)
+            if isinstance(v, list) and len(v) > 0 and isinstance(v[0], list):
+                # Sum histograms element-wise and normalize
+                num_bins = len(v[0])
+                summed = [0.0] * num_bins
+                for hist in v:
+                    for i, freq in enumerate(hist):
+                        summed[i] += freq
+                # Normalize to sum to 1
+                total = sum(summed)
+                if total > 0:
+                    reduced_metrics[k] = [x / total for x in summed]
+                else:
+                    reduced_metrics[k] = summed
+            else:
+                reduced_metrics[k] = v
         else:
             assert len(v) > 0, f"No metrics for key {k}"
             assert all(isinstance(x, (int, float)) for x in v), f"Metrics for key {k} are not all numbers"
