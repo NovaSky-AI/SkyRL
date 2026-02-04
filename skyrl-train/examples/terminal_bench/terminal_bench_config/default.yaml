@@ -12,7 +12,7 @@
 # See Harbor documentation for all available options:
 # https://harborframework.com/docs
 # And a full list of fields that TrialConfig supports:
-# https://github.com/laude-institute/harbor/blob/fdfe296145cf13663dc6a0233f8faab7bfcf5fe1/src/harbor/models/trial/config.py
+# https://github.com/laude-institute/harbor/blob/5921cc40e8f6b5b0df0a3dc6354e0e679447eb54/src/harbor/models/trial/config.py
 
 # Harbor TrialConfig fields below
 # --------------------------------

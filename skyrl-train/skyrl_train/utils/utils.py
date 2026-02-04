@@ -653,9 +653,18 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
+    # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
     if os.environ.get("DAYTONA_API_KEY"):
         logger.info("Exporting daytona api key to ray runtime env")
         env_vars["DAYTONA_API_KEY"] = os.environ["DAYTONA_API_KEY"]
+
+    if os.environ.get("MODAL_TOKEN_ID"):
+        logger.info("Exporting MODAL_TOKEN_ID to ray runtime env")
+        env_vars["MODAL_TOKEN_ID"] = os.environ["MODAL_TOKEN_ID"]
+
+    if os.environ.get("MODAL_TOKEN_SECRET"):
+        logger.info("Exporting MODAL_TOKEN_SECRET to ray runtime env")
+        env_vars["MODAL_TOKEN_SECRET"] = os.environ["MODAL_TOKEN_SECRET"]
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
