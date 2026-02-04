@@ -19,7 +19,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from skyrl_train.config.config import SkyRLConfig
+from skyrl_train.config.config import SkyRLConfig, get_config_as_dict
 from skyrl_train.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
@@ -940,7 +940,7 @@ def build_vllm_cli_args(cfg) -> Namespace:
         args.fully_sharded_loras = cfg.generator.fully_sharded_loras
 
     # Add any extra engine_init_kwargs
-    engine_kwargs = OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True)
+    engine_kwargs = get_config_as_dict(cfg.generator.engine_init_kwargs)
     for key, value in engine_kwargs.items():
         setattr(args, key, value)
 
