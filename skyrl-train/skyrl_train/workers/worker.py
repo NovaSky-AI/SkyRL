@@ -713,7 +713,7 @@ class PolicyWorkerBase(Worker):
         }
         return grad_metrics
 
-    def _compute_snr(self, start_clip: int = 10) -> float:
+    def _compute_snr(self) -> float:
         """
         Compute gradient Signal-to-Noise Ratio across all parameters.
 
@@ -724,7 +724,7 @@ class PolicyWorkerBase(Worker):
         Args:
             1. start_clip: Minimum number of steps before computing SNR.
         """
-        if self._grad_stats["count"] < start_clip:
+        if self._grad_stats["count"] <= 1:
             return 0.0
 
         snr_values = []
