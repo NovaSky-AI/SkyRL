@@ -5,10 +5,11 @@ from training workers to inference engines using CUDA IPC handles.
 """
 
 from dataclasses import dataclass, asdict
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
 
 import torch
 
@@ -264,7 +265,9 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(cfg: "DictConfig", inference_world_size: Optional[int] = None) -> CudaIpcInitInfo:
+    def create_init_info(
+        cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
+    ) -> CudaIpcInitInfo:
         """Create init info with all config-derived args."""
         return CudaIpcInitInfo(
             model_dtype_str=cfg.generator.model_dtype,

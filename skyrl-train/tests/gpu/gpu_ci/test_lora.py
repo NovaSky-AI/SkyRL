@@ -6,37 +6,34 @@ uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_lora.py
 import pytest
 import asyncio
 import ray
-import hydra
-from omegaconf import DictConfig
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
+from skyrl_train.config import SkyRLConfig, SkyRLLoraConfig
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_actor_config(enable_lora: bool = False) -> DictConfig:
+def get_test_actor_config(enable_lora: bool = False) -> SkyRLConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
+    cfg = SkyRLConfig()
+    cfg.trainer.policy.model.path = MODEL
+    cfg.trainer.critic.model.path = ""
+    cfg.trainer.placement.policy_num_gpus_per_node = 2
+    cfg.generator.async_engine = True
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.run_engines_locally = True
 
-        # Override specific parameters
-        cfg.trainer.policy.model.path = MODEL
-        cfg.trainer.critic.model.path = ""
-        cfg.trainer.placement.policy_num_gpus_per_node = 2
-        cfg.generator.async_engine = True
-        cfg.generator.num_inference_engines = 1
-        cfg.generator.run_engines_locally = True
+    # LoRA configuration
+    if enable_lora:
+        cfg.trainer.policy.model.lora = SkyRLLoraConfig(
+            rank=32,
+            alpha=32,
+            dropout=0.1,
+            target_modules="all-linear",
+        )
 
-        # LoRA configuration
-        if enable_lora:
-            cfg.trainer.policy.model.lora.rank = 32
-            cfg.trainer.policy.model.lora.alpha = 32
-            cfg.trainer.policy.model.lora.dropout = 0.1
-            cfg.trainer.policy.model.lora.target_modules = "all-linear"
-
-        return cfg
+    return cfg
 
 
 @pytest.mark.parametrize(

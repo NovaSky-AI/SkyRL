@@ -7,7 +7,6 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_engine
 """
 
 import pytest
-import hydra
 
 from skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -19,31 +18,28 @@ from tests.gpu.utils import (
     init_remote_inference_servers,
 )
 from transformers import AutoTokenizer
-from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_actor_config() -> DictConfig:
+def get_test_actor_config() -> SkyRLConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
+    cfg = SkyRLConfig()
+    cfg.trainer.policy.model.path = MODEL
 
-        cfg.trainer.policy.model.path = MODEL
+    cfg.generator.sampling_params.temperature = 0.0
+    cfg.generator.sampling_params.top_p = 1
+    cfg.generator.sampling_params.top_k = -1
+    cfg.generator.sampling_params.max_generate_length = 1024
+    cfg.generator.sampling_params.min_p = 0.0
+    cfg.generator.sampling_params.logprobs = None
 
-        cfg.generator.sampling_params.temperature = 0.0
-        cfg.generator.sampling_params.top_p = 1
-        cfg.generator.sampling_params.top_k = -1
-        cfg.generator.sampling_params.max_generate_length = 1024
-        cfg.generator.sampling_params.min_p = 0.0
-        cfg.generator.sampling_params.logprobs = None
-
-        return cfg
+    return cfg
 
 
-def init_ray_inference_engines(backend: str, tp_size: int, pp_size: int, dp_size: int, config: DictConfig):
+def init_ray_inference_engines(backend: str, tp_size: int, pp_size: int, dp_size: int, config: SkyRLConfig):
     """Initialize ray-wrapped inference engines for the specified backend.
 
     Returns:

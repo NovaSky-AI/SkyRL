@@ -12,6 +12,15 @@ from omegaconf import DictConfig, OmegaConf
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
 
+# Suppress LiteLLM verbose logging
+
+import litellm
+import logging
+
+litellm.suppress_debug_info = True  # Suppress the "Provider List" output
+litellm.set_verbose = False
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
 # We have N retries for each trial, if one of the rollout (out of n_samples_per_prompt) fails
 # after N attemptes, we skip this prompt altogether.
 MAX_NUM_RETRIES_PER_TRIAL = 2

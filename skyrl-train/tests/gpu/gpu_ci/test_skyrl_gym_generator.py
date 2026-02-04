@@ -12,13 +12,12 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from tests.gpu.utils import Timer, get_test_generator_input
-from omegaconf import DictConfig, OmegaConf
 from skyrl_train.utils.utils import initialize_ray
 from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any, Dict
 from loguru import logger
-from skyrl_train.config.utils import get_default_config
+from skyrl_train.config import SkyRLConfig, SamplingParams
 
 OBSERVATION_PROMPT = "give me another solution"
 
@@ -35,53 +34,36 @@ def get_test_config(
     temperature,
     get_logprobs,
 ):
-    # Create a mock generator config
-    cfg = get_default_config()
-    OmegaConf.update(
-        cfg,
-        "generator",
-        {
-            "sampling_params": {
-                "max_generate_length": max_generate_length,
-                # 0 -> get logprobs for the first/ chosen token
-                "logprobs": 0 if get_logprobs else None,
-                "temperature": temperature,
-            },
-            "append_eos_token_after_stop_str_in_multi_turn": True,  # for search
-            "max_input_length": max_input_length,
-            "batched": batched,
-            "max_turns": max_turns,
-            "zero_reward_on_non_stop": False,
-            "use_conversation_multi_turn": use_conversation_multi_turn,
-            "apply_overlong_filtering": False,
-            "backend": "vllm",
-            "enable_http_endpoint": False,
-            "http_endpoint_host": "127.0.0.1",
-            "http_endpoint_port": 8000,
-            "step_wise_trajectories": is_step_wise,
-        },
-    )
-
-    OmegaConf.update(
-        cfg,
-        "environment.skyrl_gym",
-        {
-            "search": {
-                "log_requests": True,
-                "search_url": "http://127.0.0.1:8000/retrieve",
-            },
-            "max_env_workers": max_env_workers,
-        },
-    )
-
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = model
-    cfg.generator = cfg.generator
+    cfg.generator.sampling_params = SamplingParams(
+        max_generate_length=max_generate_length,
+        logprobs=0 if get_logprobs else None,
+        temperature=temperature,
+    )
+    cfg.generator.append_eos_token_after_stop_str_in_multi_turn = True
+    cfg.generator.max_input_length = max_input_length
+    cfg.generator.batched = batched
+    cfg.generator.max_turns = max_turns
+    cfg.generator.zero_reward_on_non_stop = False
+    cfg.generator.use_conversation_multi_turn = use_conversation_multi_turn
+    cfg.generator.apply_overlong_filtering = False
+    cfg.generator.backend = "vllm"
+    cfg.generator.enable_http_endpoint = False
+    cfg.generator.http_endpoint_host = "127.0.0.1"
+    cfg.generator.http_endpoint_port = 8000
+    cfg.generator.step_wise_trajectories = is_step_wise
+
+    cfg.environment.skyrl_gym.search.log_requests = True
+    cfg.environment.skyrl_gym.search.search_url = "http://127.0.0.1:8000/retrieve"
+    cfg.environment.skyrl_gym.max_env_workers = max_env_workers
+
     return cfg
 
 
 # Setup for formatting tests
 class TestEnv(BaseTextEnv):
-    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: Any, extras: Dict[str, Any] = {}):
         super().__init__()
         self.max_turns = 3
 
@@ -198,16 +180,14 @@ async def run_generator_end_to_end(
     # Attach request-time sampling params into the generator input
     input_batch["sampling_params"] = get_sampling_params_for_backend(
         "vllm",
-        DictConfig(
-            {
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "top_k": -1,
-                "max_generate_length": max_generate_length,
-                "min_p": 0.0,
-                "logprobs": 0 if get_logprobs else None,
-                "stop": ["</search>", "</answer>"] if env_class == "search" else None,
-            }
+        SamplingParams(
+            temperature=1.0,
+            top_p=1.0,
+            top_k=-1,
+            max_generate_length=max_generate_length,
+            min_p=0.0,
+            logprobs=0 if get_logprobs else None,
+            stop=["</search>", "</answer>"] if env_class == "search" else None,
         ),
     )
 
@@ -287,7 +267,7 @@ async def test_generator_single_turn_gsm8k(
     """
     Test the generator with a single turn of GSM8K
     """
-    initialize_ray(get_default_config())
+    initialize_ray(SkyRLConfig())
     try:
         await run_generator_end_to_end(
             use_async_engine=use_async_engine,
@@ -307,7 +287,7 @@ async def test_generator_multi_turn_search():
     """
     Test the generator with multiple turns of search
     """
-    initialize_ray(get_default_config())
+    initialize_ray(SkyRLConfig())
     try:
         await run_generator_end_to_end(
             use_async_engine=True,
@@ -338,7 +318,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
     """
     Test generator formatting when using conversation formatting for multi-turn
     """
-    initialize_ray(get_default_config())
+    initialize_ray(SkyRLConfig())
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         generator_output = await run_generator_end_to_end(
@@ -414,7 +394,7 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
     """
     Test generator formatting when not using conversation formatting for multi-turn
     """
-    initialize_ray(get_default_config())
+    initialize_ray(SkyRLConfig())
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         generator_output = await run_generator_end_to_end(
@@ -479,7 +459,7 @@ async def test_generator_multi_turn_gsm8k_step_wise():
     """
     Test the generator with the multi-turn GSM8K environment for step-wise training
     """
-    initialize_ray(get_default_config())
+    initialize_ray(SkyRLConfig())
     try:
         generator_output: GeneratorOutput = await run_generator_end_to_end(
             use_async_engine=True,

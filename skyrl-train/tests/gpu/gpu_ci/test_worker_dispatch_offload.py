@@ -10,14 +10,12 @@ multiple models share the same GPU (colocate_all=True or colocate_policy_ref=Tru
 
 import ray
 import pytest
-import hydra
-from omegaconf import DictConfig
 from ray.util.placement_group import placement_group
 
 from tests.gpu.utils import make_dummy_training_batch, get_rank_0_memory
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.workers.worker_dispatch import WorkerDispatch, GPUState
 from tests.gpu.utils import import_worker
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, RefWorker, CriticWorker
@@ -26,10 +24,8 @@ from skyrl_train.workers.worker import PPORayActorGroup
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_config() -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+def get_test_config() -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.generator.inference_engine_tensor_parallel_size = 1
@@ -46,7 +42,7 @@ def get_test_config() -> DictConfig:
 def init_colocated_actor_group(
     worker_cls,
     shared_pg,
-    cfg: DictConfig,
+    cfg: SkyRLConfig,
 ) -> PPORayActorGroup:
     """Initialize an actor group that shares a placement group with others."""
     return PPORayActorGroup(

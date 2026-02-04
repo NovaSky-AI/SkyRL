@@ -4,11 +4,11 @@ uv run --isolated --extra dev --extra vllm --with verifiers pytest tests/gpu/gpu
 
 import pytest
 import ray
-from omegaconf import DictConfig
 from transformers import AutoTokenizer
 import socket
 
 from tests.gpu.utils import get_test_actor_config, init_inference_engines
+from skyrl_train.config import GeneratorConfig, SamplingParams
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
@@ -78,15 +78,13 @@ async def _run_verifiers_end_to_end(
 
     await client.wake_up()
 
-    generator_cfg = DictConfig(
-        {
-            "sampling_params": {"max_generate_length": max_generate_length, "logprobs": None},
-            "max_input_length": max_input_length,
-            "backend": "vllm",
-            "enable_http_endpoint": True,
-            "http_endpoint_host": http_host,
-            "http_endpoint_port": http_port,
-        }
+    generator_cfg = GeneratorConfig(
+        sampling_params=SamplingParams(max_generate_length=max_generate_length, logprobs=None),
+        max_input_length=max_input_length,
+        backend="vllm",
+        enable_http_endpoint=True,
+        http_endpoint_host=http_host,
+        http_endpoint_port=http_port,
     )
 
     from integrations.verifiers.verifiers_generator import VerifiersGenerator
@@ -112,22 +110,19 @@ async def _run_verifiers_end_to_end(
         for i in range(num_prompts)
     ]
 
-    base_sampling = DictConfig(
-        {
-            "temperature": 0.7,
-            "top_p": 0.95,
-            "top_k": -1,
-            "max_generate_length": max_generate_length,
-            "min_p": 0.0,
-            "logprobs": None,
-            "stop": None,
-        }
+    base_sampling = SamplingParams(
+        temperature=0.7,
+        top_p=0.95,
+        top_k=-1,
+        max_generate_length=max_generate_length,
+        min_p=0.0,
+        logprobs=None,
+        stop=None,
     )
-    if sampling_overrides:
-        for k, v in sampling_overrides.items():
-            base_sampling[k] = v
 
     sampling_params = get_sampling_params_for_backend("vllm", base_sampling)
+    if sampling_overrides:
+        sampling_params.update(sampling_overrides)
 
     input_batch = {
         "prompts": prompts,

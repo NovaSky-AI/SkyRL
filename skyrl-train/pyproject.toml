@@ -136,7 +136,7 @@ vllm = [
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.9.0; sys_platform == 'linux'",
     "flashinfer-python; sys_platform == 'linux'",
-    "flashinfer-jit-cache; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
 ]
 sglang = [
