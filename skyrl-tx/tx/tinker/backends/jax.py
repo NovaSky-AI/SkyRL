@@ -135,12 +135,10 @@ class AccumulatedGradients:
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
-        def _reset(path, g):
-            idx = get_adapter_idx(path, adapter_index)
-            return g.at[idx].set(0.0)
-
         return AccumulatedGradients(
-            grad_sum=jax.tree.map_with_path(_reset, self.grad_sum),
+            grad_sum=jax.tree.map_with_path(
+                lambda path, g: g.at[get_adapter_idx(path, adapter_index)].set(0.0), self.grad_sum
+            ),
             counts=self.counts.at[adapter_index].set(0),
         )
 
