@@ -48,6 +48,10 @@ class StackedDecoderLayers(nnx.Module):
         for i in range(self.num_layers):
             yield self[i]
 
+    @property
+    def is_stacked(self) -> bool:
+        return True
+
     def __setitem__(self, index: int, layer: nnx.Module):
         """Update stacked state from a modified layer (for testing/weight loading)."""
         if index < 0 or index >= self.num_layers:
