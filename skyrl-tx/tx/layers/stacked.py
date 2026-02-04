@@ -116,10 +116,14 @@ class StackedDecoderLayers(nnx.Module):
                 new_keys.append(k)
                 new_values.append(v)
 
-            return hidden_states, all_hidden_states, KVCache(
-                keys=new_keys,
-                values=new_values,
-                cache_position=kv_cache.cache_position + positions.shape[1],
+            return (
+                hidden_states,
+                all_hidden_states,
+                KVCache(
+                    keys=new_keys,
+                    values=new_values,
+                    cache_position=kv_cache.cache_position + positions.shape[1],
+                ),
             )
 
         # Training/prefill mode: use scan
@@ -146,10 +150,14 @@ class StackedDecoderLayers(nnx.Module):
         if is_training:
             return final_hs, all_hidden_states, None
 
-        return final_hs, all_hidden_states, KVCache(
-            keys=[all_keys[i] for i in range(self.num_layers)],
-            values=[all_values[i] for i in range(self.num_layers)],
-            cache_position=attention_mask.sum(axis=1).astype(jnp.int32),
+        return (
+            final_hs,
+            all_hidden_states,
+            KVCache(
+                keys=[all_keys[i] for i in range(self.num_layers)],
+                values=[all_values[i] for i in range(self.num_layers)],
+                cache_position=attention_mask.sum(axis=1).astype(jnp.int32),
+            ),
         )
 
 

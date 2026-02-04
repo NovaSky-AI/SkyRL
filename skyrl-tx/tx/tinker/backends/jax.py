@@ -127,6 +127,7 @@ class AccumulatedGradients:
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
+
         def _select_mean(path, g):
             idx = get_adapter_idx(path, adapter_index)
             return jnp.zeros_like(g).at[idx].set(g[idx] / count.astype(g.dtype))
