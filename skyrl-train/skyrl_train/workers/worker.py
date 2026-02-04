@@ -694,7 +694,7 @@ class PolicyWorkerBase(Worker):
 
             # Histogram for this param
             hist = torch.histc(grad.flatten(), bins=50)
-            step_histograms[name] = torch.nn.functional.softmax(hist, dim=0).cpu().tolist()
+            step_histograms[name] = torch.nn.functional.softmax(hist, dim=0).detach().cpu().numpy().tolist()
 
         self._grad_stats["histograms"].append(step_histograms)
         return
@@ -796,7 +796,7 @@ class PolicyWorkerBase(Worker):
         hist = hist / hist.sum()  # Normalize to probability distribution
         hist = torch.nn.functional.softmax(hist, dim=0)  # Apply softmax for emphasis
         # Return probability distribution as list
-        return hist.cpu().tolist()
+        return hist.detach().cpu().numpy().tolist()
 
     def reset_gradient_stats(self):
         """Reset gradient statistics for next accumulation period."""
