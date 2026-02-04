@@ -146,7 +146,7 @@ class RemoteInferenceClient:
         # Re-use the existing session object if it is not closed.
         # Note that we also create a new session object if the event loop has changed, since
         # aiohttp.ClientSession is tied to the event loop.
-        current_loop = asyncio.get_event_loop()
+        current_loop = asyncio.get_running_loop()
         if self._session is None or self._session.closed or self._session.loop != current_loop:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
         return self._session
@@ -548,7 +548,6 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        print(f"Initializing weight sync process group on all backends: {asdict(init_info)}")
         return await self._call_all_servers("/init_weight_transfer", asdict(init_info))
 
     async def update_named_weights(

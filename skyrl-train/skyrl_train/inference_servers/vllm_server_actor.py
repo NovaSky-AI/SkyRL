@@ -9,13 +9,12 @@ import os
 import pickle
 import time
 from argparse import Namespace
-from requests.exceptions import HTTPError
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
 import uvicorn
 import vllm.envs as envs
-from fastapi import Request
+from fastapi import Request, HTTPException
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.api_server import (
@@ -327,7 +326,7 @@ class VLLMServerActor(ServerActorProtocol):
                 try:
                     init_info = CudaIpcInitInfo(**data)
                 except Exception:
-                    raise HTTPError(status_code=400, detail="Received invalid init info")
+                    raise HTTPException(status_code=400, detail="Received invalid init info")
 
             init_info = init_info.for_engine(
                 engine_index=self._server_idx,
@@ -354,7 +353,7 @@ class VLLMServerActor(ServerActorProtocol):
                 try:
                     weight_request = CudaIpcWeightUpdateRequest.from_json_dict(data)
                 except Exception:
-                    raise HTTPError(status_code=400, detail="Received invalid weight update request")
+                    raise HTTPException(status_code=400, detail="Received invalid weight update request")
 
             pickled_request = pickle.dumps(weight_request)
 
