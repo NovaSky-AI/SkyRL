@@ -3,7 +3,7 @@ from skyrl_train.config import get_config_as_dict
 
 
 # TODO: Add a test for validation
-def build_vllm_cli_args(cfg) -> Namespace:
+def build_vllm_cli_args(cfg: "Union[SkyRLConfig, DictConfig]") -> Namespace:
     """Build CLI args for vLLM server from config."""
     from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm import AsyncEngineArgs
