@@ -64,6 +64,7 @@ import argparse
 import csv
 import json
 import os
+import random
 import re
 import signal
 import subprocess
@@ -73,7 +74,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import httpx
 import tinker
@@ -434,9 +435,10 @@ class BenchmarkRunner:
         self.config = config
         self.tokenizer = AutoTokenizer.from_pretrained(config.base_model)
 
-    def _make_datum(self, seq_len: int) -> types.Datum:
-        """Create a training datum with specified sequence length."""
-        all_tokens = list(range(1, seq_len + 1))
+    def _make_datum(self, seq_len: int, rng: random.Random) -> types.Datum:
+        """Create a training datum with random tokens."""
+        vocab_size = self.tokenizer.vocab_size
+        all_tokens = [rng.randint(1, vocab_size - 1) for _ in range(seq_len)]
         target_tokens = all_tokens[1:] + [self.tokenizer.eos_token_id]
         weights = [1.0] * seq_len
 
@@ -448,29 +450,59 @@ class BenchmarkRunner:
             },
         )
 
-    def _test_sample(
-        self, service_client, server: ServerManager, batch_size: int, seq_len: int, num_warmup_iters: int = 1
+    def _run_timed_requests(
+        self,
+        run_single_request: Callable[[], tuple[bool, float]],
+        num_measurement_iters: int,
     ) -> tuple[bool, float, float]:
-        """Execute sampling test with warmup iterations.
+        """Run timed requests with JIT warmup and measurement iterations.
+
+        Args:
+            run_single_request: Callable that executes a single request and returns (success, elapsed_time)
+            num_measurement_iters: Number of post-JIT measurement iterations
 
         Returns:
             Tuple of (success, jit_time, post_jit_avg_time)
         """
-        sampling_client = service_client.create_sampling_client(base_model=self.config.base_model)
+        # First request triggers JIT compilation
+        print("    Running warmup request (JIT compilation)...")
+        success, jit_time = run_single_request()
+        if not success:
+            return False, jit_time, 0.0
 
-        # Build prompt - half prompt, half generation
+        # Subsequent requests measure post-JIT performance
+        post_jit_times = []
+        for i in range(num_measurement_iters):
+            print(f"    Running measurement request {i + 1}/{num_measurement_iters}...")
+            success, elapsed = run_single_request()
+            if not success:
+                return False, jit_time, 0.0
+            post_jit_times.append(elapsed)
+
+        avg_post_jit_time = sum(post_jit_times) / len(post_jit_times) if post_jit_times else 0.0
+        return True, jit_time, avg_post_jit_time
+
+    def _test_sample(
+        self, service_client, server: ServerManager, batch_size: int, seq_len: int, num_measurement_iters: int
+    ) -> tuple[bool, float, float]:
+        """Execute sampling test with warmup iterations."""
+        sampling_client = service_client.create_sampling_client(base_model=self.config.base_model)
+        vocab_size = self.tokenizer.vocab_size
+        rng = random.Random(42)
+
+        # Half prompt, half generation
         prompt_len = seq_len // 2
         gen_len = seq_len - prompt_len
-        base_tokens = self.tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True)
-        prompt_tokens = (base_tokens * ((prompt_len // len(base_tokens)) + 1))[:prompt_len]
-        prompt = types.ModelInput.from_ints(prompt_tokens)
 
         def run_sample() -> tuple[bool, float]:
             """Run a single sample request and return (success, elapsed_time)."""
+            prompt_tokens = [rng.randint(1, vocab_size - 1) for _ in range(prompt_len)]
+            prompt = types.ModelInput.from_ints(prompt_tokens)
+
             start_time = time.time()
             request = sampling_client.sample(
                 prompt=prompt,
-                sampling_params=types.SamplingParams(temperature=0.7, max_tokens=gen_len, seed=42),
+                sampling_params=types.SamplingParams(temperature=0.7, max_tokens=gen_len),
                 num_samples=batch_size,
             )
             # Poll with small timeout to allow server aliveness checks
@@ -484,39 +516,19 @@ class BenchmarkRunner:
             elapsed = time.time() - start_time
             return len(result.sequences) == batch_size, elapsed
 
-        # First request triggers JIT compilation
-        print("    Running warmup request (JIT compilation)...")
-        success, jit_time = run_sample()
-        if not success:
-            return False, jit_time, 0.0
-
-        # Subsequent requests measure post-JIT performance
-        post_jit_times = []
-        for i in range(num_warmup_iters):
-            print(f"    Running measurement request {i + 1}/{num_warmup_iters}...")
-            success, elapsed = run_sample()
-            if not success:
-                return False, jit_time, 0.0
-            post_jit_times.append(elapsed)
-
-        avg_post_jit_time = sum(post_jit_times) / len(post_jit_times) if post_jit_times else 0.0
-        return True, jit_time, avg_post_jit_time
+        return self._run_timed_requests(run_sample, num_measurement_iters)
 
     def _test_forward_backward(
-        self, service_client, server: ServerManager, batch_size: int, seq_len: int, num_warmup_iters: int = 1
+        self, service_client, server: ServerManager, batch_size: int, seq_len: int, num_measurement_iters: int
     ) -> tuple[bool, float, float]:
-        """Execute forward-backward test with warmup iterations.
-
-        Returns:
-            Tuple of (success, jit_time, post_jit_avg_time)
-        """
+        """Execute forward-backward test with warmup iterations."""
         training_client = service_client.create_lora_training_client(base_model=self.config.base_model)
-
-        # Create training data
-        data = [self._make_datum(seq_len) for _ in range(batch_size)]
+        rng = random.Random(42)
 
         def run_forward_backward() -> tuple[bool, float]:
             """Run a single forward-backward request and return (success, elapsed_time)."""
+            data = [self._make_datum(seq_len, rng) for _ in range(batch_size)]
+
             start_time = time.time()
             fwdbwd_future = training_client.forward_backward(data, "cross_entropy")
             # Poll with small timeout to allow server aliveness checks
@@ -530,23 +542,7 @@ class BenchmarkRunner:
             elapsed = time.time() - start_time
             return len(result.loss_fn_outputs) == batch_size, elapsed
 
-        # First request triggers JIT compilation
-        print("    Running warmup request (JIT compilation)...")
-        success, jit_time = run_forward_backward()
-        if not success:
-            return False, jit_time, 0.0
-
-        # Subsequent requests measure post-JIT performance
-        post_jit_times = []
-        for i in range(num_warmup_iters):
-            print(f"    Running measurement request {i + 1}/{num_warmup_iters}...")
-            success, elapsed = run_forward_backward()
-            if not success:
-                return False, jit_time, 0.0
-            post_jit_times.append(elapsed)
-
-        avg_post_jit_time = sum(post_jit_times) / len(post_jit_times) if post_jit_times else 0.0
-        return True, jit_time, avg_post_jit_time
+        return self._run_timed_requests(run_forward_backward, num_measurement_iters)
 
     def run_single_test(self, batch_size: int, seq_len: int, mode: str) -> TestResult:
         """Run a single benchmark test with given parameters."""
