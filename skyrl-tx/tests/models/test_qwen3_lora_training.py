@@ -7,7 +7,7 @@ from transformers import PretrainedConfig
 
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM
-from tx.utils.models import get_dtype, load_safetensors
+from tx.utils.models import get_dtype, load_safetensors, get_adapter_idx
 from tx.layers.lora import init_lora_adapter
 from tx.tinker.types import LoraConfig
 
@@ -47,15 +47,16 @@ def test_lora_training():
 
         # Helper to extract adapter params at specific index
         def get_adapter_params(params, adapter_idx):
-            return jax.tree.map(lambda p: p[adapter_idx].copy(), params)
+            return jax.tree.map_with_path(lambda path, p: p[get_adapter_idx(path, adapter_idx)].copy(), params)
 
         # Helper to extract out-of-rank params for an adapter
         def get_out_of_rank_params(params, adapter_idx, rank):
             def slice_param(path, p):
+                idx = get_adapter_idx(path, adapter_idx)
                 if "lora_A" in str(path):
-                    return p[adapter_idx, :, rank:].copy()
+                    return p[idx][..., :, rank:].copy()
                 elif "lora_B" in str(path):
-                    return p[adapter_idx, rank:, :].copy()
+                    return p[idx][..., rank:, :].copy()
                 return p
 
             return jax.tree.map_with_path(slice_param, params)
