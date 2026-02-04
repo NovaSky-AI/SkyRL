@@ -113,12 +113,7 @@ class ServerGroup:
 
     def _create_actor_class(self, pg: PlacementGroup, start_bundle_idx: int) -> Any:
         """Create actor class with scheduling constraints for a specific bundle."""
-        from skyrl_train.inference_servers.vllm_server_actor import VLLMServerActorRay, VLLMServerActor
-
-        ray_wrapped_actor_cls = (
-            VLLMServerActorRay if self._server_actor_cls == VLLMServerActor else ray.remote(self._server_actor_cls)
-        )
-        return ray_wrapped_actor_cls.options(
+        return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=COLOCATED_ACTOR_CPU_FRACTION,
             scheduling_strategy=PlacementGroupSchedulingStrategy(
