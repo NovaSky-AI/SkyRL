@@ -503,6 +503,7 @@ class BenchmarkRunner:
             request = sampling_client.sample(
                 prompt=prompt,
                 sampling_params=types.SamplingParams(temperature=0.7, max_tokens=gen_len, seed=42),
+                num_samples=batch_size,
             )
             # Poll with small timeout to allow server aliveness checks
             while True:
