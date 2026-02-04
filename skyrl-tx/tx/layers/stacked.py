@@ -155,3 +155,23 @@ class StackedDecoderLayers(nnx.Module):
         values_list = [all_values[i] for i in range(self.num_layers)]
         cache_position = attention_mask.sum(axis=1).astype(jnp.int32)
         return final_hs, all_hidden_states, KVCache(keys=keys_list, values=values_list, cache_position=cache_position)
+
+
+def unstack_state(module: nnx.Module) -> nnx.GraphState:
+    """Transform stacked layer state to unstacked ArrayRef views.
+
+    Converts paths like `layers._stacked.xxx` to `layers.0.xxx`, `layers.1.xxx`, etc.
+    Each entry is an ArrayRef that writes through to the original stacked variable.
+    """
+    expanded = []
+    for path, var in nnx.to_flat_state(nnx.state(module)):
+        if "_stacked" not in path:
+            expanded.append((path, var))
+            continue
+
+        idx = path.index("_stacked")
+        for i in range(var[...].shape[0]):
+            new_path = path[:idx] + (str(i),) + path[idx + 1 :]
+            expanded.append((new_path, ArrayRef(var, i)))
+
+    return nnx.from_flat_state(expanded)

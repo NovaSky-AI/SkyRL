@@ -109,40 +109,30 @@ def load_safetensors(
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
+    from tx.layers.stacked import unstack_state
+
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
     tensors = {k.removeprefix(prefix): v for k, v in tensors.items()}
 
-    def load_params(module: nnx.Module, key_prefix: str):
-        updates = []
-        for path, param in nnx.to_flat_state(nnx.state(module)):
-            if filter_fn is not None and not filter_fn(path):
-                continue
-            key = key_prefix + get_param_key(path)
-            if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
-                continue
-            if "experts" in path:
-                tensor = np.stack([tensors[key_prefix + get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0)
-            else:
-                tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
-            if len(path) >= 2 and path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
-                tensor = tensor.reshape(param.shape)
-            assert param.shape == tensor.shape, f"shape mismatch for {key}"
-            updates.append((path, jax.device_put(tensor.astype(param.dtype), param.sharding)))
-        nnx.update(module, nnx.from_flat_state(updates))
-
-    def load_recursive(module: nnx.Module, key_prefix: str):
-        if getattr(module, "is_stacked", False):
-            for i in range(len(module)):
-                load_params(module[i], f"{key_prefix}{i}.")  # ArrayRef writes through
-        elif children := list(nnx.iter_children(module)):
-            for name, child in children:
-                load_recursive(child, f"{key_prefix}{name}.")
+    # unstack_state converts stacked paths (layers._stacked.xxx) to per-layer paths
+    # (layers.0.xxx) with ArrayRef write-through, matching checkpoint key format
+    for path, param in nnx.to_flat_state(unstack_state(model)):
+        if filter_fn is not None and not filter_fn(path):
+            continue
+        key = get_param_key(path)
+        if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
+            continue
+        if "experts" in path:
+            tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0)
         else:
-            load_params(module, key_prefix)
-
-    load_recursive(model, "")
+            tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
+        if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
+            tensor = tensor.reshape(param.shape)
+        assert param.shape == tensor.shape, f"shape mismatch for {key}"
+        # ArrayRef.set_raw_value writes through to the stacked parent variable
+        param.set_raw_value(jax.device_put(tensor.astype(param.dtype), param.sharding))
 
 
 def save_safetensors(
