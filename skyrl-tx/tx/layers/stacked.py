@@ -146,11 +146,11 @@ class StackedDecoderLayers(nnx.Module):
         if is_training:
             return final_hs, all_hidden_states, None
 
-        # Prefill: convert stacked arrays to list and create KVCache
-        keys_list = [all_keys[i] for i in range(self.num_layers)]
-        values_list = [all_values[i] for i in range(self.num_layers)]
-        cache_position = attention_mask.sum(axis=1).astype(jnp.int32)
-        return final_hs, all_hidden_states, KVCache(keys=keys_list, values=values_list, cache_position=cache_position)
+        return final_hs, all_hidden_states, KVCache(
+            keys=[all_keys[i] for i in range(self.num_layers)],
+            values=[all_values[i] for i in range(self.num_layers)],
+            cache_position=attention_mask.sum(axis=1).astype(jnp.int32),
+        )
 
 
 def unstack_state(module: nnx.Module) -> nnx.GraphState:
