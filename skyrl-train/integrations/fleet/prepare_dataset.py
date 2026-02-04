@@ -16,7 +16,11 @@ Split Strategy:
     - Minimum 1 eval sample per env (otherwise all go to train)
     - Held-out eval envs: instacart (computer_use only)
 
-v0.3 Changes:
+v0.3.1 Changes:
+    - Added MAX_ENV_TRAIN_RATIO=0.20 to prevent any single env from dominating
+    - Hash-based deterministic sampling for reproducibility
+
+v0.3.0 Changes:
     - Increased eval_ratio from 2% to 10%
     - Added MAX_EVAL_SAMPLES=30 cap per environment
     - MIN_EVAL_SAMPLES stays at 5
@@ -41,9 +45,13 @@ HELD_OUT_ENVS = {
 # Minimum number of samples required to create an eval split for an env
 MIN_EVAL_SAMPLES = 5
 
-# Maximum number of eval samples per environment (v0.3)
-# Ensures small envs like ticketmaster get eval traces without blowing up eval set size
-MAX_EVAL_SAMPLES = 30
+# Maximum number of eval samples per environment (v0.3.1: reduced from 30 to 20)
+# Ensures small envs get eval traces without blowing up eval set size
+MAX_EVAL_SAMPLES = 20
+
+# Maximum fraction of training data any single environment can have (v0.3.1)
+# Prevents dominant environments from skewing training
+MAX_ENV_TRAIN_RATIO = 0.20
 
 
 def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
@@ -72,6 +80,61 @@ def hash_to_split(task_key: str, eval_ratio: float = 0.10) -> str:
     return "eval" if hash_float < eval_ratio else "train"
 
 
+def hash_to_float(task_key: str) -> float:
+    """Convert task_key to deterministic float in [0, 1) for sampling."""
+    hash_bytes = hashlib.md5(task_key.encode()).digest()
+    hash_int = int.from_bytes(hash_bytes[:8], byteorder="big")
+    return hash_int / (2**64)
+
+
+def cap_training_distribution(
+    train_records: List[Dict[str, Any]],
+    max_env_ratio: float,
+) -> tuple[List[Dict[str, Any]], Dict[str, Dict[str, int]]]:
+    """Cap each environment's contribution to training data.
+
+    Uses hash-based deterministic sampling so the same tasks are always selected.
+
+    Args:
+        train_records: List of training records with 'data_source' (env_key) and 'task_key'
+        max_env_ratio: Maximum fraction any single env can contribute (e.g., 0.20 = 20%)
+
+    Returns:
+        Tuple of (capped_records, cap_stats) where cap_stats shows per-env before/after counts
+    """
+    if max_env_ratio >= 1.0:
+        return train_records, {}
+
+    total_train = len(train_records)
+    max_per_env = int(total_train * max_env_ratio)
+
+    # Group by environment
+    records_by_env: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in train_records:
+        env_key = record.get("data_source", "unknown")
+        records_by_env[env_key].append(record)
+
+    # Cap each environment
+    capped_records = []
+    cap_stats: Dict[str, Dict[str, int]] = {}
+
+    for env_key, records in records_by_env.items():
+        before_count = len(records)
+
+        if before_count <= max_per_env:
+            # No capping needed
+            capped_records.extend(records)
+            cap_stats[env_key] = {"before": before_count, "after": before_count, "capped": False}
+        else:
+            # Sort by hash for deterministic selection
+            records_sorted = sorted(records, key=lambda r: hash_to_float(r.get("task_key", "")))
+            selected = records_sorted[:max_per_env]
+            capped_records.extend(selected)
+            cap_stats[env_key] = {"before": before_count, "after": max_per_env, "capped": True}
+
+    return capped_records, cap_stats
+
+
 def prepare_fleet_dataset(
     tasks_json: str,
     output_dir: str,
@@ -79,6 +142,7 @@ def prepare_fleet_dataset(
     eval_ratio: float = 0.10,  # v0.3: increased from 0.02 to ensure ticketmaster gets eval samples
     env_filter: Optional[str] = None,
     max_tasks: Optional[int] = None,
+    max_env_ratio: float = MAX_ENV_TRAIN_RATIO,  # v0.3.1: cap dominant environments
 ):
     """
     Convert Fleet tasks JSON to SkyRL parquet dataset.
@@ -90,6 +154,7 @@ def prepare_fleet_dataset(
         eval_ratio: Fraction of data for evaluation (default: 0.02)
         env_filter: Optional env_key filter (e.g., "github", "booking")
         max_tasks: Optional maximum number of tasks to include
+        max_env_ratio: Maximum fraction any single env can contribute to training (default: 0.20)
     """
     print(f"Loading tasks from {tasks_json}...")
     tasks = load_tasks_from_json(tasks_json)
@@ -216,6 +281,24 @@ def prepare_fleet_dataset(
 
     print(f"\nTotal: {len(train_records)} train, {len(eval_records)} eval")
 
+    # Apply per-environment cap to training data (v0.3.1)
+    if max_env_ratio < 1.0 and train_records:
+        train_records, cap_stats = cap_training_distribution(train_records, max_env_ratio)
+
+        # Print capping summary
+        capped_envs = [env for env, stats in cap_stats.items() if stats["capped"]]
+        if capped_envs:
+            print(f"\n=== Training Distribution Cap ({max_env_ratio:.0%} max per env) ===")
+            for env in sorted(capped_envs):
+                stats = cap_stats[env]
+                print(f"  {env}: {stats['before']} -> {stats['after']} ({stats['before'] - stats['after']} removed)")
+            print(f"\nAfter capping: {len(train_records)} train")
+
+        # Update env_split_counts with capped values
+        for env, stats in cap_stats.items():
+            if env in env_split_counts:
+                env_split_counts[env]["train"] = stats["after"]
+
     # Create datasets
     train_dataset = Dataset.from_list(train_records) if train_records else None
     eval_dataset = Dataset.from_list(eval_records) if eval_records else None
@@ -310,6 +393,12 @@ def main():
         default=None,
         help="Maximum number of tasks to include",
     )
+    parser.add_argument(
+        "--max-env-ratio",
+        type=float,
+        default=MAX_ENV_TRAIN_RATIO,
+        help=f"Maximum fraction of training data per environment (default: {MAX_ENV_TRAIN_RATIO})",
+    )
 
     args = parser.parse_args()
 
@@ -323,6 +412,7 @@ def main():
         eval_ratio=args.eval_ratio,
         env_filter=args.env_filter,
         max_tasks=args.max_tasks,
+        max_env_ratio=args.max_env_ratio,
     )
 
 

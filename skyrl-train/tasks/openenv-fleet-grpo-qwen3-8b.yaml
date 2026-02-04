@@ -165,7 +165,7 @@ run: |
     generator.num_inference_engines=$TOTAL_GPUS \
     generator.inference_engine_tensor_parallel_size=1 \
     trainer.epochs=${NUM_EPOCHS} \
-    trainer.eval_batch_size=8 \
+    trainer.eval_batch_size=4 \
     trainer.eval_before_train=true \
     trainer.eval_interval=10 \
     trainer.update_epochs_per_batch=1 \
