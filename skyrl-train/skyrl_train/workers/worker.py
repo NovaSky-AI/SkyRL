@@ -693,8 +693,8 @@ class PolicyWorkerBase(Worker):
             self._grad_stats["var_numerator"][name] += delta * delta2  # M2 accumulator
 
             # Histogram for this param
-            hist = torch.histc(grad.flatten(), bins=50)
-            hist = torch.nn.functional.softmax(hist, dim=0)
+            hist = torch.histc(grad.flatten(), bins=10)
+            hist = hist / hist.sum()  # Normalize to probability distribution
             # Handle DTensor (FSDP2) - convert to regular tensor first
             if hasattr(hist, "full_tensor"):
                 hist = hist.full_tensor()
@@ -704,11 +704,12 @@ class PolicyWorkerBase(Worker):
         return
 
     def compute_gradient_metrics(self) -> Dict[str, float | int | list[float]]:
-        """Compute all 3 gradient-based metrics."""
+        """Compute all 4 gradient-based metrics."""
         grad_metrics = {
             "grad:snr": self._compute_snr(),
             "grad:megabytes_edited": self._compute_megabytes_edited(),
             "grad:update_diversity": self._compute_update_diversity(),
+            "grad:effective_rank": self._compute_effective_rank(),
         }
         return grad_metrics
 
@@ -796,22 +797,86 @@ class PolicyWorkerBase(Worker):
         if len(all_grads) == 0:
             return []
         all_grads = torch.cat(all_grads)
-        hist = torch.histc(all_grads, bins=50)
+        hist = torch.histc(all_grads, bins=10)
         hist = hist / hist.sum()  # Normalize to probability distribution
-        hist = torch.nn.functional.softmax(hist, dim=0)  # Apply softmax for emphasis
         # Handle DTensor (FSDP2) - convert to regular tensor first
         if hasattr(hist, "full_tensor"):
             hist = hist.full_tensor()
         # Return probability distribution as list
         return hist.detach().cpu().tolist()
 
+    def _compute_effective_rank(self, k: int = 64) -> float:
+        """
+        Compute mean normalized effective rank across all 2D gradient matrices.
+
+        Uses randomized SVD (svd_lowrank) for efficiency with k=64 components.
+
+        Effective rank measures the intrinsic dimensionality of the gradient signal.
+        For each layer's gradient matrix G:
+          1. Compute randomized SVD to get top-k singular values
+          2. Normalize singular values: p_i = σ_i / Σσ_j
+          3. Compute entropy: H = -Σ p_i log(p_i)
+          4. Effective rank: exp(H)
+          5. Normalize by k to get value in [0, 1]
+
+        Returns the mean normalized effective rank across all 2D layers.
+        Higher values indicate gradients span more directions (less low-rank).
+        """
+        if self._grad_stats["count"] == 0:
+            return 0.0
+
+        ranks = []
+        for name in self._grad_stats["mean"]:
+            mean_grad = self._grad_stats["mean"][name]
+
+            # Only compute for 2D matrices (weight layers)
+            if mean_grad.dim() != 2:
+                continue
+
+            # Handle DTensor (FSDP2)
+            if hasattr(mean_grad, "full_tensor"):
+                mean_grad = mean_grad.full_tensor()
+
+            # Compute top-k singular values using randomized SVD (faster)
+            try:
+                q = min(k, min(mean_grad.shape))
+                _, s, _ = torch.svd_lowrank(mean_grad.detach().float(), q=q)
+            except Exception:
+                continue
+
+            # Normalize to probability distribution
+            s_sum = s.sum()
+            if s_sum == 0:
+                continue
+            p = s / s_sum
+
+            # Compute entropy (with epsilon for numerical stability)
+            entropy = -(p * torch.log(p + 1e-10)).sum()
+
+            # Effective rank = exp(entropy), normalized by k (number of components)
+            eff_rank = torch.exp(entropy).item()
+            normalized_rank = eff_rank / q
+
+            ranks.append(normalized_rank)
+
+        if len(ranks) == 0:
+            return 0.0
+
+        return sum(ranks) / len(ranks)
+
     def reset_gradient_stats(self):
-        """Reset gradient statistics for next accumulation period."""
+        """Reset gradient statistics for next accumulation period.
+
+        Note: Histograms are preserved across resets to accumulate a reliable
+        distribution fingerprint for the RL environment across the training run.
+        """
+        # Preserve histograms across resets
+        existing_histograms = self._grad_stats.get("histograms", [])
         self._grad_stats = {
             "mean": {},
             "var_numerator": {},
             "count": 0,
-            "histograms": [],
+            "histograms": existing_histograms,
         }
 
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:

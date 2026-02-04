@@ -1063,6 +1063,11 @@ class RayPPOTrainer:
         Returns:
             Dict of reduced metrics from training
         """
+        # Reset gradient stats at start of each training step for per-step metrics
+        # (histograms are preserved to accumulate across the training run)
+        if self.cfg.trainer.policy.track_extra_gradient_metrics:
+            self.dispatch.reset_gradient_stats(model)
+
         # Compute mini batch size from config (algorithm-level concept)
         n_samples = self.cfg.generator.n_samples_per_prompt
         if model == "policy":
@@ -1084,15 +1089,16 @@ class RayPPOTrainer:
                 for k, v in status.items():
                     all_metrics[k].append(v)
 
-                if self.cfg.trainer.policy.track_extra_gradient_metrics:
-                    grad_metrics = self.dispatch.compute_gradient_metrics(model)
-                    for k, v in grad_metrics.items():
-                        all_metrics[k].append(v)
-
                 # Optimizer step after each mini batch
                 grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
+
+        # Compute gradient metrics once per training step (from accumulated stats)
+        if self.cfg.trainer.policy.track_extra_gradient_metrics:
+            grad_metrics = self.dispatch.compute_gradient_metrics(model)
+            for k, v in grad_metrics.items():
+                all_metrics[k].append(v)
 
         # Reduce metrics across all mini-batches and epochs
         reduced_metrics = reduce_metrics(all_metrics, ignore_keys=["grad:update_diversity"])
