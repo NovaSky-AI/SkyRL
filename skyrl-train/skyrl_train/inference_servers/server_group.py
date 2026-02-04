@@ -16,6 +16,10 @@ from skyrl_train.inference_servers.server_pool import ServerActorPool
 
 logger = logging.getLogger(__name__)
 
+# In the colocated training case, we schedule trainig and inference actors
+# in the same placement group. In SkyRL, we further schedule actors to get information
+# about the GPU ID to pack actors appropriately on different nodes.
+# Thus we use a fractional CPU allocation for colocated actors.
 COLOCATED_ACTOR_CPU_FRACTION = 0.2
 
 

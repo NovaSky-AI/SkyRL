@@ -13,7 +13,8 @@ from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout, build_vllm_cli_args
+from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.generators.base import GeneratorInterface
 from omegaconf import DictConfig
