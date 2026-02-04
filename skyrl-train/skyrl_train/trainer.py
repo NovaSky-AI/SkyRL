@@ -1094,6 +1094,8 @@ class RayPPOTrainer:
             grad_metrics = self.dispatch.compute_gradient_metrics(model)
             for k, v in grad_metrics.items():
                 all_metrics[k].append(v)
+            # Free GPU tensors (mean/var_numerator) to reclaim memory for inference
+            self.dispatch.reset_gradient_stats(model)
 
         # Reduce metrics across all mini-batches and epochs
         reduced_metrics = reduce_metrics(all_metrics, ignore_keys=["grad:update_diversity"])
