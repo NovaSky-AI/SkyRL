@@ -767,7 +767,11 @@ class PolicyWorkerBase(Worker):
                 continue
 
             mean_grad = self._grad_stats["mean"][name]
-            param_magnitude = torch.abs(param.data)
+            # Handle DTensor (FSDP2) - convert param.data to regular tensor
+            param_data = param.data
+            if hasattr(param_data, "full_tensor"):
+                param_data = param_data.full_tensor()
+            param_magnitude = torch.abs(param_data)
 
             # Count gradients where |mean_grad| > 5% of |param|
             threshold = 0.05 * param_magnitude
