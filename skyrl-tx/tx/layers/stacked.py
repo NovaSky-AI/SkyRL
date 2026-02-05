@@ -230,9 +230,11 @@ class StackedDecoderLayers(nnx.Module):
 def unstack_state(module: nnx.Module) -> nnx.GraphState:
     """Transform stacked layer state to unstacked ArrayRef views.
 
-    Converts paths like `dense_layers._stacked.xxx` or `layers._stacked.xxx` to
-    `layers.0.xxx`, `layers.1.xxx`, etc. Each entry is an ArrayRef that writes
-    through to the original stacked variable.
+    Converts paths like `layers._stacked.xxx` to `layers.0.xxx`, `layers.1.xxx`, etc.
+    Each entry is an ArrayRef that writes through to the original stacked variable.
+
+    This is useful for checkpoint loading where weights are stored per-layer.
+
 
     For models with multiple StackedDecoderLayers (e.g., DeepSeek with dense + MoE),
     the model can provide get_stacked_layers_list() to specify ordering. Otherwise,
@@ -252,7 +254,7 @@ def unstack_state(module: nnx.Module) -> nnx.GraphState:
         counter = 0
         for stacked_layers in module.model.get_stacked_layers_list():
             checkpoint_mapping[id(stacked_layers)] = counter
-            counter += len(stacked_layers)
+            counter += stacked_layers.num_layers
 
     expanded = []
     for path, param in nnx.to_flat_state(nnx.state(module)):
@@ -266,6 +268,7 @@ def unstack_state(module: nnx.Module) -> nnx.GraphState:
         stacked_layers = module
         for key in path[:stacked_idx]:
             stacked_layers = getattr(stacked_layers, key)
+        assert isinstance(stacked_layers, StackedDecoderLayers)
 
         if id(stacked_layers) in checkpoint_mapping:
             # Use checkpoint mapping - replace attribute name with "layers"
