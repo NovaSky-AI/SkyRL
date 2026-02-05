@@ -54,7 +54,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - SkyRL-Train:
+  - "SkyRL-Train: User Guide":
     - Getting Started:
       - getting-started/index.md
       - Installation: getting-started/installation.md
@@ -99,7 +99,7 @@ nav:
     - Checkpointing: checkpointing-logging/checkpointing.md
     - Troubleshooting: troubleshooting/troubleshooting.md
   - SkyRL-Agent: skyagent/agent-overview.md
-  - SkyRL-Train API:
+  - "SkyRL-Train: API Reference":
     - Data Interface: api/data.md
     - Generator: api/generator.md
     - Trainer: api/trainer.md
