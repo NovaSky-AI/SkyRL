@@ -12,28 +12,64 @@ except ImportError:
     wandb = None  # type: ignore[assignment]
 
 
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(name)s: %(message)s"
+
+RICH_HANDLER_KWARGS = {
+    "show_time": False,
+    "show_level": False,
+    "show_path": False,
+    "markup": False,
+    "rich_tracebacks": True,
+}
+
+
+def _create_rich_handler() -> RichHandler:
+    """Create a RichHandler with consistent configuration."""
+    handler = RichHandler(**RICH_HANDLER_KWARGS)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    return handler
+
+
 def _setup_root_logger() -> None:
     logger = logging.getLogger("tx")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False  # Prevent propagation to root logger
+    logger.addHandler(_create_rich_handler())
 
-    handler = RichHandler(
-        show_time=True,
-        show_level=True,
-        show_path=False,
-        markup=False,
-        rich_tracebacks=True,
-    )
-    # RichHandler already shows time and level, so only include name and message
-    handler.setFormatter(logging.Formatter("%(name)s - %(message)s"))
-    logger.addHandler(handler)
+
+def get_uvicorn_log_config() -> dict:
+    """Get uvicorn logging config that uses the same RichHandler."""
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "format": LOG_FORMAT,
+            },
+        },
+        "handlers": {
+            "default": {
+                "()": RichHandler,
+                **RICH_HANDLER_KWARGS,
+                "formatter": "default",
+            },
+        },
+        "loggers": {
+            # Main uvicorn logger (general server messages)
+            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            # Uvicorn error logger (startup, shutdown, exceptions)
+            "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            # HTTP access logs (request/response logging)
+            "uvicorn.access": {"handlers": ["default"], "level": "INFO", "propagate": False},
+        },
+    }
 
 
 def add_file_handler(path: Path | str, level: int = logging.DEBUG, *, print_path: bool = True) -> None:
     logger = logging.getLogger("tx")
     handler = logging.FileHandler(path)
     handler.setLevel(level)
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    formatter = logging.Formatter(LOG_FORMAT)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     if print_path:
@@ -92,4 +128,4 @@ def get_tracker(tracker: ExperimentTracker | None, config: dict[str, Any], **kwa
             raise ValueError(f"Unsupported experiment tracker: {tracker}")
 
 
-__all__ = ["logger"]
+__all__ = ["logger", "get_uvicorn_log_config"]
