@@ -244,6 +244,8 @@ generator:
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
   max_turns: 1
+  # Maximum time (seconds) for a single trajectory before timeout. 0 = no timeout.
+  trajectory_timeout_seconds: 600
 
   # chat template configuration for SkyRLGymGenerator.
   # For `/chat/completions` with vllm via the HTTP endpoint for rollout, instead use say

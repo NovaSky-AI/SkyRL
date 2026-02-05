@@ -7,6 +7,7 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_gene
 
 import asyncio
 import copy
+import time
 from uuid import uuid4
 import skyrl_gym
 from typing import List, Dict, Any, Optional, Union, Tuple
@@ -117,6 +118,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         self.inference_engine_client = inference_engine_client
         self.tokenizer = tokenizer
         self.max_turns = generator_cfg.max_turns
+        self.trajectory_timeout_seconds = getattr(generator_cfg, "trajectory_timeout_seconds", 600)
         self.batched = generator_cfg.batched
         self.use_conversation_multi_turn = generator_cfg.use_conversation_multi_turn
         # optionally use custom chat template to get loss masks (i.e. for Qwen3)
@@ -290,7 +292,28 @@ class SkyRLGymGenerator(GeneratorInterface):
             done=False,
         )
 
+        # Track trajectory start time for timeout
+        trajectory_start_time = time.time()
+
         while not agent_loop_state.done:
+            # Check for trajectory timeout at the start of each turn
+            if self.trajectory_timeout_seconds > 0:
+                elapsed = time.time() - trajectory_start_time
+                if elapsed > self.trajectory_timeout_seconds:
+                    logger.warning(
+                        f"Trajectory timeout after {elapsed:.1f}s (limit: {self.trajectory_timeout_seconds}s) "
+                        f"for session {session_id}. Returning zero-reward trajectory."
+                    )
+                    await self._run_in_executor_if_available(env.close)
+                    return TrajectoryOutput(
+                        response_ids=[self.tokenizer.eos_token_id],
+                        reward=0.0,
+                        stop_reason="timeout",
+                        loss_mask=[0],
+                        prompt_ids=initial_input_ids,
+                        rollout_logprobs=[0.0],
+                        env_metrics={"trajectory_timeout": 1.0},
+                    )
 
             if len(agent_loop_state.input_ids) > max_input_length:
                 stop_reason = "length"
@@ -788,6 +811,25 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Per-env failure counts for WandB
             for env, count in failures_by_env.items():
                 rollout_metrics[f"environment/{env}/env_init_failures"] = count
+
+        # Log count of trajectory timeouts by environment
+        trajectory_timeouts = sum(1 for sr in stop_reasons if sr == "timeout")
+        if trajectory_timeouts > 0:
+            # Count timeouts by env_class
+            timeouts_by_env: Dict[str, int] = {}
+            for env_class, stop_reason in zip(env_classes, stop_reasons):
+                if stop_reason == "timeout":
+                    timeouts_by_env[env_class] = timeouts_by_env.get(env_class, 0) + 1
+
+            timeout_details = ", ".join(f"{env}: {count}" for env, count in sorted(timeouts_by_env.items()))
+            logger.warning(
+                f"Trajectory timeouts: {trajectory_timeouts}/{len(stop_reasons)} trajectories "
+                f"({100 * trajectory_timeouts / len(stop_reasons):.1f}%) - by env: {timeout_details}"
+            )
+            rollout_metrics["generate/trajectory_timeouts"] = trajectory_timeouts
+            # Per-env timeout counts for WandB
+            for env, count in timeouts_by_env.items():
+                rollout_metrics[f"environment/{env}/trajectory_timeouts"] = count
 
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
