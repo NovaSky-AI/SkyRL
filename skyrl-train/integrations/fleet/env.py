@@ -78,14 +78,25 @@ def parse_tool_call(action: str) -> Optional[Dict[str, Any]]:
     - <tool_call>{"name": "...", "arguments": {...}}</tool_call>
     - <function_call>{"name": "...", "arguments": {...}}</function_call>
 
+    Also handles cases where the closing tag is missing (e.g., when </tool_call>
+    is used as the stop string and not included in the output).
+
     Returns dict with "name" and "arguments" keys, or None if not found.
     """
     # Try common tag formats
     for tag in ["tool_call", "function_call"]:
+        # First try with closing tag
         match = re.search(rf"<{tag}>(.*?)</{tag}>", action, re.DOTALL)
+        if not match:
+            # Try without closing tag (for when </tool_call> is the stop string)
+            # Match from opening tag to end of string or next special token
+            match = re.search(rf"<{tag}>(.*?)(?:<\||\Z)", action, re.DOTALL)
         if match:
             try:
                 parsed = json.loads(match.group(1).strip())
+                # json.loads can return any JSON type, we need a dict
+                if not isinstance(parsed, dict):
+                    continue
                 # Normalize keys
                 name = parsed.get("name") or parsed.get("tool")
                 args = parsed.get("arguments") or parsed.get("params", {})
