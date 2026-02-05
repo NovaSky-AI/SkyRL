@@ -171,11 +171,9 @@ def unstack_state(module: nnx.Module) -> nnx.GraphState:
     for path, var in nnx.to_flat_state(nnx.state(module)):
         if "_stacked" not in path:
             expanded.append((path, var))
-            continue
-
-        idx = path.index("_stacked")
-        for i in range(var[...].shape[0]):
-            new_path = path[:idx] + (str(i),) + path[idx + 1 :]
-            expanded.append((new_path, ArrayRef(var, i)))
-
+        else:
+            idx = path.index("_stacked")
+            for i in range(var[...].shape[0]):
+                new_path = path[:idx] + (str(i),) + path[idx + 1 :]
+                expanded.append((new_path, ArrayRef(var, i)))
     return nnx.from_flat_state(expanded)
