@@ -223,7 +223,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
         env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
-        env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
@@ -233,8 +232,30 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Need copy here since the prompt is a list of messages and we are going to modify it.
         chat_history = copy.deepcopy(prompt)
 
-        # init() returns the first prompt to be given to the model, and optional metadata dict
-        chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+        # Try to create and initialize the environment. If it fails (e.g., Fleet health check failure),
+        # return a zero-reward trajectory instead of crashing the entire training run.
+        try:
+            env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
+            # init() returns the first prompt to be given to the model, and optional metadata dict
+            chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+        except Exception as e:
+            logger.warning(f"Environment init failed for session {session_id}: {e}. Returning zero-reward trajectory.")
+            # Return a minimal failed trajectory with zero reward
+            prompt_ids = self.tokenizer.apply_chat_template(
+                chat_history,
+                add_generation_prompt=True,
+                tokenize=True,
+                **self.generator_cfg.chat_template_kwargs,
+            )
+            return TrajectoryOutput(
+                response_ids=[self.tokenizer.eos_token_id],
+                reward=0.0,
+                stop_reason="env_init_failed",
+                loss_mask=[0],  # Don't learn from failed trajectories
+                prompt_ids=prompt_ids,
+                rollout_logprobs=None,
+                env_metrics={"env_init_failed": 1.0},
+            )
         initial_chat_history_length = len(chat_history)
         initial_input_ids = self.tokenizer.apply_chat_template(
             chat_history,
