@@ -16,6 +16,7 @@ import asyncio
 from http import HTTPStatus
 from typing import Any, Dict, List, Union, Tuple
 from pathlib import Path
+from unittest.mock import patch
 import ray
 import threading
 import requests
@@ -597,7 +598,10 @@ def test_structured_generation(ray_init_fixture):
 @pytest.mark.vllm
 def test_http_endpoint_error_handling(ray_init_fixture):
     """
-    Test error handling for various invalid requests.
+    Test error handling for various invalid requests and internal server errors.
+
+    Tests validation errors (400) for invalid requests and verifies that internal
+    server errors (500) include traceback information for debugging.
     """
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
@@ -717,6 +721,44 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         bad_payload = {"model": MODEL_QWEN2_5, "prompt": ["hi", "hello", "ok"], "session_id": [0, 1]}
         r = requests.post(f"{base_url}/v1/completions", json=bad_payload)
         assert r.status_code == HTTPStatus.BAD_REQUEST
+
+        # Test internal server errors (500) include traceback for debugging
+        # This helps debug issues like 'choices' KeyError when vLLM returns malformed responses
+        import skyrl_train.inference_engines.inference_engine_client_http_endpoint as http_endpoint_module
+
+        original_client = http_endpoint_module._global_inference_engine_client
+
+        # Test /chat/completions internal error with traceback
+        async def mock_chat_completion_raises(*args, **kwargs):
+            raise KeyError("choices")
+
+        with patch.object(original_client, "chat_completion", side_effect=mock_chat_completion_raises):
+            response = requests.post(
+                f"{base_url}/v1/chat/completions",
+                json={"model": MODEL_QWEN2_5, "messages": [{"role": "user", "content": "Hello"}]},
+            )
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        error_data = response.json()
+        error_message = error_data["error"]["message"]
+        assert "choices" in error_message
+        assert "Traceback:" in error_message
+        assert "Traceback (most recent call last):" in error_message
+        assert error_data["error"]["code"] == 500
+
+        # Test /completions internal error with traceback
+        async def mock_completion_raises(*args, **kwargs):
+            raise RuntimeError("Simulated internal error")
+
+        with patch.object(original_client, "completion", side_effect=mock_completion_raises):
+            response = requests.post(
+                f"{base_url}/v1/completions",
+                json={"model": MODEL_QWEN2_5, "prompt": "Hello"},
+            )
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        error_data = response.json()
+        error_message = error_data["error"]["message"]
+        assert "Simulated internal error" in error_message
+        assert "Traceback:" in error_message
 
     finally:
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
