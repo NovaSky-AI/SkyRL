@@ -59,7 +59,7 @@ class StackedDecoderLayers(nnx.Module):
         return self.num_layers
 
     def __getitem__(self, index: int) -> nnx.Module:
-        """Get view into layer at index (stays synced with stacked state)."""
+        """Get view into layer at index. Only for tests and weight loading."""
         if index < 0 or index >= self.num_layers:
             raise IndexError(f"Layer index {index} out of range [0, {self.num_layers})")
         graphdef, state = nnx.split(self._stacked)
