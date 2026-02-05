@@ -484,24 +484,16 @@ class DeepseekV3Model(nnx.Module):
         )
 
         # Create stacked dense layers (layers 0 to first_k_dense_replace - 1)
-        if self.num_dense_layers > 0:
+        def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
+            return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MLP, dtype=dtype, rngs=rngs)
 
-            def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
-                return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MLP, dtype=dtype, rngs=rngs)
-
-            self.dense_layers = StackedDecoderLayers(create_dense_layer, self.num_dense_layers, rngs)
-        else:
-            self.dense_layers = None
+        self.dense_layers = StackedDecoderLayers(create_dense_layer, self.num_dense_layers, rngs)
 
         # Create stacked MoE layers (layers first_k_dense_replace to num_hidden_layers - 1)
-        if self.num_moe_layers > 0:
+        def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
+            return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MoE, dtype=dtype, rngs=rngs)
 
-            def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
-                return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MoE, dtype=dtype, rngs=rngs)
-
-            self.moe_layers = StackedDecoderLayers(create_moe_layer, self.num_moe_layers, rngs)
-        else:
-            self.moe_layers = None
+        self.moe_layers = StackedDecoderLayers(create_moe_layer, self.num_moe_layers, rngs)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
@@ -511,12 +503,7 @@ class DeepseekV3Model(nnx.Module):
         Returns dense layers first (checkpoint indices 0 to first_k-1),
         then MoE layers (checkpoint indices first_k to num_layers-1).
         """
-        result = []
-        if self.dense_layers is not None:
-            result.append(self.dense_layers)
-        if self.moe_layers is not None:
-            result.append(self.moe_layers)
-        return result
+        return [self.dense_layers, self.moe_layers]
 
     def __call__(
         self,
@@ -543,34 +530,30 @@ class DeepseekV3Model(nnx.Module):
             dense_kv_cache, moe_kv_cache = kv_cache.split(self.num_dense_layers)
 
         # Forward through dense layers
-        dense_kv_result = None
-        if self.dense_layers is not None:
-            hidden_states, dense_hidden_states, dense_kv_result = self.dense_layers(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=dense_kv_cache,
-                output_hidden_states=output_hidden_states,
-                gradient_checkpointing=self.config.gradient_checkpointing,
-                is_training=is_training,
-            )
-            all_hidden_states.extend(dense_hidden_states)
+        hidden_states, dense_hidden_states, dense_kv_result = self.dense_layers(
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=dense_kv_cache,
+            output_hidden_states=output_hidden_states,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+            is_training=is_training,
+        )
+        all_hidden_states.extend(dense_hidden_states)
 
         # Forward through MoE layers
-        moe_kv_result = None
-        if self.moe_layers is not None:
-            hidden_states, moe_hidden_states, moe_kv_result = self.moe_layers(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=moe_kv_cache,
-                output_hidden_states=output_hidden_states,
-                gradient_checkpointing=self.config.gradient_checkpointing,
-                is_training=is_training,
-            )
-            all_hidden_states.extend(moe_hidden_states)
+        hidden_states, moe_hidden_states, moe_kv_result = self.moe_layers(
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=moe_kv_cache,
+            output_hidden_states=output_hidden_states,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+            is_training=is_training,
+        )
+        all_hidden_states.extend(moe_hidden_states)
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:

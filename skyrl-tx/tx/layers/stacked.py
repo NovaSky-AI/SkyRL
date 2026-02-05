@@ -69,10 +69,15 @@ class StackedDecoderLayers(nnx.Module):
 
         Args:
             create_layer_fn: Function that takes rngs and returns a single layer module.
-            num_layers: Number of layers to create.
+            num_layers: Number of layers to create. Can be 0 for empty layer stack.
             rngs: Random number generators for initialization.
         """
         self.num_layers = num_layers
+
+        # Handle empty layer case
+        if num_layers == 0:
+            self._stacked = None
+            return
 
         layer_keys = jax.random.split(rngs.params(), num_layers)
         mesh = jax.sharding.get_mesh()
@@ -167,7 +172,9 @@ class StackedDecoderLayers(nnx.Module):
             Tuple of (final_hidden_states, all_hidden_states, kv_cache).
             kv_cache is None when is_training=True.
         """
-        assert self.num_layers > 0, "num_layers must be positive"
+        # Handle empty layer case - pass through inputs unchanged
+        if self.num_layers == 0:
+            return hidden_states, [], kv_cache
 
         graphdef, state = nnx.split(self._stacked)
         is_decode = kv_cache is not None
