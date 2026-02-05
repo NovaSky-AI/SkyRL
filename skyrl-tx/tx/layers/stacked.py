@@ -23,6 +23,18 @@ class ArrayRef(nnx.Variable):
         parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
         return parent[idx] if key is Ellipsis else parent[idx][key]
 
+    def __setitem__(self, key, value):
+        """Write through to parent when value is set via indexing."""
+        parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
+        if key is Ellipsis:
+            # param[...] = value -> update entire slice
+            parent[...] = parent[...].at[idx].set(value)
+        else:
+            # param[key] = value -> update sub-slice
+            parent[...] = parent[...].at[idx][key].set(value)
+        # Also update our local value
+        super().__setitem__(key, value)
+
     def set_raw_value(self, value, **kwargs):
         """Write through to parent when value is set."""
         parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
@@ -218,10 +230,13 @@ class StackedDecoderLayers(nnx.Module):
 def unstack_state(module: nnx.Module) -> nnx.GraphState:
     """Transform stacked layer state to unstacked ArrayRef views.
 
-    Converts paths like `layers._stacked.xxx` to `layers.0.xxx`, `layers.1.xxx`, etc.
-    Each entry is an ArrayRef that writes through to the original stacked variable.
+    Converts paths like `dense_layers._stacked.xxx` or `layers._stacked.xxx` to
+    `layers.0.xxx`, `layers.1.xxx`, etc. Each entry is an ArrayRef that writes
+    through to the original stacked variable.
 
-    This is useful for checkpoint loading where weights are stored per-layer.
+    For models with multiple StackedDecoderLayers (e.g., DeepSeek with dense + MoE),
+    the model can provide get_stacked_layers_list() to specify ordering. Otherwise,
+    falls back to simple per-stack numbering.
 
     Args:
         module: Module containing StackedDecoderLayers.
@@ -229,15 +244,42 @@ def unstack_state(module: nnx.Module) -> nnx.GraphState:
     Returns:
         GraphState with unstacked paths and ArrayRef views.
     """
+    # Build mapping: StackedDecoderLayers object id → starting checkpoint index
+    checkpoint_mapping = {}
+
+    if hasattr(module, "model") and hasattr(module.model, "get_stacked_layers_list"):
+        # Model provides explicit ordering - use sequential checkpoint indices
+        counter = 0
+        for stacked_layers in module.model.get_stacked_layers_list():
+            checkpoint_mapping[id(stacked_layers)] = counter
+            counter += len(stacked_layers)
+
     expanded = []
-    for path, var in nnx.to_flat_state(nnx.state(module)):
+    for path, param in nnx.to_flat_state(nnx.state(module)):
         if "_stacked" not in path:
-            expanded.append((path, var))
+            expanded.append((path, param))
             continue
 
-        idx = path.index("_stacked")
-        for i in range(var[...].shape[0]):
-            new_path = path[:idx] + (str(i),) + path[idx + 1 :]
-            expanded.append((new_path, ArrayRef(var, i)))
+        stacked_idx = path.index("_stacked")
+
+        # Find the StackedDecoderLayers object this parameter belongs to
+        stacked_layers = module
+        for key in path[:stacked_idx]:
+            stacked_layers = getattr(stacked_layers, key)
+
+        if id(stacked_layers) in checkpoint_mapping:
+            # Use checkpoint mapping - replace attribute name with "layers"
+            start_idx = checkpoint_mapping[id(stacked_layers)]
+            # Path: ("model", "dense_layers", "_stacked", ...) → ("model", "layers", "0", ...)
+            base_path = path[:stacked_idx-1] + ("layers",)
+            for layer_idx in range(stacked_layers.num_layers):
+                checkpoint_idx = start_idx + layer_idx
+                new_path = base_path + (str(checkpoint_idx),) + path[stacked_idx+1:]
+                expanded.append((new_path, ArrayRef(param, layer_idx)))
+        else:
+            # Fallback: simple numbering within the same attribute
+            for layer_idx in range(param[...].shape[0]):
+                new_path = path[:stacked_idx] + (str(layer_idx),) + path[stacked_idx+1:]
+                expanded.append((new_path, ArrayRef(param, layer_idx)))
 
     return nnx.from_flat_state(expanded)

@@ -505,6 +505,19 @@ class DeepseekV3Model(nnx.Module):
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
+    def get_stacked_layers_list(self):
+        """Return ordered list of StackedDecoderLayers for checkpoint loading.
+
+        Returns dense layers first (checkpoint indices 0 to first_k-1),
+        then MoE layers (checkpoint indices first_k to num_layers-1).
+        """
+        result = []
+        if self.dense_layers is not None:
+            result.append(self.dense_layers)
+        if self.moe_layers is not None:
+            result.append(self.moe_layers)
+        return result
+
     def __call__(
         self,
         input_ids: jax.Array,

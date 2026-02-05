@@ -268,6 +268,7 @@ def test_qwen3_lora():
             )
 
             # Load layer LoRA weights (stacked format)
+            # Access _stacked to get the stacked module with LoRA parameters
             for i in range(config.num_hidden_layers):
                 hf_layer = hf_model.base_model.model.model.layers[i]
                 for module_name, projections in [
@@ -276,7 +277,7 @@ def test_qwen3_lora():
                 ]:
                     for proj_name in projections:
                         hf_proj = getattr(getattr(hf_layer, module_name), proj_name)
-                        jax_proj = getattr(getattr(model.model.layers, module_name), proj_name)
+                        jax_proj = getattr(getattr(model.model.layers._stacked, module_name), proj_name)
                         load_stacked_lora_weights(
                             jax_proj,
                             layer_idx=i,
