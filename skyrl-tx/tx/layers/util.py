@@ -96,12 +96,17 @@ def shard_map_ep(module: nnx.Module, func, *args):
         *args: Arguments to pass to func (replicated across shards).
     """
     graphdef, state = nnx.split(module)
-    # Extract only 'ep' dims from PartitionSpecs, replacing others with None
-    # Also strip the leading dimension from PartitionSpec, which corresponds to the weight stacking dimension
-    state_specs = jax.tree.map(
-        lambda s: PartitionSpec(*(p if p == "ep" else None for p in s[1:])) if isinstance(s, PartitionSpec) else s,
-        nnx.get_partition_spec(state),
-        is_leaf=lambda x: isinstance(x, PartitionSpec),
+
+    def to_ep_spec(path, s):
+        if not isinstance(s, PartitionSpec):
+            return s
+        # Strip leading stacking dimension if path contains "_stacked"
+        dims = s[1:] if "_stacked" in str(path) else s
+        # Extract only 'ep' dims from PartitionSpecs, replacing others with None
+        return PartitionSpec(*(p if p == "ep" else None for p in dims))
+
+    state_specs = jax.tree_util.tree_map_with_path(
+        to_ep_spec, nnx.get_partition_spec(state), is_leaf=lambda x: isinstance(x, PartitionSpec)
     )
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
