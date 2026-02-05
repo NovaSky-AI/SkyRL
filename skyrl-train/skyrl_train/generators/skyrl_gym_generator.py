@@ -770,6 +770,25 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
+        # Log count of failed env inits by environment
+        env_init_failures = sum(1 for sr in stop_reasons if sr == "env_init_failed")
+        if env_init_failures > 0:
+            # Count failures by env_class
+            failures_by_env: Dict[str, int] = {}
+            for env_class, stop_reason in zip(env_classes, stop_reasons):
+                if stop_reason == "env_init_failed":
+                    failures_by_env[env_class] = failures_by_env.get(env_class, 0) + 1
+
+            failure_details = ", ".join(f"{env}: {count}" for env, count in sorted(failures_by_env.items()))
+            logger.warning(
+                f"Env init failures: {env_init_failures}/{len(stop_reasons)} trajectories "
+                f"({100 * env_init_failures / len(stop_reasons):.1f}%) - by env: {failure_details}"
+            )
+            rollout_metrics["generate/env_init_failures"] = env_init_failures
+            # Per-env failure counts for WandB
+            for env, count in failures_by_env.items():
+                rollout_metrics[f"environment/{env}/env_init_failures"] = count
+
         if self.generator_cfg.zero_reward_on_non_stop:
             # set reward to 0 if the stop reason is not "stop"
             rewards = self._zero_reward_if_not_stop(rewards, stop_reasons)
