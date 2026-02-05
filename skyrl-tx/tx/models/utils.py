@@ -202,16 +202,16 @@ def forward_layers(
     layer_graphdef, layer_state = nnx.split(layers)
     is_decode = kv_cache is not None
 
-    def body_fn(hs, xs):
-        # Unpack xs: scan automatically slices the leading dimension of layer_state
-        if is_decode:
-            layer_params, layer_k, layer_v = xs
-            layer_kv = (layer_k, layer_v)
+    def body_fn(carry, layer_params):
+        hs, cache_keys, cache_values, layer_idx = carry
+
+        # Extract layer's cache slice if available
+        if cache_keys is not None:
+            layer_kv = (cache_keys[layer_idx], cache_values[layer_idx])
         else:
-            layer_params = xs
             layer_kv = None
 
-        # Merge using the sliced params directly - no manual gather needed
+        # Forward through layer
         layer = nnx.merge(layer_graphdef, layer_params)
         new_hs, (k, v) = layer(
             hs,
@@ -220,37 +220,38 @@ def forward_layers(
             adapter_indices=adapter_indices,
             kv_cache=layer_kv,
         )
+
         hs_output = new_hs if output_hidden_states else None
 
-        if is_training:
-            # Avoid accumulating large KV tensors for training.
+        # Update cache in carry if present (decode), otherwise accumulate outputs (prefill)
+        if cache_keys is not None:
+            cache_keys = cache_keys.at[layer_idx].set(k)
+            cache_values = cache_values.at[layer_idx].set(v)
+            k = v = None  # Don't accumulate in output - cache is in carry
+        elif is_training:
             k = v = None
-        return new_hs, (hs_output, k, v)
+
+        return (new_hs, cache_keys, cache_values, layer_idx + 1), (hs_output, k, v)
 
     if gradient_checkpointing:
         body_fn = jax.checkpoint(body_fn)
 
-    # Pass layer_state as xs so scan handles the slicing automatically.
-    # This avoids capturing layer_state as a closure and manually gathering,
-    # which causes slow XLA compilation with jax.checkpoint.
-    xs = (layer_state, kv_cache.keys, kv_cache.values) if is_decode else layer_state
+    cache_keys = kv_cache.keys if kv_cache else None
+    cache_values = kv_cache.values if kv_cache else None
+    init_carry = (hidden_states, cache_keys, cache_values, 0)
 
-    final_hs, (all_hs, all_keys, all_values) = jax.lax.scan(body_fn, hidden_states, xs)
+    (final_hs, final_keys, final_values, _), (all_hs, all_keys, all_values) = jax.lax.scan(
+        body_fn, init_carry, layer_state
+    )
 
-    # [embed, layer0_out, ..., layer(N-2)_out]; final layer output gets normed by caller
-    all_hidden_states = [hidden_states] + list(all_hs[:-1]) if output_hidden_states else []
-
-    if is_training:
-        new_kv_cache = None
-    elif is_decode:
-        # Decode mode: scan stacked the per-layer updated caches into (num_layers, ...)
+    if is_decode:
         new_kv_cache = KVCache(
-            keys=all_keys,
-            values=all_values,
+            keys=final_keys,
+            values=final_values,
             cache_position=kv_cache.cache_position + positions.shape[1],
         )
     else:
-        # Prefill mode: build cache from collected k,v outputs
-        new_kv_cache = KVCache.from_layer_outputs(all_keys, all_values, attention_mask)
+        new_kv_cache = None if is_training else KVCache.from_layer_outputs(all_keys, all_values, attention_mask)
 
+    all_hidden_states = [hidden_states] + list(all_hs[:-1]) if output_hidden_states else []
     return final_hs, all_hidden_states, new_kv_cache
