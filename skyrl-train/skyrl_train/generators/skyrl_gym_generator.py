@@ -253,7 +253,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 stop_reason="env_init_failed",
                 loss_mask=[0],  # Don't learn from failed trajectories
                 prompt_ids=prompt_ids,
-                rollout_logprobs=None,
+                rollout_logprobs=[0.0],  # Match response_ids length for validation
                 env_metrics={"env_init_failed": 1.0},
             )
         initial_chat_history_length = len(chat_history)
