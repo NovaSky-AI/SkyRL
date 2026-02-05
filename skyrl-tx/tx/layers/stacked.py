@@ -19,7 +19,7 @@ class ArrayRef(nnx.Variable):
 
     def __getitem__(self, key):
         parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
-        return parent[idx] if key is Ellipsis else parent[idx][key]
+        return parent[idx][key]
 
     def set_raw_value(self, value, **kwargs):
         """Write through to parent when value is set."""
