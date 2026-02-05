@@ -7,9 +7,9 @@ from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.rotary_embedding import get_rope
 from tx.layers.util import Param, prepare_routing, shard_map_ep
 from tx.layers.layernorm import RMSNorm
+from tx.layers.stacked import StackedDecoderLayers
 from tx.models.configs import DeepseekV3Config
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
-from tx.models.utils import create_stacked_layers, forward_layers
 from tx.utils.generator import GeneratorMixin, KVCache
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
@@ -489,7 +489,7 @@ class DeepseekV3Model(nnx.Module):
             def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
                 return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MLP, dtype=dtype, rngs=rngs)
 
-            self.dense_layers = create_stacked_layers(create_dense_layer, self.num_dense_layers, rngs)
+            self.dense_layers = StackedDecoderLayers(create_dense_layer, self.num_dense_layers, rngs)
         else:
             self.dense_layers = None
 
@@ -499,7 +499,7 @@ class DeepseekV3Model(nnx.Module):
             def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
                 return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MoE, dtype=dtype, rngs=rngs)
 
-            self.moe_layers = create_stacked_layers(create_moe_layer, self.num_moe_layers, rngs)
+            self.moe_layers = StackedDecoderLayers(create_moe_layer, self.num_moe_layers, rngs)
         else:
             self.moe_layers = None
 
@@ -532,10 +532,8 @@ class DeepseekV3Model(nnx.Module):
         # Forward through dense layers
         dense_kv_result = None
         if self.dense_layers is not None:
-            hidden_states, dense_hidden_states, dense_kv_result = forward_layers(
-                self.dense_layers,
+            hidden_states, dense_hidden_states, dense_kv_result = self.dense_layers(
                 hidden_states,
-                self.num_dense_layers,
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
@@ -549,10 +547,8 @@ class DeepseekV3Model(nnx.Module):
         # Forward through MoE layers
         moe_kv_result = None
         if self.moe_layers is not None:
-            hidden_states, moe_hidden_states, moe_kv_result = forward_layers(
-                self.moe_layers,
+            hidden_states, moe_hidden_states, moe_kv_result = self.moe_layers(
                 hidden_states,
-                self.num_moe_layers,
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,

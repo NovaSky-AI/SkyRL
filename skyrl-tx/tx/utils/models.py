@@ -88,10 +88,10 @@ def is_stacked_lora_path(path: tuple) -> bool:
         path: Parameter path tuple (can be nnx path objects or strings).
 
     Returns:
-        True if the path contains 'layers', 'dense_layers', or 'moe_layers'.
+        True if the path contains '_stacked' (from StackedDecoderLayers).
     """
     path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
-    return any(name in path_strs for name in ("layers", "dense_layers", "moe_layers"))
+    return "_stacked" in path_strs
 
 
 def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
@@ -105,76 +105,19 @@ def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
     return (adapter_index,)
 
 
-def _get_layer_group_info(path: tuple, config: ModelConfig) -> tuple[str, int]:
-    """Get layer group name and starting layer index for a stacked param path.
-
-    Returns:
-        Tuple of (layer_name_for_hf_key, layer_offset) where:
-        - layer_name_for_hf_key is 'layers' (HF always uses 'layers')
-        - layer_offset is the starting layer index for this group
-    """
-    path_strs = [p.key if hasattr(p, "key") else str(p) for p in path]
-    if "dense_layers" in path_strs:
-        return "layers", 0
-    elif "moe_layers" in path_strs:
-        return "layers", getattr(config, "first_k_dense_replace", 0)
-    else:
-        return "layers", 0
+def get_param_key(path: tuple, prefix: str = "") -> str:
+    "Get the safetensors key for a given model path."
+    if path[-1] in {"embedding", "kernel"}:
+        path = (*path[:-1], "weight")
+    elif path[-1] in {"lora_A", "lora_B"}:
+        path = (*path, "weight")
+    return prefix + ".".join(map(str, path))
 
 
-def _path_to_hf_key(path: tuple, layer_idx: int | None = None) -> str:
-    """Convert param path to HuggingFace key. If layer_idx provided, insert it after 'layers'.
-
-    Handles split stacked layer names (dense_layers, moe_layers) by converting them to 'layers'.
-    """
-    parts = []
-    for p in path:
-        key = p.key if hasattr(p, "key") else str(p)
-        # Handle split stacked layer names - convert to 'layers' with index
-        if key in ("layers", "dense_layers", "moe_layers") and layer_idx is not None:
-            parts.append(f"layers.{layer_idx}")
-        elif key in ("kernel", "embedding"):
-            parts.append("weight")
-        elif key in ("lora_A", "lora_B"):
-            parts.extend([key, "weight"])
-        else:
-            parts.append(key)
-    return ".".join(parts)
-
-
-def _load_hf_tensor(tensors: dict, key: str, target_shape: tuple, num_experts: int | None) -> np.ndarray:
-    """Load tensor from HF format, handling experts, transpose, and reshape."""
-    # Handle MoE expert weights (HF stores each expert separately)
-    if ".experts." in key and num_experts:
-        tensor = np.stack([tensors[key.replace(".experts.", f".experts.{i}.")].T for i in range(num_experts)], axis=0)
-    else:
-        tensor = tensors[key]
-        if "embed_tokens" not in key:
-            tensor = tensor.T
-
-    # Reshape attention projections to match model's grouped head format
-    if any(p in key for p in ("q_proj", "k_proj", "v_proj", "o_proj")):
-        tensor = tensor.reshape(target_shape)
-
-    return tensor
-
-
-def _save_hf_tensor(tensors: dict, key: str, param: np.ndarray, num_experts: int | None) -> None:
-    """Save tensor to HF format, handling experts, transpose, and reshape."""
-    # Handle MoE expert weights
-    if ".experts." in key and num_experts:
-        for i in range(num_experts):
-            tensors[key.replace(".experts.", f".experts.{i}.")] = param[i].T
-        return
-
-    # Reshape attention projections back to 2D
-    if any(p in key for p in ("q_proj", "k_proj", "v_proj")):
-        param = param.reshape(param.shape[0], -1)
-    elif "o_proj" in key:
-        param = param.reshape(-1, param.shape[-1])
-
-    # Transpose to HF format
-    tensors[key] = param if "embed_tokens" in key else param.T
+def get_expert_key(path: tuple, expert_idx: int) -> str:
+    "Get the safetensors key for an expert weight model path."
+    path = tuple(s if s != "experts" else f"experts.{expert_idx}" for s in path)
+    return ".".join(map(str, path))
 
 
 def load_safetensors(
@@ -186,41 +129,33 @@ def load_safetensors(
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
     """Load safetensors weights into a model with stacked layers."""
+    from tx.layers.stacked import unstack_state
+
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
     tensors = {k.removeprefix(prefix): v for k, v in tensors.items()}
 
-    num_experts = config.get_num_experts()
-    model_params = nnx.to_flat_state(nnx.state(model))
-    updates = []
-
-    for path, param in model_params:
+    # unstack_state converts stacked paths (layers._stacked.xxx) to per-layer paths
+    # (layers.0.xxx) with ArrayRef write-through, matching checkpoint key format
+    for path, param in nnx.to_flat_state(unstack_state(model)):
         if filter_fn is not None and not filter_fn(path):
             continue
-
-        path_keys = [p.key if hasattr(p, "key") else str(p) for p in path]
-        if skip_lora and any(k in path_keys for k in ("lora_A", "lora_B", "lora_scaling", "lora_ranks")):
+        key = get_param_key(path)
+        # Skip LoRA parameters if requested
+        if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
-
-        if is_stacked_lora_path(path):
-            # Stack per-layer weights from HF format
-            # Infer layer count from param shape and get offset for split stacked layers
-            stacked_layer_count = param.shape[0]
-            _, layer_offset = _get_layer_group_info(path, config)
-            stacked_tensor = np.empty(param.shape, dtype=param.dtype)
-            for i in range(stacked_layer_count):
-                key = _path_to_hf_key(path, layer_idx=layer_offset + i)
-                stacked_tensor[i] = _load_hf_tensor(tensors, key, param.shape[1:], num_experts)
+        if "experts" in path:
+            tensor = np.stack(
+                [tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0
+            )
         else:
-            # Non-stacked layers or non-layer params
-            key = _path_to_hf_key(path)
-            stacked_tensor = _load_hf_tensor(tensors, key, param.shape, num_experts)
-
-        assert param.shape == stacked_tensor.shape, f"Shape mismatch for {path}"
-        updates.append((path, jax.device_put(stacked_tensor.astype(param.dtype), param.sharding)))
-
-    nnx.update(model, nnx.from_flat_state(updates))
+            tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
+        if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
+            tensor = tensor.reshape(param.shape)
+        assert param.shape == tensor.shape, f"shape mismatch for {key}"
+        # ArrayRef.set_raw_value writes through to the stacked parent variable
+        param.set_raw_value(jax.device_put(tensor.astype(param.dtype), param.sharding))
 
 
 def save_safetensors(
@@ -231,29 +166,26 @@ def save_safetensors(
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
     """Save model weights to safetensors, unstacking layer weights for HF compatibility."""
-    num_experts = config.get_num_experts()
-    model_params = nnx.to_flat_state(nnx.state(model))
-    tensors = {}
+    from tx.layers.stacked import unstack_state
 
-    for path, param in model_params:
-        path_keys = [p.key if hasattr(p, "key") else str(p) for p in path]
-        if "rngs" in path_keys:
+    # unstack_state converts stacked paths (layers._stacked.xxx) to per-layer paths
+    # (layers.0.xxx) matching the checkpoint key format used by HuggingFace
+    tensors = {}
+    for path, param in nnx.to_flat_state(unstack_state(model)):
+        if "rngs" in path:
             continue
         if filter_fn is not None and not filter_fn(path):
             continue
-
-        if is_stacked_lora_path(path):
-            # Unstack and save as individual layer weights
-            # Infer layer count from param shape and get offset for split stacked layers
-            stacked_layer_count = param.shape[0]
-            _, layer_offset = _get_layer_group_info(path, config)
-            for i in range(stacked_layer_count):
-                key = prefix + _path_to_hf_key(path, layer_idx=layer_offset + i)
-                _save_hf_tensor(tensors, key, param[i], num_experts)
-        else:
-            # Non-stacked layers or non-layer params
-            key = prefix + _path_to_hf_key(path)
-            _save_hf_tensor(tensors, key, param, num_experts)
+        key = get_param_key(path, prefix=prefix)
+        if "experts" in path:
+            for i in range(config.get_num_experts()):
+                tensors[get_expert_key(path, i)] = param[i, :, :].T
+            continue
+        if "q_proj" in path or "k_proj" in path or "v_proj" in path:
+            param = param.reshape(param.shape[0], -1)
+        elif "o_proj" in path:
+            param = param.reshape(-1, param.shape[-1])
+        tensors[key] = param if "embed_tokens" in path else param.T
 
     # In multi-host mode, gather all shards and only save from rank 0
     if jax.process_count() > 1:

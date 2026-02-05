@@ -8,7 +8,7 @@ from tx.layers.attention import dot_product_attention
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
-from tx.models.utils import create_stacked_layers, forward_layers
+from tx.layers.stacked import StackedDecoderLayers
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -217,7 +217,7 @@ class Llama3Model(nnx.Module):
         def create_layer(rngs: nnx.Rngs) -> Llama3DecoderLayer:
             return Llama3DecoderLayer(config, dtype=dtype, rngs=rngs)
 
-        self.layers = create_stacked_layers(create_layer, config.num_hidden_layers, rngs)
+        self.layers = StackedDecoderLayers(create_layer, config.num_hidden_layers, rngs)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -237,10 +237,8 @@ class Llama3Model(nnx.Module):
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
 
-        hidden_states, all_hidden_states, new_kv_cache = forward_layers(
-            self.layers,
+        hidden_states, all_hidden_states, new_kv_cache = self.layers(
             hidden_states,
-            self.num_layers,
             attention_mask=attention_mask,
             positions=positions,
             adapter_indices=adapter_indices,
