@@ -85,8 +85,23 @@ def create_stacked_layers(
         for i, arr in enumerate(flat):
             stacked_flat[i] = copy_to_slice(stacked_flat[i], flat[i], layer_idx)
 
-    # Reconstruct and merge
+    # Reconstruct state from stacked arrays.
+    # tree_unflatten creates new Variables with values from stacked_flat,
+    # but metadata (including sharding_names) comes from treedef (the original first layer).
     stacked_state = jax.tree_util.tree_unflatten(treedef, stacked_flat)
+
+    # Sync NNX sharding metadata with actual array sharding.
+    # The arrays have correct stacked sharding from device_put (line 66), but NNX APIs
+    # (nnx.get_partition_spec, nnx.Optimizer) read from 'sharding_names' metadata instead.
+    def update_sharding_metadata(var):
+        if isinstance(var, nnx.Variable) and hasattr(var.value, "sharding"):
+            array_sharding = var.value.sharding
+            if hasattr(array_sharding, "spec"):
+                var.set_metadata("sharding_names", tuple(array_sharding.spec))
+        return var
+
+    jax.tree.map(update_sharding_metadata, stacked_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
     return nnx.merge(graphdef, stacked_state)
 
 
