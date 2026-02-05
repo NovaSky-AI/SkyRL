@@ -53,6 +53,11 @@ MAX_EVAL_SAMPLES = 20
 # Prevents dominant environments from skewing training
 MAX_ENV_TRAIN_RATIO = 0.20
 
+# Maximum total eval prompts across all environments (v0.3.2)
+# With eval_n_samples_per_prompt=3 and 30s per trajectory:
+# 50 prompts × 3 samples = 150 trajectories ≈ 75 minutes per eval
+MAX_EVAL_PROMPTS = 50
+
 
 def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
     """Load tasks from JSON file (Fleet export format)."""
@@ -143,6 +148,7 @@ def prepare_fleet_dataset(
     env_filter: Optional[str] = None,
     max_tasks: Optional[int] = None,
     max_env_ratio: float = MAX_ENV_TRAIN_RATIO,  # v0.3.1: cap dominant environments
+    max_eval_prompts: Optional[int] = MAX_EVAL_PROMPTS,  # v0.3.2: cap total eval prompts
 ):
     """
     Convert Fleet tasks JSON to SkyRL parquet dataset.
@@ -281,6 +287,50 @@ def prepare_fleet_dataset(
 
     print(f"\nTotal: {len(train_records)} train, {len(eval_records)} eval")
 
+    # Apply total eval cap (v0.3.2) - stratified sampling across environments
+    if max_eval_prompts and len(eval_records) > max_eval_prompts:
+        print(f"\n=== Capping Eval Prompts ({max_eval_prompts} max total) ===")
+
+        # Group by environment
+        eval_by_env: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for record in eval_records:
+            eval_by_env[record.get("data_source", "unknown")].append(record)
+
+        # Take min(4, available) from each env, then distribute remaining quota proportionally
+        min_per_env = 4
+        capped_eval_records = []
+
+        for env_key, records in eval_by_env.items():
+            # Sort by hash for deterministic selection
+            records.sort(key=lambda r: hash_to_float(r.get("task_key", "")))
+            # Take at least min_per_env (or all if fewer available)
+            take = min(min_per_env, len(records))
+            capped_eval_records.extend(records[:take])
+
+        # If we have budget remaining, distribute proportionally
+        remaining_budget = max_eval_prompts - len(capped_eval_records)
+        if remaining_budget > 0:
+            # Records not yet selected
+            remaining_by_env = {
+                env: records[min_per_env:] for env, records in eval_by_env.items() if len(records) > min_per_env
+            }
+            total_remaining = sum(len(r) for r in remaining_by_env.values())
+
+            if total_remaining > 0:
+                for env_key, records in remaining_by_env.items():
+                    quota = int(len(records) / total_remaining * remaining_budget)
+                    capped_eval_records.extend(records[:quota])
+
+        # Update env_split_counts
+        for env_key in eval_by_env:
+            count = sum(1 for r in capped_eval_records if r.get("data_source") == env_key)
+            if env_key in env_split_counts:
+                env_split_counts[env_key]["eval"] = count
+            print(f"  {env_key}: {len(eval_by_env[env_key])} -> {count}")
+
+        eval_records = capped_eval_records
+        print(f"\nAfter capping: {len(eval_records)} eval prompts")
+
     # Apply per-environment cap to training data (v0.3.1)
     if max_env_ratio < 1.0 and train_records:
         train_records, cap_stats = cap_training_distribution(train_records, max_env_ratio)
@@ -399,6 +449,12 @@ def main():
         default=MAX_ENV_TRAIN_RATIO,
         help=f"Maximum fraction of training data per environment (default: {MAX_ENV_TRAIN_RATIO})",
     )
+    parser.add_argument(
+        "--max-eval-prompts",
+        type=int,
+        default=MAX_EVAL_PROMPTS,
+        help=f"Maximum total eval prompts across all environments (default: {MAX_EVAL_PROMPTS})",
+    )
 
     args = parser.parse_args()
 
@@ -413,6 +469,7 @@ def main():
         env_filter=args.env_filter,
         max_tasks=args.max_tasks,
         max_env_ratio=args.max_env_ratio,
+        max_eval_prompts=args.max_eval_prompts,
     )
 
 

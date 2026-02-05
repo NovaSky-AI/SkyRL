@@ -167,7 +167,7 @@ run: |
     trainer.epochs=${NUM_EPOCHS} \
     trainer.eval_batch_size=4 \
     trainer.eval_before_train=true \
-    trainer.eval_interval=10 \
+    trainer.eval_interval=40 \
     trainer.update_epochs_per_batch=1 \
     trainer.train_batch_size=4 \
     trainer.policy_mini_batch_size=4 \
