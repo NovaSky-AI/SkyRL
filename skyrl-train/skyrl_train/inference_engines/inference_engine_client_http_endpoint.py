@@ -164,12 +164,12 @@ async def handle_openai_request(raw_request: Request, endpoint: str) -> JSONResp
         )
         return JSONResponse(content=error_response.model_dump(), status_code=HTTPStatus.BAD_REQUEST.value)
     except Exception as e:
-        # Include full traceback for debugging
+        # Log full traceback server-side for debugging, but don't expose to client (CWE-209)
         tb = traceback.format_exc()
         logger.error(f"Error when handling {endpoint} request in SkyRL:\n{tb}")
         error_response = ErrorResponse(
             error=ErrorInfo(
-                message=f"Error when handling {endpoint} request in SkyRL: {str(e)}\n\nTraceback:\n{tb}",
+                message=f"Error when handling {endpoint} request in SkyRL: {str(e)}",
                 type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
                 code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             ),

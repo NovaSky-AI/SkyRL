@@ -26,12 +26,14 @@ import litellm
 from litellm import completion as litellm_completion
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
+import logging
 
 from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+import skyrl_train.inference_engines.inference_engine_client_http_endpoint as http_endpoint_module
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     serve,
     wait_for_server_ready,
@@ -596,12 +598,12 @@ def test_structured_generation(ray_init_fixture):
 
 # TODO(Charlie): sglang has slightly different error response format. We need to handle it.
 @pytest.mark.vllm
-def test_http_endpoint_error_handling(ray_init_fixture):
+def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     """
     Test error handling for various invalid requests and internal server errors.
 
     Tests validation errors (400) for invalid requests and verifies that internal
-    server errors (500) include traceback information for debugging.
+    server errors (500) are logged with traceback server-side (not exposed to client).
     """
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
@@ -722,43 +724,36 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         r = requests.post(f"{base_url}/v1/completions", json=bad_payload)
         assert r.status_code == HTTPStatus.BAD_REQUEST
 
-        # Test internal server errors (500) include traceback for debugging
-        # This helps debug issues like 'choices' KeyError when vLLM returns malformed responses
-        import skyrl_train.inference_engines.inference_engine_client_http_endpoint as http_endpoint_module
-
+        # Test internal server errors (500) return proper error responses
+        # Traceback is logged server-side only (not exposed to client per CWE-209)
+        caplog.set_level(logging.ERROR)
         original_client = http_endpoint_module._global_inference_engine_client
 
-        # Test /chat/completions internal error with traceback
-        async def mock_chat_completion_raises(*args, **kwargs):
-            raise KeyError("choices")
+        internal_error_cases = [
+            (
+                "chat_completion",
+                "/v1/chat/completions",
+                {"messages": [{"role": "user", "content": "Hello"}]},
+                KeyError("choices"),
+            ),
+            ("completion", "/v1/completions", {"prompt": "Hello"}, RuntimeError("Simulated internal error")),
+        ]
+        for method_name, endpoint, extra_payload, exception in internal_error_cases:
 
-        with patch.object(original_client, "chat_completion", side_effect=mock_chat_completion_raises):
-            response = requests.post(
-                f"{base_url}/v1/chat/completions",
-                json={"model": MODEL_QWEN2_5, "messages": [{"role": "user", "content": "Hello"}]},
-            )
-        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
-        error_data = response.json()
-        error_message = error_data["error"]["message"]
-        assert "choices" in error_message
-        assert "Traceback:" in error_message
-        assert "Traceback (most recent call last):" in error_message
-        assert error_data["error"]["code"] == 500
+            async def mock_raises(*args, exc=exception, **kwargs):
+                raise exc
 
-        # Test /completions internal error with traceback
-        async def mock_completion_raises(*args, **kwargs):
-            raise RuntimeError("Simulated internal error")
-
-        with patch.object(original_client, "completion", side_effect=mock_completion_raises):
-            response = requests.post(
-                f"{base_url}/v1/completions",
-                json={"model": MODEL_QWEN2_5, "prompt": "Hello"},
-            )
-        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
-        error_data = response.json()
-        error_message = error_data["error"]["message"]
-        assert "Simulated internal error" in error_message
-        assert "Traceback:" in error_message
+            caplog.clear()
+            with patch.object(original_client, method_name, side_effect=mock_raises):
+                response = requests.post(f"{base_url}{endpoint}", json={"model": MODEL_QWEN2_5, **extra_payload})
+            assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+            error_data = response.json()
+            error_message = error_data["error"]["message"]
+            assert str(exception) in error_message or type(exception).__name__ in error_message
+            assert "Traceback" not in error_message  # Not exposed to client (CWE-209)
+            assert error_data["error"]["code"] == 500
+            assert "Traceback (most recent call last):" in caplog.text  # Logged server-side
+            assert type(exception).__name__ in caplog.text
 
     finally:
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
