@@ -12,9 +12,6 @@ except ImportError:
     wandb = None  # type: ignore[assignment]
 
 
-LOGGER_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-
 def _setup_root_logger() -> None:
     logger = logging.getLogger("tx")
     logger.setLevel(logging.DEBUG)
@@ -27,7 +24,8 @@ def _setup_root_logger() -> None:
         markup=False,
         rich_tracebacks=True,
     )
-    handler.setFormatter(logging.Formatter(LOGGER_FORMAT))
+    # RichHandler already shows time and level, so only include name and message
+    handler.setFormatter(logging.Formatter("%(name)s - %(message)s"))
     logger.addHandler(handler)
 
 
@@ -35,7 +33,7 @@ def add_file_handler(path: Path | str, level: int = logging.DEBUG, *, print_path
     logger = logging.getLogger("tx")
     handler = logging.FileHandler(path)
     handler.setLevel(level)
-    formatter = logging.Formatter(LOGGER_FORMAT)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     if print_path:
