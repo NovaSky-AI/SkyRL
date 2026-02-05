@@ -9,45 +9,14 @@ Prerequisites:
 - KVCache must use stacked format: (num_layers, batch, seq, heads, dim)
 """
 
-import logging
-import subprocess
+import functools
 from typing import Callable
 
 from flax import nnx
 import jax
+import jax.numpy as jnp
 
 from tx.utils.generator import KVCache
-
-logger = logging.getLogger(__name__)
-
-
-def _log_mem(label: str):
-    """Log GPU memory usage via nvidia-smi and JAX memory stats."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        nvidia_mem = max(int(x) for x in result.stdout.strip().split("\n"))
-    except Exception:
-        nvidia_mem = -1
-
-    try:
-        # Get JAX's view of memory usage
-        devices = jax.devices()
-        jax_mems = []
-        for d in devices:
-            stats = d.memory_stats()
-            if stats:
-                # bytes_in_use is the actual memory used by JAX arrays
-                jax_mems.append(stats.get("bytes_in_use", 0) / 1024 / 1024)
-        jax_mem = max(jax_mems) if jax_mems else -1
-    except Exception:
-        jax_mem = -1
-
-    logger.info(f"[MEM] {label}: nvidia={nvidia_mem} MiB, jax={jax_mem:.1f} MiB")
 
 
 def create_stacked_layers(
@@ -55,14 +24,13 @@ def create_stacked_layers(
     num_layers: int,
     rngs: nnx.Rngs,
 ) -> nnx.Module:
-    """Create stacked decoder layers by creating one layer at a time and copying to pre-allocated arrays.
+    """Create stacked decoder layers by creating layers individually and stacking.
 
     This creates a single module object where all parameters have shape (num_layers, ...).
     This enables efficient scanning over layers without runtime stacking.
 
-    Memory optimization: Instead of creating all layers then stacking (which requires 2x memory),
-    we pre-allocate the stacked arrays and copy each layer's params directly, keeping only
-    one layer in memory at a time.
+    Note: We avoid nnx.vmap because it breaks eager sharding, causing ~4x memory overhead.
+    We also avoid jnp.stack because it creates a temporary full replica before resharding.
 
     Args:
         create_layer_fn: Function that takes rngs and returns a single layer module.
@@ -78,92 +46,48 @@ def create_stacked_layers(
         >>> layers = create_stacked_layers(create_layer, config.num_hidden_layers, rngs)
         >>> # layers.self_attn.q_proj.kernel.shape == (num_layers, hidden, head_dim*num_heads)
     """
-    from functools import partial
-
-    import jax.numpy as jnp
-    import jax.random
     from jax.sharding import NamedSharding, PartitionSpec
 
-    _log_mem("create_stacked_layers:start")
-
-    # Split the RNG key to get unique keys for each layer
-    base_key = rngs.params()
-    layer_keys = jax.random.split(base_key, num_layers)
-
-    # Get the current mesh for sharding
+    layer_keys = jax.random.split(rngs.params(), num_layers)
     mesh = jax.sharding.get_mesh()
 
-    # Step 1: Create first layer to get structure and shapes
+    # Create first layer to get structure and shapes
     first_layer = create_layer_fn(nnx.Rngs(layer_keys[0]))
     graphdef, first_state = nnx.split(first_layer)
     flat_first, treedef = jax.tree_util.tree_flatten(first_state)
 
-    num_params = len(flat_first)
-    logger.info(f"[MEM] Creating {num_layers} layers with {num_params} params each")
-    _log_mem("create_stacked_layers:after_first_layer")
-
-    # Step 2: Pre-allocate stacked arrays with proper sharding
+    # Pre-allocate stacked arrays with correct sharding
     stacked_flat = []
     for arr in flat_first:
-        # Determine sharding for stacked array
+        stacked_shape = (num_layers,) + arr.shape
         original_sharding = arr.sharding
         if hasattr(original_sharding, "spec"):
-            original_spec = original_sharding.spec
-            new_spec = PartitionSpec(None, *original_spec)
-            new_sharding = NamedSharding(mesh, new_spec)
+            new_spec = PartitionSpec(None, *original_sharding.spec)
+            stacked = jax.device_put(jnp.zeros(stacked_shape, arr.dtype), NamedSharding(mesh, new_spec))
         else:
-            new_sharding = None
-
-        # Pre-allocate with zeros
-        stacked_shape = (num_layers,) + arr.shape
-        if new_sharding is not None:
-            stacked = jax.device_put(jnp.zeros(stacked_shape, dtype=arr.dtype), new_sharding)
-        else:
-            stacked = jnp.zeros(stacked_shape, dtype=arr.dtype)
+            stacked = jnp.zeros(stacked_shape, arr.dtype)
         stacked_flat.append(stacked)
 
-    _log_mem("create_stacked_layers:after_preallocate")
-
-    # Step 3: Copy first layer's params to slice 0
-    @jax.jit
+    # JIT with donate_argnums enables buffer reuse
+    @functools.partial(jax.jit, donate_argnums=(0,))
     def copy_to_slice(stacked, arr, idx):
-        return jax.lax.dynamic_update_slice(stacked, arr[None], (idx,) + (0,) * arr.ndim)
+        return stacked.at[idx].set(arr)
 
-    for param_idx in range(num_params):
-        stacked_flat[param_idx] = copy_to_slice(stacked_flat[param_idx], flat_first[param_idx], 0)
+    # Copy first layer's params to slot 0
+    for i, arr in enumerate(flat_first):
+        stacked_flat[i] = copy_to_slice(stacked_flat[i], flat_first[i], 0)
 
-    # Free first layer
-    del first_layer, first_state, flat_first
-    _log_mem("create_stacked_layers:after_layer_0")
-
-    # Step 4: Create remaining layers one at a time, copy params, then free
+    # Create remaining layers one at a time and copy params
     for layer_idx in range(1, num_layers):
         layer = create_layer_fn(nnx.Rngs(layer_keys[layer_idx]))
         _, state = nnx.split(layer)
-        flat_state, _ = jax.tree_util.tree_flatten(state)
+        flat, _ = jax.tree_util.tree_flatten(state)
+        for i, arr in enumerate(flat):
+            stacked_flat[i] = copy_to_slice(stacked_flat[i], flat[i], layer_idx)
 
-        # Copy each param to the appropriate slice
-        for param_idx in range(num_params):
-            stacked_flat[param_idx] = copy_to_slice(
-                stacked_flat[param_idx], flat_state[param_idx], layer_idx
-            )
-
-        # Free this layer immediately
-        del layer, state, flat_state
-
-        if layer_idx == num_layers - 1 or (layer_idx + 1) % 6 == 0:
-            _log_mem(f"create_stacked_layers:after_layer_{layer_idx}")
-
-    _log_mem("create_stacked_layers:after_all_layers")
-
-    # Step 5: Reconstruct the state tree with stacked arrays
+    # Reconstruct and merge
     stacked_state = jax.tree_util.tree_unflatten(treedef, stacked_flat)
-    del stacked_flat
-
-    # Merge back into a module with stacked parameters
-    result = nnx.merge(graphdef, stacked_state)
-    _log_mem("create_stacked_layers:end")
-    return result
+    return nnx.merge(graphdef, stacked_state)
 
 
 def forward_layers(
