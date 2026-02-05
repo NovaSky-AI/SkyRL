@@ -61,7 +61,8 @@ def init_ray_inference_engines(backend: str, tp_size: int, pp_size: int, dp_size
         backend=backend,
         gpu_memory_utilization=0.8,
         num_inference_engines=1,
-        sleep_level=1 if backend == "vllm" else 2,  # "SGLang always discards weights, so sleep_level is not applicable."
+        # SGLang always discards weights, so sleep_level is not applicable.
+        sleep_level=1 if backend == "vllm" else 2,
     )
     return client, pg, router, server_group
 
