@@ -236,28 +236,32 @@ jobs:
           echo ""
 
           # Stream logs until job completes (this blocks)
-          sky logs --follow "$CLUSTER_NAME" || true
+          # Save to file to check for success pattern
+          sky logs --follow "$CLUSTER_NAME" 2>&1 | tee /tmp/training_logs.txt || true
 
           # Get final cluster status
           echo ""
           echo "=== Final Cluster Status ==="
           sky status "$CLUSTER_NAME" || true
 
-          # Check cluster status
-          CLUSTER_STATUS=$(sky status "$CLUSTER_NAME" 2>/dev/null | grep "$CLUSTER_NAME" | awk '{print $2}' || echo "UNKNOWN")
-          echo "cluster_status=$CLUSTER_STATUS" >> $GITHUB_OUTPUT
-          echo "Final status: $CLUSTER_STATUS"
+          # Check if job succeeded by looking for SkyPilot success pattern
+          if grep -q "Job finished (status: SUCCEEDED)" /tmp/training_logs.txt 2>/dev/null; then
+            echo "Job completed successfully"
+            JOB_SUCCEEDED=true
+          else
+            echo "Job did not complete successfully"
+            JOB_SUCCEEDED=false
+          fi
 
-          # For sky launch, check if the task completed successfully
-          # The cluster will still be UP after task completes
-          if [ "$CLUSTER_STATUS" == "UP" ]; then
-            echo "Training completed, cluster is still up"
-            echo "Terminating cluster to save costs..."
-            sky down "$CLUSTER_NAME" -y || true
+          # Always terminate cluster to save costs
+          echo "Terminating cluster..."
+          sky down "$CLUSTER_NAME" -y || true
+
+          if [ "$JOB_SUCCEEDED" == "true" ]; then
             echo "cluster_status=COMPLETED" >> $GITHUB_OUTPUT
             exit 0
           else
-            echo "Cluster status: $CLUSTER_STATUS"
+            echo "cluster_status=FAILED" >> $GITHUB_OUTPUT
             exit 1
           fi
 

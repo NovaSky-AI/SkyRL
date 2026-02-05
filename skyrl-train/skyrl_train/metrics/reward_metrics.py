@@ -8,12 +8,42 @@ All metrics follow the same naming convention for WandB logging:
 - reward/{group}/pass_at_{n} - Pass@n metric for group
 - reward/{group}/variance_per_prompt - Mean within-prompt reward variance (GRPO learning signal)
 - reward/{group}/mean_positive_reward - Mean of positive rewards for group
+
+Rewards can be in two formats:
+- Scalar rewards: List[float] - one reward per trajectory
+- Token-level rewards: List[List[float]] - per-token rewards per trajectory (summed to scalar)
 """
 
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
 import numpy as np
+
+
+def flatten_rewards(rewards: Union[List[float], List[List[float]]]) -> List[float]:
+    """Flatten rewards to scalar format.
+
+    Handles both scalar rewards (List[float]) and token-level rewards (List[List[float]]).
+    For token-level rewards, sums each trajectory's rewards into a single scalar.
+
+    Args:
+        rewards: Either List[float] (scalar per trajectory) or
+                 List[List[float]] (token-level per trajectory)
+
+    Returns:
+        List[float]: Flattened scalar rewards, one per trajectory
+    """
+    if not rewards:
+        return []
+
+    flat_rewards: List[float] = []
+    for r in rewards:
+        if isinstance(r, list):
+            # Token-level rewards: sum to get trajectory reward
+            flat_rewards.append(float(sum(r)))
+        else:
+            flat_rewards.append(float(r))
+    return flat_rewards
 
 
 def sanitize_metric_key(key: str) -> str:
@@ -29,7 +59,7 @@ def sanitize_metric_key(key: str) -> str:
 
 
 def compute_pass_at_n(
-    rewards: List[float],
+    rewards: Union[List[float], List[List[float]]],
     uids: List[str],
 ) -> float:
     """Compute pass@n: fraction of unique prompts with at least one positive reward.
@@ -39,14 +69,16 @@ def compute_pass_at_n(
     can succeed at least once when given multiple attempts.
 
     Args:
-        rewards: List of rewards (one per rollout)
+        rewards: List of rewards (one per rollout). Can be scalar (List[float])
+                 or token-level (List[List[float]]) - will be flattened.
         uids: List of unique IDs (one per rollout, same uid = same prompt)
 
     Returns:
         Float between 0.0 and 1.0 representing the fraction of prompts that passed
     """
+    flat_rewards = flatten_rewards(rewards)
     uid_to_rewards: Dict[str, List[float]] = defaultdict(list)
-    for uid, reward in zip(uids, rewards):
+    for uid, reward in zip(uids, flat_rewards):
         uid_to_rewards[uid].append(reward)
 
     if not uid_to_rewards:
@@ -57,7 +89,7 @@ def compute_pass_at_n(
 
 
 def compute_variance_per_prompt(
-    rewards: List[float],
+    rewards: Union[List[float], List[List[float]]],
     uids: List[str],
 ) -> float:
     """Compute mean within-prompt reward variance (GRPO learning signal).
@@ -69,15 +101,17 @@ def compute_variance_per_prompt(
     mean variance across all prompts.
 
     Args:
-        rewards: List of rewards (one per rollout)
+        rewards: List of rewards (one per rollout). Can be scalar (List[float])
+                 or token-level (List[List[float]]) - will be flattened.
         uids: List of unique IDs (one per rollout, same uid = same prompt)
 
     Returns:
         Mean variance across prompts. Higher = more learning signal.
         Returns 0.0 if no prompts or all prompts have single rollouts.
     """
+    flat_rewards = flatten_rewards(rewards)
     uid_to_rewards: Dict[str, List[float]] = defaultdict(list)
-    for uid, reward in zip(uids, rewards):
+    for uid, reward in zip(uids, flat_rewards):
         uid_to_rewards[uid].append(reward)
 
     if not uid_to_rewards:
@@ -93,14 +127,15 @@ def compute_variance_per_prompt(
 
 
 def compute_reward_metrics(
-    rewards: List[float],
+    rewards: Union[List[float], List[List[float]]],
     uids: List[str],
     n_samples_per_prompt: int,
 ) -> Dict[str, float]:
     """Compute core reward metrics.
 
     Args:
-        rewards: List of rewards (one per rollout)
+        rewards: List of rewards (one per rollout). Can be scalar (List[float])
+                 or token-level (List[List[float]]) - will be flattened.
         uids: List of unique IDs for pass@n grouping
         n_samples_per_prompt: Number of samples per prompt (used in metric key name)
 
@@ -110,9 +145,11 @@ def compute_reward_metrics(
             - "variance_per_prompt": Mean within-prompt reward variance (GRPO learning signal)
             - "mean_positive_reward": Mean of positive rewards only
     """
-    pass_at_n = compute_pass_at_n(rewards, uids)
-    variance = compute_variance_per_prompt(rewards, uids)
-    positive_rewards = [r for r in rewards if r > 0]
+    # Flatten rewards once for efficiency (each sub-function would otherwise flatten again)
+    flat_rewards = flatten_rewards(rewards)
+    pass_at_n = compute_pass_at_n(flat_rewards, uids)
+    variance = compute_variance_per_prompt(flat_rewards, uids)
+    positive_rewards = [r for r in flat_rewards if r > 0]
     mean_positive = float(np.mean(positive_rewards)) if positive_rewards else 0.0
 
     return {
@@ -123,7 +160,7 @@ def compute_reward_metrics(
 
 
 def compute_per_group_metrics(
-    rewards: List[float],
+    rewards: Union[List[float], List[List[float]]],
     uids: List[str],
     groups: List[str],
     n_samples_per_prompt: int,
@@ -135,7 +172,8 @@ def compute_per_group_metrics(
     per-environment analysis in training and evaluation.
 
     Args:
-        rewards: List of rewards (one per rollout)
+        rewards: List of rewards (one per rollout). Can be scalar (List[float])
+                 or token-level (List[List[float]]) - will be flattened.
         uids: List of unique IDs for pass@n grouping within each group
         groups: List of group keys (e.g., env_key or data_source per rollout)
         n_samples_per_prompt: Number of samples per prompt (used in metric key name)
@@ -147,9 +185,12 @@ def compute_per_group_metrics(
             - "{prefix}/{group}/pass_at_{n}"
             - "{prefix}/{group}/mean_positive_reward"
     """
+    # Flatten rewards once before grouping
+    flat_rewards = flatten_rewards(rewards)
+
     # Group data by group key
     group_data: Dict[str, Dict[str, List[Any]]] = defaultdict(lambda: {"rewards": [], "uids": []})
-    for reward, uid, group in zip(rewards, uids, groups):
+    for reward, uid, group in zip(flat_rewards, uids, groups):
         group_key = group if group is not None else "unknown"
         group_data[group_key]["rewards"].append(reward)
         group_data[group_key]["uids"].append(uid)

@@ -5,8 +5,50 @@ from skyrl_train.metrics.reward_metrics import (
     compute_per_group_metrics,
     compute_reward_metrics,
     compute_variance_per_prompt,
+    flatten_rewards,
     sanitize_metric_key,
 )
+
+
+class TestFlattenRewards:
+    """Tests for flatten_rewards function."""
+
+    def test_scalar_rewards(self):
+        """Scalar rewards remain unchanged."""
+        rewards = [1.0, 0.5, 0.0, -0.5]
+        assert flatten_rewards(rewards) == [1.0, 0.5, 0.0, -0.5]
+
+    def test_token_level_rewards(self):
+        """Token-level rewards are summed."""
+        rewards = [[0.5, 0.3, 0.2], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]
+        assert flatten_rewards(rewards) == [1.0, 1.0, 0.0]
+
+    def test_mixed_length_token_rewards(self):
+        """Token-level rewards with varying lengths."""
+        rewards = [[1.0], [0.5, 0.5], [0.1, 0.2, 0.3, 0.4]]
+        assert flatten_rewards(rewards) == [1.0, 1.0, 1.0]
+
+    def test_empty_list(self):
+        """Empty list returns empty list."""
+        assert flatten_rewards([]) == []
+
+    def test_empty_token_rewards(self):
+        """Empty token reward lists sum to 0."""
+        rewards = [[], [], [1.0]]
+        assert flatten_rewards(rewards) == [0.0, 0.0, 1.0]
+
+    def test_single_element(self):
+        """Single scalar reward."""
+        assert flatten_rewards([0.5]) == [0.5]
+
+    def test_single_token_list(self):
+        """Single token-level reward."""
+        assert flatten_rewards([[0.3, 0.7]]) == [1.0]
+
+    def test_negative_token_rewards(self):
+        """Negative token rewards sum correctly."""
+        rewards = [[-0.5, 0.5], [0.0, -1.0]]
+        assert flatten_rewards(rewards) == [0.0, -1.0]
 
 
 class TestSanitizeMetricKey:
@@ -76,6 +118,28 @@ class TestComputePassAtN:
         uids = ["a", "a"]
         assert compute_pass_at_n(rewards, uids) == 0.0
 
+    def test_token_level_rewards_pass(self):
+        """Token-level rewards are summed - positive sum counts as pass."""
+        # First trajectory: [0.5, 0.3, 0.2] -> 1.0 (pass)
+        # Second trajectory: [0.0, 0.0, 0.0] -> 0.0 (fail)
+        rewards = [[0.5, 0.3, 0.2], [0.0, 0.0, 0.0]]
+        uids = ["a", "a"]
+        assert compute_pass_at_n(rewards, uids) == 1.0  # uid "a" passes
+
+    def test_token_level_rewards_all_zero(self):
+        """Token-level rewards that sum to zero don't pass."""
+        rewards = [[0.0, 0.0], [0.0, 0.0, 0.0]]
+        uids = ["a", "b"]
+        assert compute_pass_at_n(rewards, uids) == 0.0
+
+    def test_token_level_rewards_partial(self):
+        """Some prompts pass with token-level rewards."""
+        rewards = [[1.0, 0.0], [0.0, 0.0], [0.0, 0.5], [0.0, 0.0]]
+        uids = ["a", "a", "b", "b"]
+        # uid "a": has [1.0, 0.0] -> sum=1.0 (pass)
+        # uid "b": has [0.5, 0.0] -> sum=0.5 (pass)
+        assert compute_pass_at_n(rewards, uids) == 1.0
+
 
 class TestComputeVariancePerPrompt:
     """Tests for within-prompt variance (GRPO learning signal)."""
@@ -133,6 +197,24 @@ class TestComputeVariancePerPrompt:
         variance = compute_variance_per_prompt(rewards, uids)
         assert abs(variance - 0.10416666666666667) < 1e-10
 
+    def test_token_level_rewards_variance(self):
+        """Token-level rewards are summed before variance calculation."""
+        # Trajectory 1: [1.0, 0.0] -> 1.0
+        # Trajectory 2: [0.0, 0.0] -> 0.0
+        # Both for uid "a", so variance = 0.25
+        rewards = [[1.0, 0.0], [0.0, 0.0]]
+        uids = ["a", "a"]
+        variance = compute_variance_per_prompt(rewards, uids)
+        assert variance == 0.25
+
+    def test_token_level_rewards_no_variance(self):
+        """Token-level rewards that sum to same value have zero variance."""
+        # Both sum to 1.0
+        rewards = [[0.5, 0.5], [0.3, 0.7]]
+        uids = ["a", "a"]
+        variance = compute_variance_per_prompt(rewards, uids)
+        assert variance == 0.0
+
 
 class TestComputeRewardMetrics:
     def test_basic_metrics(self):
@@ -187,6 +269,33 @@ class TestComputeRewardMetrics:
         metrics_8 = compute_reward_metrics(rewards, uids, n_samples_per_prompt=8)
         assert "pass_at_8" in metrics_8
         assert "variance_per_prompt" in metrics_8
+
+    def test_token_level_rewards(self):
+        """Test with token-level rewards (List[List[float]])."""
+        # Trajectory 1 for uid "a": [0.5, 0.5] -> 1.0
+        # Trajectory 2 for uid "a": [0.0, 0.0] -> 0.0
+        # Trajectory 3 for uid "b": [0.3, 0.2] -> 0.5
+        # Trajectory 4 for uid "b": [0.0, 0.0] -> 0.0
+        rewards = [[0.5, 0.5], [0.0, 0.0], [0.3, 0.2], [0.0, 0.0]]
+        uids = ["a", "a", "b", "b"]
+        metrics = compute_reward_metrics(rewards, uids, n_samples_per_prompt=2)
+
+        # Both uids have at least one positive (1.0, 0.5)
+        assert metrics["pass_at_2"] == 1.0
+        # Positive rewards: 1.0, 0.5 -> mean = 0.75
+        assert metrics["mean_positive_reward"] == 0.75
+        # Variance: uid "a" [1.0, 0.0] var=0.25, uid "b" [0.5, 0.0] var=0.0625 -> mean=0.15625
+        assert abs(metrics["variance_per_prompt"] - 0.15625) < 1e-10
+
+    def test_token_level_rewards_all_zero(self):
+        """Test token-level rewards that all sum to zero."""
+        rewards = [[0.0, 0.0], [0.0, 0.0, 0.0]]
+        uids = ["a", "b"]
+        metrics = compute_reward_metrics(rewards, uids, n_samples_per_prompt=1)
+
+        assert metrics["pass_at_1"] == 0.0
+        assert metrics["mean_positive_reward"] == 0.0
+        assert metrics["variance_per_prompt"] == 0.0
 
 
 class TestComputePerGroupMetrics:
@@ -274,6 +383,24 @@ class TestComputePerGroupMetrics:
         assert len([k for k in metrics.keys() if k.startswith("reward/env1/")]) == 3
         # uid "a" [1,0] var=0.25, uid "b" [0.5,0.5] var=0 -> mean=0.125
         assert abs(metrics["reward/env1/variance_per_prompt"] - 0.125) < 1e-10
+
+    def test_token_level_rewards_per_group(self):
+        """Test with token-level rewards grouped by environment."""
+        # github: [[1.0, 0.0], [0.0, 0.0]] -> [1.0, 0.0]
+        # booking: [[0.3, 0.2], [0.0, 0.0]] -> [0.5, 0.0]
+        rewards = [[1.0, 0.0], [0.0, 0.0], [0.3, 0.2], [0.0, 0.0]]
+        uids = ["task1", "task1", "task2", "task2"]
+        groups = ["github", "github", "booking", "booking"]
+
+        metrics = compute_per_group_metrics(rewards, uids, groups, n_samples_per_prompt=2, prefix="eval")
+
+        # github: uid "task1" has [1.0, 0.0] -> pass, var=0.25
+        assert metrics["eval/github/pass_at_2"] == 1.0
+        assert metrics["eval/github/variance_per_prompt"] == 0.25
+
+        # booking: uid "task2" has [0.5, 0.0] -> pass, var=0.0625
+        assert metrics["eval/booking/pass_at_2"] == 1.0
+        assert metrics["eval/booking/variance_per_prompt"] == 0.0625
 
 
 class TestIntegrationWithSkyRLPatterns:

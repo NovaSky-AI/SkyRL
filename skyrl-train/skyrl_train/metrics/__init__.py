@@ -5,6 +5,7 @@ from skyrl_train.metrics.reward_metrics import (
     compute_reward_metrics,
     compute_per_group_metrics,
     compute_variance_per_prompt,
+    flatten_rewards,
     sanitize_metric_key,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "compute_reward_metrics",
     "compute_per_group_metrics",
     "compute_variance_per_prompt",
+    "flatten_rewards",
     "sanitize_metric_key",
 ]
