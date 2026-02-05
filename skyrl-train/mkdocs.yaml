@@ -1,4 +1,4 @@
-site_name: SkyRL-Train
+site_name: SkyRL
 site_url: https://docs.skyrl.ai
 repo_url: https://github.com/NovaSky-AI/SkyRL
 edit_uri: edit/main/skyrl-train/new_docs/
@@ -54,7 +54,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - User Guide:
+  - SkyRL-Train:
     - Getting Started:
       - getting-started/index.md
       - Installation: getting-started/installation.md
@@ -98,8 +98,8 @@ nav:
       - Model Placement & Colocation: configuration/placement.md
     - Checkpointing: checkpointing-logging/checkpointing.md
     - Troubleshooting: troubleshooting/troubleshooting.md
-  - SkyAgent Overview: skyagent/agent-overview.md
-  - API Reference:
+  - SkyRL-Agent: skyagent/agent-overview.md
+  - SkyRL-Train API:
     - Data Interface: api/data.md
     - Generator: api/generator.md
     - Trainer: api/trainer.md

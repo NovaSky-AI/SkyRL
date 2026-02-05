@@ -42,9 +42,9 @@ To get started, you can follow the instructions for installing via Docker in the
 
 This ensures that the necessary dependencies needed for Megatron are installed and don't need to be built on each node for each run, which can be time consuming. Previously, we recommended setting PYTHONPATH to the location of TransformerEngine installation, but this is no longer necessary.
 
-~~~~~~~~~~~~~~~
-In order to use flash attention with the megatron backend, you must use `flash_attn` version `2.7.4.post1` or lower for compatibility with `TransformerEngine==2.7.0`.
-This is handled in the `pyproject.toml` file for the `mcore` extra.
+!!! note
+    In order to use flash attention with the megatron backend, you must use `flash_attn` version `2.7.4.post1` or lower for compatibility with `TransformerEngine==2.7.0`.
+    This is handled in the `pyproject.toml` file for the `mcore` extra.
 
 ## Configuration
 

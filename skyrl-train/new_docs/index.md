@@ -1,4 +1,4 @@
-# SkyRL-Train Documentation
+# Welcome to SkyRL's Documentation
 
 SkyRL is a full-stack reinforcement learning library for training LLMs, designed for modularity and extensibility.
 

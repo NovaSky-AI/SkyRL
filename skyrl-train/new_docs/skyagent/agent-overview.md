@@ -1,8 +1,8 @@
 
 
-SkyAgent is a generic agent layer for training and evaluating agents. It is a flexible frontend for building your own agents. 
+SkyRL-Agent is a generic agent layer for training and evaluating agents. It is a flexible frontend for building your own agents. 
 
-SkyAgent is designed primarily for researchers to have a unified interface around implementing agentic tasks. A modular design allows researchers to
+SkyRL-Agent is designed primarily for researchers to have a unified interface around implementing agentic tasks. A modular design allows researchers to
 
 1. Bring in their own tasks
 2. Use any training backend or simply run evaluation
@@ -11,27 +11,27 @@ SkyAgent is designed primarily for researchers to have a unified interface aroun
 5. And more ...
 
 !!! warning
-    SkyAgent is still under active development. We welcome any early feedback and contributions.
+    SkyRL-Agent is still under active development. We welcome any early feedback and contributions.
  
 
 ## Examples
 
 We have a few examples in the `examples` folder: 
 
-1. [Evaluation: OpenAI](https://github.com/NovaSky-AI/SkyRL/tree/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/examples/run_openai): This example shows how to run evaluation with an OpenAI compatible endpoint.
-2. [Training: SkyAgent and SkyRL-train](https://github.com/NovaSky-AI/SkyRL/tree/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/examples/run_skyrl) : Training a model on the SWEBench task with SkyRL-train.
-3. [Training: SkyAgent and VeRL](https://github.com/NovaSky-AI/SkyRL/tree/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/examples/run_verl) : Training a model on the SWEBench task with VeRL.
+1. [Evaluation: OpenAI](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-agent/examples/run_openai): This example shows how to run evaluation with an OpenAI compatible endpoint.
+2. [Training: SkyRL-Agent and SkyRL-train](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-agent/examples/run_skyrl) : Training a model on the SWEBench task with SkyRL-train.
+3. [Training: SkyRL-Agent and VeRL](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-agent/examples/run_verl) : Training a model on the SWEBench task with VeRL.
 
 ## Core components
 
-SkyAgent consists of the following components:
+SkyRL-Agent consists of the following components:
 
-1. [AgentRunner](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/agents/base.py#L89) : The main entrypoint for Skyagent is the AgentRunner class - it's responsible for generating trajectories for the given batch of prompts
-2. [Trajectory](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/agents/base.py#L61C7-L61C21) : the trajectory class handles generating a single trajectory for the given instance from the batch. 
-3. [Agent](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/agents/react/react_agent.py#L15) : This is simply an LLM with the ability to call tools. 
-4. [Task](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/tasks/base.py#L7) : The task class contains the task specification such as initial instruction, how the agent's runtime should be setup, how to evaluate results, etc. 
-5. [Dispatcher](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/dispatcher/dispatchers.py#L20) : the dispatcher is responsible for efficiently handling trajectory execution for a batch of prompts. 
-6. [Backend](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/integrations/base.py#L5) : Backend is the LLM backend for generating responses. For example, vLLM for inference or `SkyRL-train`'s inference engines for training.
+1. [AgentRunner](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/agents/base.py#L89) : The main entrypoint for SkyRL-Agent is the AgentRunner class - it's responsible for generating trajectories for the given batch of prompts
+2. [Trajectory](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/agents/base.py#L61) : the trajectory class handles generating a single trajectory for the given instance from the batch.
+3. [Agent](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/agents/react/react_agent.py#L15) : This is simply an LLM with the ability to call tools.
+4. [Task](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/tasks/base.py#L7) : The task class contains the task specification such as initial instruction, how the agent's runtime should be setup, how to evaluate results, etc.
+5. [Dispatcher](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/dispatcher/dispatchers.py#L20) : the dispatcher is responsible for efficiently handling trajectory execution for a batch of prompts.
+6. [Backend](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/integrations/base.py#L5) : Backend is the LLM backend for generating responses. For example, vLLM for inference or `SkyRL-train`'s inference engines for training.
 
 ## Trajectory
 
@@ -53,7 +53,7 @@ The agent class is a simple wrapper around an LLM with the ability to call tools
 
 ## Backend
 
-The backend is the LLM backend for generating responses. For example, this can be an [OpenAI-compatible webserver](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/integrations/openai.py#L15) for inference or [SkyRL-train](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/integrations/skyrl_train/skyrl_train_backend.py#L5) for training. 
+The backend is the LLM backend for generating responses. For example, this can be an [OpenAI-compatible webserver](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/integrations/openai.py#L15) for inference or [SkyRL-train](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/integrations/skyrl_train/skyrl_train_backend.py#L5) for training. 
 
 ## Dispatcher
 
@@ -61,7 +61,7 @@ The dispatcher handles the actual execution of a batch of trajectories efficient
 
 For example, we provide a pipelined dispatcher that can run multiple trajectories in parallel with a maximum concurrency per stage (initialize, generate, evaluate) of `max_parallel_agents`.
 
-![SkyAgent Dispatcher](../images/skyagent/dispatcher_skyagent.png)
+![SkyRL-Agent Dispatcher](../images/skyagent/dispatcher_skyagent.png)
 
 *Overview of the pipelined dispatcher with `max_parallel_agents=3`*
 
@@ -76,5 +76,5 @@ The task class has the following methods:
 
 We currently provide two tasks:
 
-1. [SWEBenchTask](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/tasks/swebench/utils.py#L341) : Implements the SWEBench task leveraging [OpenHands](https://github.com/All-Hands-AI/OpenHands) .
-2. [GeneralReactTask](https://github.com/NovaSky-AI/SkyRL/blob/bd9d6a9bace82df5e27c81ab231f5f4a17b2cf5b/skyagent/skyagent/tasks/general_react/utils.py#L7) : A general task implementation for many basic reasoning tasks like math, science, simple code generation, etc.
+1. [SWEBenchTask](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/tasks/swebench/utils.py#L341) : Implements the SWEBench task leveraging [OpenHands](https://github.com/All-Hands-AI/OpenHands) .
+2. [GeneralReactTask](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-agent/skyrl_agent/tasks/general_react/utils.py#L7) : A general task implementation for many basic reasoning tasks like math, science, simple code generation, etc.
