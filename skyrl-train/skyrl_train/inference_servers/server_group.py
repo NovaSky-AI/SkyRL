@@ -16,6 +16,12 @@ from skyrl_train.inference_servers.server_pool import ServerActorPool
 
 logger = logging.getLogger(__name__)
 
+# In the colocated training case, we schedule trainig and inference actors
+# in the same placement group. In SkyRL, we further schedule actors to get information
+# about the GPU ID to pack actors appropriately on different nodes.
+# Thus we use a fractional CPU allocation for colocated actors.
+COLOCATED_ACTOR_CPU_FRACTION = 0.2
+
 
 class ServerGroup:
     """
@@ -109,7 +115,7 @@ class ServerGroup:
         """Create actor class with scheduling constraints for a specific bundle."""
         return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
-            num_cpus=1,
+            num_cpus=COLOCATED_ACTOR_CPU_FRACTION,
             scheduling_strategy=PlacementGroupSchedulingStrategy(
                 placement_group=pg,
                 placement_group_capture_child_tasks=True,
@@ -140,6 +146,7 @@ class ServerGroup:
                 dp_rpc_port=dp_rpc_port,
                 enable_pd=self._enable_pd,
                 nixl_side_channel_base=self._nixl_side_channel_base,
+                colocated_training=self._external_pg is not None,
             )
 
             # Get DP info from server 0 which is where DP0 will be

@@ -10,8 +10,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "datasets>=4.0.0",
-    "flax>=0.12.2",
-    "optax>=0.2.5",
     "pillow>=11.3.0",
     "rich>=14.1.0",
     "safetensors>=0.6.2",
@@ -22,7 +20,6 @@ dependencies = [
     "peft",
     "hf_transfer",
     "cloudpathlib>=0.23.0",
-    "jax>=0.8,<1.0",
 ]
 
 [project.optional-dependencies]
@@ -61,7 +58,10 @@ azure = [
 # respectively.
 
 jax = [
+    "jax>=0.8,<1.0",
     "jax[cuda12]>=0.7.2; sys_platform == 'linux'",
+    "flax>=0.12.2",
+    "optax>=0.2.5",
 ]
 
 skyrl_train = [
@@ -99,6 +99,10 @@ tx = "tx.run.main:app"
 required-environments = [
     "sys_platform == 'linux'",
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+constraint-dependencies = [
+    "flashinfer-jit-cache==0.5.3",
 ]
 
 [tool.uv.extra-build-dependencies]

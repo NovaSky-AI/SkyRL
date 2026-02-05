@@ -6,14 +6,14 @@ from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
+from omegaconf import DictConfig, OmegaConf
 
 import ray
 import torch
 import torch.distributed
 import torch.nn as nn
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
     PlacementGroup,
@@ -25,6 +25,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
 
+from skyrl_train.config import SkyRLConfig, AlgorithmConfig
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -38,6 +39,7 @@ from skyrl_train.distributed.ulysses import (
     set_ulysses_sequence_parallel_group,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.utils import (
     get_ray_pg_ready_with_timeout,
@@ -52,13 +54,16 @@ from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
-    masked_mean,
     ppo_critic_loss,
 )
+from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.utils import configure_ray_worker_logging
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 
 _SET_AFFINITY = False
+
+if TYPE_CHECKING:
+    from skyrl_train.inference_engines.remote_inference_client import RemoteInferenceClient
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -207,7 +212,7 @@ class DistributedTorchRayActor:
 
 
 class Worker(DistributedTorchRayActor):
-    def __init__(self, cfg: DictConfig, *args, **kwargs):
+    def __init__(self, cfg: Union[SkyRLConfig, DictConfig], *args, **kwargs):
         from skyrl_train.weight_sync import get_transfer_strategy_cls
 
         super().__init__(*args, **kwargs)
@@ -285,7 +290,9 @@ class Worker(DistributedTorchRayActor):
             io.remove(record_memory_path)
         torch.cuda.memory._dump_snapshot(record_memory_path)
 
-    async def init_weight_sync_state(self, inference_engine_client: InferenceEngineClient):
+    async def init_weight_sync_state(
+        self, inference_engine_client: "Union[InferenceEngineClient, RemoteInferenceClient]"
+    ):
         """Initialize state for weight syncing with Inference Engine Client
 
         Creates init info and sender, then sends init info to inference engines
@@ -297,8 +304,14 @@ class Worker(DistributedTorchRayActor):
 
         assert inference_engine_client is not None
 
-        # Create init info on all ranks (it's deterministic from cfg)
-        init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
+        # For new inference path, fetch world_size from servers
+        # For legacy path, calculate from config
+        inference_world_size = None
+        if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
+            inference_world_size = await inference_engine_client.get_world_size()
+
+        # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
+        init_info = self._transfer_strategy_cls.create_init_info(self.cfg, inference_world_size=inference_world_size)
 
         # Create sender on all ranks
         # Strategy implementations may have different logic for different ranks
@@ -763,7 +776,13 @@ class PolicyWorkerBase(Worker):
         loss_config = self.cfg.trainer.algorithm
         if loss_fn_config is not None:
             # Create a copy of the config and apply overrides
-            loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
+            # TODO: Fix nested overrides
+            if isinstance(loss_config, DictConfig):
+                loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
+            else:
+                assert isinstance(loss_config, AlgorithmConfig)
+                new_loss_config = OmegaConf.merge(OmegaConf.create(loss_config), OmegaConf.create(loss_fn_config))
+                loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -779,7 +798,7 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
-            policy_loss, clip_ratio = current_loss_fn(
+            policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -860,19 +879,19 @@ class PolicyWorkerBase(Worker):
             status = {
                 "final_loss": loss.item(),
                 "policy_loss": policy_loss.item(),
-                "ppo_clip_ratio": clip_ratio,
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
             }
+            for k, v in loss_metrics.items():
+                status["loss_metrics/" + k] = v
             if self.cfg.trainer.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
-        # Extract loss_fn_outputs before all_reduce (it's not a tensor/scalar)
         loss_fn_outputs = status.pop("loss_fn_outputs", None)
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         # Add back loss_fn_outputs after all_reduce
         if loss_fn_outputs is not None:
@@ -903,12 +922,6 @@ class PolicyWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """
@@ -1096,7 +1109,7 @@ class CriticWorkerBase(Worker):
         }
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
@@ -1123,12 +1136,6 @@ class CriticWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """

@@ -29,9 +29,12 @@ from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer
 from transformers.trainer_pt_utils import get_module_class_from_name
 from torch.distributed.device_mesh import init_device_mesh
 from collections import OrderedDict
+from omegaconf import DictConfig
 
 from packaging import version
 from peft.utils.save_and_load import get_peft_model_state_dict
+
+from skyrl_train.config import FSDPConfig
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
     from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
@@ -355,12 +358,14 @@ def fsdp2_get_full_state_dict(model: torch.nn.Module, cpu_offload=True, rank0_on
     return state_dict
 
 
-def apply_fsdp2(model, fsdp_kwargs, config):
+def apply_fsdp2(model, fsdp_kwargs, config: Union[FSDPConfig, DictConfig]):
     """model: AutoModelForCausalLM"""
     assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
     default_transformer_cls_names_to_wrap = getattr(model, "_no_split_modules", None)
-    fsdp_transformer_layer_cls_to_wrap = config.get("wrap_policy", {}).get(
-        "transformer_layer_cls_to_wrap", default_transformer_cls_names_to_wrap
+    fsdp_transformer_layer_cls_to_wrap = (
+        config.wrap_policy.get("transformer_layer_cls_to_wrap", None)
+        if getattr(config, "wrap_policy", {}).get("transformer_layer_cls_to_wrap", None)
+        else default_transformer_cls_names_to_wrap
     )
 
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):

@@ -1394,8 +1394,8 @@ wheels = [
 
 [[package]]
 name = "harbor"
-version = "0.1.42"
-source = { git = "https://github.com/laude-institute/harbor?rev=fdfe296145cf13663dc6a0233f8faab7bfcf5fe1#fdfe296145cf13663dc6a0233f8faab7bfcf5fe1" }
+version = "0.1.43"
+source = { git = "https://github.com/laude-institute/harbor?rev=5921cc40e8f6b5b0df0a3dc6354e0e679447eb54#5921cc40e8f6b5b0df0a3dc6354e0e679447eb54" }
 dependencies = [
     { name = "claude-agent-sdk" },
     { name = "datasets" },
@@ -4720,7 +4720,7 @@ requires-dist = [
     { name = "flash-attn", marker = "sys_platform == 'linux' and extra == 'sglang'", specifier = "==2.8.3" },
     { name = "flash-attn", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==2.8.3" },
     { name = "flashinfer-jit-cache", marker = "sys_platform == 'linux' and extra == 'mcore'", specifier = "==0.5.3", index = "https://flashinfer.ai/whl/cu128" },
-    { name = "flashinfer-jit-cache", marker = "sys_platform == 'linux' and extra == 'vllm'", index = "https://flashinfer.ai/whl/cu128" },
+    { name = "flashinfer-jit-cache", marker = "sys_platform == 'linux' and extra == 'vllm'", specifier = "==0.5.3", index = "https://flashinfer.ai/whl/cu128" },
     { name = "flashinfer-python", marker = "(sys_platform == 'linux' and extra == 'flashrl' and extra == 'mcore') or (sys_platform == 'linux' and extra == 'flashrl' and extra != 'sglang') or (sys_platform == 'linux' and extra == 'flashrl' and extra == 'sglang' and extra == 'vllm')" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'flashrl' and extra != 'mcore' and extra == 'sglang' and extra != 'vllm'", url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'mcore'", specifier = "==0.5.3" },
@@ -4728,7 +4728,7 @@ requires-dist = [
     { name = "flashinfer-python", marker = "(sys_platform == 'linux' and extra == 'mcore' and extra == 'sglang') or (sys_platform == 'linux' and extra == 'sglang' and extra == 'vllm')" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'vllm'" },
     { name = "func-timeout" },
-    { name = "harbor", marker = "extra == 'harbor'", git = "https://github.com/laude-institute/harbor?rev=fdfe296145cf13663dc6a0233f8faab7bfcf5fe1" },
+    { name = "harbor", marker = "extra == 'harbor'", git = "https://github.com/laude-institute/harbor?rev=5921cc40e8f6b5b0df0a3dc6354e0e679447eb54" },
     { name = "hf-transfer" },
     { name = "hydra-core", specifier = "==1.3.2" },
     { name = "jaxtyping" },

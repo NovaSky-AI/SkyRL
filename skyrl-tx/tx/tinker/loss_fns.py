@@ -1,7 +1,9 @@
-"""Loss functions for training."""
+"""Loss functions for training (JAX implementations)."""
 
 import jax
 import jax.numpy as jnp
+
+from tx.tinker.types import LOSS_TYPES
 
 
 def safe_loss_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
@@ -36,15 +38,12 @@ def ppo_loss(
 
 
 # Map from string names to loss functions
-# The ordering of this map determines the indices used in jax.lax.switch
 LOSS_FUNCTION_MAP = {
     "cross_entropy": cross_entropy_loss,
     "importance_sampling": importance_sampling_loss,
     "ppo": ppo_loss,
 }
 
-# Map from loss function name to index (for jax.lax.switch)
-LOSS_TYPES = {name: idx for idx, name in enumerate(LOSS_FUNCTION_MAP.keys())}
-
-# List of loss functions in order (for jax.lax.switch)
-LOSS_FUNCTIONS = list(LOSS_FUNCTION_MAP.values())
+# Build list of functions indexed by LOSS_TYPES values (for jax.lax.switch)
+# Sort by index to ensure LOSS_FUNCTIONS[idx] corresponds to the correct function
+LOSS_FUNCTIONS = [LOSS_FUNCTION_MAP[name] for name, idx in sorted(LOSS_TYPES.items(), key=lambda x: x[1])]

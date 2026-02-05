@@ -12,12 +12,10 @@ import asyncio
 from dataclasses import dataclass
 from typing import Literal
 
-import hydra
 import pytest
-from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
@@ -118,21 +116,20 @@ def convert_to_sample_output(output: dict) -> SampleOutput:
     return SampleOutput(sequences=sequences, prompt_logprobs=None)
 
 
-def get_test_config() -> DictConfig:
+def get_test_config() -> SkyRLConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-        cfg.trainer.policy.model.path = MODEL
-        cfg.generator.sampling_params.temperature = 0.7
-        cfg.generator.sampling_params.top_p = 1
-        cfg.generator.sampling_params.top_k = -1
-        cfg.generator.sampling_params.max_generate_length = 64
-        cfg.generator.sampling_params.min_p = 0.0
-        cfg.generator.sampling_params.logprobs = None
-        return cfg
+    cfg = SkyRLConfig()
+    cfg.trainer.policy.model.path = MODEL
+    cfg.generator.sampling_params.temperature = 0.7
+    cfg.generator.sampling_params.top_p = 1
+    cfg.generator.sampling_params.top_k = -1
+    cfg.generator.sampling_params.max_generate_length = 64
+    cfg.generator.sampling_params.min_p = 0.0
+    cfg.generator.sampling_params.logprobs = None
+    return cfg
 
 
-def init_inference_client(backend: str, tp_size: int, config: DictConfig) -> InferenceEngineClient:
+def init_inference_client(backend: str, tp_size: int, config: SkyRLConfig) -> InferenceEngineClient:
     """Initialize inference client for testing."""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     engines = create_ray_wrapped_inference_engines(

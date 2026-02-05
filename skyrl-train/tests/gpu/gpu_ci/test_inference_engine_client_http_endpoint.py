@@ -17,21 +17,19 @@ from http import HTTPStatus
 from typing import Any, Dict, List, Union, Tuple
 from pathlib import Path
 import ray
-import hydra
 import threading
 import requests
 import aiohttp
-from omegaconf import DictConfig
 from pydantic import BaseModel
 import litellm
 from litellm import completion as litellm_completion
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
-from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     serve,
@@ -56,7 +54,7 @@ SERVER_HOST = "127.0.0.1"
 litellm.disable_aiohttp_transport = True
 
 
-def _get_test_sampling_params(backend: str, cfg: DictConfig, endpoint: str) -> Dict[str, Any]:
+def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> Dict[str, Any]:
     assert endpoint in ["chat_completions", "completions"]
     sampling_params = get_sampling_params_for_backend(backend, cfg.generator.sampling_params)
     sampling_params["logprobs"] = True
@@ -66,21 +64,17 @@ def _get_test_sampling_params(backend: str, cfg: DictConfig, endpoint: str) -> D
     return sampling_params
 
 
-def get_test_actor_config(num_inference_engines: int, model: str) -> DictConfig:
+def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
-        # Override specific parameters
-        cfg.trainer.policy.model.path = model
-        cfg.trainer.critic.model.path = ""
-        cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-        cfg.generator.async_engine = True
-        cfg.generator.num_inference_engines = num_inference_engines
-        cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
-        cfg.generator.run_engines_locally = True
-
-        return cfg
+    cfg = SkyRLConfig()
+    cfg.trainer.policy.model.path = model
+    cfg.trainer.critic.model.path = ""
+    cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
+    cfg.generator.async_engine = True
+    cfg.generator.num_inference_engines = num_inference_engines
+    cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
+    cfg.generator.run_engines_locally = True
+    return cfg
 
 
 # ------------------------------------------
@@ -232,7 +226,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -299,7 +293,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         cfg.trainer.placement.colocate_all = True
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -548,7 +542,7 @@ def test_structured_generation(ray_init_fixture):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -611,7 +605,7 @@ def test_http_endpoint_error_handling(ray_init_fixture):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -751,7 +745,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             repo_root = Path(__file__).parent.parent.parent.parent
             engine_init_kwargs["chat_template"] = str(repo_root / template_path)
 
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -843,7 +837,7 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         # Set the served_model_name to be different from the model path
         cfg.generator.served_model_name = SERVED_MODEL_NAME
 
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
