@@ -100,8 +100,8 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
-        ray.shutdown()
         if "router" in locals() and router is not None:
             router.shutdown()
         if "server_group" in locals() and server_group is not None:
             server_group.shutdown()
+        ray.shutdown()

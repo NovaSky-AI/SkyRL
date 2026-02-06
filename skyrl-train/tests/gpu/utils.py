@@ -1,5 +1,6 @@
 import asyncio
 import os
+import copy
 import ray
 import torch
 from typing import Any, Dict
@@ -367,6 +368,21 @@ def init_inference_engines(
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
+
+    # Use deepcopy to avoid modifying the original config
+    # Update with overrides
+    cfg = copy.deepcopy(cfg)
+    cfg.trainer.policy.model.path = model
+    cfg.generator.run_engines_locally = use_local
+    cfg.generator.async_engine = async_engine
+    cfg.generator.inference_engine_tensor_parallel_size = tp_size
+    cfg.trainer.placement.colocate_all = colocate_all
+    cfg.generator.backend = backend
+    cfg.generator.gpu_memory_utilization = gpu_memory_utilization
+    cfg.generator.num_inference_engines = num_inference_engines
+    cfg.generator.max_num_seqs = max_num_seqs
+    cfg.generator.engine_init_kwargs = engine_init_kwargs
+
     if not ray.is_initialized():
         initialize_ray(cfg)
     if colocate_all:
@@ -394,6 +410,8 @@ def init_inference_engines(
 
     if _SKYRL_USE_NEW_INFERENCE:
         # init with internal router and servers
+        if enable_lora:
+            raise ValueError("LoRA is not supported for new inference pathway yet")
         server_group = ServerGroup(
             cli_args=build_vllm_cli_args(cfg),
             num_servers=num_inference_engines * cfg.generator.inference_engine_data_parallel_size,
