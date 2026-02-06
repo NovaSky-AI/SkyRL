@@ -1039,12 +1039,9 @@ def test_context_length_error_returns_400(ray_init_fixture):
                 num_retries=0,
             )
 
-        exception_raised = None
-        try:
+        with pytest.raises(LiteLLMBadRequestError) as excinfo:
             asyncio.run(make_litellm_call())
-            pytest.fail("Expected LiteLLM to raise an exception for prompt+max_tokens overflow")
-        except LiteLLMBadRequestError as e:
-            exception_raised = e
+        exception_raised = excinfo.value
 
         assert exception_raised is not None
         error_str = str(exception_raised).lower()
