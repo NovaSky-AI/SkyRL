@@ -883,9 +883,7 @@ def build_dataloader(
         )
         dataloader = StatefulDataLoader(
             dataset,
-            batch_size=None,  # Sampler yields individual indices
-            batch_sampler=None,
-            sampler=sampler,
+            batch_sampler=sampler,  # HybridEnvSampler yields batches of indices
             collate_fn=dataset.collate_fn,
             num_workers=0 if cfg.generator.enable_http_endpoint else 8,
         )

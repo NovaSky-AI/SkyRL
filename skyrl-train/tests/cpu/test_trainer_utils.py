@@ -1262,3 +1262,96 @@ def test_hybrid_env_sampler_iteration_exhaustion():
 
     expected_total = 3 * batch_size  # 30
     assert len(all_indices) == expected_total, f"Expected {expected_total} samples, got {len(all_indices)}"
+
+
+def test_hybrid_env_sampler_dataloader_integration():
+    """
+    Test that HybridEnvSampler works correctly with DataLoader using batch_sampler.
+
+    This test catches the bug where using `sampler=` instead of `batch_sampler=`
+    caused the collate_fn to receive indices instead of dataset items, resulting in:
+        ValueError: not enough values to unpack (expected 4, got 1)
+    """
+    from torch.utils.data import DataLoader
+
+    dataset = MockPromptDataset(
+        {
+            "booking": 20,
+            "github": 15,
+            "reddit": 10,
+        }
+    )
+
+    batch_size = 9
+    min_samples_per_env = 2
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    # This is the correct way - using batch_sampler
+    dataloader = DataLoader(
+        dataset,
+        batch_sampler=sampler,
+        collate_fn=dataset.collate_fn,
+    )
+
+    # Get first batch
+    batch = next(iter(dataloader))
+
+    # Verify batch structure - should be list of tuples from __getitem__
+    assert len(batch) == batch_size, f"Expected batch size {batch_size}, got {len(batch)}"
+
+    # Each item should be a tuple of (prompt, env_class, extras, uid)
+    for item in batch:
+        assert isinstance(item, tuple), f"Expected tuple, got {type(item)}"
+        assert len(item) == 4, f"Expected 4 elements (prompt, env_class, extras, uid), got {len(item)}"
+        prompt, env_class, extras, uid = item
+        assert isinstance(prompt, str), f"Expected prompt to be str, got {type(prompt)}"
+        assert env_class in ["booking", "github", "reddit"], f"Unexpected env_class: {env_class}"
+        assert isinstance(extras, dict), f"Expected extras to be dict, got {type(extras)}"
+        assert isinstance(uid, str), f"Expected uid to be str, got {type(uid)}"
+
+    # Verify minimum samples per environment in the batch
+    env_counts = {}
+    for item in batch:
+        env_class = item[1]
+        env_counts[env_class] = env_counts.get(env_class, 0) + 1
+
+    for env, count in env_counts.items():
+        assert count >= min_samples_per_env, f"Environment {env} has {count} samples, expected >= {min_samples_per_env}"
+
+
+def test_hybrid_env_sampler_wrong_usage_fails():
+    """
+    Demonstrate that using sampler= instead of batch_sampler= fails.
+
+    This documents the bug we fixed - the sampler yields batches of indices,
+    not individual indices, so it must be used with batch_sampler=.
+    """
+    from torch.utils.data import DataLoader
+
+    dataset = MockPromptDataset({"env_a": 10, "env_b": 10})
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=6,
+        min_samples_per_env=1,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    # WRONG: Using sampler= with a batch-yielding sampler
+    # This causes the dataloader to treat each batch of indices as a single index
+    wrong_dataloader = DataLoader(
+        dataset,
+        batch_size=None,
+        sampler=sampler,
+        collate_fn=dataset.collate_fn,
+    )
+
+    # This will fail because collate_fn receives indices, not dataset items
+    with pytest.raises((ValueError, TypeError)):
+        next(iter(wrong_dataloader))
