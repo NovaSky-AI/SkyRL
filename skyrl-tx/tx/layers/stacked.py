@@ -183,17 +183,17 @@ class StackedDecoderLayers(nnx.Module):
         gradient_checkpointing: bool,
         is_training: bool = False,
     ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
-        """Forward pass through all layers using scan.
+        """Forward pass through all layers.
 
-        Uses jax.lax.scan for all modes (training/prefill/decode). For decode mode,
-        the KV cache is passed as scan carry for efficient buffer donation.
+        Uses scan for prefill/training (efficient, no KV cache needed).
+        Uses Python loop for decode (with list-format KV cache) to enable buffer donation.
 
         Args:
             hidden_states: Input hidden states of shape (batch, seq, hidden).
             attention_mask: Attention mask of shape (batch, seq).
             positions: Position indices of shape (batch, seq).
             adapter_indices: Optional LoRA adapter indices of shape (batch,).
-            kv_cache: Optional KV cache for decode mode (None for prefill).
+            kv_cache: Optional KV cache for decode mode (None for prefill). Uses list format.
             output_hidden_states: Whether to return intermediate hidden states.
             gradient_checkpointing: Whether to use gradient checkpointing.
             is_training: Whether in training mode. Skips KV cache to save memory.
@@ -209,56 +209,81 @@ class StackedDecoderLayers(nnx.Module):
         graphdef, state = nnx.split(self._stacked)
         is_decode = kv_cache is not None
 
+        if is_decode:
+            # Decode mode: Use Python loop with list KV cache for buffer donation.
+            # We avoid jax.lax.scan here because carrying a stacked KV cache through scan
+            # and updating it with cache.at[layer_idx].set() causes XLA to copy the entire
+            # cache array on each layer (16MB per layer). XLA can't prove the buffer can be
+            # donated since it doesn't know the slices are non-overlapping. With a Python
+            # loop and list format, each layer's KV array is independent and can be donated.
+            flat_state, treedef = jax.tree_util.tree_flatten(state)
+            all_hidden_states: list[jax.Array] = []
+            updated_keys: list[jax.Array] = []
+            updated_values: list[jax.Array] = []
+
+            for layer_idx in range(self.num_layers):
+                if output_hidden_states:
+                    all_hidden_states.append(hidden_states)
+
+                # Extract this layer's parameters
+                layer_params_flat = [p[layer_idx] for p in flat_state]
+                layer_params = jax.tree_util.tree_unflatten(treedef, layer_params_flat)
+                layer = nnx.merge(graphdef, layer_params)
+
+                # Get this layer's KV cache
+                layer_kv = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx])
+
+                hidden_states, (k, v) = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    positions=positions,
+                    adapter_indices=adapter_indices,
+                    kv_cache=layer_kv,
+                )
+                updated_keys.append(k)
+                updated_values.append(v)
+
+            new_kv_cache = KVCache.update(
+                kv_cache, updated_keys, updated_values, positions, attention_mask
+            )
+            return hidden_states, all_hidden_states, new_kv_cache
+
+        # Prefill/training mode: use scan for efficiency
         def body_fn(carry, layer_params):
-            hs, cache_keys, cache_values, layer_idx = carry
+            hs = carry
 
-            # Extract layer's cache slice if available
-            if cache_keys is not None:
-                layer_kv = (cache_keys[layer_idx], cache_values[layer_idx])
-            else:
-                layer_kv = None
-
-            # Forward through layer
+            # Forward through layer (no KV cache input for prefill)
             layer = nnx.merge(graphdef, layer_params)
             new_hs, (k, v) = layer(
                 hs,
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
-                kv_cache=layer_kv,
+                kv_cache=None,
             )
 
             hs_output = new_hs if output_hidden_states else None
 
-            # Update cache in carry if present (decode), otherwise accumulate outputs (prefill)
-            if cache_keys is not None:
-                cache_keys = cache_keys.at[layer_idx].set(k)
-                cache_values = cache_values.at[layer_idx].set(v)
-                k = v = None  # Don't accumulate in output - cache is in carry
-            elif is_training:
+            # Skip KV accumulation in training mode to save memory
+            if is_training:
                 k = v = None
 
-            return (new_hs, cache_keys, cache_values, layer_idx + 1), (hs_output, k, v)
+            return new_hs, (hs_output, k, v)
 
         if gradient_checkpointing:
             body_fn = jax.checkpoint(body_fn)
 
-        cache_keys = kv_cache.keys if kv_cache else None
-        cache_values = kv_cache.values if kv_cache else None
-        init_carry = (hidden_states, cache_keys, cache_values, 0)
-
-        (final_hs, final_keys, final_values, _), (all_hs, all_keys, all_values) = jax.lax.scan(
-            body_fn, init_carry, state
+        final_hs, (all_hs, all_keys, all_values) = jax.lax.scan(
+            body_fn, hidden_states, state
         )
 
-        if is_decode:
-            new_kv_cache = KVCache(
-                keys=final_keys,
-                values=final_values,
-                cache_position=kv_cache.cache_position + positions.shape[1],
-            )
+        if is_training:
+            new_kv_cache = None
         else:
-            new_kv_cache = None if is_training else KVCache.from_layer_outputs(all_keys, all_values, attention_mask)
+            # Convert stacked scan outputs to list format
+            keys_list = [all_keys[i] for i in range(self.num_layers)]
+            values_list = [all_values[i] for i in range(self.num_layers)]
+            new_kv_cache = KVCache.update(None, keys_list, values_list, positions, attention_mask)
 
         all_hidden_states = [hidden_states] + list(all_hs[:-1]) if output_hidden_states else []
         return final_hs, all_hidden_states, new_kv_cache
