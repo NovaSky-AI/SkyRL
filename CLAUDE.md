@@ -45,6 +45,22 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
    - Use DAPO overlong filtering: truncate sequences > `max_sequence_length` and zero out loss mask
    - Match metrics naming: `pass_at_n`, per-environment metrics, etc.
 
+7. **Always run tests before creating PRs** - Ensure tests pass before pushing code:
+   ```bash
+   # Run all CPU tests
+   cd skyrl-train && uv run --isolated --extra dev pytest tests/cpu/ -v
+
+   # Run specific test file
+   uv run --isolated --extra dev pytest tests/cpu/test_trainer_utils.py -v
+   ```
+
+   Test requirements:
+   - All existing tests must pass before creating or updating a PR
+   - New functionality should include test coverage
+   - Test edge cases and error conditions, not just happy paths
+   - When fixing bugs, add regression tests that would have caught the bug
+   - Use descriptive test names that explain what is being tested
+
 ## Project Context
 
 - This is SkyRL, a reinforcement learning training framework

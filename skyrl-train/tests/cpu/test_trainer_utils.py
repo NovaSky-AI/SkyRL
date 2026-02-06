@@ -992,8 +992,9 @@ def test_hybrid_env_sampler_minimum_samples_per_env():
         drop_last=True,
     )
 
-    # Get first batch
-    batch_indices = list(sampler)[:batch_size]
+    # Get first batch (sampler yields batches of indices)
+    first_batch = next(iter(sampler))
+    batch_indices = first_batch
 
     # Count samples per env in the batch
     env_counts = {"booking": 0, "github": 0, "reddit": 0}
@@ -1039,9 +1040,9 @@ def test_hybrid_env_sampler_reproducibility():
         generator=torch.Generator().manual_seed(123),
     )
 
-    # Get batches from both
-    batch1 = list(sampler1)[:batch_size]
-    batch2 = list(sampler2)[:batch_size]
+    # Get first batch from both (sampler yields batches)
+    batch1 = next(iter(sampler1))
+    batch2 = next(iter(sampler2))
 
     # Should be identical
     assert batch1 == batch2, "Same seed should produce identical batches"
@@ -1074,8 +1075,9 @@ def test_hybrid_env_sampler_different_seeds():
         generator=torch.Generator().manual_seed(999),
     )
 
-    batch1 = list(sampler1)[:batch_size]
-    batch2 = list(sampler2)[:batch_size]
+    # Get first batch from each (sampler yields batches)
+    batch1 = next(iter(sampler1))
+    batch2 = next(iter(sampler2))
 
     # Should be different (with very high probability)
     assert batch1 != batch2, "Different seeds should produce different batches"
@@ -1110,7 +1112,7 @@ def test_hybrid_env_sampler_warns_when_min_exceeds_batch():
 
 
 def test_hybrid_env_sampler_length():
-    """Test that __len__ returns correct number of samples."""
+    """Test that __len__ returns correct number of batches."""
     dataset = MockPromptDataset(
         {
             "env_a": 20,
@@ -1130,11 +1132,10 @@ def test_hybrid_env_sampler_length():
     )
 
     # env_b has 10 samples, needs 2 per batch -> 5 batches possible
-    # Total samples = 5 * 9 = 45
+    # __len__ returns number of batches (for batch_sampler compatibility)
     expected_batches = 10 // min_samples_per_env  # 5
-    expected_length = expected_batches * batch_size  # 45
 
-    assert len(sampler) == expected_length
+    assert len(sampler) == expected_batches
 
 
 def test_hybrid_env_sampler_proportional_fill():
@@ -1158,14 +1159,13 @@ def test_hybrid_env_sampler_proportional_fill():
     )
 
     # Collect multiple batches to get statistical average
-    all_indices = list(sampler)
-    num_batches = len(all_indices) // batch_size
+    # Sampler yields batches, so flatten them
+    all_batches = list(sampler)
 
     total_large = 0
     total_small = 0
 
-    for batch_idx in range(num_batches):
-        batch = all_indices[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+    for batch in all_batches:
         for idx in batch:
             env = dataset.dataframe[idx]["env_class"]
             if env == "large_env":
@@ -1200,7 +1200,8 @@ def test_hybrid_env_sampler_single_env():
         generator=torch.Generator().manual_seed(42),
     )
 
-    batch = list(sampler)[:batch_size]
+    # Get first batch (sampler yields batches)
+    batch = next(iter(sampler))
 
     # All should be from the only environment
     assert len(batch) == batch_size
@@ -1224,7 +1225,8 @@ def test_hybrid_env_sampler_many_small_envs():
         generator=torch.Generator().manual_seed(42),
     )
 
-    batch = list(sampler)[:batch_size]
+    # Get first batch (sampler yields batches)
+    batch = next(iter(sampler))
 
     # Count envs in batch
     env_counts = {}
@@ -1258,10 +1260,15 @@ def test_hybrid_env_sampler_iteration_exhaustion():
     )
 
     # scarce has 6, needs 2 per batch -> 3 batches max
-    all_indices = list(sampler)
+    all_batches = list(sampler)
 
+    expected_num_batches = 3
+    assert len(all_batches) == expected_num_batches, f"Expected {expected_num_batches} batches, got {len(all_batches)}"
+
+    # Verify total samples
+    total_samples = sum(len(batch) for batch in all_batches)
     expected_total = 3 * batch_size  # 30
-    assert len(all_indices) == expected_total, f"Expected {expected_total} samples, got {len(all_indices)}"
+    assert total_samples == expected_total, f"Expected {expected_total} samples, got {total_samples}"
 
 
 def test_hybrid_env_sampler_dataloader_integration():
@@ -1343,15 +1350,21 @@ def test_hybrid_env_sampler_wrong_usage_fails():
         generator=torch.Generator().manual_seed(42),
     )
 
-    # WRONG: Using sampler= with a batch-yielding sampler
-    # This causes the dataloader to treat each batch of indices as a single index
+    # WRONG: Using sampler= with a batch-yielding sampler and batch_size
+    # This causes the dataloader to:
+    # 1. Get a batch [idx1, idx2, ...] from sampler
+    # 2. Try to use each element as an index to fetch from dataset
+    # 3. But since sampler yields whole batches, not indices, this fails
     wrong_dataloader = DataLoader(
         dataset,
-        batch_size=None,
+        batch_size=6,  # DataLoader will try to batch the batches
         sampler=sampler,
         collate_fn=dataset.collate_fn,
     )
 
-    # This will fail because collate_fn receives indices, not dataset items
-    with pytest.raises((ValueError, TypeError)):
+    # This will fail because:
+    # - sampler yields [0, 3, 5, 1, 4, 2] (a batch of indices)
+    # - DataLoader tries to use [0, 3, 5, 1, 4, 2] as the index for __getitem__
+    # - dataset[list] fails with TypeError
+    with pytest.raises(TypeError):
         next(iter(wrong_dataloader))

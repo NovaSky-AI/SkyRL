@@ -18,6 +18,7 @@ from pathlib import Path
 from skyrl_train.utils.io import io
 from skyrl_train.dataset import PromptDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
+from torch.utils.data import DataLoader
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -830,16 +831,17 @@ class HybridEnvSampler(torch.utils.data.Sampler):
                 perm = torch.randperm(len(batch_indices)).tolist()
             batch_indices = [batch_indices[i] for i in perm]
 
-            yield from batch_indices
+            # Yield the complete batch (for use with batch_sampler=)
+            yield batch_indices
 
     def __len__(self):
-        # Number of samples yielded per epoch
+        # Number of batches per epoch (for batch_sampler, __len__ returns batch count)
         min_batches_per_env = [len(indices) // self.min_samples_per_env for indices in self.env_to_indices.values()]
         num_batches = min(min_batches_per_env)
         # Also limit by total samples / batch_size
         total_samples = sum(len(indices) for indices in self.env_to_indices.values())
         num_batches = min(num_batches, total_samples // self.batch_size)
-        return num_batches * self.batch_size
+        return num_batches
 
 
 def build_dataloader(
@@ -881,7 +883,9 @@ def build_dataloader(
             generator=seeded_generator,
             drop_last=True,
         )
-        dataloader = StatefulDataLoader(
+        # Use standard DataLoader instead of StatefulDataLoader for hybrid sampling
+        # StatefulDataLoader ignores batch_sampler and falls back to index-based fetching
+        dataloader = DataLoader(
             dataset,
             batch_sampler=sampler,  # HybridEnvSampler yields batches of indices
             collate_fn=dataset.collate_fn,
