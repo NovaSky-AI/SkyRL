@@ -553,7 +553,7 @@ def ppo_policy_loss(
     )
     loss_metrics.update(off_policy_metrics)
 
-    loss = loss.sum()
+    loss = reduce_loss(loss, loss_mask)
 
     return loss, loss_metrics
 

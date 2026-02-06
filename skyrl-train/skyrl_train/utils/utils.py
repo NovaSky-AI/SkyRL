@@ -261,14 +261,14 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
         f"Must be one of {available_advantage_estimators}"
     )
 
-    # assert cfg.trainer.algorithm.loss_reduction in (
-    #     "token_mean",
-    #     "sequence_mean",
-    #     "seq_mean_token_sum_norm",
-    # ), (
-    #     f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
-    #     f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
-    # )
+    assert cfg.trainer.algorithm.loss_reduction in (
+        "token_mean",
+        "sequence_mean",
+        "seq_mean_token_sum_norm",
+    ), (
+        f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
+        f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+    )
 
     # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
     # per batch can be variable based on the prompt length. This is used to normalize the loss for
