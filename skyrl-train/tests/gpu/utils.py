@@ -348,7 +348,6 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,
-            add_special_tokens=False,
             tokenize=True,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
