@@ -52,7 +52,6 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
         if kv_cache is None:
             # Prefill: deterministic hidden_states (which equal logits)
             hidden_states = jnp.tile(base[None, None, :], (batch_size, seq_len, 1))
-            # List format: one entry per layer (use 1 layer for this dummy model)
             keys = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             values = [jnp.zeros((batch_size, seq_len, 1, 1), dtype=jnp.float32)]
             # Per-sequence cache_position (all same length in this test)

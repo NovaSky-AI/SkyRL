@@ -92,7 +92,7 @@ def load_lora_weights(
     scaling: float,
     rank: int,
 ) -> None:
-    """Load LoRA weights from numpy arrays to JAX module (non-stacked modules like embed_tokens)."""
+    """Load LoRA weights from numpy arrays to JAX module."""
     assert (
         jax_module.lora_A is not None
         and jax_module.lora_B is not None
@@ -245,7 +245,7 @@ def test_qwen3_lora():
                 rank=lora_config.r,
             )
 
-            # Load layer LoRA weights via unstacked view
+            # Load layer LoRA weights
             for i in range(config.num_hidden_layers):
                 hf_layer = hf_model.base_model.model.model.layers[i]
                 jax_layer = model.model.layers[i]
