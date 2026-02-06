@@ -962,16 +962,14 @@ class JaxBackend(JaxBackendImpl):
         """Broadcast method call to workers and execute locally via super()."""
         if jax.process_count() > 1:
             hints = get_type_hints(getattr(JaxBackendImpl, method))
+
             # TODO: Remove AnyPath special case once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
-            clean = {
-                k: (
-                    str(v)
-                    if hints.get(k) is AnyPath
-                    else TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
-                )
-                for k, v in kwargs.items()
-            }
-            _broadcast_command(RpcPayload(method=method, kwargs=clean))
+            def serialize(k, v):
+                if hints.get(k) is AnyPath:
+                    return str(v)
+                return TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
+
+            _broadcast_command(RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}))
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
