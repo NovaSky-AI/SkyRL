@@ -961,8 +961,8 @@ class JaxBackend(JaxBackendImpl):
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
         if jax.process_count() > 1:
-            kwargs = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
-            _broadcast_command(RpcPayload(method=method, kwargs=kwargs))
+            clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
+            _broadcast_command(RpcPayload(method=method, kwargs=clean))
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
