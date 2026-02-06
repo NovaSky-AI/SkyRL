@@ -99,5 +99,3 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
 
         print(f"Example output after weight sync: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
-
-    ray.shutdown()

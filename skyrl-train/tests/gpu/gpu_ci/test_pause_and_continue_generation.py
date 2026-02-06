@@ -37,6 +37,7 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
     num_engines = 2
     num_requests = 6
     max_num_seqs = 2
+    engines = None
     # Create tokenizer separately to work with both InferenceEngineClient and RemoteInferenceClient
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     try:
@@ -168,7 +169,7 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
         shutdown_server(host=SERVER_HOST, port=SERVER_PORT, max_wait_seconds=5)
         if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
-        if "engines" in locals():
+        if engines is not None:
             engines.close()
 
 
