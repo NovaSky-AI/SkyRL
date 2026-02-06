@@ -8,6 +8,7 @@
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
 # GPUs: B200:4
 #
+# v0.3.4: Enable use_hybrid_env_sampling to ensure every env is sampled every batch
 # v0.3.3: Reduced eval_interval (40→20) for more frequent eval checkpoints
 # v0.3.2: Increased batch size (4→32) and GPUs (2→4) for hybrid env sampling
 # v0.3 OOM fix: gpu_memory_utilization reduced from 0.8 to 0.7
@@ -171,6 +172,8 @@ run: |
     trainer.eval_interval=20 \
     trainer.update_epochs_per_batch=1 \
     trainer.train_batch_size=32 \
+    trainer.use_hybrid_env_sampling=true \
+    trainer.min_samples_per_env=1 \
     trainer.policy_mini_batch_size=32 \
     trainer.micro_forward_batch_size_per_gpu=2 \
     trainer.micro_train_batch_size_per_gpu=2 \
