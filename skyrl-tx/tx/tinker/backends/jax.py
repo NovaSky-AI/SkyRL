@@ -828,7 +828,7 @@ class JaxBackendImpl(AbstractBackend):
         self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
-    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
         lora_model = self.models[model_id]
         save_lora_checkpoint(
@@ -961,8 +961,15 @@ class JaxBackend(JaxBackendImpl):
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
         if jax.process_count() > 1:
-            clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
-            _broadcast_command(RpcPayload(method=method, kwargs=clean))
+            hints = get_type_hints(getattr(JaxBackendImpl, method))
+
+            # TODO: Remove AnyPath special case once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
+            def serialize(k, v):
+                if hints.get(k) is AnyPath:
+                    return str(v)
+                return TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
+
+            _broadcast_command(RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}))
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
@@ -986,8 +993,11 @@ class JaxBackend(JaxBackendImpl):
     def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
 
-    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
+        # Write probe so workers can detect shared filesystem
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.with_name(output_path.name + ".probe").write_text("write_probe")
+        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id, persist=persist)
 
 
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):

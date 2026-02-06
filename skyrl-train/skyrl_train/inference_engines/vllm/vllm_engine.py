@@ -533,21 +533,39 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
+
+            # Determine appropriate HTTP status code based on error message to mimic vllm serve error
+            # handling. Here, we handle context length errors, which should return 400 according to
+            # vllm serve error handling, so that downstream users can handle these properly rather
+            # than seeing a 500 SkyRL INTERNAL_SERVER_ERROR. For instance, LiteLLM can wraps them as
+            # BadRequestError, enabling Harbor to detect ContextLengthExceededError.
+            # NOTE(Charlie): This is hacky. With the refactored inference stack, we
+            # should be able to directly reuse the error handling from the served vllm.
+            error_message = str(e).lower()
+            is_context_length_error = (
+                "maximum context length" in error_message or "maximum model length" in error_message
+            )
+
+            if is_context_length_error:
+                http_status = HTTPStatus.BAD_REQUEST
+            else:
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
                 from vllm.entrypoints.openai.protocol import ErrorInfo
 
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
-                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                        type=http_status.phrase,
+                        code=http_status.value,
                     ),
                 ).model_dump()
             else:
                 return ErrorResponse(
                     message=str(e),
-                    type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                    code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    type=http_status.phrase,
+                    code=http_status.value,
                 ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:

@@ -31,7 +31,7 @@ from tx.tinker.db_models import (
 )
 from tx.tinker.extra import ExternalInferenceClient
 from tx.utils.storage import download_file
-from tx.utils.log import logger
+from tx.utils.log import logger, get_uvicorn_log_config
 
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
@@ -1168,4 +1168,4 @@ if __name__ == "__main__":
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(app, host=args.host, port=args.port, log_config=get_uvicorn_log_config())

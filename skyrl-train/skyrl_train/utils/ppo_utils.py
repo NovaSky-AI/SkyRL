@@ -469,6 +469,7 @@ class PolicyLossType(StrEnum):
     KL_COV = "kl_cov"
     SAPO = "sapo"
     CROSS_ENTROPY = "cross_entropy"
+    IMPORTANCE_SAMPLING = "importance_sampling"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -499,6 +500,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
             "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
+            "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -927,6 +929,56 @@ def cross_entropy_loss(
 
     # No clipping in cross-entropy loss
     return loss, {"clip_ratio": 0.0}
+
+
+@register_policy_loss(PolicyLossType.IMPORTANCE_SAMPLING)
+def importance_sampling_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: Union[AlgorithmConfig, DictConfig],
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """
+    Importance sampling loss for off-policy RL training.
+
+    Computes the policy gradient with importance weighting to correct for
+    off-policy samples. Uses the ratio p_theta(x)/q(x) where p_theta is the
+    current (learner) policy and q is the sampling policy.
+
+    The loss is: -(exp(log_probs - old_log_probs) * advantages).sum()
+
+    This matches Tinker's importance_sampling semantics.
+    See: https://tinker-docs.thinkingmachines.ai/losses#policy-gradient-importance_sampling
+
+    Args:
+        log_probs: Log probabilities from current policy (learner)
+        old_log_probs: Log probabilities from sampling policy (for importance weighting)
+        advantages: Advantage values for RL
+        config: Algorithm configuration
+        loss_mask: Mask indicating which tokens to include in loss (1=include, 0=ignore)
+        rollout_logprobs: Ignored (same as old_log_probs for this loss)
+
+    Returns:
+        Tuple of (loss, metrics_dict)
+    """
+    # Compute importance ratio: p_theta(x) / q(x)
+    prob_ratio = torch.exp(log_probs - old_log_probs)
+
+    # Importance-weighted policy gradient
+    elementwise_loss = -(prob_ratio * advantages)
+
+    # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
+    if loss_mask is not None:
+        loss = (elementwise_loss * loss_mask).sum()
+        # Track mean importance ratio for monitoring
+        mean_ratio = (prob_ratio * loss_mask).sum() / loss_mask.sum()
+    else:
+        loss = elementwise_loss.sum()
+        mean_ratio = prob_ratio.mean()
+
+    return loss, {"importance_ratio": mean_ratio.item()}
 
 
 def reduce_loss(

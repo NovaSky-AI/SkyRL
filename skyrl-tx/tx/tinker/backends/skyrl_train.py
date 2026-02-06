@@ -4,6 +4,7 @@ Uses SkyRL-Train infrastructure for supervised training with cross-entropy loss.
 Currently supports a single model only.
 """
 
+import asyncio
 import os
 import tarfile
 import tempfile
@@ -49,7 +50,9 @@ except ImportError:  # pragma: no cover - exercised only in non-ray installs
 class SkyRLTrainBackendConfig(BaseModel, extra="forbid"):
     """Configuration for the SkyRL-Train backend.
 
-    Currently uses default config from skyrl-train.
+    Note: Currently uses SkyRL's default config for all parameters.
+    TODO: Implement proper config management to allow Tinker users to override
+    training and inference parameters via backend_config.
     """
 
     pass
@@ -97,6 +100,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._trainer: RayPPOTrainer | None = None
         self._cfg = None
         self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
+        self._inference_engine_client = None  # InferenceEngineClient for sampling
 
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
@@ -117,7 +121,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Create inference engine client
         logger.info(f"Creating {self._cfg.generator.num_inference_engines} inference engines")
-        inference_engine_client = InferenceEngineClient(
+        self._inference_engine_client = InferenceEngineClient(
             create_ray_wrapped_inference_engines_from_config(self._cfg, colocate_pg, self._tokenizer),
             self._tokenizer,
             self._cfg,
@@ -137,7 +141,7 @@ class SkyRLTrainBackend(AbstractBackend):
             tokenizer=self._tokenizer,
             train_dataset=None,  # Not needed for tinker API
             eval_dataset=None,
-            inference_engine_client=inference_engine_client,
+            inference_engine_client=self._inference_engine_client,
             generator=None,  # TODO(tyler): Update for sampling + RL
             colocate_pg=colocate_pg,
         )
@@ -152,6 +156,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
         logger.info("Building models.")
         self._trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
+
+        logger.info("Initializing weight sync state.")
+        self._trainer.init_weight_sync_state()
 
         self._model_id = model_id
         self._model_metadata = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
@@ -282,7 +289,133 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedSampleBatch,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        raise NotImplementedError("Sampling not yet supported.")
+        """Generate samples using InferenceEngineClient.
+
+        NOTE: Weight sync is NOT triggered automatically. The caller must call
+        save_weights_for_sampler() explicitly before calling sample() if weights
+        have been updated.
+        """
+        # 1. Validate inference is enabled
+        if self._inference_engine_client is None:
+            error = types.ErrorResponse(
+                error="Sampling not enabled. Inference engines were not initialized (num_inference_engines=0 in SkyRL config).",
+                status="error",
+            )
+            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+
+        # 2. Validate single model
+        unique_models = set(prepared_batch.all_model_ids)
+        if unique_models != {self._model_id}:
+            error = types.ErrorResponse(
+                error=f"Model mismatch. Expected {self._model_id}, got {unique_models}", status="error"
+            )
+            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+
+        # 3. Sample all prompts in parallel
+        async def sample_all():
+            tasks = []
+            for i in range(len(prepared_batch.all_prompts)):
+                prompt = prepared_batch.all_prompts[i]
+                sampling_params = prepared_batch.all_sampling_params[i]
+
+                # Pass through common fields; only stop needs name translation
+                # (Tinker uses stop_strings/stop_tokens, vLLM uses stop/stop_token_ids)
+                params_dict = {
+                    "temperature": sampling_params.temperature,
+                    "max_tokens": sampling_params.max_tokens,
+                    "seed": sampling_params.seed,
+                    "top_k": sampling_params.top_k,
+                    "top_p": sampling_params.top_p,
+                }
+                if sampling_params.stop_strings:
+                    params_dict["stop"] = sampling_params.stop_strings
+                if sampling_params.stop_tokens:
+                    params_dict["stop_token_ids"] = sampling_params.stop_tokens
+
+                tasks.append(
+                    self._inference_engine_client.sample(
+                        prompt_token_ids=prompt,
+                        num_samples=1,  # Tinker batches multiple samples separately
+                        sampling_params=params_dict,
+                    )
+                )
+
+            return await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Backend runs in engine subprocess with no event loop
+        sample_outputs = asyncio.run(sample_all())
+
+        # Note: sample_outputs may contain Exception objects (from return_exceptions=True)
+        # We preserve these to include error messages in responses
+
+        # 4. Aggregate results by request
+        return self._aggregate_sample_results(prepared_batch, sample_outputs)
+
+    def _aggregate_sample_results(
+        self,
+        prepared_batch: types.PreparedSampleBatch,
+        sample_outputs: list,
+    ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
+        """Convert InferenceEngineClient outputs to Tinker format."""
+        results = {}
+
+        for request_id, model_id, start_idx, end_idx, needs_prompt_logprobs in prepared_batch.request_batch_slices:
+            sequences = []
+            has_error = False
+            error_msg = None
+
+            for i in range(start_idx, end_idx):
+                output = sample_outputs[i]
+
+                # Check if sampling failed (Exception or None)
+                if isinstance(output, Exception):
+                    has_error = True
+                    error_msg = f"Sampling failed for sample {i}: {type(output).__name__}: {str(output)}"
+                    logger.error(error_msg)
+                    break
+                elif output is None:
+                    has_error = True
+                    error_msg = f"Sampling failed for sample {i}: Unknown error (output is None)"
+                    logger.error(error_msg)
+                    break
+
+                # Extract tokens and logprobs
+                response_tokens = output["response_ids"][0]
+                response_logprobs = (output.get("response_logprobs") or [[]])[0]
+                stop_reason_raw = output["stop_reasons"][0]
+
+                # Map vLLM stop reason to Tinker format
+                stop_reason = "stop" if stop_reason_raw in ["stop", "stop_token"] else "length"
+
+                # Ensure logprobs exist (critical for RL)
+                if response_logprobs is None or len(response_logprobs) == 0:
+                    logger.warning("No logprobs returned - filling with zeros")
+                    response_logprobs = [0.0] * len(response_tokens)
+
+                sequences.append(
+                    types.GeneratedSequence(
+                        tokens=response_tokens,
+                        logprobs=response_logprobs,
+                        stop_reason=stop_reason,
+                    )
+                )
+
+            if has_error:
+                results[request_id] = types.ErrorResponse(
+                    error=error_msg or "Unknown sampling error",
+                    status="error",
+                )
+            else:
+                # Note: prompt_logprobs not supported initially
+                if needs_prompt_logprobs:
+                    logger.warning("Prompt logprobs requested but not yet supported")
+
+                results[request_id] = types.SampleOutput(
+                    sequences=sequences,
+                    prompt_logprobs=None,
+                )
+
+        return results
 
     def _validate_model_state(self, model_id: str) -> None:
         """Validate that model exists and is initialized."""
@@ -332,18 +465,31 @@ class SkyRLTrainBackend(AbstractBackend):
 
         logger.info(f"Loaded checkpoint for {model_id} from {checkpoint_path}")
 
-    def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
-        """Save sampler checkpoint as tar (model only, no optimizer)."""
+    def save_sampler_checkpoint(self, output_path, model_id: str, persist: bool = True) -> None:
+        """Sync weights to colocated inference engines and optionally save to disk.
+
+        The NCCL broadcast always runs so inference engines have the latest
+        policy weights.  When ``persist`` is False (the common hot-path in RL
+        loops) the expensive HuggingFace model export is skipped entirely.
+        """
         self._validate_model_state(model_id)
 
-        # Create temp directory for HuggingFace export
-        with tempfile.TemporaryDirectory() as temp_dir:
-            hf_dir = os.path.join(temp_dir, "model")
+        # Always sync weights to inference engines (in-memory NCCL broadcast)
+        if self._inference_engine_client is not None:
+            asyncio.run(self._trainer.dispatch.save_weights_for_sampler())
+            logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
-            # Save in HuggingFace format (model weights + tokenizer only)
-            self._trainer.dispatch.save_hf_model(model="policy", hf_model_dir=hf_dir, tokenizer=self._tokenizer)
-
-            # Create tar archive
-            self._create_tar_from_directory(hf_dir, output_path)
-
-        logger.info(f"Saved sampler checkpoint for {model_id} to {output_path}")
+        if persist:
+            # Full HuggingFace model export to disk
+            with tempfile.TemporaryDirectory() as temp_dir:
+                hf_dir = os.path.join(temp_dir, "model")
+                self._trainer.dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
+                self._create_tar_from_directory(hf_dir, output_path)
+            logger.info(f"Saved sampler checkpoint for {model_id} to {output_path}")
+        else:
+            # Hot path: write a lightweight marker so the engine's checkpoint
+            # bookkeeping stays consistent.  Actual weights live in GPU memory.
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            with tarfile.open(output_path, "w"):
+                pass  # empty tar — marker only
+            logger.info(f"Synced weights for {model_id} (disk save skipped)")

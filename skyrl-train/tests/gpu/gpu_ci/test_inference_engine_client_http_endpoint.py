@@ -677,6 +677,41 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
         health_data = response.json()
         assert health_data["status"] == "healthy"
 
+        # Test 8: Test internal server errors (500) return proper error responses
+        # Traceback is logged server-side only (not exposed to client per CWE-209)
+        caplog.set_level(logging.ERROR)
+        original_client = http_endpoint_module._global_inference_engine_client
+
+        internal_error_cases = [
+            (
+                "chat_completion",
+                "/v1/chat/completions",
+                {"messages": [{"role": "user", "content": "Hello"}]},
+                KeyError("choices"),
+            ),
+            ("completion", "/v1/completions", {"prompt": "Hello"}, RuntimeError("Simulated internal error")),
+        ]
+        for method_name, endpoint, extra_payload, exception in internal_error_cases:
+
+            async def mock_raises(*args, exc=exception, **kwargs):
+                raise exc
+
+            caplog.clear()
+            with patch.object(original_client, method_name, side_effect=mock_raises):
+                response = requests.post(f"{base_url}{endpoint}", json={"model": MODEL_QWEN2_5, **extra_payload})
+            assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+            error_data = response.json()
+            error_message = error_data["error"]["message"]
+            assert str(exception) in error_message or type(exception).__name__ in error_message
+            assert "Traceback" not in error_message  # Not exposed to client (CWE-209)
+            assert error_data["error"]["code"] == 500
+            assert "Traceback (most recent call last):" in caplog.text  # Logged server-side
+            assert type(exception).__name__ in caplog.text
+
+        # Test 9: Context length errors return HTTP 400 (not 500)
+        # This is tested in a separate test function with a custom max_model_len.
+        # See test_context_length_error_returns_400() below.
+
         # Tests below are for `/completions` endpoint.
         # e.g. session id wrong length, etc.
         # Additional tests for /v1/completions
@@ -712,37 +747,6 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
         bad_payload = {"model": MODEL_QWEN2_5, "prompt": ["hi", "hello", "ok"], "session_id": [0, 1]}
         r = requests.post(f"{base_url}/v1/completions", json=bad_payload)
         assert r.status_code == HTTPStatus.BAD_REQUEST
-
-        # Test internal server errors (500) return proper error responses
-        # Traceback is logged server-side only (not exposed to client per CWE-209)
-        caplog.set_level(logging.ERROR)
-        original_client = http_endpoint_module._global_inference_engine_client
-
-        internal_error_cases = [
-            (
-                "chat_completion",
-                "/v1/chat/completions",
-                {"messages": [{"role": "user", "content": "Hello"}]},
-                KeyError("choices"),
-            ),
-            ("completion", "/v1/completions", {"prompt": "Hello"}, RuntimeError("Simulated internal error")),
-        ]
-        for method_name, endpoint, extra_payload, exception in internal_error_cases:
-
-            async def mock_raises(*args, exc=exception, **kwargs):
-                raise exc
-
-            caplog.clear()
-            with patch.object(original_client, method_name, side_effect=mock_raises):
-                response = requests.post(f"{base_url}{endpoint}", json={"model": MODEL_QWEN2_5, **extra_payload})
-            assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
-            error_data = response.json()
-            error_message = error_data["error"]["message"]
-            assert str(exception) in error_message or type(exception).__name__ in error_message
-            assert "Traceback" not in error_message  # Not exposed to client (CWE-209)
-            assert error_data["error"]["code"] == 500
-            assert "Traceback (most recent call last):" in caplog.text  # Logged server-side
-            assert type(exception).__name__ in caplog.text
 
     finally:
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
@@ -922,6 +926,119 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         assert (
             response.status_code == HTTPStatus.OK
         ), f"Completions request with served_model_name failed: {response.status_code}, {response.json()}"
+
+    finally:
+        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread.is_alive():
+            server_thread.join(timeout=5)
+
+
+@pytest.mark.vllm
+def test_context_length_error_returns_400(ray_init_fixture):
+    """
+    Test that context length errors return HTTP 400 (Bad Request), not 500.
+
+    This is important for LiteLLM/Harbor integration: HTTP 400 gets wrapped as
+    BadRequestError, which Harbor can detect as ContextLengthExceededError.
+    HTTP 500 would be wrapped as InternalServerError and not detected.
+
+    Tests both raw HTTP requests and LiteLLM client behavior.
+    """
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+    # Use a small max_model_len to make testing faster
+    TEST_MAX_MODEL_LEN = 1024
+
+    try:
+        cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
+        cfg.trainer.placement.colocate_all = True
+        cfg.generator.weight_sync_backend = "nccl"
+        cfg.trainer.strategy = "fsdp2"
+
+        client, _, router, server_group = init_inference_engines(
+            cfg=cfg,
+            use_local=True,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            backend="vllm",
+            model=MODEL_QWEN2_5,
+            num_inference_engines=cfg.generator.num_inference_engines,
+            sleep_level=1,
+            engine_init_kwargs={"max_model_len": TEST_MAX_MODEL_LEN},
+        )
+
+        server_thread, server_port = set_up_http_server(client)
+        base_url = f"http://{SERVER_HOST}:{server_port}/v1"
+
+        # Test 1: Prompt alone exceeds max_model_len (1024) -> HTTP 400
+        # vllm serve returns: "This model's maximum context length is 1024 tokens. However, your
+        # request has {n} input tokens. Please reduce the length of the input messages."
+        messages_oversized = [{"role": "user", "content": "hello " * 1500}]
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            json={"model": MODEL_QWEN2_5, "messages": messages_oversized},
+        )
+        assert (
+            response.status_code == HTTPStatus.BAD_REQUEST
+        ), f"Expected HTTP 400 for oversized prompt, got {response.status_code}: {response.json()}"
+        error_data = response.json()
+        assert "error" in error_data
+        error_message = error_data["error"]["message"]
+        assert (
+            "maximum context length" in error_message.lower()
+        ), f"Error message should mention 'maximum context length': {error_message}"
+
+        # Test 2: Prompt fits, but prompt + max_tokens exceeds max_model_len -> HTTP 400
+        # vllm serve returns: "'max_tokens' or 'max_completion_tokens' is too large: {max_tokens}.
+        # This model's maximum context length is {max_model_len} tokens and your request has {n}
+        # input tokens ({max_tokens} > {max_model_len} - {n})."
+        messages_medium = [{"role": "user", "content": "hello " * 500}]
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            json={"model": MODEL_QWEN2_5, "messages": messages_medium, "max_tokens": 1000},
+        )
+        assert (
+            response.status_code == HTTPStatus.BAD_REQUEST
+        ), f"Expected HTTP 400 for prompt+max_tokens overflow, got {response.status_code}: {response.json()}"
+        error_data = response.json()
+        assert "error" in error_data
+        error_message = error_data["error"]["message"]
+        assert (
+            "maximum context length" in error_message.lower()
+        ), f"Error message should mention 'maximum context length': {error_message}"
+
+        # Test 3: Valid request still works (regression test)
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            json={"model": MODEL_QWEN2_5, "messages": messages_medium, "max_tokens": 10},
+        )
+        assert (
+            response.status_code == HTTPStatus.OK
+        ), f"Expected HTTP 200 for valid request, got {response.status_code}: {response.json()}"
+
+        # Test 4: LiteLLM wraps prompt+max_tokens error as BadRequestError (not InternalServerError).
+        # This is critical for Harbor's ContextLengthExceededError detection.
+        # Uses the same prompt+max_tokens case as Test 2.
+        async def make_litellm_call():
+            return await litellm_async_completion(
+                model=f"hosted_vllm/{MODEL_QWEN2_5}",
+                messages=messages_medium,
+                api_base=base_url,
+                api_key="DUMMY_KEY",
+                max_tokens=1000,
+                num_retries=0,
+            )
+
+        with pytest.raises(LiteLLMBadRequestError) as excinfo:
+            asyncio.run(make_litellm_call())
+        exception_raised = excinfo.value
+
+        assert exception_raised is not None
+        error_str = str(exception_raised).lower()
+        assert (
+            "maximum context length" in error_str
+        ), f"Error message should mention 'maximum context length': {str(exception_raised)[:200]}"
 
     finally:
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)

@@ -495,9 +495,14 @@ class TinkerEngine:
         checkpoint_id = Path(request_data.path).name
         output_path = self.config.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
 
+        # When the caller provides a sampling_session_seq_id the save is
+        # transient — weights only need to reach the inference engines, not
+        # disk.  Backends can skip the expensive write in that case.
+        persist = request_data.sampling_session_seq_id is None
+
         with self._checkpoint_status_context(model_id, checkpoint_id, types.CheckpointType.SAMPLER):
-            self.backend.save_sampler_checkpoint(output_path, model_id)
-            logger.info(f"Saved LoRA adapter weights for model {model_id} to {output_path}")
+            self.backend.save_sampler_checkpoint(output_path, model_id, persist=persist)
+            logger.info(f"Saved sampler checkpoint for model {model_id} to {output_path}")
 
         # Return path=None when using sampling_session_seq_id and seq_id (SDK expects this)
         if request_data.sampling_session_seq_id is not None and request_data.seq_id is not None:
