@@ -30,7 +30,7 @@ from skyrl_train.distributed.megatron.megatron_utils import print_model_size, br
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype
 from skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -595,7 +595,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Reduce and all-reduce metrics
         status = reduce_metrics(dict(all_metrics))
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         # Add loss_fn_outputs back (not reduced, kept as list)
         if all_loss_fn_outputs:

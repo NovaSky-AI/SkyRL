@@ -22,11 +22,15 @@ from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType, TrajectoryID
 from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray
+from skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT, _SKYRL_USE_NEW_INFERENCE
+from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+from skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl_train.inference_servers.router import InferenceRouter
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -72,6 +76,7 @@ def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> Traini
             "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
             "loss_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
             "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+            "rollout_logprobs": 0.2 * torch.ones((batch_size, num_actions), device="cpu"),
         }
     )
     data.metadata = {"response_length": num_actions}
@@ -333,8 +338,13 @@ def ray_init_for_tests():
     ray.init(runtime_env={"env_vars": env_vars})
 
 
-async def run_inference(client, prompts, sampling_params):
+async def run_inference(client, prompts, sampling_params, tokenizer=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
+    if isinstance(client, RemoteInferenceClient):
+        # convert to prompt token ids
+        assert tokenizer is not None
+        prompt_token_ids = tokenizer.apply_chat_template(prompts, add_generation_prompt=True)
+        engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     return await client.generate(engine_input)
 
 
@@ -360,7 +370,14 @@ def init_inference_engines(
     if not ray.is_initialized():
         initialize_ray(cfg)
     if colocate_all:
-        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
+        pg = placement_group(
+            [{"GPU": 1, "CPU": 1}]
+            * tp_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+            * num_inference_engines,
+            strategy="PACK",
+        )
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         sleep = True
     else:
@@ -370,32 +387,57 @@ def init_inference_engines(
     served_model_name = cfg.generator.served_model_name
 
     tokenizer = AutoTokenizer.from_pretrained(model)
-    eps = create_ray_wrapped_inference_engines(
-        num_inference_engines=num_inference_engines,
-        tensor_parallel_size=tp_size,
-        model_dtype="bfloat16",
-        pretrain=model,
-        seed=42,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=True,
-        enforce_eager=True,
-        shared_pg=pg,
-        gpu_memory_utilization=gpu_memory_utilization,
-        inference_engine_enable_sleep=sleep,
-        async_engine=async_engine,
-        max_num_batched_tokens=8192,
-        max_num_seqs=max_num_seqs,
-        tokenizer=tokenizer,
-        backend=backend,
-        sleep_level=sleep_level,
-        enable_lora=enable_lora,
-        engine_init_kwargs=engine_init_kwargs,
-        served_model_name=served_model_name,
-    )
-    client = InferenceEngineClient(eps, tokenizer, cfg)
+
+    # Return both router and server group if created to keep references alive
+    router = None
+    server_group = None
+
+    if _SKYRL_USE_NEW_INFERENCE:
+        # init with internal router and servers
+        server_group = ServerGroup(
+            cli_args=build_vllm_cli_args(cfg),
+            num_servers=num_inference_engines * cfg.generator.inference_engine_data_parallel_size,
+            placement_group=pg if colocate_all else None,
+            enable_dp=cfg.generator.inference_engine_data_parallel_size > 1,
+        )
+        server_infos = server_group.start()
+        server_urls = [info.url for info in server_infos]
+
+        router = InferenceRouter(server_urls=server_urls)
+        proxy_url = router.start()
+        logger.info(
+            f"HTTP Inference: Built servers and router internally - "
+            f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={colocate_all}"
+        )
+        client = RemoteInferenceClient(proxy_url=proxy_url, server_urls=server_urls, model_name=model)
+    else:
+        eps = create_ray_wrapped_inference_engines(
+            num_inference_engines=num_inference_engines,
+            tensor_parallel_size=tp_size,
+            model_dtype="bfloat16",
+            pretrain=model,
+            seed=42,
+            vllm_v1_disable_multiproc=True,
+            enable_prefix_caching=True,
+            enforce_eager=True,
+            shared_pg=pg,
+            gpu_memory_utilization=gpu_memory_utilization,
+            inference_engine_enable_sleep=sleep,
+            async_engine=async_engine,
+            max_num_batched_tokens=8192,
+            max_num_seqs=max_num_seqs,
+            tokenizer=tokenizer,
+            backend=backend,
+            sleep_level=sleep_level,
+            enable_lora=enable_lora,
+            engine_init_kwargs=engine_init_kwargs,
+            served_model_name=served_model_name,
+        )
+        client = InferenceEngineClient(eps, tokenizer, cfg)
+
     if sleep:
         asyncio.run(client.wake_up())
-    return client, pg
+    return client, pg, router, server_group
 
 
 def init_remote_inference_servers(

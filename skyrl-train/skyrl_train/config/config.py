@@ -255,6 +255,21 @@ class CISPOConfig(BaseConfig):
     cispo_eps_clip_high: float = 5.0
 
 
+# see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
+@dataclass
+class OffPolicyCorrectionConfig(BaseConfig):
+    tis_ratio_type: Optional[str] = None
+    token_tis_ratio_clip_high: float = 2.0
+    sequence_tis_ratio_clip_high: float = 5.0
+    sequence_mask_metric: Optional[str] = None
+    geo_mask_high: float = 1.01
+    geo_mask_low: float = 0.99
+    product_mask_high: float = 2.0
+    product_mask_low: float = 0.5
+    outlier_token_is_threshold_low: Optional[float] = None
+    outlier_token_is_threshold_high: Optional[float] = None
+
+
 @dataclass
 class AlgorithmConfig(BaseConfig):
     advantage_estimator: str = "grpo"
@@ -278,6 +293,7 @@ class AlgorithmConfig(BaseConfig):
     clip_ratio_c: float = 3.0
     tis_imp_ratio_cap: float = -1.0
     use_tis: bool = False
+    off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     value_clip: float = 0.2
     dynamic_sampling: DynamicSamplingConfig = field(default_factory=DynamicSamplingConfig)

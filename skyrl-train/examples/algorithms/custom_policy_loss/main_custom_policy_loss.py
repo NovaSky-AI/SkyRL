@@ -28,7 +28,7 @@ def compute_reinforce_policy_loss(
     loss = (-log_probs * advantages).mean()
 
     # Return loss and dummy clip_ratio (no clipping in REINFORCE)
-    return loss, 0.0
+    return loss, {"clip_ratio": 0.0}
 
 
 # Register the custom policy loss
