@@ -58,18 +58,14 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     adapter_config = LoraConfig(rank=rank, alpha=alpha, seed=0)
 
     # Set LoRA weights to random values for testing (to catch transpose bugs)
-    # layers is now stacked, so access directly (not subscriptable)
-    # LoRA weights have shape (num_layers, num_adapters, ...) for stacked layers
-    q_proj = model.model.layers.self_attn.q_proj
+    q_proj = model.model.layers[0].self_attn.q_proj
     rng1, rng2 = jax.random.split(jax.random.PRNGKey(42))
     q_proj.lora_A[...] = jax.random.normal(rng1, q_proj.lora_A[...].shape)
     q_proj.lora_B[...] = jax.random.normal(rng2, q_proj.lora_B[...].shape)
 
     # Store expected values (trimmed to rank and transposed)
-    # For stacked layers: shape is (num_layers, num_adapters, in_dim, rank) for lora_A
-    # We have 1 layer, so index [0] for layer, then adapter_index
-    expected_lora_A = np.array(q_proj.lora_A[...][0, adapter_index, :, :rank].T)
-    expected_lora_B = np.array(q_proj.lora_B[...][0, adapter_index, :rank, :].T)
+    expected_lora_A = np.array(q_proj.lora_A[...][adapter_index, :, :rank].T)
+    expected_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :].T)
 
     # Save and verify checkpoint exists
     models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path)
@@ -94,18 +90,17 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
 @pytest.mark.parametrize(
     "path,expected",
     [
-        # Stacked paths (DictKey)
-        ((DictKey(key="model"), DictKey(key="layers"), DictKey(key="self_attn"), DictKey(key="lora_A")), True),
-        ((DictKey(key="model"), DictKey(key="dense_layers"), DictKey(key="self_attn"), DictKey(key="lora_A")), True),
-        ((DictKey(key="model"), DictKey(key="moe_layers"), DictKey(key="mlp"), DictKey(key="lora_A")), True),
+        # Stacked paths (DictKey) — real NNX paths include _stacked
+        ((DictKey(key="model"), DictKey(key="layers"), DictKey(key="_stacked"), DictKey(key="self_attn"), DictKey(key="lora_A")), True),
+        ((DictKey(key="model"), DictKey(key="layers"), DictKey(key="layer_groups"), DictKey(key="_stacked"), DictKey(key="self_attn"), DictKey(key="lora_A")), True),
         # Non-stacked paths (DictKey)
         ((DictKey(key="model"), DictKey(key="embed_tokens"), DictKey(key="lora_A")), False),
         ((DictKey(key="lm_head"), DictKey(key="lora_A")), False),
         # String paths
-        (("model", "layers", "self_attn", "lora_A"), True),
+        (("model", "layers", "_stacked", "self_attn", "lora_A"), True),
         (("model", "embed_tokens", "lora_A"), False),
     ],
-    ids=["layers", "dense_layers", "moe_layers", "embed_tokens", "lm_head", "str_layers", "str_embed"],
+    ids=["stacked_layers", "multi_stacked_layers", "embed_tokens", "lm_head", "str_stacked", "str_embed"],
 )
 def test_is_stacked_path(path, expected):
     """Test is_stacked_path correctly identifies stacked vs non-stacked paths."""
@@ -119,7 +114,7 @@ def test_extract_insert_adapter_state_roundtrip():
     _, _, model = create_test_model(base_model_name, rank, alpha, adapter_index)
 
     # Set LoRA weights to random values
-    q_proj = model.model.layers.self_attn.q_proj
+    q_proj = model.model.layers[0].self_attn.q_proj
     rng1, rng2 = jax.random.split(jax.random.PRNGKey(123))
     q_proj.lora_A[...] = jax.random.normal(rng1, q_proj.lora_A[...].shape)
     q_proj.lora_B[...] = jax.random.normal(rng2, q_proj.lora_B[...].shape)
@@ -128,8 +123,8 @@ def test_extract_insert_adapter_state_roundtrip():
     _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
 
     # Store original values for comparison
-    original_lora_A = np.array(q_proj.lora_A[...][0, adapter_index, :, :rank])
-    original_lora_B = np.array(q_proj.lora_B[...][0, adapter_index, :rank, :])
+    original_lora_A = np.array(q_proj.lora_A[...][adapter_index, :, :rank])
+    original_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :])
 
     # Extract adapter state
     extracted = extract_adapter_state(adapter_index, lora_params, rank)
@@ -144,12 +139,12 @@ def test_extract_insert_adapter_state_roundtrip():
                 assert leaf.ndim == 3  # (layers, in_dim, rank) or (layers, rank, out_dim)
 
     # Zero out the adapter's weights
-    q_proj.lora_A[...] = q_proj.lora_A[...].at[0, adapter_index].set(0)
-    q_proj.lora_B[...] = q_proj.lora_B[...].at[0, adapter_index].set(0)
+    q_proj.lora_A[...] = q_proj.lora_A[...].at[adapter_index].set(0)
+    q_proj.lora_B[...] = q_proj.lora_B[...].at[adapter_index].set(0)
 
     # Verify weights are zeroed
-    assert np.allclose(q_proj.lora_A[...][0, adapter_index], 0)
-    assert np.allclose(q_proj.lora_B[...][0, adapter_index], 0)
+    assert np.allclose(q_proj.lora_A[...][adapter_index], 0)
+    assert np.allclose(q_proj.lora_B[...][adapter_index], 0)
 
     # Re-split to get updated lora_params
     _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
