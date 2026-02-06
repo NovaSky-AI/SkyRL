@@ -179,7 +179,6 @@ class StackedDecoderLayers(nnx.Module):
         positions: jax.Array,
         adapter_indices: jax.Array | None,
         kv_cache: KVCache | None,
-        kv_cache_offset: int = 0,
         output_hidden_states: bool,
         gradient_checkpointing: bool,
         is_training: bool = False,
@@ -195,8 +194,6 @@ class StackedDecoderLayers(nnx.Module):
             positions: Position indices of shape (batch, seq).
             adapter_indices: Optional LoRA adapter indices of shape (batch,).
             kv_cache: Optional KV cache for decode mode (None for prefill).
-            kv_cache_offset: Layer offset into the KV cache. Used when multiple
-                StackedDecoderLayers share the same cache.
             output_hidden_states: Whether to return intermediate hidden states.
             gradient_checkpointing: Whether to use gradient checkpointing.
             is_training: Whether in training mode. Skips KV cache to save memory.
@@ -216,9 +213,8 @@ class StackedDecoderLayers(nnx.Module):
             hs, cache_keys, cache_values, layer_idx = carry
 
             # Extract layer's cache slice if available
-            cache_idx = kv_cache_offset + layer_idx
             if cache_keys is not None:
-                layer_kv = (cache_keys[cache_idx], cache_values[cache_idx])
+                layer_kv = (cache_keys[layer_idx], cache_values[layer_idx])
             else:
                 layer_kv = None
 
@@ -236,8 +232,8 @@ class StackedDecoderLayers(nnx.Module):
 
             # Update cache in carry if present (decode), otherwise accumulate outputs (prefill)
             if cache_keys is not None:
-                cache_keys = cache_keys.at[cache_idx].set(k)
-                cache_values = cache_values.at[cache_idx].set(v)
+                cache_keys = cache_keys.at[layer_idx].set(k)
+                cache_values = cache_values.at[layer_idx].set(v)
                 k = v = None  # Don't accumulate in output - cache is in carry
             elif is_training:
                 k = v = None
@@ -340,23 +336,6 @@ class MultiStackedDecoderLayers(nnx.Module):
 
         return result
 
-    def _forward_group(
-        self,
-        group: StackedDecoderLayers,
-        hidden_states: jax.Array,
-        layer_offset: int,
-        kv_cache: KVCache | None,
-        is_decode: bool,
-        **kwargs,
-    ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
-        """Forward through a single layer group with appropriate cache handling."""
-        return group(
-            hidden_states,
-            kv_cache=kv_cache if is_decode else None,
-            kv_cache_offset=layer_offset if is_decode else 0,
-            **kwargs,
-        )
-
     def __call__(
         self,
         hidden_states: jax.Array,
@@ -385,33 +364,38 @@ class MultiStackedDecoderLayers(nnx.Module):
             Tuple of (final_hidden_states, all_hidden_states, kv_cache).
         """
         all_hidden_states: list[jax.Array] = []
-        is_decode = kv_cache is not None
-        layer_offset = 0
-        kv_results = []
 
-        for group in self.layer_groups:
-            hidden_states, layer_hidden_states, layer_kv_cache = self._forward_group(
-                group,
+        # Split KV cache for each group
+        if kv_cache is not None:
+            split_points = []
+            cumsum = 0
+            for group in self.layer_groups[:-1]:
+                cumsum += group.num_layers
+                split_points.append(cumsum)
+            kv_caches = kv_cache.split(*split_points)
+        else:
+            kv_caches = (None,) * len(self.layer_groups)
+
+        # Forward through each group
+        kv_results = []
+        for group, group_kv_cache in zip(self.layer_groups, kv_caches):
+            hidden_states, layer_hidden_states, layer_kv_cache = group(
                 hidden_states,
-                layer_offset,
-                kv_cache,
-                is_decode,
                 attention_mask=attention_mask,
                 positions=positions,
                 adapter_indices=adapter_indices,
+                kv_cache=group_kv_cache,
                 output_hidden_states=output_hidden_states,
                 gradient_checkpointing=gradient_checkpointing,
                 is_training=is_training,
             )
             all_hidden_states.extend(layer_hidden_states)
-            kv_cache = layer_kv_cache if is_decode else kv_cache
             kv_results.append(layer_kv_cache)
-            layer_offset += group.num_layers
 
-        if not is_decode and kv_results:
-            kv_cache = KVCache.concatenate(*kv_results)
+        # Concatenate KV caches
+        new_kv_cache = KVCache.concatenate(*kv_results) if kv_results else None
 
-        return hidden_states, all_hidden_states, kv_cache
+        return hidden_states, all_hidden_states, new_kv_cache
 
 
 def unstack_state(module: nnx.Module) -> nnx.GraphState:

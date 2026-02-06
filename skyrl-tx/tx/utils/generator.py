@@ -114,36 +114,35 @@ class KVCache:
         """Current sequence length."""
         return self.keys.shape[2]
 
-    def split(self, layer_idx: int) -> tuple[KVCache | None, KVCache | None]:
-        """Split the cache at a layer index.
+    def split(self, *layer_indices: int) -> tuple[KVCache | None, ...]:
+        """Split the cache at one or more layer indices.
 
         Args:
-            layer_idx: Layer index to split at.
+            *layer_indices: Layer indices to split at. For example, split(3, 7)
+                creates 3 caches: [0:3), [3:7), [7:end).
 
         Returns:
-            Tuple of (first_cache, second_cache) where first_cache contains
-            layers [0, layer_idx) and second_cache contains layers [layer_idx, num_layers).
-            Returns None for empty splits.
+            Tuple of KVCache objects, one for each segment. Returns None for empty segments.
         """
-        first = (
-            None
-            if layer_idx == 0
-            else KVCache(
-                keys=self.keys[:layer_idx],
-                values=self.values[:layer_idx],
-                cache_position=self.cache_position,
-            )
-        )
-        second = (
-            None
-            if layer_idx == self.num_layers
-            else KVCache(
-                keys=self.keys[layer_idx:],
-                values=self.values[layer_idx:],
-                cache_position=self.cache_position,
-            )
-        )
-        return first, second
+        if len(layer_indices) == 0:
+            return (self,)
+
+        # Build split points: 0, idx1, idx2, ..., num_layers
+        split_points = [0] + list(layer_indices) + [self.num_layers]
+
+        caches = []
+        for start, end in zip(split_points[:-1], split_points[1:]):
+            if start == end:
+                caches.append(None)
+            else:
+                caches.append(
+                    KVCache(
+                        keys=self.keys[start:end],
+                        values=self.values[start:end],
+                        cache_position=self.cache_position,
+                    )
+                )
+        return tuple(caches)
 
     @staticmethod
     def concatenate(*caches: KVCache | None) -> KVCache | None:
