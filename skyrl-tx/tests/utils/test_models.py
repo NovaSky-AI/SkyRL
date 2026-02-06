@@ -91,8 +91,27 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     "path,expected",
     [
         # Stacked paths (DictKey) — real NNX paths include _stacked
-        ((DictKey(key="model"), DictKey(key="layers"), DictKey(key="_stacked"), DictKey(key="self_attn"), DictKey(key="lora_A")), True),
-        ((DictKey(key="model"), DictKey(key="layers"), DictKey(key="layer_groups"), DictKey(key="_stacked"), DictKey(key="self_attn"), DictKey(key="lora_A")), True),
+        (
+            (
+                DictKey(key="model"),
+                DictKey(key="layers"),
+                DictKey(key="_stacked"),
+                DictKey(key="self_attn"),
+                DictKey(key="lora_A"),
+            ),
+            True,
+        ),
+        (
+            (
+                DictKey(key="model"),
+                DictKey(key="layers"),
+                DictKey(key="layer_groups"),
+                DictKey(key="_stacked"),
+                DictKey(key="self_attn"),
+                DictKey(key="lora_A"),
+            ),
+            True,
+        ),
         # Non-stacked paths (DictKey)
         ((DictKey(key="model"), DictKey(key="embed_tokens"), DictKey(key="lora_A")), False),
         ((DictKey(key="lm_head"), DictKey(key="lora_A")), False),
