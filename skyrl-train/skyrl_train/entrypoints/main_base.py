@@ -281,7 +281,13 @@ class BasePPOExp:
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
 
-        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+        return InferenceEngineClient(
+            inference_engines,
+            self.tokenizer,
+            self.cfg.trainer.policy.model.path,
+            self.cfg.trainer.policy.model.lora,
+            self.cfg.generator.inference_engine,
+        )
 
     def _get_new_inference_client(self):
         """New inference client using HTTP endpoints.

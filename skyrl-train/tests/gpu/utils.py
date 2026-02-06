@@ -392,7 +392,9 @@ def init_inference_engines(
         engine_init_kwargs=engine_init_kwargs,
         served_model_name=served_model_name,
     )
-    client = InferenceEngineClient(eps, tokenizer, cfg)
+    client = InferenceEngineClient(
+        eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.lora, cfg.generator.inference_engine
+    )
     if sleep:
         asyncio.run(client.wake_up())
     return client, pg
@@ -505,5 +507,11 @@ def init_remote_inference_servers(
         expert_parallel_size=1,
     )
 
-    client = InferenceEngineClient(engines, tokenizer, config)
+    client = InferenceEngineClient(
+        engines,
+        tokenizer,
+        config.trainer.policy.model.path,
+        config.trainer.policy.lora,
+        config.generator.inference_engine,
+    )
     return client, server_process

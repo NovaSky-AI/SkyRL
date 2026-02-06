@@ -20,9 +20,9 @@ def get_test_actor_config(enable_lora: bool = False) -> SkyRLConfig:
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = 1
-    cfg.generator.run_engines_locally = True
+    cfg.generator.inference_engine.async_engine = True
+    cfg.generator.inference_engine.num_engines = 1
+    cfg.generator.inference_engine.run_engines_locally = True
 
     # LoRA configuration
     if enable_lora:
@@ -57,10 +57,10 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     """
     cfg = get_test_actor_config(enable_lora=True)
     cfg.trainer.placement.colocate_all = colocate_all
-    cfg.generator.weight_sync_backend = weight_sync_backend
+    cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy
-    cfg.generator.backend = backend
-    cfg.generator.inference_engine_tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.backend = backend
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
     client, pg = init_inference_engines(

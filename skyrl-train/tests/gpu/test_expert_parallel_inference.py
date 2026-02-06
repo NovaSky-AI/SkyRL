@@ -46,13 +46,13 @@ def _get_test_cfg() -> SkyRLConfig:
     cfg.trainer.policy.model.path = MODEL
 
     # vLLM generator with EP enabled
-    cfg.generator.backend = "vllm"
-    cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = NUM_GPUS // 2
-    cfg.generator.inference_engine_tensor_parallel_size = 2
-    cfg.generator.inference_engine_expert_parallel_size = 2
-    cfg.generator.inference_engine_data_parallel_size = 1
-    cfg.generator.gpu_memory_utilization = 0.8
+    cfg.generator.inference_engine.backend = "vllm"
+    cfg.generator.inference_engine.async_engine = True
+    cfg.generator.inference_engine.num_engines = NUM_GPUS // 2
+    cfg.generator.inference_engine.tensor_parallel_size = 2
+    cfg.generator.inference_engine.expert_parallel_size = 2
+    cfg.generator.inference_engine.data_parallel_size = 1
+    cfg.generator.inference_engine.gpu_memory_utilization = 0.8
 
     # Small lengths for faster tests
     cfg.generator.max_input_length = 2048
@@ -108,7 +108,13 @@ def init_ray_inference_engines(
         tokenizer=tokenizer,
         backend=backend,
     )
-    client = InferenceEngineClient(engine, tokenizer, config)
+    client = InferenceEngineClient(
+        engine,
+        tokenizer,
+        config.trainer.policy.model.path,
+        config.trainer.policy.lora,
+        config.generator.inference_engine,
+    )
     return client
 
 

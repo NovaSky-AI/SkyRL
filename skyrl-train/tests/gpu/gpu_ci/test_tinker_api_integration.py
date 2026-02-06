@@ -152,7 +152,13 @@ def init_inference_client(backend: str, tp_size: int, config: SkyRLConfig) -> In
         tokenizer=tokenizer,
         backend=backend,
     )
-    return InferenceEngineClient(engines, tokenizer, config)
+    return InferenceEngineClient(
+        engines,
+        tokenizer,
+        config.trainer.policy.model.path,
+        config.trainer.policy.lora,
+        config.generator.inference_engine,
+    )
 
 
 @pytest.mark.parametrize(
@@ -356,7 +362,9 @@ def test_multi_engine_load_balancing(ray_init_fixture, backend: str, tp_size: in
         tokenizer=tokenizer,
         backend=backend,
     )
-    llm_client = InferenceEngineClient(engines, tokenizer, cfg)
+    llm_client = InferenceEngineClient(
+        engines, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.lora, cfg.generator.inference_engine
+    )
 
     # Create Tinker-style input
     prompt_text = "What is 2 + 2?"

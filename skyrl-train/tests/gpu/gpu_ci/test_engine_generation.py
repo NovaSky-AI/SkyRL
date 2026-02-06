@@ -59,7 +59,13 @@ def init_ray_inference_engines(
         tokenizer=tokenizer,
         backend=backend,
     )
-    client = InferenceEngineClient(engine, tokenizer, config)
+    client = InferenceEngineClient(
+        engine,
+        tokenizer,
+        config.trainer.policy.model.path,
+        config.trainer.policy.lora,
+        config.generator.inference_engine,
+    )
     return client
 
 

@@ -127,7 +127,13 @@ class DAPOExp(BasePPOExp):
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
 
-        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+        return InferenceEngineClient(
+            inference_engines,
+            self.tokenizer,
+            self.cfg.trainer.policy.model.path,
+            self.cfg.trainer.policy.lora,
+            self.cfg.generator.inference_engine,
+        )
 
 
 @ray.remote(num_cpus=1)

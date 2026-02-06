@@ -56,7 +56,13 @@ def init_inference_client(backend: str, tp_size: int, config: SkyRLConfig) -> In
         tokenizer=tokenizer,
         backend=backend,
     )
-    return InferenceEngineClient(engines, tokenizer, config)
+    return InferenceEngineClient(
+        engines,
+        tokenizer,
+        config.trainer.policy.model.path,
+        config.trainer.policy.lora,
+        config.generator.inference_engine,
+    )
 
 
 @dataclass

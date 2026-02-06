@@ -70,10 +70,10 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-    cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = num_inference_engines
-    cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
-    cfg.generator.run_engines_locally = True
+    cfg.generator.inference_engine.async_engine = True
+    cfg.generator.inference_engine.num_engines = num_inference_engines
+    cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
+    cfg.generator.inference_engine.run_engines_locally = True
     return cfg
 
 
@@ -460,7 +460,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-        cfg.generator.backend = backend
+        cfg.generator.inference_engine.backend = backend
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
         client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL_QWEN2_5)
