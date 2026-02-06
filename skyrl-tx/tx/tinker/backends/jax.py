@@ -23,10 +23,9 @@ Usage:
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Annotated, Any, Callable, get_type_hints
 
-from cloudpathlib import AnyPath, CloudPath
+from cloudpathlib import AnyPath
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -34,7 +33,7 @@ from jax.experimental import multihost_utils
 import optax
 from flax import nnx
 from flax.training import checkpoints
-from pydantic import BaseModel, Field, PlainSerializer, PlainValidator, TypeAdapter
+from pydantic import BaseModel, Field, PlainValidator, TypeAdapter, WrapSerializer
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
@@ -57,7 +56,7 @@ from tx.utils.models import (
 from tx.utils.log import logger
 
 # This can be removed and replaced with AnyPath once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
-SerializablePath = Annotated[Path | CloudPath, PlainValidator(AnyPath), PlainSerializer(str)]
+SerializablePath = Annotated[AnyPath, PlainValidator(AnyPath), WrapSerializer(lambda v, h: str(v))]
 
 
 class JaxBackendConfig(BaseModel, extra="forbid"):
