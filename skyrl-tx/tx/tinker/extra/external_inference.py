@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 from datetime import datetime, timezone
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -7,6 +9,25 @@ from tx.tinker.config import EngineConfig
 from tx.tinker.db_models import FutureDB, RequestStatus
 from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack
+
+
+def _extract_checkpoint_sync(checkpoint_path, target_dir):
+    """Extract a LoRA checkpoint to disk for vLLM to load.
+
+    This is a blocking operation (filesystem/network I/O) and should be called
+    via asyncio.to_thread() to avoid blocking the event loop.
+    """
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    # Extract the checkpoint if it doesn't already exist
+    if not target_dir.exists():
+        try:
+            with download_and_unpack(checkpoint_path) as extracted_path:
+                extracted_path.rename(target_dir)
+        except FileExistsError:
+            # This could happen if two processes try to download the file.
+            # In that case the other process won the race and created target_dir.
+            pass
 
 
 class ExternalInferenceClient:
@@ -75,20 +96,11 @@ class ExternalInferenceClient:
             model_name = base_model
         else:
             # LoRA sampling: extract checkpoint and reference it by name for dynamic loading
-            checkpoint_path = self.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
             model_name = f"{model_id}_{checkpoint_id}"
+            checkpoint_path = self.checkpoints_base / model_id / "sampler_weights" / f"{checkpoint_id}.tar.gz"
             target_dir = self.lora_base_dir / model_name
-            target_dir.parent.mkdir(parents=True, exist_ok=True)
 
-            # Extract the checkpoint if it doesn't already exist
-            if not target_dir.exists():
-                try:
-                    with download_and_unpack(checkpoint_path) as extracted_path:
-                        extracted_path.rename(target_dir)
-                except FileExistsError:
-                    # This could happen if two processes try to download the file.
-                    # In that case the other process won the race and created target_dir.
-                    pass
+            await asyncio.to_thread(_extract_checkpoint_sync, checkpoint_path, target_dir)
 
         payload = {
             "model": model_name,
