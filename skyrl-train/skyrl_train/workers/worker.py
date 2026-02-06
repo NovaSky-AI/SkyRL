@@ -808,11 +808,10 @@ class PolicyWorkerBase(Worker):
             )
 
         loss_scale = self.mesh_rank.dp_size
-        policy_loss = policy_loss * loss_scale
 
         # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
         if resolved_loss_name == "cross_entropy":
-            loss = policy_loss
+            loss = policy_loss * loss_scale
             self.strategy.backward(loss, self.model, self.optimizer)
 
             # Compute elementwise loss for Tinker API (per-token NLL)
@@ -878,11 +877,12 @@ class PolicyWorkerBase(Worker):
             kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
             loss = policy_loss + kl_loss_term - entropy_loss_term
+            loss = loss * loss_scale
             self.strategy.backward(loss, self.model, self.optimizer)
 
             status = {
                 "final_loss": loss.item(),
-                "policy_loss": policy_loss.item(),
+                "policy_loss": policy_loss.item() * loss_scale,
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
