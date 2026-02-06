@@ -56,7 +56,6 @@ from tx.utils.models import (
 from tx.utils.log import logger
 
 
-
 class JaxBackendConfig(BaseModel, extra="forbid"):
     """Configuration specific to the JAX backend."""
 
@@ -964,7 +963,14 @@ class JaxBackend(JaxBackendImpl):
         if jax.process_count() > 1:
             hints = get_type_hints(getattr(JaxBackendImpl, method))
             # TODO: Remove AnyPath special case once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
-            clean = {k: str(v) if hints.get(k) is AnyPath else TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v for k, v in kwargs.items()}
+            clean = {
+                k: (
+                    str(v)
+                    if hints.get(k) is AnyPath
+                    else TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
+                )
+                for k, v in kwargs.items()
+            }
             _broadcast_command(RpcPayload(method=method, kwargs=clean))
         return getattr(super(), method)(**kwargs)
 
