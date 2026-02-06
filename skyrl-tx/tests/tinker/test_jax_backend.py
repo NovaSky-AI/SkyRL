@@ -108,18 +108,17 @@ def test_clear_lora_adapter():
 
     # Verify adapter has non-zero rank after creation
     model = backend.model
-    # With stacked layers, lora_ranks has shape (num_layers, num_adapters)
-    lora_layer: LoRALinear = model.model.layers.self_attn.q_proj
-    assert lora_layer.lora_ranks[0, adapter_idx] > 0
+    lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+    assert lora_layer.lora_ranks[adapter_idx] > 0
 
     # Delete the model (calls clear_lora_adapter internally)
     backend.delete_model(model_id)
 
-    # Verify adapter state is zeroed (check layer 0)
-    assert lora_layer.lora_ranks[0, adapter_idx] == 0
-    assert lora_layer.lora_scaling[0, adapter_idx] == 0.0
-    assert (lora_layer.lora_A[0, adapter_idx] == 0.0).all()
-    assert (lora_layer.lora_B[0, adapter_idx] == 0.0).all()
+    # Verify adapter state is zeroed
+    assert lora_layer.lora_ranks[adapter_idx] == 0
+    assert lora_layer.lora_scaling[adapter_idx] == 0.0
+    assert (lora_layer.lora_A[adapter_idx] == 0.0).all()
+    assert (lora_layer.lora_B[adapter_idx] == 0.0).all()
 
 
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:
@@ -535,21 +534,20 @@ def test_adapter_reuse_initializes_lora_adapter():
     # (slot 0 is reserved for base model)
     backend = create_backend(max_lora_adapters=2)
     model = backend.model
-    # With stacked layers, lora_A has shape (num_layers, num_adapters, in_features, max_rank)
-    lora_layer: LoRALinear = model.model.layers.self_attn.q_proj
+    lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
 
     # Create first model
     model_id_1 = "model_1"
     adapter_idx = create_model(backend, model_id_1)
 
-    # Verify lora_A is non-zero after creation (check layer 0)
+    # Verify lora_A is non-zero after creation
     assert not (
-        lora_layer.lora_A[0, adapter_idx, ..., :LORA_RANK] == 0.0
+        lora_layer.lora_A[adapter_idx, ..., :LORA_RANK] == 0.0
     ).all(), "lora_A should be initialized with he_uniform (non-zero)"
 
     # Delete the model (clears both lora_A and lora_B to zeros)
     backend.delete_model(model_id_1)
-    assert (lora_layer.lora_A[0, adapter_idx] == 0.0).all(), "lora_A should be zeroed after clear_lora_adapter"
+    assert (lora_layer.lora_A[adapter_idx] == 0.0).all(), "lora_A should be zeroed after clear_lora_adapter"
 
     # Create a new model that reuses the same adapter slot
     model_id_2 = "model_2"
@@ -558,11 +556,11 @@ def test_adapter_reuse_initializes_lora_adapter():
 
     # Verify lora_A is initialized (non-zero)
     assert not (
-        lora_layer.lora_A[0, adapter_idx, ..., :LORA_RANK] == 0.0
+        lora_layer.lora_A[adapter_idx, ..., :LORA_RANK] == 0.0
     ).all(), "lora_A should be initialized with he_uniform after adapter reuse"
 
     # Verify lora_B is zeros
-    assert (lora_layer.lora_B[0, adapter_idx] == 0.0).all(), "lora_B should be zeros"
+    assert (lora_layer.lora_B[adapter_idx] == 0.0).all(), "lora_B should be zeros"
 
 
 def test_mixed_train_unembed_adapters():
