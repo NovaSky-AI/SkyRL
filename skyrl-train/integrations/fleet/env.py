@@ -102,7 +102,9 @@ def parse_tool_call(action: str) -> Optional[Dict[str, Any]]:
                 args = parsed.get("arguments") or parsed.get("params", {})
                 if name:
                     return {"name": name, "arguments": args}
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError):
+                # ValueError catches Python's integer string conversion limit
+                # (e.g., model generates 8000+ digit numbers)
                 pass
 
     return None
