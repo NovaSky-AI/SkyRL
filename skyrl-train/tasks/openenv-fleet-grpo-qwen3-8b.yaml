@@ -8,6 +8,7 @@
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
 # GPUs: B200:4
 #
+# v0.3.3: Reduced eval_interval (40→20) for more frequent eval checkpoints
 # v0.3.2: Increased batch size (4→32) and GPUs (2→4) for hybrid env sampling
 # v0.3 OOM fix: gpu_memory_utilization reduced from 0.8 to 0.7
 # v0.3 has 3x more data including google-maps (4.7K tasks) with longer tool schemas
@@ -167,7 +168,7 @@ run: |
     trainer.epochs=${NUM_EPOCHS} \
     trainer.eval_batch_size=32 \
     trainer.eval_before_train=true \
-    trainer.eval_interval=40 \
+    trainer.eval_interval=20 \
     trainer.update_epochs_per_batch=1 \
     trainer.train_batch_size=32 \
     trainer.policy_mini_batch_size=32 \

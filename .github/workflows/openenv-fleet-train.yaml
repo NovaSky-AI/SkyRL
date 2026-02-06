@@ -45,6 +45,7 @@ env:
 jobs:
   launch-training:
     runs-on: ubuntu-latest
+    timeout-minutes: 1440  # 24 hours (default is 6 hours which cuts off training)
     env:
       # Make both keys available as env vars for bash selection
       WANDB_KEY_TOOL_USE: ${{ secrets.WANDB_API_KEY_TOOL_USE }}
