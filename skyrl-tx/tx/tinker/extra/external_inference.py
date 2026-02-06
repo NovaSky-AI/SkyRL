@@ -1,7 +1,9 @@
 import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
-from datetime import datetime, timezone
+from cloudpathlib import AnyPath
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from tx.tinker import types
@@ -11,7 +13,7 @@ from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack
 
 
-def _extract_checkpoint_sync(checkpoint_path, target_dir):
+def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None:
     """Extract a LoRA checkpoint to disk for vLLM to load.
 
     This is a blocking operation (filesystem/network I/O) and should be called
