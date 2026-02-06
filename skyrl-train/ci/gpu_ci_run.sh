@@ -35,3 +35,4 @@ uv run --isolated --extra vllm --extra dev \
 # Run tests for new inference layer
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci/test_engine_generation.py -m "vllm"
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci/test_skyrl_gym_generator.py
