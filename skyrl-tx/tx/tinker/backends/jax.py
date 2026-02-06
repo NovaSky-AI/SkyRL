@@ -20,7 +20,6 @@ Usage:
     uv run -m tx.tinker.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
-import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -57,7 +56,7 @@ from tx.utils.models import (
 from tx.utils.log import logger
 
 # This can be removed and replaced with AnyPath once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
-SerializablePath = Annotated[os.PathLike, PlainValidator(AnyPath), PlainSerializer(str)]
+SerializablePath = Annotated[Any, PlainValidator(AnyPath), PlainSerializer(str)]
 
 
 class JaxBackendConfig(BaseModel, extra="forbid"):
