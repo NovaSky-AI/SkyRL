@@ -24,11 +24,14 @@ class ArrayRef(nnx.Variable):
         return parent[idx][key]
 
     def __setitem__(self, key, value):
-        """Write through to parent when value is set via indexing."""
-        parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
-        parent[...] = parent[...].at[idx][key].set(value)
-        # Also update our local value
-        super().__setitem__(key, value)
+        """Write through to parent when value is set via indexing.
+
+        Only supports Ellipsis key (param[...] = value) because JAX's .at[idx]
+        returns _IndexUpdateRef which doesn't support further subscripting.
+        """
+        if key is not Ellipsis:
+            raise NotImplementedError("ArrayRef only supports `ref[...] = value`")
+        self.set_raw_value(value)
 
     def set_raw_value(self, value, **kwargs):
         """Write through to parent when value is set."""

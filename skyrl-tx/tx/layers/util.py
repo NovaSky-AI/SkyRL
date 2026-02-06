@@ -4,8 +4,6 @@ from jax import lax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh, PartitionSpec
 
-from tx.utils.models import is_stacked_path
-
 
 def ragged_dot(
     lhs: jax.Array,
@@ -99,17 +97,21 @@ def shard_map_ep(module: nnx.Module, func, *args):
     """
     graphdef, state = nnx.split(module)
 
-    def make_ep_spec(path, s):
-        if not isinstance(s, PartitionSpec):
-            return s
-        # Strip leading stacking dimension if path is stacked
-        dims = s[1:] if is_stacked_path(path) else s
-        # Extract only 'ep' dims from PartitionSpecs, replacing others with None
-        return PartitionSpec(*(p if p == "ep" else None for p in dims))
+    def make_ep_spec(spec, value):
+        """Create a PartitionSpec with only 'ep' dims, truncated to match tensor rank."""
+        if not isinstance(spec, PartitionSpec):
+            return spec
+        # When a layer is extracted from stacked layers via x[layer_idx], the tensor
+        # loses a dimension but the PartitionSpec metadata still has the extra leading None.
+        # Truncate the spec to match the actual tensor rank.
+        arr = value[...] if isinstance(value, nnx.Variable) else value
+        rank = len(arr.shape) if hasattr(arr, "shape") else 0
+        truncated = tuple(spec)[-rank:] if rank > 0 else ()
+        return PartitionSpec(*(p if p == "ep" else None for p in truncated))
 
     partition_specs = nnx.get_partition_spec(state)
-    state_specs = jax.tree_util.tree_map_with_path(
-        make_ep_spec, partition_specs, is_leaf=lambda x: isinstance(x, PartitionSpec)
+    state_specs = jax.tree.map(
+        make_ep_spec, partition_specs, state, is_leaf=lambda x: isinstance(x, PartitionSpec)
     )
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
