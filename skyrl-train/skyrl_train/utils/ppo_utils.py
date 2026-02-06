@@ -809,9 +809,8 @@ def dppo_policy_loss(
         elif dppo_type == "binary_kl":
             # Binary KL (Equation 14)
             eps = 1e-8
-            binary_kl = (
-                mu_probs * (mu_log_probs - log_probs)
-                + (1 - mu_probs) * torch.log((1 - mu_probs + eps) / (1 - current_probs + eps))
+            binary_kl = mu_probs * (mu_log_probs - log_probs) + (1 - mu_probs) * torch.log(
+                (1 - mu_probs + eps) / (1 - current_probs + eps)
             )
 
             mask = torch.ones_like(advantages)
