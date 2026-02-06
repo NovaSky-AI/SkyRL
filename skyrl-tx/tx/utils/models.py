@@ -158,8 +158,7 @@ def save_safetensors(
 
         tensors = {k: multihost_utils.process_allgather(v, tiled=True) for k, v in tensors.items()}
 
-    if jax.process_index() == 0:
-        safetensors.numpy.save_file({k: np.asarray(v) for k, v in tensors.items()}, filename)
+    safetensors.numpy.save_file({k: np.asarray(v) for k, v in tensors.items()}, filename)
 
 
 def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:
@@ -183,13 +182,6 @@ def load_lora_checkpoint(
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
     """
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint file not found: {checkpoint_path}. "
-            "If you are using a multi-node setup, you cannot use local storage for checkpoints. "
-            "Please configure 'checkpoints_base' to point to NFS or a blob storage (e.g., gs:// or s3://)."
-        )
-
     _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
 
     adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
