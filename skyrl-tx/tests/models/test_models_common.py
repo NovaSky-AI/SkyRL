@@ -149,8 +149,8 @@ class TestGradientCheckpointing:
 
         out = model(input_ids, attention_mask=attention_mask)
 
-        # keys is a stacked array with shape (num_layers, batch, seq, heads, dim)
-        assert out.kv_cache.keys.shape[0] == config.num_hidden_layers
+        # keys is a list with one entry per layer
+        assert len(out.kv_cache.keys) == config.num_hidden_layers
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)

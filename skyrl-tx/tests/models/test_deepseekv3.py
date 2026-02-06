@@ -221,7 +221,7 @@ def test_deepseekv3_gradient_checkpointing():
             results[use_checkpointing] = {
                 "logits": np.array(logits),
                 "hidden_states": [np.array(hs) for hs in out.hidden_states],
-                "kv_cache_shape": out.kv_cache.keys.shape,
+                "kv_cache_len": len(out.kv_cache.keys),
             }
 
     # Verify outputs match
@@ -232,5 +232,5 @@ def test_deepseekv3_gradient_checkpointing():
     for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(results[False]["hidden_states"], results[True]["hidden_states"])):
         np.testing.assert_allclose(hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}")
 
-    # Verify KV cache shape is correct (num_layers, batch, seq, heads, dim)
-    assert results[True]["kv_cache_shape"][0] == config.num_hidden_layers
+    # Verify KV cache has correct number of layers
+    assert results[True]["kv_cache_len"] == config.num_hidden_layers
