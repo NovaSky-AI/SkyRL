@@ -187,6 +187,13 @@ trainer:
     cispo: 
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
+
+    # DPPO parameters (only used when policy_loss_type: "dppo")
+    # See: https://arxiv.org/abs/2602.04879
+    dppo:
+      dppo_type: binary_tv  # "binary_tv" or "binary_kl"
+      delta_low: 0.2  # divergence threshold for negative advantages (0.2 for TV, 0.05 for KL recommended)
+      delta_high: 0.2  # divergence threshold for positive advantages (0.2 for TV, 0.05 for KL recommended)
   
   # Fully async specific knobs. For more see https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:

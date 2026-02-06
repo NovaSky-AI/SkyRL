@@ -255,6 +255,13 @@ class CISPOConfig(BaseConfig):
     cispo_eps_clip_high: float = 5.0
 
 
+@dataclass
+class DPPOConfig(BaseConfig):
+    dppo_type: str = "binary_tv"
+    delta_low: float = 0.2
+    delta_high: float = 0.2
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -300,6 +307,7 @@ class AlgorithmConfig(BaseConfig):
     clip_cov: ClipCovConfig = field(default_factory=ClipCovConfig)
     kl_cov: KLCovConfig = field(default_factory=KLCovConfig)
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
+    dppo: DPPOConfig = field(default_factory=DPPOConfig)
     max_seq_len: Optional[int] = None
 
 
