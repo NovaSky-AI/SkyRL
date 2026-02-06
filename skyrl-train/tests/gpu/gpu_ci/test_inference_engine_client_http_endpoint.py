@@ -955,7 +955,7 @@ def test_context_length_error_returns_400(ray_init_fixture):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
-        client, _, router, server_group = init_inference_engines(
+        engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -967,6 +967,7 @@ def test_context_length_error_returns_400(ray_init_fixture):
             sleep_level=1,
             engine_init_kwargs={"max_model_len": TEST_MAX_MODEL_LEN},
         )
+        client = engines.client
 
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
