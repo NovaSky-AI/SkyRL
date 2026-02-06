@@ -146,24 +146,27 @@ class KVCache:
         return first, second
 
     @staticmethod
-    def concatenate(first: KVCache | None, second: KVCache | None) -> KVCache | None:
-        """Concatenate two caches along the layer dimension.
+    def concatenate(*caches: KVCache | None) -> KVCache | None:
+        """Concatenate multiple caches along the layer dimension.
 
         Args:
-            first: First cache (earlier layers), or None.
-            second: Second cache (later layers), or None.
+            *caches: KVCache objects to concatenate, or None values to skip.
 
         Returns:
-            Combined KVCache, or the non-None input, or None if both are None.
+            Combined KVCache, or None if all inputs are None.
         """
-        if first is None:
-            return second
-        if second is None:
-            return first
+        # Filter out None values
+        non_none_caches = [c for c in caches if c is not None]
+
+        if len(non_none_caches) == 0:
+            return None
+        if len(non_none_caches) == 1:
+            return non_none_caches[0]
+
         return KVCache(
-            keys=jnp.concatenate([first.keys, second.keys], axis=0),
-            values=jnp.concatenate([first.values, second.values], axis=0),
-            cache_position=second.cache_position,
+            keys=jnp.concatenate([c.keys for c in non_none_caches], axis=0),
+            values=jnp.concatenate([c.values for c in non_none_caches], axis=0),
+            cache_position=non_none_caches[-1].cache_position,
         )
 
 

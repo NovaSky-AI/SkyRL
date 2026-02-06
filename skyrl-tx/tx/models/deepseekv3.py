@@ -7,7 +7,7 @@ from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.rotary_embedding import get_rope
 from tx.layers.util import Param, prepare_routing, shard_map_ep
 from tx.layers.layernorm import RMSNorm
-from tx.layers.stacked import StackedDecoderLayers
+from tx.layers.stacked import MultiStackedDecoderLayers, StackedDecoderLayers
 from tx.models.configs import DeepseekV3Config
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -483,27 +483,22 @@ class DeepseekV3Model(nnx.Module):
             rngs=rngs,
         )
 
-        # Create stacked dense layers (layers 0 to first_k_dense_replace - 1)
+        # Create stacked layers: dense layers followed by MoE layers
         def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
             return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MLP, dtype=dtype, rngs=rngs)
 
-        self.dense_layers = StackedDecoderLayers(create_dense_layer, self.num_dense_layers, rngs)
-
-        # Create stacked MoE layers (layers first_k_dense_replace to num_hidden_layers - 1)
         def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
             return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MoE, dtype=dtype, rngs=rngs)
 
-        self.moe_layers = StackedDecoderLayers(create_moe_layer, self.num_moe_layers, rngs)
+        dense_layers = StackedDecoderLayers(create_dense_layer, self.num_dense_layers, rngs)
+        moe_layers = StackedDecoderLayers(create_moe_layer, self.num_moe_layers, rngs)
+        self.layers = MultiStackedDecoderLayers(dense_layers, moe_layers)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def get_stacked_layers_list(self):
-        """Return ordered list of StackedDecoderLayers for checkpoint loading.
-
-        Returns dense layers first (checkpoint indices 0 to first_k-1),
-        then MoE layers (checkpoint indices first_k to num_layers-1).
-        """
-        return [self.dense_layers, self.moe_layers]
+        """Delegate to MultiStackedDecoderLayers for checkpoint loading."""
+        return self.layers.get_stacked_layers_list()
 
     def __call__(
         self,
@@ -521,50 +516,26 @@ class DeepseekV3Model(nnx.Module):
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
 
-        # Split KV cache for dense and MoE layers
-        dense_kv_cache = None
-        moe_kv_cache = None
-        if kv_cache is not None:
-            dense_kv_cache, moe_kv_cache = kv_cache.split(self.num_dense_layers)
-
-        # Forward through dense layers
-        hidden_states, dense_hidden_states, dense_kv_result = self.dense_layers(
+        # Forward through all layers
+        hidden_states, all_hidden_states, kv_cache = self.layers(
             hidden_states,
             attention_mask=attention_mask,
             positions=positions,
             adapter_indices=adapter_indices,
-            kv_cache=dense_kv_cache,
+            kv_cache=kv_cache,
             output_hidden_states=output_hidden_states,
             gradient_checkpointing=self.config.gradient_checkpointing,
             is_training=is_training,
         )
-        all_hidden_states.extend(dense_hidden_states)
-
-        # Forward through MoE layers
-        hidden_states, moe_hidden_states, moe_kv_result = self.moe_layers(
-            hidden_states,
-            attention_mask=attention_mask,
-            positions=positions,
-            adapter_indices=adapter_indices,
-            kv_cache=moe_kv_cache,
-            output_hidden_states=output_hidden_states,
-            gradient_checkpointing=self.config.gradient_checkpointing,
-            is_training=is_training,
-        )
-        all_hidden_states.extend(moe_hidden_states)
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        # Merge KV caches from dense and MoE layers
-        new_kv_cache = KVCache.concatenate(dense_kv_result, moe_kv_result)
-
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=new_kv_cache,
+            kv_cache=kv_cache,
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
