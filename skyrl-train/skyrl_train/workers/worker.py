@@ -663,7 +663,6 @@ class PolicyWorkerBase(Worker):
             "mean": {},  # Dict[param_name, Tensor] - running mean per param
             "var_numerator": {},  # Dict[param_name, Tensor] - running M2 for variance.
             "count": 0,  # int - number of steps accumulated
-            "histograms": [],  # List[Dict[layer, histogram]] - for update diversity
         }
         return
 
@@ -672,15 +671,15 @@ class PolicyWorkerBase(Worker):
         self._grad_stats["count"] += 1
         n = self._grad_stats["count"]
 
-        step_histograms = {}
-
         for name, param in self.model.named_parameters():
             if param.grad is None:
                 continue
+            # Use local shard instead of full_tensor to save memory
             grad = param.grad.detach()
-            # Handle DTensor (FSDP2) - convert to regular tensor first
-            if hasattr(grad, "full_tensor"):
-                grad = grad.full_tensor()
+            if hasattr(grad, "_local_tensor"):
+                grad = grad._local_tensor
+            # Move to CPU to save GPU memory
+            grad = grad.cpu()
 
             # Initialize on first step
             if name not in self._grad_stats["mean"]:
@@ -696,13 +695,6 @@ class PolicyWorkerBase(Worker):
             delta2 = grad - self._grad_stats["mean"][name]
             self._grad_stats["var_numerator"][name] += delta * delta2  # M2 accumulator
 
-            # Histogram for this param (use local shard - histc doesn't support DTensor)
-            local_grad = grad._local_tensor if hasattr(grad, "_local_tensor") else grad
-            hist = torch.histc(local_grad.flatten(), bins=10)
-            hist = hist / hist.sum()  # Normalize to probability distribution
-            step_histograms[name] = hist.detach().cpu().tolist()
-
-        self._grad_stats["histograms"].append(step_histograms)
         return
 
     def compute_gradient_metrics(self) -> Dict[str, float | int | list[float]]:
@@ -766,11 +758,11 @@ class PolicyWorkerBase(Worker):
                 continue
 
             mean_grad = self._grad_stats["mean"][name]
-            # Handle DTensor (FSDP2) - convert param.data to regular tensor
+            # Use local shard instead of full_tensor to save memory
             param_data = param.data
-            if hasattr(param_data, "full_tensor"):
-                param_data = param_data.full_tensor()
-            param_magnitude = torch.abs(param_data)
+            if hasattr(param_data, "_local_tensor"):
+                param_data = param_data._local_tensor
+            param_magnitude = torch.abs(param_data.cpu())
 
             # Count gradients where |mean_grad| > 5% of |param|
             # Both mean_grad and param.data are DTensors with same sharding
@@ -793,20 +785,22 @@ class PolicyWorkerBase(Worker):
         if self._grad_stats["count"] == 0:
             return []
 
-        # Collect all mean gradients into a single tensor (use local shard for histc)
+        # Collect all mean gradients into a single tensor (already local shards on CPU)
         all_grads = []
         for name in self._grad_stats["mean"]:
             g = self._grad_stats["mean"][name]
-            local_g = g._local_tensor if hasattr(g, "_local_tensor") else g
-            all_grads.append(local_g.flatten())
+            all_grads.append(g.flatten())
 
         if len(all_grads) == 0:
             return []
         all_grads = torch.cat(all_grads)
         hist = torch.histc(all_grads, bins=10)
-        hist = hist / hist.sum()  # Normalize to probability distribution
-        # Return probability distribution as list
-        return hist.detach().cpu().tolist()
+        hist_sum = hist.sum()
+        if hist_sum > 0:
+            hist = hist / hist_sum  # Normalize to probability distribution
+            return hist.tolist()
+        else:
+            return [0.0] * 10  # All zeros if no gradients
 
     def _compute_effective_rank(self, k: int = 64) -> float:
         """
@@ -836,14 +830,11 @@ class PolicyWorkerBase(Worker):
             if mean_grad.dim() != 2:
                 continue
 
-            # Use local shard for SVD (doesn't support DTensor)
-            if hasattr(mean_grad, "_local_tensor"):
-                mean_grad = mean_grad._local_tensor
-
+            # mean_grad is already local shard on CPU, ready for SVD
             # Compute top-k singular values using randomized SVD (faster)
             try:
                 q = min(k, min(mean_grad.shape))
-                _, s, _ = torch.svd_lowrank(mean_grad.detach().float(), q=q)
+                _, s, _ = torch.svd_lowrank(mean_grad.float(), q=q)
             except Exception:
                 continue
 
@@ -868,18 +859,11 @@ class PolicyWorkerBase(Worker):
         return sum(ranks) / len(ranks)
 
     def reset_gradient_stats(self):
-        """Reset gradient statistics for next accumulation period.
-
-        Note: Histograms are preserved across resets to accumulate a reliable
-        distribution fingerprint for the RL environment across the training run.
-        """
-        # Preserve histograms across resets
-        existing_histograms = self._grad_stats.get("histograms", [])
+        """Reset gradient statistics for next accumulation period."""
         self._grad_stats = {
             "mean": {},
             "var_numerator": {},
             "count": 0,
-            "histograms": existing_histograms,
         }
 
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:

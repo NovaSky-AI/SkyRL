@@ -1090,7 +1090,8 @@ class RayPPOTrainer:
                     all_metrics["grad_norm"].append(grad_norm)
 
         # Compute gradient metrics once per training step (from accumulated stats)
-        if self.cfg.trainer.policy.track_extra_gradient_metrics:
+        # Only track gradient metrics for policy, not critic
+        if model == "policy" and self.cfg.trainer.policy.track_extra_gradient_metrics:
             grad_metrics = self.dispatch.compute_gradient_metrics(model)
             for k, v in grad_metrics.items():
                 all_metrics[k].append(v)
