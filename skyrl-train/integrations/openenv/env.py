@@ -1,6 +1,5 @@
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput, ConversationType
-from typing import Dict, Type, Any
-from omegaconf import DictConfig
+from typing import Any, Dict, Type
 
 # Demonstrate five different environments for now
 from envs.echo_env import EchoEnv, EchoAction
@@ -53,7 +52,7 @@ class OpenEnv(BaseTextEnv):
 
     def __init__(
         self,
-        env_config: DictConfig,
+        env_config: dict,
         extras: Dict[str, Any] = {},
     ):
         super().__init__()

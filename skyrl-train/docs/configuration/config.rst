@@ -496,7 +496,7 @@ It can be helpful to understand the final loss formulation to see how the differ
       log_probs: torch.Tensor,
       old_log_probs: torch.Tensor,
       advantages: torch.Tensor,
-      config: DictConfig, # trainer.algorithm config
+      config: AlgorithmConfig, # trainer.algorithm config
       loss_mask: Optional[torch.Tensor] = None,
   ) -> torch.Tensor:
 

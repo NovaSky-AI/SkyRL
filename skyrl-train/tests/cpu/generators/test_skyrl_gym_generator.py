@@ -281,7 +281,6 @@ async def test_agent_loop_single_turn(
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -333,7 +332,6 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, g
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -480,7 +478,6 @@ async def test_generate_interface_compliance(
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -603,7 +600,6 @@ async def test_length_limit_exceeded_during_conversation(
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -693,7 +689,6 @@ async def test_multi_turn_response_truncation(
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -775,7 +770,6 @@ async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mo
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -839,7 +833,6 @@ async def test_apply_overlong_filtering_non_batched(
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -961,7 +954,6 @@ async def test_apply_overlong_filtering_batched(
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -1061,7 +1053,6 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
 
     # Run agent loop
@@ -1152,7 +1143,6 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     # Ensure base_conversation_token_ids doesn't shift observation slicing in test
     generator.base_conversation_token_ids = []
@@ -1243,7 +1233,6 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="Qwen/Qwen3-0.6B",  # ensures custom_chat_template is truthy in get_custom_chat_template
     )
     # Force retokenize path regardless of model resolution logic if needed
     generator.custom_chat_template = "<custom>"
@@ -1332,7 +1321,6 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
 
     prompt = [{"role": "user", "content": "Q?"}]
@@ -1424,7 +1412,6 @@ async def test_step_wise_trajectories_trajectory_ids(mock_make, mock_tokenizer, 
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []
 
@@ -1542,7 +1529,6 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
         tokenizer=mock_tokenizer,
-        model_name="test_model",
     )
     generator.base_conversation_token_ids = []
 

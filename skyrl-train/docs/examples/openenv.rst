@@ -29,7 +29,7 @@ At a high level, the integration looks as follows:
 
     # The OpenEnv wrapper class
     class OpenEnv(BaseTextEnv):
-        def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+        def __init__(self, env_config: dict, extras: Dict[str, Any] = {}):
             self.env_name = extras["env_name"]
             self.env_type = self._get_env_class(self.env_name)
             self.env = self.env_type.from_docker_image(self.env_name + ":latest")

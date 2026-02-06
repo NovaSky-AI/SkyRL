@@ -122,7 +122,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
     ):
 
         # Call parent constructor first
-        super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
+        super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer)
 
         self.http_server_inference_engine_client_host = generator_cfg.inference_engine.http_endpoint_host
 

@@ -95,7 +95,6 @@ def _build_generator(tokenizer, model_name: str, chat_template_config, extra_ove
         skyrl_gym_cfg=env_cfg,
         inference_engine_client=None,  # to be replaced per-test
         tokenizer=tokenizer,
-        model_name=model_name,
     )
 
 

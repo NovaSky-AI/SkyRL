@@ -216,7 +216,6 @@ class BasePPOExp:
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
-            model_name=cfg.trainer.policy.model.path,
         )
 
     def get_trainer(

@@ -8,7 +8,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type
 
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import OmegaConf
 
 import ray
 import torch
@@ -779,12 +779,10 @@ class PolicyWorkerBase(Worker):
         if loss_fn_config is not None:
             # Create a copy of the config and apply overrides
             # TODO: Fix nested overrides
-            if isinstance(loss_config, DictConfig):
-                loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
-            else:
-                assert isinstance(loss_config, AlgorithmConfig)
-                new_loss_config = OmegaConf.merge(OmegaConf.create(loss_config), OmegaConf.create(loss_fn_config))
-                loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
+            from dataclasses import asdict
+
+            new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
+            loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):

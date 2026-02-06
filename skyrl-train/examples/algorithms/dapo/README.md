@@ -87,7 +87,7 @@ class DAPOExp(BasePPOExp):
       return DAPOTrainer(*args, **kwargs)
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLConfig):
     exp = DAPOExp(cfg)
     exp.run()
 ```

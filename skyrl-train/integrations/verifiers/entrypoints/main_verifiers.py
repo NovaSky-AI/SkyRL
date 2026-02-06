@@ -1,7 +1,6 @@
-import hydra
-from typing import Union
-from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+import sys
+
+from skyrl_train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl_train.utils import initialize_ray
 import ray
 from integrations.verifiers.verifiers_generator import VerifiersGenerator
@@ -13,7 +12,7 @@ from skyrl_train.config import SkyRLConfig
 class VerifiersEntrypoint(BasePPOExp):
     def get_generator(
         self,
-        cfg: Union[SkyRLConfig, DictConfig],
+        cfg: SkyRLConfig,
         tokenizer: PreTrainedTokenizer,
         inference_engine_client: InferenceEngineClient,
     ):
@@ -25,13 +24,13 @@ class VerifiersEntrypoint(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLConfig):
     exp = VerifiersEntrypoint(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = SkyRLConfig.from_cli_overrides(sys.argv[1:])
     # Validate config args.
     validate_cfg(cfg)
 

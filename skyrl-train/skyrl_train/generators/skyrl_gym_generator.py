@@ -105,7 +105,6 @@ class SkyRLGymGenerator(GeneratorInterface):
         skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
-        model_name: str,
     ):
         """
         Args:
@@ -113,7 +112,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             skyrl_gym_cfg: SkyRL-Gym environment configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
-            model_name: Name of the model
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg

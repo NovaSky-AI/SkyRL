@@ -676,15 +676,11 @@ def make_config(
     return dataclass(type("_CustomSkyRLConfig", (SkyRLConfig,), ns))
 
 
-def get_config_as_dict(cfg: Union[dict, BaseConfig, DictConfig]) -> dict:
+def get_config_as_dict(cfg: Union[dict, BaseConfig]) -> dict:
     if isinstance(cfg, dict):
         return cfg
-    elif isinstance(cfg, DictConfig):
-        return OmegaConf.to_container(cfg, resolve=True)
     return asdict(cfg)
 
 
-def get_config_as_yaml_str(cfg: Union[BaseConfig, DictConfig]) -> str:
-    if isinstance(cfg, DictConfig):
-        return OmegaConf.to_yaml(cfg)
+def get_config_as_yaml_str(cfg: BaseConfig) -> str:
     return yaml.dump(asdict(cfg))
