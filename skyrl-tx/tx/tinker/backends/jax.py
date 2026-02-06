@@ -23,7 +23,7 @@ Usage:
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Annotated, Any, Callable, get_type_hints
+from typing import Any, Callable, get_type_hints
 
 from cloudpathlib import AnyPath
 import numpy as np
@@ -33,7 +33,7 @@ from jax.experimental import multihost_utils
 import optax
 from flax import nnx
 from flax.training import checkpoints
-from pydantic import BaseModel, Field, PlainValidator, TypeAdapter, WrapSerializer
+from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
@@ -55,8 +55,6 @@ from tx.utils.models import (
 )
 from tx.utils.log import logger
 
-# This can be removed and replaced with AnyPath once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
-SerializablePath = Annotated[AnyPath, PlainValidator(AnyPath), WrapSerializer(lambda v, h: str(v))]
 
 
 class JaxBackendConfig(BaseModel, extra="forbid"):
@@ -777,7 +775,7 @@ class JaxBackendImpl(AbstractBackend):
 
         return results
 
-    def save_checkpoint(self, output_path: SerializablePath, model_id: str) -> None:
+    def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
         """Save training checkpoint using Flax checkpoints."""
         checkpoint_data = self._extract_checkpoint_data(model_id)
         checkpoints.save_checkpoint_multiprocess(
@@ -817,7 +815,7 @@ class JaxBackendImpl(AbstractBackend):
             adapter_index, nnx.state(self.optimizers[model_id]), checkpoint_data["optimizer_state"], rank
         )
 
-    def load_checkpoint(self, checkpoint_path: SerializablePath, model_id: str) -> None:
+    def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
         """Load training checkpoint using Flax checkpoints."""
         checkpoint = checkpoints.restore_checkpoint(
             ckpt_dir=checkpoint_path,
@@ -831,7 +829,7 @@ class JaxBackendImpl(AbstractBackend):
         self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
-    def save_sampler_checkpoint(self, output_path: SerializablePath, model_id: str, persist: bool = True) -> None:
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
         lora_model = self.models[model_id]
         save_lora_checkpoint(
@@ -843,7 +841,7 @@ class JaxBackendImpl(AbstractBackend):
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
-    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: SerializablePath) -> None:
+    def load_sampler_checkpoint(self, model_id: str, checkpoint_id: str, checkpoint_path: AnyPath) -> None:
         """Insert sampler weights from checkpoint file."""
         adapter_index = self.models[model_id].adapter_index
         adapter_config = self.models[model_id].lora_config
@@ -965,7 +963,8 @@ class JaxBackend(JaxBackendImpl):
         """Broadcast method call to workers and execute locally via super()."""
         if jax.process_count() > 1:
             hints = get_type_hints(getattr(JaxBackendImpl, method))
-            clean = {k: TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v for k, v in kwargs.items()}
+            # TODO: Remove AnyPath special case once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
+            clean = {k: str(v) if hints.get(k) is AnyPath else TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v for k, v in kwargs.items()}
             _broadcast_command(RpcPayload(method=method, kwargs=clean))
         return getattr(super(), method)(**kwargs)
 
