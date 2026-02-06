@@ -133,12 +133,19 @@ class AbstractBackend(ABC):
         pass
 
     @abstractmethod
-    def save_sampler_checkpoint(self, output_path, model_id: str) -> None:
-        """Save sampler checkpoint to disk as tar.gz.
+    def save_sampler_checkpoint(self, output_path, model_id: str, persist: bool = True) -> None:
+        """Prepare model weights for sampling and optionally save to disk.
+
+        Backends that use colocated inference engines should sync weights
+        in-memory regardless of ``persist``.  When ``persist`` is *False*
+        the backend may skip the expensive disk write and only place a
+        lightweight marker at ``output_path``.
 
         Args:
             output_path: Path to save the checkpoint tar.gz file
             model_id: The model identifier
+            persist: If True, write a full model snapshot to disk.
+                     If False, only sync weights in-memory (hot path).
         """
         pass
 
