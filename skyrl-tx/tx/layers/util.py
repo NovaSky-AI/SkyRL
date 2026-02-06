@@ -108,7 +108,9 @@ def shard_map_ep(module: nnx.Module, func, *args):
         return PartitionSpec(*(p if p == "ep" else None for p in dims))
 
     partition_specs = nnx.get_partition_spec(state)
-    state_specs = jax.tree_util.tree_map_with_path(make_ep_spec, partition_specs, is_leaf=lambda x: isinstance(x, PartitionSpec))
+    state_specs = jax.tree_util.tree_map_with_path(
+        make_ep_spec, partition_specs, is_leaf=lambda x: isinstance(x, PartitionSpec)
+    )
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
     @jax.shard_map(mesh=get_abstract_mesh(), in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"})
