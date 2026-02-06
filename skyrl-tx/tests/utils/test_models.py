@@ -18,7 +18,7 @@ from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.tinker.types import LoraConfig
 from tx.utils import models
-from tx.utils.models import extract_adapter_state, insert_adapter_state, is_stacked_lora_path
+from tx.utils.models import extract_adapter_state, insert_adapter_state, is_stacked_path
 from tx.utils.storage import download_and_unpack
 
 
@@ -107,9 +107,9 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     ],
     ids=["layers", "dense_layers", "moe_layers", "embed_tokens", "lm_head", "str_layers", "str_embed"],
 )
-def test_is_stacked_lora_path(path, expected):
-    """Test is_stacked_lora_path correctly identifies stacked vs non-stacked paths."""
-    assert is_stacked_lora_path(path) is expected
+def test_is_stacked_path(path, expected):
+    """Test is_stacked_path correctly identifies stacked vs non-stacked paths."""
+    assert is_stacked_path(path) is expected
 
 
 def test_extract_insert_adapter_state_roundtrip():
@@ -139,7 +139,7 @@ def test_extract_insert_adapter_state_roundtrip():
         key = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
         if key in {"lora_A", "lora_B"}:
             # Stacked: should have (num_layers, ...) not (num_layers, num_adapters, ...)
-            if is_stacked_lora_path(path):
+            if is_stacked_path(path):
                 assert leaf.shape[0] == 1  # num_layers
                 assert leaf.ndim == 3  # (layers, in_dim, rank) or (layers, rank, out_dim)
 

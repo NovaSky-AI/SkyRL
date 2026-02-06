@@ -78,11 +78,10 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
 
-def is_stacked_lora_path(path: tuple) -> bool:
-    """Check if a parameter path is for stacked layer weights (for LoRA indexing).
+def is_stacked_path(path: tuple) -> bool:
+    """Check if a parameter path is for stacked layer weights.
 
-    Stacked layer params have the adapter dimension at axis 1: (num_layers, num_adapters, ...).
-    Non-stacked params (e.g., embed_tokens) have adapter dimension at axis 0: (num_adapters, ...).
+    Stacked layer params have an extra leading dimension: (num_layers, ...).
 
     Args:
         path: Parameter path tuple (can be nnx path objects or strings).
@@ -100,7 +99,7 @@ def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
     Stacked layer params have shape (num_layers, num_adapters, ...) -> index as [:, adapter_index].
     Non-stacked params (embed_tokens) have shape (num_adapters, ...) -> index as [adapter_index].
     """
-    if is_stacked_lora_path(path):
+    if is_stacked_path(path):
         return (slice(None), adapter_index)
     return (adapter_index,)
 
@@ -291,8 +290,8 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
         idx = get_adapter_idx(path, adapter_index)
         if key == "lora_A":
-            return p[idx + (..., slice(None, rank))]
-        return p[idx + (..., slice(None, rank), slice(None))]
+            return p[*idx, ..., :rank]
+        return p[*idx, ..., :rank, :]
 
     return jax.tree.map_with_path(extract_state, lora_params)
 
@@ -311,8 +310,8 @@ def insert_adapter_state(
         assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
         idx = get_adapter_idx(path, adapter_index)
         if key == "lora_A":
-            return p.at[idx + (..., slice(None, rank))].set(new)
-        return p.at[idx + (..., slice(None, rank), slice(None))].set(new)
+            return p.at[*idx, ..., :rank].set(new)
+        return p.at[*idx, ..., :rank, :].set(new)
 
     updated = jax.tree.map_with_path(insert_state, lora_params, new_params)
     nnx.update(lora_params, updated)

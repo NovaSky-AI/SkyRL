@@ -21,17 +21,12 @@ class ArrayRef(nnx.Variable):
 
     def __getitem__(self, key):
         parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
-        return parent[idx] if key is Ellipsis else parent[idx][key]
+        return parent[idx][key]
 
     def __setitem__(self, key, value):
         """Write through to parent when value is set via indexing."""
         parent, idx = self.get_metadata("_parent"), self.get_metadata("_idx")
-        if key is Ellipsis:
-            # param[...] = value -> update entire slice
-            parent[...] = parent[...].at[idx].set(value)
-        else:
-            # param[key] = value -> update sub-slice
-            parent[...] = parent[...].at[idx][key].set(value)
+        parent[...] = parent[...].at[idx][key].set(value)
         # Also update our local value
         super().__setitem__(key, value)
 
@@ -94,7 +89,9 @@ class StackedDecoderLayers(nnx.Module):
             original_sharding = arr.sharding
             if hasattr(original_sharding, "spec"):
                 new_spec = PartitionSpec(None, *original_sharding.spec)
-                stacked = jax.device_put(jnp.zeros(stacked_shape, arr.dtype), NamedSharding(mesh, new_spec))
+                stacked = jax.device_put(
+                    jnp.zeros(stacked_shape, arr.dtype), NamedSharding(mesh, new_spec)
+                )
             else:
                 stacked = jnp.zeros(stacked_shape, arr.dtype)
             stacked_flat.append(stacked)
@@ -129,7 +126,11 @@ class StackedDecoderLayers(nnx.Module):
                     var.set_metadata("sharding_names", tuple(array_sharding.spec))
             return var
 
-        jax.tree.map(update_sharding_metadata, stacked_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
+        jax.tree.map(
+            update_sharding_metadata,
+            stacked_state,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
 
         self._stacked = nnx.merge(graphdef, stacked_state)
 
@@ -154,7 +155,9 @@ class StackedDecoderLayers(nnx.Module):
         for i in range(self.num_layers):
             yield self[i]
 
-    def unstack_paths(self, state: nnx.GraphState, base_path: tuple = ()) -> list[tuple[tuple, ArrayRef]]:
+    def unstack_paths(
+        self, state: nnx.GraphState, base_path: tuple = ()
+    ) -> list[tuple[tuple, ArrayRef]]:
         """Transform _stacked paths to per-layer paths with ArrayRef.
 
         Args:
@@ -256,7 +259,9 @@ class StackedDecoderLayers(nnx.Module):
                 updated_keys.append(k)
                 updated_values.append(v)
 
-            new_kv_cache = KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask)
+            new_kv_cache = KVCache.update(
+                kv_cache, updated_keys, updated_values, positions, attention_mask
+            )
             return hidden_states, all_hidden_states, new_kv_cache
 
         # Prefill/training mode: use scan for efficiency
@@ -284,7 +289,9 @@ class StackedDecoderLayers(nnx.Module):
         if gradient_checkpointing:
             body_fn = jax.checkpoint(body_fn)
 
-        final_hs, (all_hs, all_keys, all_values) = jax.lax.scan(body_fn, hidden_states, state)
+        final_hs, (all_hs, all_keys, all_values) = jax.lax.scan(
+            body_fn, hidden_states, state
+        )
 
         if is_training:
             new_kv_cache = None
@@ -292,9 +299,13 @@ class StackedDecoderLayers(nnx.Module):
             # Convert stacked scan outputs to list format
             keys_list = [all_keys[i] for i in range(self.num_layers)]
             values_list = [all_values[i] for i in range(self.num_layers)]
-            new_kv_cache = KVCache.update(None, keys_list, values_list, positions, attention_mask)
+            new_kv_cache = KVCache.update(
+                None, keys_list, values_list, positions, attention_mask
+            )
 
-        all_hidden_states = [hidden_states] + list(all_hs[:-1]) if output_hidden_states else []
+        all_hidden_states = (
+            [hidden_states] + list(all_hs[:-1]) if output_hidden_states else []
+        )
         return final_hs, all_hidden_states, new_kv_cache
 
 
@@ -330,18 +341,14 @@ class MultiStackedDecoderLayers(nnx.Module):
                 return group[index - offset]
             offset += group.num_layers
 
-        raise IndexError(f"Layer index {index} not found")
-
     def __iter__(self):
         """Iterate over all layers across all groups."""
         for group in self.layer_groups:
             yield from group
 
-    def get_stacked_layers_list(self) -> list[StackedDecoderLayers]:
-        """Return list of StackedDecoderLayers for checkpoint loading."""
-        return list(self.layer_groups)
-
-    def unstack_paths(self, state: nnx.GraphState, base_path: tuple = ()) -> list[tuple[tuple, ArrayRef]]:
+    def unstack_paths(
+        self, state: nnx.GraphState, base_path: tuple = ()
+    ) -> list[tuple[tuple, ArrayRef]]:
         """Transform _stacked paths from all groups to unified per-layer paths.
 
         Args:
@@ -363,7 +370,11 @@ class MultiStackedDecoderLayers(nnx.Module):
                 # Extract layer index from path: group_path + (layer_idx,) + rest
                 layer_idx = int(path[len(group_path)])
                 # New path: base_path + (checkpoint_idx + layer_idx,) + rest
-                new_path = base_path + (str(checkpoint_idx + layer_idx),) + path[len(group_path) + 1 :]
+                new_path = (
+                    base_path
+                    + (str(checkpoint_idx + layer_idx),)
+                    + path[len(group_path) + 1 :]
+                )
                 result.append((new_path, array_ref))
 
             checkpoint_idx += group.num_layers

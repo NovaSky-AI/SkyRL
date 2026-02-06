@@ -469,7 +469,6 @@ class DeepseekV3Model(nnx.Module):
         self.config = config
         self.num_dense_layers = config.first_k_dense_replace
         self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
-        self.num_layers = config.num_hidden_layers
 
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
@@ -495,10 +494,6 @@ class DeepseekV3Model(nnx.Module):
         self.layers = MultiStackedDecoderLayers(dense_layers, moe_layers)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-
-    def get_stacked_layers_list(self):
-        """Delegate to MultiStackedDecoderLayers for checkpoint loading."""
-        return self.layers.get_stacked_layers_list()
 
     def __call__(
         self,

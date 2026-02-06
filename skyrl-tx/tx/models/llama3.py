@@ -200,7 +200,6 @@ class Llama3Model(nnx.Module):
 
     def __init__(self, config: LlamaConfig, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.num_layers = config.num_hidden_layers
 
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,

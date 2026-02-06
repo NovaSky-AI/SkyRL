@@ -105,28 +105,6 @@ def load_lora_weights(
     jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
 
 
-def load_stacked_lora_weights(
-    jax_module: LoRAMixin,
-    layer_idx: int,
-    adapter_idx: int,
-    lora_A_weights: np.ndarray,
-    lora_B_weights: np.ndarray,
-    scaling: float,
-    rank: int,
-) -> None:
-    """Load LoRA weights for a specific layer in stacked format (decoder layers)."""
-    assert (
-        jax_module.lora_A is not None
-        and jax_module.lora_B is not None
-        and jax_module.lora_scaling is not None
-        and jax_module.lora_ranks is not None
-    )
-    jax_module.lora_A[...] = jax_module.lora_A[...].at[layer_idx, adapter_idx].set(jnp.array(lora_A_weights))
-    jax_module.lora_B[...] = jax_module.lora_B[...].at[layer_idx, adapter_idx].set(jnp.array(lora_B_weights))
-    jax_module.lora_scaling[...] = jax_module.lora_scaling[...].at[layer_idx, adapter_idx].set(scaling)
-    jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[layer_idx, adapter_idx].set(rank)
-
-
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
 def test_qwen3_moe_layer_lora(ep: int, tp: int):
     """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
@@ -267,20 +245,19 @@ def test_qwen3_lora():
                 rank=lora_config.r,
             )
 
-            # Load layer LoRA weights (stacked format)
-            # Access _stacked to get the stacked module with LoRA parameters
+            # Load layer LoRA weights via unstacked view
             for i in range(config.num_hidden_layers):
                 hf_layer = hf_model.base_model.model.model.layers[i]
+                jax_layer = model.model.layers[i]
                 for module_name, projections in [
                     ("mlp", ["gate_proj", "up_proj", "down_proj"]),
                     ("self_attn", ["q_proj", "k_proj", "v_proj", "o_proj"]),
                 ]:
                     for proj_name in projections:
                         hf_proj = getattr(getattr(hf_layer, module_name), proj_name)
-                        jax_proj = getattr(getattr(model.model.layers._stacked, module_name), proj_name)
-                        load_stacked_lora_weights(
+                        jax_proj = getattr(getattr(jax_layer, module_name), proj_name)
+                        load_lora_weights(
                             jax_proj,
-                            layer_idx=i,
                             adapter_idx=adapter_idx,
                             lora_A_weights=hf_proj.lora_A["default"].weight.detach().numpy().T,
                             lora_B_weights=hf_proj.lora_B["default"].weight.detach().numpy().T,
