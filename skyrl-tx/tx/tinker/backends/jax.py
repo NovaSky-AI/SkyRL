@@ -987,6 +987,8 @@ class JaxBackend(JaxBackendImpl):
         self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
+        # Write probe so workers can detect shared filesystem
+        output_path.with_name(output_path.name + ".probe").write_text("write_probe")
         self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
 
 
