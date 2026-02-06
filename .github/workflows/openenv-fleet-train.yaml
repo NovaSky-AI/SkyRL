@@ -30,7 +30,7 @@ on:
       task_name:
         description: "SkyPilot task name (YAML file in skyrl-train/tasks/)"
         type: string
-        default: "openenv-fleet-grpo"
+        default: "openenv-fleet-grpo-qwen3-8b"
       data_version:
         description: "Dataset version in S3 (e.g., v0.1, v0.2, v0.3)"
         type: string
