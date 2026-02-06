@@ -104,6 +104,20 @@ def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
     return (adapter_index,)
 
 
+def get_lora_adapter_slice(path: tuple, adapter_index: int, rank: int) -> tuple | None:
+    """Return index tuple for accessing a single adapter's LoRA weight in an unstacked param.
+
+    After unstack_state, LoRA params have shape (num_adapters, ..., max_rank, ...).
+    Returns the slice to extract/insert one adapter's trimmed-rank weights, or None
+    for non-LoRA params.
+    """
+    if "lora_A" in path:
+        return (adapter_index, slice(None), slice(None, rank))
+    if "lora_B" in path:
+        return (adapter_index, slice(None, rank), slice(None))
+    return None
+
+
 def get_param_key(path: tuple, prefix: str = "") -> str:
     "Get the safetensors key for a given model path."
     if path[-1] in {"embedding", "kernel"}:
@@ -126,8 +140,14 @@ def load_safetensors(
     skip_lora: bool = True,
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
+    adapter_index: int | None = None,
+    rank: int | None = None,
 ) -> None:
-    """Load safetensors weights into a model with stacked layers."""
+    """Load safetensors weights into a model with stacked layers.
+
+    When adapter_index and rank are provided, loads LoRA weights into a specific
+    adapter slot instead of replacing the full parameter.
+    """
     from tx.layers.stacked import unstack_state
 
     tensors = {}
@@ -144,15 +164,23 @@ def load_safetensors(
         # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
+        if key not in tensors:
+            continue
         if "experts" in path:
             tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0)
         else:
             tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
-        if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
-            tensor = tensor.reshape(param.shape)
-        assert param.shape == tensor.shape, f"shape mismatch for {key}"
-        # ArrayRef.set_raw_value writes through to the stacked parent variable
-        param.set_raw_value(jax.device_put(tensor.astype(param.dtype), param.sharding))
+        lora_idx = get_lora_adapter_slice(path, adapter_index, rank) if adapter_index is not None else None
+        if lora_idx is not None:
+            # Load into specific adapter slot via ArrayRef write-through
+            arr = param[...]
+            param[...] = arr.at[lora_idx].set(jnp.array(tensor, dtype=arr.dtype))
+        else:
+            if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
+                tensor = tensor.reshape(param.shape)
+            assert param.shape == tensor.shape, f"shape mismatch for {key}"
+            # ArrayRef.set_raw_value writes through to the stacked parent variable
+            param.set_raw_value(jax.device_put(tensor.astype(param.dtype), param.sharding))
 
 
 def save_safetensors(
@@ -161,8 +189,14 @@ def save_safetensors(
     filename: Path,
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
+    adapter_index: int | None = None,
+    rank: int | None = None,
 ) -> None:
-    """Save model weights to safetensors, unstacking layer weights for HF compatibility."""
+    """Save model weights to safetensors, unstacking layer weights for HF compatibility.
+
+    When adapter_index and rank are provided, extracts a single adapter's LoRA
+    weights instead of saving the full parameter.
+    """
     from tx.layers.stacked import unstack_state
 
     # unstack_state converts stacked paths (layers._stacked.xxx) to per-layer paths
@@ -174,6 +208,10 @@ def save_safetensors(
         if filter_fn is not None and not filter_fn(path):
             continue
         key = get_param_key(path, prefix=prefix)
+        # Extract specific adapter's LoRA weights when adapter_index is provided
+        lora_idx = get_lora_adapter_slice(path, adapter_index, rank) if adapter_index is not None else None
+        if lora_idx is not None:
+            param = param[lora_idx]
         if "experts" in path:
             for i in range(config.get_num_experts()):
                 tensors[get_expert_key(path, i)] = param[i, :, :].T
@@ -195,6 +233,9 @@ def save_safetensors(
 
 
 def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:
+    """Check if a LoRA weight path matches the adapter config's training targets."""
+    if "lora_A" not in path and "lora_B" not in path:
+        return False
     if not adapter_config.train_attn and "self_attn" in path:
         return False
     if not adapter_config.train_mlp and ("mlp" in path or "experts" in path):
@@ -215,20 +256,17 @@ def load_lora_checkpoint(
         adapter_index: Index of the adapter to load into
         checkpoint_path: Path to the checkpoint tar.gz file
     """
-    _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
-
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
-
     with download_and_unpack(checkpoint_path) as temp_dir:
         load_safetensors(
             temp_dir,
             model.config,
-            adapter_lora_params,
+            model,
             skip_lora=False,
             prefix="base_model.model.",
             filter_fn=lambda path: filter_lora(adapter_config, path),
+            adapter_index=adapter_index,
+            rank=adapter_config.rank,
         )
-    insert_adapter_state(adapter_index, lora_params, adapter_lora_params, adapter_config.rank)
 
 
 def save_lora_checkpoint(
@@ -246,10 +284,6 @@ def save_lora_checkpoint(
         adapter_index: Index of the adapter to save
         output_path: Path to save the checkpoint tar.gz file
     """
-    _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
-
-    adapter_lora_params = extract_adapter_state(adapter_index, lora_params, adapter_config.rank)
-
     peft_config = peft.LoraConfig(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
     )
@@ -257,10 +291,12 @@ def save_lora_checkpoint(
     with pack_and_upload(output_path) as temp_dir:
         save_safetensors(
             model.config,
-            adapter_lora_params,
+            model,
             temp_dir / "adapter_model.safetensors",
             prefix="base_model.model.",
             filter_fn=lambda path: filter_lora(adapter_config, path),
+            adapter_index=adapter_index,
+            rank=adapter_config.rank,
         )
         peft_config.save_pretrained(temp_dir)
 
