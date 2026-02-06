@@ -9,12 +9,11 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import ray
 from ray import ObjectRef
 
-from omegaconf import DictConfig
 from skyrl_train.config import SkyRLConfig
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -40,7 +39,7 @@ class WorkerDispatch:
 
     def __init__(
         self,
-        cfg: Union[SkyRLConfig, DictConfig],
+        cfg: SkyRLConfig,
         policy_actor_group: PPORayActorGroup,
         critic_actor_group: Optional[PPORayActorGroup] = None,
         ref_actor_group: Optional[PPORayActorGroup] = None,

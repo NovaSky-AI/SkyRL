@@ -59,6 +59,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         self.engines = engines
         self.tokenizer = tokenizer
+        self.inference_engine_cfg = inference_engine_cfg
         # Use served_model_name if provided, otherwise fall back to model path.
         # served_model_name allows using a different model name for HTTP endpoint validation
         # than the actual model path. See ppo_base_config.yaml for details.

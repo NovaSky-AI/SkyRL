@@ -1,14 +1,14 @@
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig, OmegaConf
+from skyrl_train.config import GeneratorConfig
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
 
@@ -31,35 +31,33 @@ class TerminalBenchAgentOutput:
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: DictConfig,
-        terminal_bench_cfg: DictConfig,
+        generator_cfg: GeneratorConfig,
+        terminal_bench_cfg: Dict[str, Any],
         inference_engine_client: InferenceEngineClient,
         tokenizer,
     ):
         """
         Args:
-            generator_cfg: DictConfig object containing the generator configuration
-            terminal_bench_cfg: DictConfig object containing the terminal bench configuration
+            generator_cfg: GeneratorConfig object containing the generator configuration
+            terminal_bench_cfg: Dict containing the terminal bench / Harbor configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
         """
-        self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
+        ie_cfg = generator_cfg.inference_engine
+        self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}"
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
-        self.model_name = generator_cfg.model_name
 
         # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
         # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
-        self._harbor_config_template = OmegaConf.to_container(terminal_bench_cfg, resolve=True)
+        self._harbor_config_template = deepcopy(terminal_bench_cfg)
 
         # Set model_name and api_base once (constant across all trials)
-        assert generator_cfg.served_model_name is not None, "served_model_name must be set"
+        assert ie_cfg.served_model_name is not None, "served_model_name must be set"
         assert (
-            "/" not in generator_cfg.served_model_name
+            "/" not in ie_cfg.served_model_name
         ), "served_model_name must not contain '/', Harbor expects hosted_vllm/{model_name}"
-        self._harbor_config_template.setdefault("agent", {})[
-            "model_name"
-        ] = f"hosted_vllm/{generator_cfg.served_model_name}"
+        self._harbor_config_template.setdefault("agent", {})["model_name"] = f"hosted_vllm/{ie_cfg.served_model_name}"
         self._harbor_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
         logger.info(
@@ -69,7 +67,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         )
 
         # Read custom chat template
-        custom_chat_template_path = generator_cfg.engine_init_kwargs.get("chat_template", None)
+        custom_chat_template_path = ie_cfg.engine_init_kwargs.get("chat_template", None)
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()

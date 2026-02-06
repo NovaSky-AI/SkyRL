@@ -7,11 +7,10 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass, replace
-from typing import Iterable, Iterator, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Iterable, Iterator, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from omegaconf import DictConfig
-    from skyrl_train.config import SkyRLConfig
+    from skyrl_train.config import InferenceEngineConfig
 
 import ray
 import torch
@@ -206,12 +205,12 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
 
     @staticmethod
     def create_init_info(
-        cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
+        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
     ) -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:
-            cfg: Configuration object containing generator settings.
+            ie_cfg: InferenceEngineConfig containing inference engine settings.
             inference_world_size: Total number of inference workers (from client.get_world_size()).
                 If provided, uses this instead of calculating from config.
                 This is the preferred approach for HTTP inference path.
@@ -227,14 +226,12 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             world_size = inference_world_size + 1  # +1 for trainer rank 0
         else:
             # Legacy path: calculate from config
-            ie_cfg = cfg.generator.inference_engine
             num_inference_engines = ie_cfg.num_engines
             tensor_parallel_size = ie_cfg.tensor_parallel_size
             pipeline_parallel_size = ie_cfg.pipeline_parallel_size
             data_parallel_size = ie_cfg.data_parallel_size
             world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
 
-        ie_cfg = cfg.generator.inference_engine
         master_addr = ray._private.services.get_node_ip_address()
         with socket.socket() as sock:
             sock.bind(("", 0))

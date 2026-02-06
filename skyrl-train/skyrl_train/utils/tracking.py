@@ -21,7 +21,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Union, Optional
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
 import pprint
 
 from skyrl_train.config import SkyRLConfig, get_config_as_dict
@@ -36,7 +35,7 @@ class Tracking:
         project_name,
         experiment_name,
         backends: Union[str, List[str]] = "console",
-        config: Optional[Union[SkyRLConfig, DictConfig]] = None,
+        config: Optional[SkyRLConfig] = None,
     ):
         if isinstance(backends, str):
             backends = [backends]
@@ -150,7 +149,7 @@ class _TensorboardAdapter:
 
 
 class _MlflowLoggingAdapter:
-    def __init__(self, project_name, experiment_name, config: Optional[Union[SkyRLConfig, DictConfig]] = None):
+    def __init__(self, project_name, experiment_name, config: Optional[SkyRLConfig] = None):
         import os
 
         import mlflow
@@ -183,9 +182,6 @@ class _MlflowLoggingAdapter:
 def _compute_mlflow_params_from_objects(params) -> Dict[str, Any]:
     if params is None:
         return {}
-
-    if isinstance(params, DictConfig):
-        params = OmegaConf.to_container(params, resolve=True)
 
     return _flatten_dict(_transform_params_to_json_serializable(params, convert_list_to_dict=True), sep="/")
 

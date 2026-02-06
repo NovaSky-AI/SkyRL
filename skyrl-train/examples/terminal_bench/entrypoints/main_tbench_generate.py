@@ -3,20 +3,22 @@ Main entrypoint for generating rollouts on terminal bench tasks. For debugging p
 """
 
 import ray
+import sys
 import asyncio
-import hydra
+import yaml
 from loguru import logger
-from omegaconf import DictConfig
 
 from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import (
-    BasePPOExp,
-    config_dir,
-)
+from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.generators.base import GeneratorInput, TrajectoryID
 from examples.terminal_bench.generator.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
+from examples.terminal_bench.entrypoints.main_tbench import (
+    TerminalBenchSkyRLConfig,
+    TERMINAL_BENCH_DEFAULT_CONFIG,
+    _deep_merge,
+)
 
 
 # For debugging purposes, we only generate a few samples.
@@ -30,7 +32,7 @@ class TerminalBenchGenerateExp(BasePPOExp):
         """
         return TerminalBenchGenerator(
             generator_cfg=cfg.generator,
-            terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
+            terminal_bench_cfg=cfg.terminal_bench_config,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
         )
@@ -44,11 +46,7 @@ class TerminalBenchGenerateExp(BasePPOExp):
         return self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
 
     def get_train_dataset(self):
-        """Initializes the training dataset.
-
-        Returns:
-            TerminalBenchTaskDataset: The training dataset.
-        """
+        """Initializes the training dataset."""
         prompts_dataset = TerminalBenchTaskDataset(
             data_files=self.cfg.data.train_data,
         )
@@ -80,17 +78,20 @@ class TerminalBenchGenerateExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
-    # make sure that the training loop is not run on the head node.
+def skyrl_entrypoint(cfg):
     exp = TerminalBenchGenerateExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
-    # validate the arguments
-    validate_cfg(cfg)
+def main() -> None:
+    cfg = TerminalBenchSkyRLConfig.from_cli_overrides(sys.argv[1:])
 
+    # Load terminal bench defaults and merge CLI overrides on top
+    with open(TERMINAL_BENCH_DEFAULT_CONFIG) as f:
+        defaults = yaml.safe_load(f)
+    cfg.terminal_bench_config = _deep_merge(defaults, cfg.terminal_bench_config)
+
+    validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 

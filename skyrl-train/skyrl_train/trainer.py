@@ -5,7 +5,6 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from omegaconf import DictConfig
 
 import numpy as np
 import ray
@@ -78,7 +77,7 @@ from skyrl_train.workers.worker_utils import reduce_metrics
 class RayPPOTrainer:
     def __init__(
         self,
-        cfg: Union[SkyRLConfig, DictConfig],
+        cfg: SkyRLConfig,
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],
@@ -399,7 +398,7 @@ class RayPPOTrainer:
             pg = self.colocate_pg
 
             policy_model = PPORayActorGroup(
-                cfg,
+                cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
                 PolicyWorker,
@@ -414,7 +413,7 @@ class RayPPOTrainer:
                     num_policy_gpus == num_ref_gpus
                 ), "num_policy_gpus and num_ref_gpus must be the same when colocating policy and ref model"
                 ref_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
                     RefWorker,
@@ -431,7 +430,7 @@ class RayPPOTrainer:
                     num_policy_gpus == num_critic_gpus
                 ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
                 critic_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
                     CriticWorker,
@@ -461,7 +460,7 @@ class RayPPOTrainer:
                 get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
             policy_model = PPORayActorGroup(
-                cfg,
+                cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
                 PolicyWorker,
@@ -472,7 +471,7 @@ class RayPPOTrainer:
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
                     RefWorker,
@@ -486,7 +485,7 @@ class RayPPOTrainer:
 
             if cfg.trainer.critic.model.path:
                 critic_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
                     CriticWorker,

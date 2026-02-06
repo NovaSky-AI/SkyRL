@@ -19,9 +19,6 @@ MAX_GENERATE_LENGTH=3000
 TRAIN_BATCH_SIZE=64
 MAX_TURNS=6
 
-# NOTE: we set `generator.retokenize_chat_history` to true so that 
-# chat template is applied to the input each time - this ensures
-# that previous think tokens are removed 
 uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -36,8 +33,8 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.policy.sequence_parallel_size=1 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine_tensor_parallel_size=$TP_SIZE \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$TP_SIZE \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=1 \
@@ -50,15 +47,15 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.ckpt_interval=10 \
   trainer.hf_save_interval=30 \
   trainer.dump_data_batch=true \
-  generator.backend=vllm \
-  generator.run_engines_locally=true \
-  generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
+  generator.inference_engine.backend=vllm \
+  generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.weight_sync_backend=nccl \
+  generator.inference_engine.async_engine=true \
   generator.batched=false \
   environment.env_class=text2sql \
   generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.7 \
+  generator.inference_engine.gpu_memory_utilization=0.7 \
   generator.max_turns=$MAX_TURNS \
   generator.sampling_params.temperature=0.6 \
   generator.sampling_params.top_p=0.95 \
@@ -75,5 +72,4 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.eval_interval=5 \
   trainer.algorithm.policy_loss_type="dual_clip" \
   generator.step_wise_trajectories=true \
-  +generator.retokenize_chat_history=true \
   $@

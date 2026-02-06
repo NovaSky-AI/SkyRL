@@ -204,7 +204,7 @@ def test_micro_batches_accumulated_initialized():
 
     # PolicyWorker has _micro_batches_accumulated initialized at construction
     policy_worker = TestPolicyWorker(
-        cfg=cfg,
+        cfg=cfg.trainer,
         world_size=4,
         rank=0,
         local_rank=0,
@@ -217,7 +217,7 @@ def test_micro_batches_accumulated_initialized():
 
     # CriticWorker has _micro_batches_accumulated initialized at construction
     critic_worker = TestCriticWorker(
-        cfg=cfg,
+        cfg=cfg.trainer,
         world_size=4,
         rank=0,
         local_rank=0,
@@ -436,7 +436,7 @@ def test_forward_backward_batch_calculations():
     # Helper function to create worker with minimal setup
     def create_test_worker(worker_class):
         worker = worker_class(
-            cfg=cfg,
+            cfg=cfg.trainer,
             world_size=1,
             rank=0,
             local_rank=0,

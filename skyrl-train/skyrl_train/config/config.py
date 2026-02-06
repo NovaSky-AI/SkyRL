@@ -266,6 +266,9 @@ class AlgorithmConfig(BaseConfig):
     kl_loss_coef: float = 0.001
     use_entropy_loss: bool = False
     entropy_loss_coef: float = 0.01
+    # Temperature for scaling logits in policy loss computation.
+    # This is typically set from generator.sampling_params.temperature during config validation.
+    temperature: float = 1.0
     advantage_batch_normalize: bool = False
     value_head_prefix: str = "value_head"
     policy_loss_type: str = "regular"
@@ -551,12 +554,20 @@ class SkyRLConfig(BaseConfig):
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
+    def __post_init__(self):
+        # Copy temperature from generator sampling params to algorithm config
+        # so workers can access it without needing the generator config
+        self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
     @classmethod
     def from_cli_overrides(cls, args: List[str]) -> "SkyRLConfig":
         """Construct a SkyRLConfig from CLI arguments.
 
         Parses CLI arguments and builds a typed config. Dataclass field defaults
         are used for any values not specified on the command line.
+
+        Supports both new-style config paths (e.g., generator.inference_engine.backend)
+        and legacy YAML-style paths (e.g., generator.backend) for backward compatibility.
 
         Args:
             args: List of CLI arguments in 'key.path=value' format.
@@ -568,6 +579,13 @@ class SkyRLConfig(BaseConfig):
         Raises:
             ValueError: If an argument uses the unsupported '+' prefix.
         """
+        from skyrl_train.config.legacy import (
+            is_legacy_config,
+            translate_legacy_config,
+            warn_legacy_config,
+        )
+        from skyrl_train.config.utils import get_default_config
+
         # Check for unsupported '+' prefix
         for arg in args:
             if arg.startswith("+"):
@@ -577,8 +595,85 @@ class SkyRLConfig(BaseConfig):
                 )
         overrides = OmegaConf.from_cli(args)
 
-        # Convert to typed dataclass
-        return cls.from_dict_config(overrides)
+        # Try new format first
+        try:
+            return cls.from_dict_config(overrides)
+        except ValueError:
+            # Fall back to legacy format: load base YAML, merge overrides, translate
+            try:
+                base_cfg = get_default_config()
+                merged = OmegaConf.merge(base_cfg, overrides)
+                merged_dict = OmegaConf.to_container(merged, resolve=True)
+
+                if is_legacy_config(merged_dict):
+                    warn_legacy_config()
+                    translated = translate_legacy_config(merged_dict)
+                    return build_nested_dataclass(cls, translated)
+            except Exception:
+                pass  # Legacy translation failed, re-raise original error
+
+            # Re-raise original error if not a legacy config issue
+            raise
+
+
+def make_config(
+    algorithm_cls: Optional[Type[AlgorithmConfig]] = None,
+    trainer_cls: Optional[Type[TrainerConfig]] = None,
+    generator_cls: Optional[Type[GeneratorConfig]] = None,
+) -> Type[SkyRLConfig]:
+    """Create a SkyRLConfig subclass with custom nested config classes.
+
+    Convenience helper to avoid boilerplate when extending configs for custom
+    algorithms or generators. For full IDE autocomplete on custom fields, use
+    explicit subclassing instead (see examples/algorithms/dapo/main_dapo.py).
+
+    Args:
+        algorithm_cls: Custom AlgorithmConfig subclass. If provided without
+            trainer_cls, a TrainerConfig subclass is automatically created.
+        trainer_cls: Custom TrainerConfig subclass. Takes precedence over
+            algorithm_cls for the trainer config.
+        generator_cls: Custom GeneratorConfig subclass.
+
+    Returns:
+        A SkyRLConfig subclass wired up with the custom config classes.
+
+    Example::
+
+        @dataclass
+        class MyAlgorithmConfig(AlgorithmConfig):
+            my_param: int = 42
+
+        MyConfig = make_config(algorithm_cls=MyAlgorithmConfig)
+        cfg = MyConfig.from_cli_overrides(sys.argv[1:])
+    """
+    effective_trainer_cls = trainer_cls
+
+    if algorithm_cls is not None and trainer_cls is None:
+        effective_trainer_cls = dataclass(
+            type(
+                f"_{algorithm_cls.__name__}TrainerConfig",
+                (TrainerConfig,),
+                {
+                    "__annotations__": {"algorithm": algorithm_cls},
+                    "algorithm": field(default_factory=algorithm_cls),
+                },
+            )
+        )
+
+    ns: Dict[str, Any] = {}
+    annotations: Dict[str, Any] = {}
+
+    if effective_trainer_cls is not None:
+        annotations["trainer"] = effective_trainer_cls
+        ns["trainer"] = field(default_factory=effective_trainer_cls)
+
+    if generator_cls is not None:
+        annotations["generator"] = generator_cls
+        ns["generator"] = field(default_factory=generator_cls)
+
+    ns["__annotations__"] = annotations
+
+    return dataclass(type("_CustomSkyRLConfig", (SkyRLConfig,), ns))
 
 
 def get_config_as_dict(cfg: Union[dict, BaseConfig, DictConfig]) -> dict:

@@ -18,10 +18,10 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     data.train_data="['$DATA_DIR/train.parquet']" \
     data.val_data="['$DATA_DIR/validation.parquet']" \
     trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
-    generator.run_engines_locally=False \
-    generator.remote_inference_engine_urls="['127.0.0.1:8001']" \
-    generator.inference_engine_tensor_parallel_size="$INF_ENGINE_TP" \
-    generator.backend="$BACKEND" \
+    generator.inference_engine.run_engines_locally=False \
+    generator.inference_engine.remote_urls="['127.0.0.1:8001']" \
+    generator.inference_engine.tensor_parallel_size="$INF_ENGINE_TP" \
+    generator.inference_engine.backend="$BACKEND" \
     generator.sampling_params.temperature=0.6 \
     generator.sampling_params.top_p=0.95 \
     trainer.algorithm.advantage_estimator="grpo" \

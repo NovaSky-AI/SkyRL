@@ -10,7 +10,6 @@ import copy
 from uuid import uuid4
 from dataclasses import asdict
 import skyrl_gym
-from omegaconf import DictConfig, OmegaConf
 from typing import List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
@@ -102,18 +101,19 @@ class TurnOutput:
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
         self,
-        model_path: str,
-        generator_cfg: Union[GeneratorConfig, DictConfig],
-        skyrl_gym_cfg: Union[SkyRLGymConfig, DictConfig],
+        generator_cfg: GeneratorConfig,
+        skyrl_gym_cfg: SkyRLGymConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,
     ):
         """
         Args:
-            generator_cfg: DictConfig object containing the generator configuration
+            generator_cfg: Generator configuration
+            skyrl_gym_cfg: SkyRL-Gym environment configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            model_name: Name of the model
         """
         self.generator_cfg = generator_cfg
         self.skyrl_gym_cfg = skyrl_gym_cfg
@@ -158,7 +158,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
-    def _validate_cfg(self, generator_cfg: Union[GeneratorConfig, DictConfig]):
+    def _validate_cfg(self, generator_cfg: GeneratorConfig):
         if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
@@ -256,13 +256,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # `sampling_params` if provided is a dict in the format expected by the inference engine backend
         # we cast default config to a dict for consistency
         current_sampling_params: dict = (
-            sampling_params
-            if sampling_params is not None
-            else (
-                OmegaConf.to_container(self.generator_cfg.sampling_params, resolve=True)
-                if isinstance(self.generator_cfg, DictConfig)
-                else asdict(self.generator_cfg.sampling_params)
-            )
+            sampling_params if sampling_params is not None else asdict(self.generator_cfg.sampling_params)
         )
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)

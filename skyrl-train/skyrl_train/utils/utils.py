@@ -5,8 +5,6 @@ import sys
 import logging
 import math
 import socket
-from omegaconf import DictConfig, OmegaConf
-from typing import Union
 
 import ray
 import torch
@@ -53,7 +51,7 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
-def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
+def validate_batch_sizes(cfg: SkyRLConfig):
     """
     Validate configured batch sizes.
 
@@ -186,7 +184,7 @@ def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     )
 
 
-def validate_megatron_cfg(cfg: Union[SkyRLConfig, DictConfig]):
+def validate_megatron_cfg(cfg: SkyRLConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
     assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
@@ -212,7 +210,7 @@ def validate_megatron_cfg(cfg: Union[SkyRLConfig, DictConfig]):
         )
 
 
-def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
+def validate_cfg(cfg: SkyRLConfig):
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
@@ -275,14 +273,9 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # per batch can be variable based on the prompt length. This is used to normalize the loss for
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
     # fixed max response budget.
-    if isinstance(cfg, DictConfig):
-        new_cfg = OmegaConf.create(cfg.trainer.algorithm)
-        new_cfg.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-        cfg.trainer.algorithm = new_cfg
-    else:
-        cfg.trainer.algorithm.max_seq_len = (
-            cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-        )
+    cfg.trainer.algorithm.max_seq_len = (
+        cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    )
 
     if cfg.trainer.algorithm.use_tis:
         if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
@@ -340,7 +333,7 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
             )
 
 
-def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
+def validate_generator_cfg(cfg: SkyRLConfig):
     """Validates the correctness of generator-related config.
 
     Args:
@@ -465,7 +458,7 @@ def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     _validate_new_inference_cfg(cfg)
 
 
-def _validate_new_inference_cfg(cfg: DictConfig):
+def _validate_new_inference_cfg(cfg: SkyRLConfig):
     """Validates config options for the new inference layer.
 
     This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
@@ -488,8 +481,8 @@ def _validate_new_inference_cfg(cfg: DictConfig):
         return
 
     is_colocated = cfg.trainer.placement.colocate_all
-    has_external_proxy = cfg.generator.get("external_proxy_url") is not None
-    has_external_servers = cfg.generator.get("external_server_urls") is not None
+    has_external_proxy = cfg.generator.inference_engine.external_proxy_url is not None
+    has_external_servers = cfg.generator.inference_engine.external_server_urls is not None
 
     # Colocated mode cannot use external endpoints
     if is_colocated and (has_external_proxy or has_external_servers):
@@ -540,7 +533,7 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
-def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str, str]:
+def prepare_runtime_environment(cfg: SkyRLConfig) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
 
@@ -684,7 +677,7 @@ def configure_ray_worker_logging() -> None:
     logging.root.setLevel(level)
 
 
-def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
+def initialize_ray(cfg: SkyRLConfig):
     """
     Initialize Ray cluster with prepared runtime environment.
 

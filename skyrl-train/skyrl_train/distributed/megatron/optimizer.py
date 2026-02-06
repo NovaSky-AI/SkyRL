@@ -16,9 +16,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Union
-
-from omegaconf import DictConfig
 import torch
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
@@ -27,9 +24,7 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from skyrl_train.config import OptimizerConfig as SkyRLOptimizerConfig
 
 
-def init_megatron_optim_config(
-    optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict
-) -> OptimizerConfig:
+def init_megatron_optim_config(optim_config: SkyRLOptimizerConfig, optimizer_config_kwargs: dict) -> OptimizerConfig:
     optim_args = {
         "optimizer": getattr(optim_config, "optimizer", "adam"),
         "lr": getattr(optim_config, "lr", 1e-6),
@@ -59,7 +54,7 @@ def get_megatron_optimizer(
 
 def get_megatron_optimizer_param_scheduler(
     optimizer,
-    config: Union[SkyRLOptimizerConfig, DictConfig],
+    config: SkyRLOptimizerConfig,
     num_training_steps: int = 1e9,  # default to a large number for constant lr/wd
 ):
     """
