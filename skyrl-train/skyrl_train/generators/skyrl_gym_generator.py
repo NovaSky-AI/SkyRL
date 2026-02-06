@@ -249,9 +249,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                 tokenize=True,
                 **self.generator_cfg.chat_template_kwargs,
             )
+            # Use token-level reward format [0.0] to match normal trajectories when custom_chat_template is None
+            # This ensures consistent reward types across all trajectories in a batch
+            zero_reward = 0.0 if self.custom_chat_template else [0.0]
             return TrajectoryOutput(
                 response_ids=[self.tokenizer.eos_token_id],
-                reward=0.0,
+                reward=zero_reward,
                 stop_reason="env_init_failed",
                 loss_mask=[0],  # Don't learn from failed trajectories
                 prompt_ids=prompt_ids,
@@ -305,9 +308,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                         f"for session {session_id}. Returning zero-reward trajectory."
                     )
                     await self._run_in_executor_if_available(env.close)
+                    # Use token-level reward format [0.0] to match normal trajectories when custom_chat_template is None
+                    zero_reward = 0.0 if self.custom_chat_template else [0.0]
                     return TrajectoryOutput(
                         response_ids=[self.tokenizer.eos_token_id],
-                        reward=0.0,
+                        reward=zero_reward,
                         stop_reason="timeout",
                         loss_mask=[0],
                         prompt_ids=initial_input_ids,
