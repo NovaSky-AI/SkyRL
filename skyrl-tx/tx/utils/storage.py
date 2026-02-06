@@ -9,6 +9,8 @@ from typing import Generator
 import jax
 from cloudpathlib import AnyPath
 
+from tx.utils.log import logger
+
 
 @contextmanager
 def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
@@ -28,6 +30,7 @@ def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
 
         # If probe file exists, filesystem is shared - only rank 0 should write
         if dest.with_name(dest.name + ".probe").exists() and jax.process_index() != 0:
+            logger.info(f"Skipping write to {dest} (shared filesystem, rank {jax.process_index()})")
             return
 
         dest.parent.mkdir(parents=True, exist_ok=True)
