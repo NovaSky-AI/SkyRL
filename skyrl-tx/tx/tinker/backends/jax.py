@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, get_type_hints
 
-from cloudpathlib import AnyPath
+from cloudpathlib import AnyPath, CloudPath
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -961,7 +961,7 @@ class JaxBackend(JaxBackendImpl):
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
         if jax.process_count() > 1:
-            clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
+            clean = {k: str(v) if isinstance(v, CloudPath) else v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
             _broadcast_command(RpcPayload(method=method, kwargs=clean))
         return getattr(super(), method)(**kwargs)
 
@@ -981,16 +981,16 @@ class JaxBackend(JaxBackendImpl):
         return self._broadcast_and_call("sample", prepared_batch=prepared_batch)
 
     def save_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("save_checkpoint", output_path=str(output_path), model_id=model_id)
+        self._broadcast_and_call("save_checkpoint", output_path=output_path, model_id=model_id)
 
     def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("load_checkpoint", checkpoint_path=str(checkpoint_path), model_id=model_id)
+        self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
 
     def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         # Write probe so workers can detect shared filesystem
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.with_name(output_path.name + ".probe").write_text("write_probe")
-        self._broadcast_and_call("save_sampler_checkpoint", output_path=str(output_path), model_id=model_id, persist=persist)
+        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id, persist=persist)
 
 
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):
