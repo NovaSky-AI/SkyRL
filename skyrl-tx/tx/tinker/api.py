@@ -890,7 +890,9 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
 
     if req.app.state.external_inference_client:
         asyncio.create_task(
-            req.app.state.external_inference_client.call_and_store_result(request_id, request, model_id, checkpoint_id)
+            req.app.state.external_inference_client.call_and_store_result(
+                request_id, request, model_id, checkpoint_id, base_model=base_model
+            )
         )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
