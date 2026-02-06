@@ -154,19 +154,19 @@ class StackedDecoderLayers(nnx.Module):
         result = []
         for path, param in nnx.to_flat_state(state):
             # Only process paths belonging to this module
-            if not path[:len(base_path)] == base_path:
+            if not path[: len(base_path)] == base_path:
                 continue
             # Only process _stacked paths
-            if "_stacked" not in path[len(base_path):]:
+            if "_stacked" not in path[len(base_path) :]:
                 continue
 
             # Find _stacked in the relative path
-            rel_path = path[len(base_path):]
+            rel_path = path[len(base_path) :]
             stacked_idx = rel_path.index("_stacked")
 
             # Create per-layer paths: base_path + (layer_idx,) + rest
             for layer_idx in range(self.num_layers):
-                new_path = base_path + (str(layer_idx),) + rel_path[stacked_idx+1:]
+                new_path = base_path + (str(layer_idx),) + rel_path[stacked_idx + 1 :]
                 result.append((new_path, ArrayRef(param, layer_idx)))
 
         return result
@@ -243,9 +243,7 @@ class StackedDecoderLayers(nnx.Module):
                 updated_keys.append(k)
                 updated_values.append(v)
 
-            new_kv_cache = KVCache.update(
-                kv_cache, updated_keys, updated_values, positions, attention_mask
-            )
+            new_kv_cache = KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask)
             return hidden_states, all_hidden_states, new_kv_cache
 
         # Prefill/training mode: use scan for efficiency
@@ -273,9 +271,7 @@ class StackedDecoderLayers(nnx.Module):
         if gradient_checkpointing:
             body_fn = jax.checkpoint(body_fn)
 
-        final_hs, (all_hs, all_keys, all_values) = jax.lax.scan(
-            body_fn, hidden_states, state
-        )
+        final_hs, (all_hs, all_keys, all_values) = jax.lax.scan(body_fn, hidden_states, state)
 
         if is_training:
             new_kv_cache = None
@@ -354,7 +350,7 @@ class MultiStackedDecoderLayers(nnx.Module):
                 # Extract layer index from path: group_path + (layer_idx,) + rest
                 layer_idx = int(path[len(group_path)])
                 # New path: base_path + (checkpoint_idx + layer_idx,) + rest
-                new_path = base_path + (str(checkpoint_idx + layer_idx),) + path[len(group_path)+1:]
+                new_path = base_path + (str(checkpoint_idx + layer_idx),) + path[len(group_path) + 1 :]
                 result.append((new_path, array_ref))
 
             checkpoint_idx += group.num_layers
