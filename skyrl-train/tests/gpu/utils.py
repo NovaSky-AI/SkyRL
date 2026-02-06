@@ -342,8 +342,8 @@ def ray_init_for_tests():
 
 async def run_inference(client, prompts, sampling_params, tokenizer=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
-    if tokenizer is not None:  # TESTING
-        # convert to prompt token ids
+    if isinstance(client, RemoteInferenceClient):
+        # convert to prompt token ids for RemoteInferenceClient
         assert tokenizer is not None
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
