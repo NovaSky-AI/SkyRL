@@ -182,6 +182,10 @@ trainer:
   epochs: 1  # Number of passes over the full dataset
   update_epochs_per_batch: 1  # Number of gradient update passes over each train batch
   train_batch_size: 1024  # See `utils/utils.py::validate_batch_sizes` for train, mini, and micro batch size constraints.
+  # Hybrid environment sampling: ensures minimum representation from each environment per batch
+  # to prevent "unlucky" batches with only hard environments. Remaining slots filled proportionally.
+  use_hybrid_env_sampling: true
+  min_samples_per_env: 1  # Minimum samples from each environment per batch (only used when use_hybrid_env_sampling=true)
   policy_mini_batch_size: 256
   critic_mini_batch_size: 256
   micro_train_batch_size_per_gpu: 1

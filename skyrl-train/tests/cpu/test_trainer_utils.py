@@ -16,6 +16,7 @@ from skyrl_train.utils.trainer_utils import (
     zero_variance_filter,
     validate_generator_output,
     build_dataloader,
+    HybridEnvSampler,
 )
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from typing import Union
@@ -24,6 +25,7 @@ import os
 import tempfile
 import pytest
 import re
+import torch
 
 from unittest.mock import Mock, patch, mock_open
 import json
@@ -927,3 +929,336 @@ def test_validate_generator_output_invalid_rewards():
 
     generator_output["rewards"] = [[0.5, 0.6], [0.7, 0.8]]
     validate_generator_output(len(input_batch["prompts"]), generator_output)
+
+
+# ============================================================================
+# HybridEnvSampler Tests
+# ============================================================================
+
+
+class MockPromptDataset:
+    """Mock PromptDataset for testing HybridEnvSampler."""
+
+    def __init__(self, env_distribution: dict):
+        """
+        Create a mock dataset with specified environment distribution.
+
+        Args:
+            env_distribution: Dict mapping env_class -> number of samples
+                e.g., {"booking": 10, "github": 5, "reddit": 3}
+        """
+        self.env_class_key = "env_class"
+        self.dataframe = []
+
+        for env_class, count in env_distribution.items():
+            for i in range(count):
+                self.dataframe.append(
+                    {
+                        "env_class": env_class,
+                        "prompt": f"prompt_{env_class}_{i}",
+                    }
+                )
+
+    def __len__(self):
+        return len(self.dataframe)
+
+    def __getitem__(self, idx):
+        row = self.dataframe[idx]
+        return row["prompt"], row["env_class"], {}, str(idx)
+
+    def collate_fn(self, batch):
+        return batch
+
+
+def test_hybrid_env_sampler_minimum_samples_per_env():
+    """Test that HybridEnvSampler ensures minimum samples from each environment."""
+    # Create dataset with uneven distribution
+    dataset = MockPromptDataset(
+        {
+            "booking": 100,
+            "github": 50,
+            "reddit": 20,
+        }
+    )
+
+    batch_size = 30
+    min_samples_per_env = 3
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+        drop_last=True,
+    )
+
+    # Get first batch
+    batch_indices = list(sampler)[:batch_size]
+
+    # Count samples per env in the batch
+    env_counts = {"booking": 0, "github": 0, "reddit": 0}
+    for idx in batch_indices:
+        env_class = dataset.dataframe[idx]["env_class"]
+        env_counts[env_class] += 1
+
+    # Verify minimum samples from each environment
+    for env, count in env_counts.items():
+        assert (
+            count >= min_samples_per_env
+        ), f"Environment {env} has {count} samples, expected at least {min_samples_per_env}"
+
+    # Verify total batch size
+    assert len(batch_indices) == batch_size
+
+
+def test_hybrid_env_sampler_reproducibility():
+    """Test that HybridEnvSampler produces same results with same seed."""
+    dataset = MockPromptDataset(
+        {
+            "env_a": 20,
+            "env_b": 15,
+            "env_c": 10,
+        }
+    )
+
+    batch_size = 12
+    min_samples_per_env = 2
+
+    # Create two samplers with same seed
+    sampler1 = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(123),
+    )
+
+    sampler2 = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(123),
+    )
+
+    # Get batches from both
+    batch1 = list(sampler1)[:batch_size]
+    batch2 = list(sampler2)[:batch_size]
+
+    # Should be identical
+    assert batch1 == batch2, "Same seed should produce identical batches"
+
+
+def test_hybrid_env_sampler_different_seeds():
+    """Test that different seeds produce different results."""
+    dataset = MockPromptDataset(
+        {
+            "env_a": 30,
+            "env_b": 25,
+            "env_c": 20,
+        }
+    )
+
+    batch_size = 15
+    min_samples_per_env = 2
+
+    sampler1 = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    sampler2 = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(999),
+    )
+
+    batch1 = list(sampler1)[:batch_size]
+    batch2 = list(sampler2)[:batch_size]
+
+    # Should be different (with very high probability)
+    assert batch1 != batch2, "Different seeds should produce different batches"
+
+
+def test_hybrid_env_sampler_warns_when_min_exceeds_batch():
+    """Test that sampler warns and adjusts when min_samples_per_env * num_envs > batch_size."""
+    dataset = MockPromptDataset(
+        {
+            "env_a": 10,
+            "env_b": 10,
+            "env_c": 10,
+            "env_d": 10,
+            "env_e": 10,
+        }
+    )
+
+    # 5 envs * 5 min = 25 > batch_size of 10
+    batch_size = 10
+    min_samples_per_env = 5
+
+    # Should warn and reduce min_samples_per_env
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    # min_samples_per_env should be reduced to fit: max(1, 10 // 5) = 2
+    assert sampler.min_samples_per_env == 2
+
+
+def test_hybrid_env_sampler_length():
+    """Test that __len__ returns correct number of samples."""
+    dataset = MockPromptDataset(
+        {
+            "env_a": 20,
+            "env_b": 10,  # Smallest: limits batches
+            "env_c": 15,
+        }
+    )
+
+    batch_size = 9
+    min_samples_per_env = 2
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    # env_b has 10 samples, needs 2 per batch -> 5 batches possible
+    # Total samples = 5 * 9 = 45
+    expected_batches = 10 // min_samples_per_env  # 5
+    expected_length = expected_batches * batch_size  # 45
+
+    assert len(sampler) == expected_length
+
+
+def test_hybrid_env_sampler_proportional_fill():
+    """Test that remaining slots are filled proportionally."""
+    # Create dataset with very uneven distribution
+    dataset = MockPromptDataset(
+        {
+            "large_env": 900,  # 90%
+            "small_env": 100,  # 10%
+        }
+    )
+
+    batch_size = 100
+    min_samples_per_env = 1
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    # Collect multiple batches to get statistical average
+    all_indices = list(sampler)
+    num_batches = len(all_indices) // batch_size
+
+    total_large = 0
+    total_small = 0
+
+    for batch_idx in range(num_batches):
+        batch = all_indices[batch_idx * batch_size : (batch_idx + 1) * batch_size]
+        for idx in batch:
+            env = dataset.dataframe[idx]["env_class"]
+            if env == "large_env":
+                total_large += 1
+            else:
+                total_small += 1
+
+    # After minimum allocation (1 each), 98 slots filled proportionally
+    # Expected: ~90% large, ~10% small (with some variance)
+    total = total_large + total_small
+    large_ratio = total_large / total
+
+    # Should be roughly 90% large (allowing ±10% tolerance for randomness)
+    assert 0.80 <= large_ratio <= 0.95, f"Expected ~90% large_env samples, got {large_ratio*100:.1f}%"
+
+
+def test_hybrid_env_sampler_single_env():
+    """Test sampler with only one environment."""
+    dataset = MockPromptDataset(
+        {
+            "only_env": 50,
+        }
+    )
+
+    batch_size = 10
+    min_samples_per_env = 1
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    batch = list(sampler)[:batch_size]
+
+    # All should be from the only environment
+    assert len(batch) == batch_size
+    for idx in batch:
+        assert dataset.dataframe[idx]["env_class"] == "only_env"
+
+
+def test_hybrid_env_sampler_many_small_envs():
+    """Test sampler with many small environments."""
+    # 10 environments with 5 samples each
+    env_dist = {f"env_{i}": 5 for i in range(10)}
+    dataset = MockPromptDataset(env_dist)
+
+    batch_size = 20
+    min_samples_per_env = 1
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    batch = list(sampler)[:batch_size]
+
+    # Count envs in batch
+    env_counts = {}
+    for idx in batch:
+        env = dataset.dataframe[idx]["env_class"]
+        env_counts[env] = env_counts.get(env, 0) + 1
+
+    # Each env should have at least 1 sample
+    for env in env_dist.keys():
+        assert env in env_counts, f"Environment {env} missing from batch"
+        assert env_counts[env] >= min_samples_per_env
+
+
+def test_hybrid_env_sampler_iteration_exhaustion():
+    """Test that sampler correctly limits iterations based on smallest env."""
+    dataset = MockPromptDataset(
+        {
+            "abundant": 100,
+            "scarce": 6,  # Only 6 samples
+        }
+    )
+
+    batch_size = 10
+    min_samples_per_env = 2
+
+    sampler = HybridEnvSampler(
+        dataset=dataset,
+        batch_size=batch_size,
+        min_samples_per_env=min_samples_per_env,
+        generator=torch.Generator().manual_seed(42),
+    )
+
+    # scarce has 6, needs 2 per batch -> 3 batches max
+    all_indices = list(sampler)
+
+    expected_total = 3 * batch_size  # 30
+    assert len(all_indices) == expected_total, f"Expected {expected_total} samples, got {len(all_indices)}"

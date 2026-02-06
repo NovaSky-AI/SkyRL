@@ -687,6 +687,161 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
         ), "rewards must be `List[float]` or `List[List[float]]`"
 
 
+class HybridEnvSampler(torch.utils.data.Sampler):
+    """
+    Hybrid environment sampler that ensures minimum representation from each environment
+    while filling remaining slots proportionally from larger environments.
+
+    This prevents "unlucky" batches where all samples come from hard environments
+    with low success rates, ensuring learning signal in every batch.
+
+    Args:
+        dataset: PromptDataset with env_class information
+        batch_size: Number of samples per batch
+        min_samples_per_env: Minimum samples from each environment per batch (default: 1)
+        generator: Random number generator for reproducibility
+        drop_last: Whether to drop the last incomplete batch
+    """
+
+    def __init__(
+        self,
+        dataset: PromptDataset,
+        batch_size: int,
+        min_samples_per_env: int = 1,
+        generator: torch.Generator = None,
+        drop_last: bool = True,
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.min_samples_per_env = min_samples_per_env
+        self.generator = generator
+        self.drop_last = drop_last
+
+        # Build index mapping: env_class -> list of sample indices
+        self.env_to_indices: Dict[str, List[int]] = defaultdict(list)
+        for idx in range(len(dataset)):
+            # Access the underlying dataframe to get env_class without full __getitem__
+            env_class = dataset.dataframe[idx].get(dataset.env_class_key, "unknown")
+            self.env_to_indices[env_class].append(idx)
+
+        self.env_classes = list(self.env_to_indices.keys())
+        self.num_envs = len(self.env_classes)
+
+        # Validate that we can fit minimum samples
+        min_required = self.num_envs * min_samples_per_env
+        if min_required > batch_size:
+            logger.warning(
+                f"HybridEnvSampler: {self.num_envs} envs × {min_samples_per_env} min samples = {min_required} "
+                f"> batch_size {batch_size}. Reducing min_samples_per_env to fit."
+            )
+            self.min_samples_per_env = max(1, batch_size // self.num_envs)
+
+        # Calculate proportional weights for remaining slots
+        total_samples = len(dataset)
+        self.env_weights = {env: len(indices) / total_samples for env, indices in self.env_to_indices.items()}
+
+        logger.info(
+            f"HybridEnvSampler initialized: {self.num_envs} envs, "
+            f"batch_size={batch_size}, min_per_env={self.min_samples_per_env}"
+        )
+        for env, indices in sorted(self.env_to_indices.items()):
+            logger.info(f"  {env}: {len(indices)} samples ({self.env_weights[env]*100:.1f}%)")
+
+    def __iter__(self):
+        # Create shuffled copies of indices for each environment
+        env_indices_shuffled = {}
+        for env, indices in self.env_to_indices.items():
+            shuffled = indices.copy()
+            if self.generator is not None:
+                # Use generator for reproducibility
+                perm = torch.randperm(len(shuffled), generator=self.generator).tolist()
+            else:
+                perm = torch.randperm(len(shuffled)).tolist()
+            env_indices_shuffled[env] = [shuffled[i] for i in perm]
+
+        # Track position in each env's shuffled list
+        env_positions = {env: 0 for env in self.env_classes}
+
+        # Calculate number of complete batches we can form
+        # Each batch consumes batch_size samples total. We need at least min_samples_per_env from each env.
+        # The limiting factor is the smallest env - it determines how many batches we can form.
+        # We use a conservative estimate: total_samples / batch_size, but limited by smallest env.
+        min_batches_per_env = [len(indices) // self.min_samples_per_env for indices in self.env_to_indices.values()]
+        num_batches = min(min_batches_per_env)
+
+        # Further limit by total available samples / batch_size to avoid over-consuming
+        total_samples = sum(len(indices) for indices in self.env_to_indices.values())
+        num_batches = min(num_batches, total_samples // self.batch_size)
+
+        for batch_idx in range(num_batches):
+            batch_indices = []
+
+            # Step 1: Add minimum samples from each environment
+            for env in self.env_classes:
+                available = len(env_indices_shuffled[env]) - env_positions[env]
+                samples_to_take = min(self.min_samples_per_env, available)
+                for _ in range(samples_to_take):
+                    idx = env_indices_shuffled[env][env_positions[env]]
+                    batch_indices.append(idx)
+                    env_positions[env] += 1
+
+            # Step 2: Fill remaining slots proportionally
+            remaining_slots = self.batch_size - len(batch_indices)
+            if remaining_slots > 0:
+                # Weighted sampling for remaining slots
+                # Collect available indices from all envs (those not yet used in this epoch)
+                available_by_env = {env: env_indices_shuffled[env][env_positions[env] :] for env in self.env_classes}
+
+                # Sample proportionally
+                for _ in range(remaining_slots):
+                    # Find envs that still have samples
+                    envs_with_samples = [env for env, avail in available_by_env.items() if avail]
+                    if not envs_with_samples:
+                        break
+
+                    # Weight by original proportions (normalized to available envs)
+                    weights = [self.env_weights[env] for env in envs_with_samples]
+                    total_weight = sum(weights)
+                    weights = [w / total_weight for w in weights]
+
+                    # Sample an env
+                    if self.generator is not None:
+                        rand_val = torch.rand(1, generator=self.generator).item()
+                    else:
+                        rand_val = torch.rand(1).item()
+
+                    cumsum = 0
+                    chosen_env = envs_with_samples[-1]
+                    for env, w in zip(envs_with_samples, weights):
+                        cumsum += w
+                        if rand_val < cumsum:
+                            chosen_env = env
+                            break
+
+                    # Take next sample from chosen env
+                    idx = available_by_env[chosen_env].pop(0)
+                    batch_indices.append(idx)
+                    env_positions[chosen_env] += 1
+
+            # Shuffle the batch to avoid predictable ordering
+            if self.generator is not None:
+                perm = torch.randperm(len(batch_indices), generator=self.generator).tolist()
+            else:
+                perm = torch.randperm(len(batch_indices)).tolist()
+            batch_indices = [batch_indices[i] for i in perm]
+
+            yield from batch_indices
+
+    def __len__(self):
+        # Number of samples yielded per epoch
+        min_batches_per_env = [len(indices) // self.min_samples_per_env for indices in self.env_to_indices.values()]
+        num_batches = min(min_batches_per_env)
+        # Also limit by total samples / batch_size
+        total_samples = sum(len(indices) for indices in self.env_to_indices.values())
+        num_batches = min(num_batches, total_samples // self.batch_size)
+        return num_batches * self.batch_size
+
+
 def build_dataloader(
     cfg: DictConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
 ) -> StatefulDataLoader:
@@ -707,16 +862,46 @@ def build_dataloader(
     seeded_generator = torch.Generator()
     seeded_generator.manual_seed(cfg.trainer.seed)
 
-    dataloader = StatefulDataLoader(
-        dataset,
-        batch_size=batch_size if not is_fully_async else 1,
-        shuffle=True if is_train else False,
-        collate_fn=dataset.collate_fn,
-        # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
-        drop_last=True if is_train else False,
-        generator=seeded_generator,
+    # Check if we should use hybrid env sampling for training
+    # Requires dataset to have dataframe and env_class_key attributes (like PromptDataset)
+    use_hybrid_sampling = (
+        is_train
+        and not is_fully_async
+        and getattr(cfg.trainer, "use_hybrid_env_sampling", False)
+        and hasattr(dataset, "dataframe")
+        and hasattr(dataset, "env_class_key")
     )
+
+    if use_hybrid_sampling:
+        min_samples_per_env = getattr(cfg.trainer, "min_samples_per_env", 1)
+        sampler = HybridEnvSampler(
+            dataset=dataset,
+            batch_size=batch_size,
+            min_samples_per_env=min_samples_per_env,
+            generator=seeded_generator,
+            drop_last=True,
+        )
+        dataloader = StatefulDataLoader(
+            dataset,
+            batch_size=None,  # Sampler yields individual indices
+            batch_sampler=None,
+            sampler=sampler,
+            collate_fn=dataset.collate_fn,
+            num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        )
+        logger.info(f"Using HybridEnvSampler for training with min_samples_per_env={min_samples_per_env}")
+    else:
+        dataloader = StatefulDataLoader(
+            dataset,
+            batch_size=batch_size if not is_fully_async else 1,
+            shuffle=True if is_train else False,
+            collate_fn=dataset.collate_fn,
+            # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
+            num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+            drop_last=True if is_train else False,
+            generator=seeded_generator,
+        )
+
     if is_train:
         if not is_fully_async:
             logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
