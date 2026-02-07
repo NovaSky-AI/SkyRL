@@ -1,0 +1,10 @@
+{
+  "title": "Tinker Integration",
+  "pages": [
+    "overview",
+    "quickstart",
+    "architecture",
+    "cookbook",
+    "limitations"
+  ]
+}

@@ -1,0 +1,151 @@
+---
+title: "Architecture"
+---
+
+This page describes how SkyRL implements the Tinker API, including the system architecture, training and sampling request lifecycles, and concurrency model.
+
+## System Architecture
+
+The integration is organized in three high-level layers:
+
+1. **API Layer** (`tx.tinker.api`) - FastAPI HTTP server that accepts Tinker API requests, stores them in a database, and returns future IDs for async polling
+2. **Engine Layer** (`tx.tinker.engine`) - Background subprocess that polls the database, batches pending requests, and dispatches them to the backend
+3. **Backend Layer** (`tx.tinker.backends.skyrl_train` and `skyrl-train` core library) - Translates Tinker operations into SkyRL-Train calls, managing Ray workers, training, and inference
+
+## Model Creation
+
+The Tinker call `create_lora_training_client()` triggers the full initialization of the SkyRL backend, spinning up training and inference workers, loading the base model (optionally with LoRA adaptors), and initializing weight sync state like NCCL transfer channels
+
+## Training
+
+Training requests (`forward_backward`, `optim_step`, `forward`) go through the following lifecycle:
+
+```
+Client (tinker SDK)
+    │
+    ▼
+API Server (FastAPI)
+    │  Writes request to SQLite DB
+    ▼
+Background Engine (subprocess)
+    │  Polls DB, batches requests
+    ▼
+SkyRL-Train Backend
+    │  Converts Tinker batch → SkyRL TrainingInputBatch
+    ▼
+RayPPOTrainer.dispatch
+    │  Distributes work across Ray workers
+    ▼
+GPU Workers (FSDP2 or Megatron)
+    │  Execute forward/backward/optim
+    ▼
+Results aggregated → DB updated → Client polls future
+```
+
+### `forward_backward()`
+
+Calls `trainer.dispatch.forward_backward("policy", batch, loss_fn=loss_fn)` which distributes computation across FSDP2/Megatron workers. The dispatch returns:
+
+- `loss_fn_outputs`: Per-example dicts containing `logprobs` and `elementwise_loss`
+- Aggregate metrics: `loss`, `policy_loss`, `policy_entropy`, `response_length`
+
+### `forward()`
+
+Calls `trainer.dispatch.forward("policy", batch)` for a gradient-free forward pass. Returns only `logprobs` per example (no loss computation). 
+
+### `optim_step()`
+
+Calls `dispatch.optim_step("policy")` to apply accumulated gradients.
+
+## Sampling
+
+Sampling requests (`sample`) go through the following lifecycle:
+
+```
+Client calls sample()
+    │
+    ▼
+SkyRL-Train Backend
+    │  Converts Tinker SamplingParams → vLLM params
+    ▼
+InferenceEngineClient
+    │  Distributes prompts across vLLM engines
+    ▼
+Inference Workers (vLLM)
+    │  Generate tokens with logprobs
+    ▼
+Results aggregated → GeneratedSequence objects returned
+```
+
+The `sample()` call is a fairly lightweight wrapper around SkyRL-Train's vLLM inference engines. The backend translates Tinker `SamplingParams` to vLLM format (e.g., `stop_strings` → `stop`, `stop_tokens` → `stop_token_ids`) and delegates prompts to the `InferenceEngineClient`, which handles load balancing and sticky routing across vLLM workers. 
+
+
+## Weight Sync
+
+Training workers and inference engines hold separate copies of the model weights. After training updates the policy, the client must explicitly call `save_weights_for_sampler()` to broadcast the new weights to the inference engines before sampling. Multiple training steps (forward_backward + optim_step) can accumulate before a single sync.
+
+```
+Client calls save_weights_for_sampler()
+    │
+    ▼
+SkyRL-Train Backend
+    │
+    ▼
+RayPPOTrainer.dispatch.save_weights_for_sampler()
+    │  NCCL broadcast
+    ▼
+Training Workers ──→ Inference Engines (vLLM)
+    (source weights)     (receive updated weights)
+```
+
+### Weight Sync Modes: Transient vs Persistent
+
+The weight sync mode is determined implicitly by the Tinker client's request parameters:
+
+- **Transient** (hot path in RL loops): The client provides a `sampling_session_seq_id`, signaling that the weights are ephemera and should not be checkpointed before transferring to sampling engines. The HuggingFace model export to disk is skipped entirely — only a lightweight empty tar marker is written for bookkeeping.
+- **Persistent**: When no `sampling_session_seq_id` is provided, the backend performs both the trainer-to-sampler weight sync and a full HuggingFace model export to disk. This is slower but produces a checkpoint that can be loaded independently.
+
+In typical RL training loops (e.g., tinker-cookbook's `rl_loop`), every iteration calls `save_weights_for_sampler()` in transient mode before sampling. 
+
+### Single Model Constraint
+
+SkyRL currently supports only one copy of sampling model weights at a time. This differs from Thinking Machines' hosted service that supports arbitrarily many sampling clients attached to various sampling model weights. In SkyRL, after a weight sync, all subsequent `sample()` calls automatically use the updated weights.
+
+## Checkpointing
+
+The backend supports two checkpoint types:
+
+- **Full checkpoint** (`save_checkpoint` / `load_checkpoint`): Saves model weights, optimizer state, and LR scheduler as an uncompressed tar archive. Used for resuming training.
+- **Sampler checkpoint** (`save_weights_for_sampler`): Syncs weights to inference engines. When `persist=True`, also exports a HuggingFace model to disk. 
+
+## Loss Functions
+
+The following loss functions are validated through the Tinker API:
+
+| Loss Function | Description | Use Case |
+|--------------|-------------|----------|
+| `cross_entropy` | Standard next-token prediction loss | Supervised fine-tuning |
+| `importance_sampling` | Off-policy policy gradient: `-(exp(logp - old_logp) * advantage)` | RL training (GRPO, REINFORCE) |
+
+SkyRL-Train's `PolicyLossRegistry` also contains additional loss functions (`regular`, `dual_clip`, `gspo`, `sapo`, `cispo`, `clip_cov`, `kl_cov`) used by SkyRL's native trainer. These are not yet wired through the Tinker data conversion path, which does not currently populate the required `advantages` and `old_log_probs` fields in the training batch for these loss types.
+
+## Concurrency Model
+
+The Tinker API is inherently asynchronous:
+
+1. Clients submit requests and receive a `request_id` (future)
+2. The background engine batches compatible requests (e.g., multiple `forward_backward` calls for the same model)
+3. Barrier operations (`optim_step`, `load_checkpoint`) block until prior operations complete
+4. Clients poll `retrieve_future` to get results
+
+This design allows the engine to batch small requests for better GPU utilization and to pipeline operations when possible.
+
+## Batching
+
+Tinker represents training data as `Datum` objects with a `ModelInput` (containing one or more `EncodedTextChunk`s of token IDs) and `loss_fn_inputs` (a flexible dictionary of `TensorData` fields whose keys vary by loss function — e.g., `target_tokens` and `weights` for SFT, or `target_tokens`, `logprobs`, `advantages`, and `mask` for RL). The backend converts these to SkyRL's `TrainingInputBatch` format:
+
+- **Left-pads** sequences to uniform length (SkyRL-Train expects padded tensors)
+- **Shifts** tokens: Tinker pre-shifts inputs/targets, but SkyRL-Train shifts internally, so the backend appends the last target token to reconstruct full sequences
+- Builds `attention_mask`, `loss_mask`, and `response_mask` tensors from token weights
+
+There is currently a limitation that batch size must be divisible by the data parallelism size (number of GPUs). The engine layer handles batching multiple client requests together before passing them to the backend.

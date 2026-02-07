@@ -1,0 +1,105 @@
+---
+title: "Quickstart"
+---
+
+This guide walks you through starting a Tinker API server using the SkyRL backend, and running a training script against it.
+
+If you run into any issues, please [open an issue](https://github.com/NovaSky-AI/SkyRL/issues/new) or [message us on Slack](https://join.slack.com/t/skyrl/shared_invite/zt-3f6ncn5b8-QawzK3uks6ka3KWoLwsi5Q).
+
+## Prerequisites
+
+- CUDA 12.8
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/) package manager
+
+## 1. Clone and Install SkyRL
+
+```bash
+git clone https://github.com/NovaSky-AI/SkyRL.git
+cd SkyRL/skyrl-tx
+uv sync --extra tinker --extra skyrl_train
+```
+
+## 2. Start the Tinker Server
+
+The server hosts the Tinker API and manages a background engine that processes training requests.
+
+```bash
+cd SkyRL/skyrl-tx
+
+uv run --extra tinker --extra skyrl_train -m tx.tinker.api \
+    --base-model "Qwen/Qwen3-0.6B" \
+    --backend skyrl_train
+```
+
+This will:
+1. Start the FastAPI server on port 8000
+2. Initialize the training workers
+3. Load the base model and set up inference engines 
+
+The server is ready when you see `Uvicorn running on http://0.0.0.0:8000`.
+
+### Server Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--base-model` | (required) | HuggingFace model name or path |
+| `--backend` | (required) | Backend type (`skyrl_train`) |
+| `--port` | 8000 | API server port |
+| `--checkpoints-base` | `/tmp/tx_checkpoints` | Directory for checkpoint storage |
+| `--database-url` | `sqlite:///tinker.db` | Database URL for request tracking |
+
+## 3. Install the Tinker Client
+
+In a separate terminal, install the Tinker Python client:
+
+```bash
+pip install tinker
+```
+
+## 4. Run a Supervised Fine-Tuning Script
+
+Here's a minimal SFT training loop using the Tinker API:
+
+```python
+import tinker
+
+# Connect to the SkyRL server
+service = tinker.ServiceClient(base_url="http://localhost:8000")
+
+# Create a LoRA training client
+training = service.create_lora_training_client(
+    base_model="Qwen/Qwen3-0.6B",
+    rank=8,
+)
+
+# Prepare a training datum
+datum = tinker.types.Datum(
+    model_input=tinker.types.ModelInput(
+        chunks=[tinker.types.EncodedTextChunk(tokens=[1, 2, 3, 4, 5])]
+    ),
+    loss_fn_inputs={
+        "target_tokens": tinker.types.TensorData(data=[2, 3, 4, 5, 0]),
+        "weights": tinker.types.TensorData(data=[1.0, 1.0, 1.0, 1.0, 1.0]),
+    },
+)
+
+# Training step
+fwd_bwd = training.forward_backward([datum], loss_fn="cross_entropy")
+result = fwd_bwd.result()
+print(f"Loss fn outputs: {len(result.loss_fn_outputs)}")
+print(f"Metrics: {result.metrics}")
+
+# Optimizer step
+adam = tinker.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-8)
+optim_result = training.optim_step(adam).result()
+print(f"Grad norm: {optim_result.metrics.get('grad_norm')}")
+```
+
+Congratulations! You've run your first Tinker training script on SkyRL.
+
+## 5. Run a Cookbook Recipe
+
+In general, **zero** code changes are required to execute [tinker-cookbook](https://github.com/ThinkingMachinesLab/tinker-cookbook) scripts on SkyRL. Simply update the `base_url` of the `ServiceClient` to point to the address and port of the local Tinker API server (e.g., `http://localhost:8000` above).
+
+See [Cookbook Scripts](./cookbook) for example commands and recipes that have been validated on SkyRL.
