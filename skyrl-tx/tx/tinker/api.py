@@ -304,7 +304,7 @@ class SampleRequest(BaseModel):
     model_path: str | None = None
     sampling_session_id: str | None = None
     seq_id: int | None = None
-    prompt_logprobs: bool | None = None
+    prompt_logprobs: bool = False
     topk_prompt_logprobs: int = 0
     type: Literal["sample"] = "sample"
 
