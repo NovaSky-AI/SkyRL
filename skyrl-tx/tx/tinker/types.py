@@ -119,6 +119,7 @@ class Datum(BaseModel):
 class ForwardBackwardInput(BaseModel):
     data: list[Datum]
     loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
+    loss_fn_config: dict[str, float] | None = None
 
 
 class ForwardBackwardOutput(BaseModel):
@@ -233,6 +234,9 @@ class PreparedModelPassBatch(BaseModel):
     # Per-example scalars
     all_model_ids: list[str]
     all_loss_fn_types: list[int]
+
+    # Batch-level config
+    loss_fn_config: dict[str, float] | None = None
 
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
     request_batch_slices: list[tuple[str, str, int, int]]

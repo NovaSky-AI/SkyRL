@@ -103,9 +103,12 @@ def prepare_model_pass_batch(
     all_advantages = []
     all_loss_fn_types = []
     request_batch_slices = []
+    loss_fn_config = None
 
     for request_id, (model_id, request_data) in requests.items():
         loss_fn_type = LOSS_TYPES[request_data.loss_fn]
+        if loss_fn_config is None and request_data.loss_fn_config is not None:
+            loss_fn_config = request_data.loss_fn_config
 
         request_start = len(all_input_ids)
         for item in request_data.data:
@@ -129,6 +132,7 @@ def prepare_model_pass_batch(
         all_advantages=all_advantages,
         all_model_ids=all_model_ids,
         all_loss_fn_types=all_loss_fn_types,
+        loss_fn_config=loss_fn_config,
         request_batch_slices=request_batch_slices,
     )
 

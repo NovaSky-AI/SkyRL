@@ -260,7 +260,9 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         batch = self._to_training_batch(prepared_batch)
-        data = self._trainer.dispatch.forward_backward("policy", batch, loss_fn=loss_fn)
+        data = self._trainer.dispatch.forward_backward(
+            "policy", batch, loss_fn=loss_fn, loss_fn_config=prepared_batch.loss_fn_config,
+        )
 
         metrics = self._extract_metrics(data)
 
