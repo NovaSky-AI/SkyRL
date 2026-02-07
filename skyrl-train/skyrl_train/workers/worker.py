@@ -876,12 +876,28 @@ class PolicyWorkerBase(Worker):
             loss = policy_loss + kl_loss_term - entropy_loss_term
             self.strategy.backward(loss, self.model, self.optimizer)
 
+            # Build per-sequence loss_fn_outputs with logprobs for the Tinker API.
+            batch_size = action_log_probs.shape[0]
+            loss_fn_outputs = []
+            for i in range(batch_size):
+                if action_mask is not None:
+                    valid_len = int(action_mask[i].sum().item())
+                elif loss_mask is not None:
+                    valid_len = int(loss_mask[i].sum().item())
+                else:
+                    valid_len = action_log_probs.shape[1]
+                start = max(action_log_probs.shape[1] - valid_len, 0)
+                loss_fn_outputs.append({
+                    "logprobs": action_log_probs[i, start:].detach().cpu().tolist(),
+                })
+
             status = {
                 "final_loss": loss.item(),
                 "policy_loss": policy_loss.item(),
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
+                "loss_fn_outputs": loss_fn_outputs,
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
