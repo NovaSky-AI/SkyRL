@@ -209,15 +209,15 @@ class JaxBackendImpl(AbstractBackend):
 
         if config.train_micro_batch_size <= 0:
             logger.warning(
-                "train_micro_batch_size is not set. This can lead to OOMs. "
-                "Consider setting train_micro_batch_size to limit memory usage during training. "
+                '"train_micro_batch_size" is not set. This can lead to OOMs. '
+                'Consider setting "train_micro_batch_size" via --backend-config to limit memory usage during training. '
                 "In the future, we plan to add a heuristic to set this automatically: "
                 "https://github.com/NovaSky-AI/SkyRL/issues/1048"
             )
         if config.sample_max_num_sequences <= 0:
             logger.warning(
-                "sample_max_num_sequences is not set. This can lead to OOMs. "
-                "Consider setting sample_max_num_sequences to limit memory usage during sampling. "
+                '"sample_max_num_sequences" is not set. This can lead to OOMs. '
+                'Consider setting "sample_max_num_sequences" via --backend-config to limit memory usage during sampling. '
                 "In the future, we plan to add a heuristic to set this automatically: "
                 "https://github.com/NovaSky-AI/SkyRL/issues/1048"
             )
