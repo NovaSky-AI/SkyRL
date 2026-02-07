@@ -22,7 +22,6 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
 
 from skyrl_train.config import SkyRLConfig, AlgorithmConfig
@@ -646,7 +645,6 @@ class PolicyWorkerBase(Worker):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
-        self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
@@ -843,7 +841,7 @@ class PolicyWorkerBase(Worker):
             status = {
                 "loss": loss.item(),
                 "response_length": num_actions,
-                "lr": self.scheduler.get_last_lr()[0],
+                "lr": self.get_lr(),
                 "loss_fn_outputs": loss_fn_outputs,
             }
         else:
@@ -881,7 +879,7 @@ class PolicyWorkerBase(Worker):
                 "policy_loss": policy_loss.item(),
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
-                "policy_lr": self.scheduler.get_last_lr()[0],
+                "policy_lr": self.get_lr(),
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
@@ -914,7 +912,7 @@ class PolicyWorkerBase(Worker):
                     param.grad.mul_(scale)
 
         # Perform optimizer step (includes gradient clipping)
-        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, None, name="actor")
 
         # Reset counter for next accumulation cycle
         self._micro_batches_accumulated = 0
@@ -949,22 +947,20 @@ class PolicyWorkerBase(Worker):
         self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
-            scheduler=self.scheduler,
+            scheduler=None,
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
 
-    def load_checkpoint(
-        self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True
-    ):
+    def load_checkpoint(self, ckpt_dir: Path, load_optimizer_states: bool = True):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer if load_optimizer_states else None,
-            scheduler=self.scheduler if load_lr_scheduler_states else None,
+            scheduler=None,
             ckpt_dir=ckpt_dir,
             load_optimizer_states=load_optimizer_states,
-            load_lr_scheduler_states=load_lr_scheduler_states,
+            load_lr_scheduler_states=False,
         )
         return states
 
@@ -1007,7 +1003,6 @@ class CriticWorkerBase(Worker):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.model: nn.Module = None
-        self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
@@ -1105,7 +1100,7 @@ class CriticWorkerBase(Worker):
             "critic_loss": loss.item(),
             "values_mean": masked_mean(values, loss_mask).item(),
             "values_clipfrac": clipfrac,
-            "critic_lr": self.scheduler.get_last_lr()[0],
+            "critic_lr": self.get_lr(),
         }
 
         # All-reduce metrics across DP workers
@@ -1128,7 +1123,7 @@ class CriticWorkerBase(Worker):
                     param.grad.mul_(scale)
 
         # Perform optimizer step (includes gradient clipping)
-        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="critic")
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, None, name="critic")
 
         # Reset counter for next accumulation cycle
         self._micro_batches_accumulated = 0
@@ -1196,20 +1191,20 @@ class CriticWorkerBase(Worker):
         self.strategy.save_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
-            scheduler=self.scheduler,
+            scheduler=None,
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
         )
 
-    def load_checkpoint(self, ckpt_dir=None, load_optimizer_states=True, load_lr_scheduler_states=True):
+    def load_checkpoint(self, ckpt_dir=None, load_optimizer_states=True):
         _, states = self.strategy.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer if load_optimizer_states else None,
-            scheduler=self.scheduler if load_lr_scheduler_states else None,
+            scheduler=None,
             ckpt_dir=ckpt_dir,
             load_optimizer_states=load_optimizer_states,
-            load_lr_scheduler_states=load_lr_scheduler_states,
+            load_lr_scheduler_states=False,
         )
         return states
 

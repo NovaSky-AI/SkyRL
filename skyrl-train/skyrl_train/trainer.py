@@ -1342,7 +1342,6 @@ class RayPPOTrainer:
             "policy",
             policy_ckpt_dir,
             load_optimizer_states=True,
-            load_lr_scheduler_states=True,
         )
         logger.info("Successfully loaded policy checkpoint")
 
@@ -1353,7 +1352,6 @@ class RayPPOTrainer:
                 "critic",
                 critic_ckpt_dir,
                 load_optimizer_states=True,
-                load_lr_scheduler_states=True,
             )
             logger.info("Successfully loaded critic checkpoint")
 
