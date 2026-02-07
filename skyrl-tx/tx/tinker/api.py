@@ -387,7 +387,7 @@ class SampleRequest(BaseModel):
     model_path: str | None = None
     sampling_session_id: str | None = None
     seq_id: int | None = None
-    prompt_logprobs: bool = False
+    prompt_logprobs: bool | None = None
     topk_prompt_logprobs: int = 0
     type: Literal["sample"] = "sample"
 
@@ -882,7 +882,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
-            prompt_logprobs=request.prompt_logprobs,
+            prompt_logprobs=request.prompt_logprobs if request.prompt_logprobs is not None else False,
         ),
     )
 
