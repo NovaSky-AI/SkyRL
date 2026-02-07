@@ -58,12 +58,9 @@ def prepare_sample_batch(
             all_prompts.append(prompt_tokens)
             # Derive a unique seed per sample so that num_samples > 1 produces
             # diverse sequences, matching vLLM's behavior (seed + index).
-            if sample_idx == 0:
-                sample_params = request_data.sampling_params
-            else:
-                sample_params = request_data.sampling_params.model_copy(
-                    update={"seed": request_data.sampling_params.seed + sample_idx}
-                )
+            sample_params = request_data.sampling_params.model_copy(
+                update={"seed": request_data.sampling_params.seed + sample_idx}
+            )
             all_sampling_params.append(sample_params)
             all_model_ids.append(model_id)
             all_checkpoint_ids.append(request_data.checkpoint_id)
