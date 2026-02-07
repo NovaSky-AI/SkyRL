@@ -184,6 +184,7 @@ class SkyRLTrainBackend(AbstractBackend):
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:
             raise ValueError(f"Model {model_id} not found")
+        # TODO: For now, prefer shutting down the backend and re-launching. Will be improved shortly.
         raise NotImplementedError("Deleting models not yet implemented")
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
@@ -295,7 +296,38 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        raise NotImplementedError("Forward-only pass not supported")
+        if not prepared_batch.all_input_ids:
+            return {}
+
+        batch = self._to_training_batch(prepared_batch)
+        data = self._trainer.dispatch.forward("policy", batch)
+
+        # dispatch.forward() returns TrainingOutputBatch({"output": tensor[batch, max_response_len]})
+        output_logprobs = data["output"]
+
+        results = {}
+        for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
+            loss_fn_outputs = []
+            for i in range(start_idx, end_idx):
+                # Use token weights length to determine each example's actual response length
+                valid_len = len(prepared_batch.all_token_weights[i])
+                start = max(output_logprobs.shape[1] - valid_len, 0)
+                logprobs = output_logprobs[i, start:].tolist()
+                loss_fn_outputs.append(
+                    {
+                        "logprobs": {
+                            "data": logprobs,
+                            "dtype": "float32",
+                            "shape": [len(logprobs)],
+                        },
+                    }
+                )
+            results[request_id] = types.ForwardBackwardOutput(
+                loss_fn_output_type="scalar",
+                loss_fn_outputs=loss_fn_outputs,
+                metrics={},
+            )
+        return results
 
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         if model_id != self._model_id:
