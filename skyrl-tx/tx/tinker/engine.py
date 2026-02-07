@@ -54,9 +54,17 @@ def prepare_sample_batch(
             checkpoint_path = str(
                 checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
             )
-        for _ in range(request_data.num_samples):
+        for sample_idx in range(request_data.num_samples):
             all_prompts.append(prompt_tokens)
-            all_sampling_params.append(request_data.sampling_params)
+            # Derive a unique seed per sample so that num_samples > 1 produces
+            # diverse sequences, matching vLLM's behavior (seed + index).
+            if sample_idx == 0:
+                sample_params = request_data.sampling_params
+            else:
+                sample_params = request_data.sampling_params.model_copy(
+                    update={"seed": request_data.sampling_params.seed + sample_idx}
+                )
+            all_sampling_params.append(sample_params)
             all_model_ids.append(model_id)
             all_checkpoint_ids.append(request_data.checkpoint_id)
             all_checkpoint_paths.append(checkpoint_path)
