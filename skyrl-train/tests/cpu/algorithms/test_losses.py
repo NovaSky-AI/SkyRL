@@ -623,36 +623,78 @@ def test_sapo_policy_loss_basic():
     "name, dppo_type, delta_low, delta_high, old_lp, new_lp, advs, rollout_lp, expect_mask, expect_clip_gt_zero",
     [
         (
-            "tv_pos_adv_masked", "binary_tv", 0.2, 0.2,
-            [[-1.0, -1.0, -1.0]], [[-0.3, -2.0, -0.9]], [[1.0, -1.0, 1.0]],
-            None, [[0.0, 0.0, 1.0]], True,
+            "tv_pos_adv_masked",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0, -1.0]],
+            [[-0.3, -2.0, -0.9]],
+            [[1.0, -1.0, 1.0]],
+            None,
+            [[0.0, 0.0, 1.0]],
+            True,
         ),
         (
-            "tv_wrong_direction_not_masked", "binary_tv", 0.2, 0.2,
-            [[-1.0, -1.0]], [[-2.0, -0.3]], [[1.0, -1.0]],
-            None, [[1.0, 1.0]], False,
+            "tv_wrong_direction_not_masked",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0]],
+            [[-2.0, -0.3]],
+            [[1.0, -1.0]],
+            None,
+            [[1.0, 1.0]],
+            False,
         ),
         (
-            "tv_uses_rollout_logprobs", "binary_tv", 0.2, 0.2,
-            [[-1.0, -1.0]], [[-0.3, -0.95]], [[1.0, 1.0]],
-            [[-0.35, -1.0]], None, None,
+            "tv_uses_rollout_logprobs",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0]],
+            [[-0.3, -0.95]],
+            [[1.0, 1.0]],
+            [[-0.35, -1.0]],
+            None,
+            None,
         ),
         (
-            "kl_masked", "binary_kl", 0.05, 0.05,
-            [[-1.0, -1.0]], [[-0.1, -0.95]], [[1.0, 1.0]],
-            None, None, True,
+            "kl_masked",
+            "binary_kl",
+            0.05,
+            0.05,
+            [[-1.0, -1.0]],
+            [[-0.1, -0.95]],
+            [[1.0, 1.0]],
+            None,
+            None,
+            True,
         ),
         (
-            "kl_no_masking_within_delta", "binary_kl", 0.5, 0.5,
-            [[-1.0, -1.0]], [[-1.01, -0.99]], [[1.0, -1.0]],
-            None, [[1.0, 1.0]], False,
+            "kl_no_masking_within_delta",
+            "binary_kl",
+            0.5,
+            0.5,
+            [[-1.0, -1.0]],
+            [[-1.01, -0.99]],
+            [[1.0, -1.0]],
+            None,
+            [[1.0, 1.0]],
+            False,
         ),
     ],
 )
 def test_dppo_policy_loss(
-    name, dppo_type, delta_low, delta_high,
-    old_lp, new_lp, advs, rollout_lp,
-    expect_mask, expect_clip_gt_zero,
+    name,
+    dppo_type,
+    delta_low,
+    delta_high,
+    old_lp,
+    new_lp,
+    advs,
+    rollout_lp,
+    expect_mask,
+    expect_clip_gt_zero,
 ):
     device = "cpu"
     old_log_probs = torch.tensor(old_lp, device=device)
@@ -672,20 +714,30 @@ def test_dppo_policy_loss(
 
     if name == "tv_uses_rollout_logprobs":
         loss_with, m1 = loss_fn(
-            log_probs=log_probs, old_log_probs=old_log_probs,
-            advantages=advantages, config=config, rollout_logprobs=rollout_logprobs,
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            config=config,
+            rollout_logprobs=rollout_logprobs,
         )
         loss_without, m2 = loss_fn(
-            log_probs=log_probs, old_log_probs=old_log_probs,
-            advantages=advantages, config=config, rollout_logprobs=None,
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            config=config,
+            rollout_logprobs=None,
         )
-        assert not torch.allclose(loss_with, loss_without), \
-            "rollout_logprobs should change the mask and therefore the loss"
+        assert not torch.allclose(
+            loss_with, loss_without
+        ), "rollout_logprobs should change the mask and therefore the loss"
         return
 
     loss, metrics = loss_fn(
-        log_probs=log_probs, old_log_probs=old_log_probs,
-        advantages=advantages, config=config, rollout_logprobs=rollout_logprobs,
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        rollout_logprobs=rollout_logprobs,
     )
 
     if expect_mask is not None:
