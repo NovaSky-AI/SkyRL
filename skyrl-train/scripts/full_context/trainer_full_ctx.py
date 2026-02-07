@@ -14,7 +14,7 @@ class FullCtxTrainer(RayPPOTrainer):
     This helps catch OOM issues early before running full training.
     """
 
-    def train(self):
+    async def train(self):
         """Run a few training steps with max sequence length."""
         logger.info("Starting dummy training with max sequence length...")
 
@@ -61,8 +61,8 @@ class FullCtxTrainer(RayPPOTrainer):
                 }
                 training_input = self.convert_to_training_input(dummy_generator_output, uids)
 
-                # Run forward pass
-                training_input = self.fwd_logprobs_values_reward(training_input)
+                with Timer("fwd_logprobs_values_reward", self.all_timings):
+                    training_input = self.fwd_logprobs_values_reward(training_input)
 
                 # 1.5 apply kl divergence penalty to rewards
                 if self.cfg.trainer.algorithm.use_kl_in_reward:

@@ -1,8 +1,8 @@
 """
 Test save_hf_model and load_hf_model functionality for different strategies.
 
-For FSDP and DeepSpeed, run with:
-uv run --isolated --extra dev --extra deepspeed -- pytest tests/gpu/test_save_load_model.py -m "not megatron"
+For FSDP and FSDP2, run with:
+uv run --isolated --extra dev -- pytest tests/gpu/test_save_load_model.py -m "not megatron"
 
 For Megatron, run with:
 uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_save_load_model.py -m "megatron"
@@ -10,33 +10,29 @@ uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_save_load_m
 
 import ray
 import pytest
-import hydra
 import torch
 import os
 import shutil
 import tempfile
-from omegaconf import DictConfig
 import json
 from transformers import AutoTokenizer
 
+from skyrl_train.config import SkyRLConfig
 from tests.gpu.utils import (
     init_worker_with_type,
-    make_dummy_experience,
+    make_dummy_training_batch,
     get_model_logits_from_actor,
     ray_init_for_tests,
-    validate_cfg,
 )
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.utils.utils import validate_cfg
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MODEL_ARCH = "Qwen3ForCausalLM"
 NUM_GPUS = 4
 
 
-def get_test_actor_config(strategy: str) -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+def get_test_actor_config(strategy: str) -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.strategy = strategy
@@ -54,28 +50,20 @@ def get_test_actor_config(strategy: str) -> DictConfig:
 def run_one_training_step(
     actor_group,
     strategy,
-    experience=None,
-    global_step=None,
-    local_step=None,
-    accumulation_steps=None,
+    data=None,
     megatron_batch=None,
 ):
-    if strategy == "megatron":
-        assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
-        return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
-    else:
-        assert experience is not None, f"{strategy} requires an Experience for training_step"
-        return ray.get(
-            actor_group.async_run_ray_method(
-                "pass_through", "training_step", experience, global_step, local_step, accumulation_steps
-            )
-        )
+    """Run forward_backward + optim_step to perform one training step."""
+    # Unified interface for all strategies (megatron, fsdp, fsdp2)
+    batch = megatron_batch if strategy == "megatron" else data
+    assert batch is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
+    ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
 @pytest.mark.parametrize(
     "strategy",
     [
-        "deepspeed",
         "fsdp",
         "fsdp2",
         pytest.param("megatron", marks=pytest.mark.megatron),
@@ -103,30 +91,23 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
         )
 
         # Prepare training input and run one training step
-        global_step, local_step, accumulation_steps = 0, 0, 1
+        dp_size = actor_group_1.actor_infos[0].rank.dp_size
         if "megatron" in strategy:
             from tests.gpu.test_megatron_worker import get_test_training_batch
 
-            dp_size = actor_group_1.actor_infos[0].rank.dp_size
             train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
             run_one_training_step(
                 actor_group_1,
                 strategy,
-                experience=None,
-                global_step=global_step,
-                local_step=local_step,
-                accumulation_steps=accumulation_steps,
+                data=None,
                 megatron_batch=train_batch_1,
             )
         else:
-            dummy_experience = make_dummy_experience()
+            dummy_batch = make_dummy_training_batch(batch_size=dp_size)
             run_one_training_step(
                 actor_group_1,
                 strategy,
-                experience=dummy_experience,
-                global_step=global_step,
-                local_step=local_step,
-                accumulation_steps=accumulation_steps,
+                data=dummy_batch,
                 megatron_batch=None,
             )
 

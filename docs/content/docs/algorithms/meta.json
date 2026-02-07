@@ -1,0 +1,8 @@
+{
+  "title": "Algorithms",
+  "pages": [
+    "dapo",
+    "off_policy_correction",
+    "custom_algorithms"
+  ]
+}

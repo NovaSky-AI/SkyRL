@@ -62,7 +62,7 @@ class EnvSpec:
         """Converts the environment spec into a json compatible string.
 
         Returns:
-            A jsonifyied string for the environment spec
+            A jsonified string for the environment spec
         """
         env_spec_dict = dataclasses.asdict(self)
         env_spec_dict.pop("name")

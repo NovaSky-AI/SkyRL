@@ -16,25 +16,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Union
 
+from omegaconf import DictConfig
 import torch
 from megatron.core.optimizer import OptimizerConfig
 from megatron.core.optimizer import get_megatron_optimizer as get_megatron_optimizer_native
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+from skyrl_train.config import OptimizerConfig as SkyRLOptimizerConfig
 
-def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict) -> OptimizerConfig:
+
+def init_megatron_optim_config(
+    optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict
+) -> OptimizerConfig:
     optim_args = {
-        "optimizer": optim_config.get("optimizer", "adam"),
-        "lr": optim_config.get("lr"),
-        "min_lr": optim_config.get("min_lr", 0.0),
-        "clip_grad": optim_config.get("max_grad_norm", 1.0),
-        "weight_decay": optim_config.get("weight_decay", 0.01),
+        "optimizer": getattr(optim_config, "optimizer", "adam"),
+        "lr": getattr(optim_config, "lr", 1e-6),
+        "min_lr": getattr(optim_config, "min_lr", 0.0),
+        "clip_grad": getattr(optim_config, "max_grad_norm", 1.0),
+        "weight_decay": getattr(optim_config, "weight_decay", 1e-2),
         "bf16": True,
         "params_dtype": torch.bfloat16,
         "use_distributed_optimizer": True,
     }
-
     optim_args.update(optimizer_config_kwargs)
 
     config = OptimizerConfig(**optim_args)
@@ -44,45 +49,39 @@ def init_megatron_optim_config(optim_config: dict, optimizer_config_kwargs: dict
 def get_megatron_optimizer(
     model,
     config: OptimizerConfig,
-    no_weight_decay_cond=None,
-    scale_lr_cond=None,
-    lr_mult=1.0,
 ):
     # Base optimizer.
     return get_megatron_optimizer_native(
         config=config,
         model_chunks=model,
-        no_weight_decay_cond=no_weight_decay_cond,
-        scale_lr_cond=scale_lr_cond,
-        lr_mult=lr_mult,
     )
 
 
 def get_megatron_optimizer_param_scheduler(
     optimizer,
-    config,
+    config: Union[SkyRLOptimizerConfig, DictConfig],
     num_training_steps: int = 1e9,  # default to a large number for constant lr/wd
 ):
     """
     Get the optimizer parameter scheduler for Megatron.
     """
     # TODO: support other schedulers for Megatron
-    if config.get("scheduler", "constant_with_warmup") != "constant_with_warmup":
+    if getattr(config, "scheduler", "constant_with_warmup") != "constant_with_warmup":
         raise ValueError("Only constant_with_warmup scheduler is supported for Megatron")
 
     lr_warmup_steps = config.num_warmup_steps
-    if config.get("lr_decay_steps", None) is None:
+    if getattr(config, "lr_decay_steps", None) is None:
         lr_decay_steps = num_training_steps
-    if config.get("lr_warmup_steps_ratio", None) is not None and (
-        config.get("lr_warmup_steps", None) is None or config.lr_warmup_steps <= 0
+    if getattr(config, "lr_warmup_steps_ratio", None) is not None and (
+        getattr(config, "lr_warmup_steps", None) is None or getattr(config, "lr_warmup_steps", None) <= 0
     ):
         lr_warmup_steps = int(config.lr_warmup_steps_ratio * lr_decay_steps)
 
     opt_param_scheduler = OptimizerParamScheduler(
         optimizer,
-        init_lr=config.get("lr_warmup_init", 0.0),
-        max_lr=config.lr,
-        min_lr=config.get("min_lr", 0.0),
+        init_lr=getattr(config, "lr_warmup_init", 0.0),
+        max_lr=getattr(config, "lr", 1e-6),
+        min_lr=getattr(config, "min_lr", 0.0),
         lr_warmup_steps=lr_warmup_steps,
         lr_decay_steps=lr_decay_steps,
         lr_decay_style="constant",

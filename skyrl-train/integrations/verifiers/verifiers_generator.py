@@ -1,23 +1,25 @@
-from typing import Optional
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from typing import Optional, Union
 from omegaconf import DictConfig
+from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from openai import AsyncOpenAI
 import httpx
 from verifiers import load_environment
-from verifiers.types import GenerateOutputs, ProcessedOutputs, GenerateInputs
+from verifiers.types import GenerateOutputs, ProcessedOutputs, RolloutInput
 from skyrl_train.generators.utils import get_rollout_metrics
+
+from skyrl_train.config import GeneratorConfig
 
 
 class VerifiersGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: DictConfig,
+        generator_cfg: Union[GeneratorConfig, DictConfig],
         tokenizer,
         model_name: str,
     ):
         """
         Args:
-            generator_cfg: DictConfig object containing the generator configuration
+            generator_cfg: GeneratorConfig object containing the generator configuration
             tokenizer: tokenizer object for encoding and decoding text
         """
         self.generator_cfg = generator_cfg
@@ -47,12 +49,17 @@ class VerifiersGenerator(GeneratorInterface):
 
         # Defaults are based on Verifiers' defaults.
         verifiers_dicts = [sample["verifiers"] for sample in input_batch["env_extras"]]
-        generate_inputs = GenerateInputs(
-            prompt=input_batch["prompts"],
-            answer=[item.get("answer", "") for item in verifiers_dicts],
-            info=[item.get("info", {}) for item in verifiers_dicts],
-            task=[item.get("task", "default") for item in verifiers_dicts],
-        )
+        rollout_inputs = []
+        for i, item in enumerate(verifiers_dicts):
+            rollout_inputs.append(
+                RolloutInput(
+                    prompt=input_batch["prompts"][i],
+                    answer=item.get("answer", ""),
+                    example_id=item["example_id"],
+                    info=item.get("info", {}),
+                    task=item.get("task", "default"),
+                )
+            )
 
         # Assumes all training samples correspond to the same Verifiers environment.
         # For now, if multiple environments are needed, use Verifiers' EnvGroup abstraction.
@@ -67,7 +74,7 @@ class VerifiersGenerator(GeneratorInterface):
             "return_tokens_as_token_ids": True,
         }
 
-        # Clean the sampling params for Verifiers' a_generate.
+        # Clean the sampling params for Verifiers' generate.
         extra_body_keys = [
             "min_tokens",
             "skip_special_tokens",
@@ -82,8 +89,8 @@ class VerifiersGenerator(GeneratorInterface):
                 del sampling_params[key]
 
         # Generate the trajectories.
-        generate_outputs: GenerateOutputs = await vf_env.a_generate(
-            inputs=generate_inputs,
+        generate_outputs: GenerateOutputs = await vf_env.generate(
+            inputs=rollout_inputs,
             client=self.client,
             model=self.model_name,
             sampling_args=sampling_params,

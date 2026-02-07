@@ -2,6 +2,7 @@
 uv run --extra dev --isolated pytest tests/cpu/generators/test_utils.py
 """
 
+import os
 import pytest
 from skyrl_train.generators.utils import (
     apply_overlong_filtering,
@@ -10,6 +11,26 @@ from skyrl_train.generators.utils import (
     get_generation_prompt_ids,
 )
 from transformers import AutoTokenizer
+
+
+# Path to the custom Qwen3 chat template that doesn't add empty thinking blocks
+QWEN3_ACC_THINKING_TEMPLATE_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "..",
+    "skyrl_train",
+    "utils",
+    "templates",
+    "qwen3_acc_thinking.jinja2",
+)
+
+
+@pytest.fixture
+def qwen3_acc_thinking_template():
+    """Load the qwen3_acc_thinking.jinja2 template."""
+    with open(QWEN3_ACC_THINKING_TEMPLATE_PATH, "r") as f:
+        return f.read()
 
 
 @pytest.mark.parametrize(
@@ -608,6 +629,12 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         # - `<|im_start|>assistant\n` is the generation prompt (mask 0)
         # - `b<|im_end|>` is the assistant generated content (mask 1)
         # - `\n` is after EOS (mask 0)
+        expected_response_str = "<|im_start|>assistant\nb<|im_end|>\n"
+        expected_response_ids = qwen_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen_tokenizer.decode(response_ids)}"
+
         generation_prompt_ids = get_generation_prompt_ids(qwen_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
 
@@ -626,6 +653,12 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         # - `<|start_header_id|>assistant<|end_header_id|>\n\n` is the generation prompt (mask 0)
         # - `b<|eot_id|>` is the assistant generated content (mask 1)
         # - No tokens after EOS for Llama
+        expected_response_str = "<|start_header_id|>assistant<|end_header_id|>\n\nb<|eot_id|>"
+        expected_response_ids = llama_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {llama_tokenizer.decode(response_ids)}"
+
         generation_prompt_ids = get_generation_prompt_ids(llama_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
 
@@ -640,6 +673,13 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ]
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen3_tokenizer)
+
+        # For Qwen3: `<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n`
+        expected_response_str = "<|im_start|>assistant\n" + thinking_content + "<|im_end|>\n"
+        expected_response_ids = qwen3_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen3_tokenizer.decode(response_ids)}"
 
         generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
@@ -664,6 +704,17 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ]
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen_tokenizer)
+
+        # For Qwen2.5 multi-turn.
+        expected_response_str = (
+            "<|im_start|>assistant\nb<|im_end|>\n"  # First assistant
+            "<|im_start|>user\n1<|im_end|>\n"  # User
+            "<|im_start|>assistant\nb<|im_end|>\n"  # Second assistant
+        )
+        expected_response_ids = qwen_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen_tokenizer.decode(response_ids)}"
 
         generation_prompt_ids = get_generation_prompt_ids(qwen_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
@@ -694,6 +745,17 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 
         response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, llama_tokenizer)
 
+        # For Llama multi-turn.
+        expected_response_str = (
+            "<|start_header_id|>assistant<|end_header_id|>\n\nb<|eot_id|>"  # First assistant
+            "<|start_header_id|>user<|end_header_id|>\n\n1<|eot_id|>"  # User
+            "<|start_header_id|>assistant<|end_header_id|>\n\nb<|eot_id|>"  # Second assistant
+        )
+        expected_response_ids = llama_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {llama_tokenizer.decode(response_ids)}"
+
         generation_prompt_ids = get_generation_prompt_ids(llama_tokenizer)
         gen_prompt_len = len(generation_prompt_ids)
 
@@ -709,50 +771,121 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 
         assert loss_mask == expected_loss_mask, f"Expected {expected_loss_mask}, got {loss_mask}"
 
-    def test_qwen3_multi_turn_exact_loss_mask(self, qwen3_tokenizer):
-        """Test exact loss mask for multi-turn conversation with Qwen3."""
+    @pytest.mark.parametrize("use_custom_template", [False, True], ids=["default_template", "custom_template"])
+    def test_qwen3_multi_turn_exact_loss_mask(self, qwen3_tokenizer, qwen3_acc_thinking_template, use_custom_template):
+        """Test exact loss mask for multi-turn conversation with Qwen3.
+
+        When using the default Qwen3 template, assistant messages without thinking content
+        get an empty thinking block added: <think>\n\n</think>\n\n
+
+        When using the qwen3_acc_thinking template, assistant messages are rendered as-is
+        without any added thinking block.
+        """
+        chat_template = qwen3_acc_thinking_template if use_custom_template else None
+
         messages = [
             {"role": "assistant", "content": "b"},
             {"role": "user", "content": "1"},
             {"role": "assistant", "content": "b"},
         ]
 
-        response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen3_tokenizer)
-
-        # Verify our assumptions about token structure
-        generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer)
-        assert len(generation_prompt_ids) == 3, "Qwen3 generation prompt should be 3 tokens: <|im_start|>assistant\\n"
-
-        user_msg_tokens = encode_messages_subset([{"role": "user", "content": "1"}], qwen3_tokenizer)
-        assert len(user_msg_tokens) == 6, "User message '1' should be 6 tokens: <|im_start|>user\\n1<|im_end|>\\n"
-
-        assistant_msg_tokens = encode_messages_subset([{"role": "assistant", "content": "b"}], qwen3_tokenizer)
-        # For Qwen3 with content "b": <|im_start|>assistant\n<think>\n\n</think>\n\nb<|im_end|>\n
-        # = 3 (gen prompt) + 6 (content with thinking + eos) + 1 (\n after eos) = 10 tokens
-        assert (
-            len(assistant_msg_tokens) == 10
-        ), f"Assistant message 'b' should be 10 tokens, got {len(assistant_msg_tokens)}"
-        assert assistant_msg_tokens[-2] == qwen3_tokenizer.eos_token_id, "Second to last token should be EOS"
-
-        # Expected loss mask:
-        # First assistant: [0,0,0] gen_prompt + [1,1,1,1,1,1] content+eos + [0] \n = 10 tokens
-        # User: [0,0,0,0,0,0] = 6 tokens
-        # Second assistant: [0,0,0] gen_prompt + [1,1,1,1,1,1] content+eos + [0] \n = 10 tokens
-        expected_loss_mask = (
-            [0, 0, 0]
-            + [1, 1, 1, 1, 1, 1]
-            + [0]  # first assistant (10 tokens)
-            + [0, 0, 0, 0, 0, 0]  # user (6 tokens)
-            + [0, 0, 0]
-            + [1, 1, 1, 1, 1, 1]
-            + [0]  # second assistant (10 tokens)
+        response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+            messages, qwen3_tokenizer, chat_template=chat_template
         )
 
-        assert len(expected_loss_mask) == 26, "Total should be 26 tokens"
+        if use_custom_template:
+            # With custom template: no empty thinking block added
+            expected_response_str = (
+                "<|im_start|>assistant\nb<|im_end|>\n"  # First assistant
+                "<|im_start|>user\n1<|im_end|>\n"  # User
+                "<|im_start|>assistant\nb<|im_end|>\n"  # Second assistant
+            )
+        else:
+            # With default template: Qwen3 adds empty thinking block for assistant messages
+            expected_response_str = (
+                "<|im_start|>assistant\n<think>\n\n</think>\n\nb<|im_end|>\n"  # First assistant
+                "<|im_start|>user\n1<|im_end|>\n"  # User
+                "<|im_start|>assistant\n<think>\n\n</think>\n\nb<|im_end|>\n"  # Second assistant
+            )
+
+        expected_response_ids = qwen3_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen3_tokenizer.decode(response_ids)}"
+
+        # Verify our assumptions about token structure
+        generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer, chat_template=chat_template)
+        assert len(generation_prompt_ids) == 3, "Qwen3 generation prompt should be 3 tokens: <|im_start|>assistant\\n"
+
+        user_msg_tokens = encode_messages_subset(
+            [{"role": "user", "content": "1"}], qwen3_tokenizer, chat_template=chat_template
+        )
+        assert len(user_msg_tokens) == 6, "User message '1' should be 6 tokens: <|im_start|>user\\n1<|im_end|>\\n"
+
+        assistant_msg_tokens = encode_messages_subset(
+            [{"role": "assistant", "content": "b"}], qwen3_tokenizer, chat_template=chat_template
+        )
+
+        if use_custom_template:
+            # With custom template: <|im_start|>assistant\nb<|im_end|>\n
+            # = 3 (gen prompt) + 2 (b + eos) + 1 (\n after eos) = 6 tokens
+            assert (
+                len(assistant_msg_tokens) == 6
+            ), f"Assistant message 'b' with custom template should be 6 tokens, got {len(assistant_msg_tokens)}"
+        else:
+            # With default template: <|im_start|>assistant\n<think>\n\n</think>\n\nb<|im_end|>\n
+            # = 3 (gen prompt) + 6 (content with thinking + eos) + 1 (\n after eos) = 10 tokens
+            assert (
+                len(assistant_msg_tokens) == 10
+            ), f"Assistant message 'b' with default template should be 10 tokens, got {len(assistant_msg_tokens)}"
+
+        assert assistant_msg_tokens[-2] == qwen3_tokenizer.eos_token_id, "Second to last token should be EOS"
+
+        if use_custom_template:
+            # Expected loss mask with custom template:
+            # First assistant: [0,0,0] gen_prompt + [1,1] (b + eos) + [0] \n = 6 tokens
+            # User: [0,0,0,0,0,0] = 6 tokens
+            # Second assistant: [0,0,0] gen_prompt + [1,1] (b + eos) + [0] \n = 6 tokens
+            expected_loss_mask = (
+                [0, 0, 0]
+                + [1, 1]
+                + [0]  # first assistant (6 tokens)
+                + [0, 0, 0, 0, 0, 0]  # user (6 tokens)
+                + [0, 0, 0]
+                + [1, 1]
+                + [0]  # second assistant (6 tokens)
+            )
+            assert len(expected_loss_mask) == 18, "Total should be 18 tokens"
+        else:
+            # Expected loss mask with default template:
+            # First assistant: [0,0,0] gen_prompt + [1,1,1,1,1,1] content+eos + [0] \n = 10 tokens
+            # User: [0,0,0,0,0,0] = 6 tokens
+            # Second assistant: [0,0,0] gen_prompt + [1,1,1,1,1,1] content+eos + [0] \n = 10 tokens
+            expected_loss_mask = (
+                [0, 0, 0]
+                + [1, 1, 1, 1, 1, 1]
+                + [0]  # first assistant (10 tokens)
+                + [0, 0, 0, 0, 0, 0]  # user (6 tokens)
+                + [0, 0, 0]
+                + [1, 1, 1, 1, 1, 1]
+                + [0]  # second assistant (10 tokens)
+            )
+            assert len(expected_loss_mask) == 26, "Total should be 26 tokens"
+
         assert loss_mask == expected_loss_mask, f"Expected {expected_loss_mask}, got {loss_mask}"
 
-    def test_qwen3_multi_turn_exact_loss_mask_with_thinking(self, qwen3_tokenizer):
-        """Test exact loss mask for multi-turn conversation with Qwen3 including thinking content."""
+    @pytest.mark.parametrize("use_custom_template", [False, True], ids=["default_template", "custom_template"])
+    def test_qwen3_multi_turn_exact_loss_mask_with_thinking(
+        self, qwen3_tokenizer, qwen3_acc_thinking_template, use_custom_template
+    ):
+        """Test exact loss mask for multi-turn conversation with Qwen3 including thinking content.
+
+        Both templates should produce the same result since the thinking content is already
+        in the message content. The qwen3_acc_thinking template just preserves it as-is,
+        and the default template also keeps it since it's already there.
+        """
+        chat_template = qwen3_acc_thinking_template if use_custom_template else None
+
         thinking_content = THINKING_CONTENT + "b"  # <think>\nmock thinking\n</think>\n\nb
         messages = [
             {"role": "assistant", "content": thinking_content},
@@ -760,17 +893,32 @@ class TestGetResponseIdsAndLossMaskFromMessages:
             {"role": "assistant", "content": thinking_content},
         ]
 
-        response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(messages, qwen3_tokenizer)
+        response_ids, loss_mask, _ = get_response_ids_and_loss_mask_from_messages(
+            messages, qwen3_tokenizer, chat_template=chat_template
+        )
+
+        # For Qwen3 multi-turn with thinking - both templates produce the same result
+        expected_response_str = (
+            "<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n"  # First assistant
+            "<|im_start|>user\n1<|im_end|>\n"  # User
+            "<|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n"  # Second assistant
+        )
+        expected_response_ids = qwen3_tokenizer.encode(expected_response_str, add_special_tokens=False)
+        assert (
+            response_ids == expected_response_ids
+        ), f"Expected response_ids for '{expected_response_str}', got {qwen3_tokenizer.decode(response_ids)}"
 
         # Verify our assumptions about token structure
-        generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer)
+        generation_prompt_ids = get_generation_prompt_ids(qwen3_tokenizer, chat_template=chat_template)
         assert len(generation_prompt_ids) == 3, "Qwen3 generation prompt should be 3 tokens"
 
-        user_msg_tokens = encode_messages_subset([{"role": "user", "content": "1"}], qwen3_tokenizer)
+        user_msg_tokens = encode_messages_subset(
+            [{"role": "user", "content": "1"}], qwen3_tokenizer, chat_template=chat_template
+        )
         assert len(user_msg_tokens) == 6, "User message '1' should be 6 tokens"
 
         assistant_msg_tokens = encode_messages_subset(
-            [{"role": "assistant", "content": thinking_content}], qwen3_tokenizer
+            [{"role": "assistant", "content": thinking_content}], qwen3_tokenizer, chat_template=chat_template
         )
         # For Qwen3 with thinking_content "<think>\nmock thinking\n</think>\n\nb":
         # <|im_start|>assistant\n<think>\nmock thinking\n</think>\n\nb<|im_end|>\n
@@ -780,7 +928,7 @@ class TestGetResponseIdsAndLossMaskFromMessages:
         ), f"Assistant message with thinking should be 13 tokens, got {len(assistant_msg_tokens)}"
         assert assistant_msg_tokens[-2] == qwen3_tokenizer.eos_token_id, "Second to last token should be EOS"
 
-        # Expected loss mask:
+        # Expected loss mask (same for both templates when thinking is present):
         # First assistant: [0,0,0] gen_prompt + [1]*9 content+eos + [0] \n = 13 tokens
         # User: [0]*6 = 6 tokens
         # Second assistant: [0,0,0] gen_prompt + [1]*9 content+eos + [0] \n = 13 tokens
@@ -796,3 +944,83 @@ class TestGetResponseIdsAndLossMaskFromMessages:
 
         assert len(expected_loss_mask) == 32, "Total should be 32 tokens"
         assert loss_mask == expected_loss_mask, f"Expected {expected_loss_mask}, got {loss_mask}"
+
+
+# ============================================================================
+# Tests for custom chat template support
+# ============================================================================
+
+
+class TestCustomChatTemplateSupport:
+    """Tests for custom chat_template parameter in get_generation_prompt_ids and encode_messages_subset."""
+
+    def test_custom_template_produces_different_output(self, qwen3_tokenizer):
+        """Test that custom template produces meaningfully different output from default.
+
+        Compares the default Qwen3 template against a simple custom template.
+        - Default Qwen3 template: uses <|im_start|>assistant\\n format, adds empty thinking block
+        - Custom template: uses <|im_start|>assistant\\n[test] format, no thinking block
+
+        Tests both encode_messages_subset() and get_generation_prompt_ids().
+        """
+        # Simple custom template similar to Qwen3 but with [test] prefix and no thinking block
+        simple_custom_template = (
+            "{%- for message in messages %}"
+            "{%- if message['role'] == 'user' %}"
+            "{{ '<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n' }}"
+            "{%- elif message['role'] == 'assistant' %}"
+            "{{ '<|im_start|>assistant\\n[test]' + message['content'] + '<|im_end|>\\n' }}"
+            "{%- elif message['role'] == 'system' %}"
+            "{{ '<|im_start|>system\\n' + message['content'] + '<|im_end|>\\n' }}"
+            "{%- endif %}"
+            "{%- endfor %}"
+            "{%- if add_generation_prompt %}"
+            "{{ '<|im_start|>assistant\\n[test]' }}"
+            "{%- endif %}"
+        )
+
+        messages = [{"role": "assistant", "content": "Hello"}]
+
+        # ---- Test encode_messages_subset() ----
+
+        # Default Qwen3 template: adds empty thinking block
+        default_tokens = encode_messages_subset(messages, qwen3_tokenizer)
+        default_decoded = qwen3_tokenizer.decode(default_tokens)
+        expected_default_str = "<|im_start|>assistant\n<think>\n\n</think>\n\nHello<|im_end|>\n"
+        assert default_decoded == expected_default_str, (
+            f"Default template should produce:\n{repr(expected_default_str)}\n" f"Got:\n{repr(default_decoded)}"
+        )
+
+        # Custom template: adds [test] prefix instead of thinking block
+        custom_tokens = encode_messages_subset(messages, qwen3_tokenizer, chat_template=simple_custom_template)
+        custom_decoded = qwen3_tokenizer.decode(custom_tokens)
+        expected_custom_str = "<|im_start|>assistant\n[test]Hello<|im_end|>\n"
+        assert custom_decoded == expected_custom_str, (
+            f"Custom template should produce:\n{repr(expected_custom_str)}\n" f"Got:\n{repr(custom_decoded)}"
+        )
+
+        # Verify the tokens are different
+        assert default_tokens != custom_tokens, "Default and custom templates should produce different tokens"
+
+        # ---- Test get_generation_prompt_ids() ----
+
+        # Default Qwen3 template: generation prompt is "<|im_start|>assistant\n"
+        default_gen_prompt = get_generation_prompt_ids(qwen3_tokenizer)
+        expected_default_gen_prompt_str = "<|im_start|>assistant\n"
+        assert qwen3_tokenizer.decode(default_gen_prompt) == expected_default_gen_prompt_str, (
+            f"Default generation prompt should be:\n{repr(expected_default_gen_prompt_str)}\n"
+            f"Got:\n{repr(qwen3_tokenizer.decode(default_gen_prompt))}"
+        )
+
+        # Custom template: generation prompt is "<|im_start|>assistant\n[test]"
+        custom_gen_prompt = get_generation_prompt_ids(qwen3_tokenizer, chat_template=simple_custom_template)
+        expected_custom_gen_prompt_str = "<|im_start|>assistant\n[test]"
+        assert qwen3_tokenizer.decode(custom_gen_prompt) == expected_custom_gen_prompt_str, (
+            f"Custom generation prompt should be:\n{repr(expected_custom_gen_prompt_str)}\n"
+            f"Got:\n{repr(qwen3_tokenizer.decode(custom_gen_prompt))}"
+        )
+
+        # Verify the generation prompts are different
+        assert (
+            default_gen_prompt != custom_gen_prompt
+        ), "Generation prompts should be different between default and custom templates"

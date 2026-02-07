@@ -5,11 +5,12 @@ import sys
 import logging
 import math
 import socket
+from omegaconf import DictConfig, OmegaConf
+from typing import Union
 
 import ray
 import torch
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import (
     placement_group,
     PlacementGroupSchedulingStrategy,
@@ -17,7 +18,13 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from .constants import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.config.config import SkyRLConfig
+from skyrl_train.env_vars import (
+    SKYRL_LD_LIBRARY_PATH_EXPORT,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_PYTHONPATH_EXPORT,
+    _SKYRL_USE_NEW_INFERENCE,
+)
 
 
 class Timer:
@@ -46,16 +53,20 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
-def validate_batch_sizes(cfg: DictConfig):
+def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Validate configured batch sizes.
 
     Explanation of how batching operates:
     1. Each prompt in train_batch_size creates `n_samples_per_prompt` total samples.
-    2. During training, these samples are split across data parallel (DP) workers, making the effective per-GPU batch size: `train_batch_size * n_samples_per_prompt / dp_size`.
-    3. Mini batches are similarly normalized to per-gpu mini batches with size: `mini_batch_size * n_samples_per_prompt / dp_size`.
-    4. Per-gpu train batch size must be divisble by per-gpu mini batch size, otherwise the last mini batch will be incomplete.
-    5. Per-gpu mini batch size must be divisible by per-gpu micro batch size, otherwise the last micro batch will be incomplete.
+    2. During training, these samples are split across data parallel (DP) workers, making the effective per-GPU
+       batch size: `train_batch_size * n_samples_per_prompt / dp_size`.
+    3. Mini batches are similarly normalized to per-gpu mini batches with size:
+       `mini_batch_size * n_samples_per_prompt / dp_size`.
+    4. Per-gpu train batch size must be divisible by per-gpu mini batch size, otherwise the last mini batch will
+       be incomplete.
+    5. Per-gpu mini batch size must be divisible by per-gpu micro batch size, otherwise the last micro batch will
+       be incomplete.
     """
     assert cfg.trainer.train_batch_size >= cfg.trainer.policy_mini_batch_size
     assert cfg.trainer.policy_mini_batch_size > 0, "policy_mini_batch_size must be greater than 0"
@@ -80,9 +91,10 @@ def validate_batch_sizes(cfg: DictConfig):
     else:
         policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
 
-    assert (
-        cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0
-    ), f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
+    assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
+        f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
+        f"policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
+    )
     policy_mini_batch_size_per_gpu = (
         cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
     )
@@ -92,29 +104,34 @@ def validate_batch_sizes(cfg: DictConfig):
         f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
         f"dp_size={policy_dp_size}"
     )
-    assert (
-        policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0
-    ), f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-    assert (
-        policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0
-    ), f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+    assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
+        f"by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+    )
+    assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
+        f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+    )
     policy_train_batch_size_per_gpu = (
         cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
     )
 
     # `train_batch_size_per_gpu` should be divisible by `policy_mini_batch_size_per_gpu`
-    assert (
-        policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0
-    ), f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) {policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu (policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
+    assert policy_train_batch_size_per_gpu % policy_mini_batch_size_per_gpu == 0, (
+        f"normalized policy_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // policy_dp_size) "
+        f"{policy_train_batch_size_per_gpu} should be divisible by policy_mini_batch_size_per_gpu "
+        f"(policy_mini_batch_size * n_samples_per_prompt // policy_dp_size) {policy_mini_batch_size_per_gpu}"
+    )
 
     # Validate critic mini batch size
     critic_world_size = cfg.trainer.placement.critic_num_nodes * cfg.trainer.placement.critic_num_gpus_per_node
     critic_dp_size = critic_world_size // cfg.trainer.critic.sequence_parallel_size
 
     if cfg.trainer.critic.model.path is not None:
-        assert (
-            cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0
-        ), f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
+        assert cfg.trainer.train_batch_size % cfg.trainer.critic_mini_batch_size == 0, (
+            f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
+            f"critic_mini_batch_size {cfg.trainer.critic_mini_batch_size}"
+        )
         critic_mini_batch_size_per_gpu = (
             cfg.trainer.critic_mini_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
         )
@@ -124,18 +141,22 @@ def validate_batch_sizes(cfg: DictConfig):
             f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
             f"dp_size={critic_dp_size}"
         )
-        assert (
-            critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0
-        ), f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        assert (
-            critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0
-        ), f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by "
+            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
+        assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than "
+            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
         critic_train_batch_size_per_gpu = (
             cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
         )
-        assert (
-            critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0
-        ), f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) {critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu (critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
+        assert critic_train_batch_size_per_gpu % critic_mini_batch_size_per_gpu == 0, (
+            f"normalized critic_train_batch_size_per_gpu (train_batch_size * n_samples_per_prompt // critic_dp_size) "
+            f"{critic_train_batch_size_per_gpu} should be divisible by critic_mini_batch_size_per_gpu "
+            f"(critic_mini_batch_size * n_samples_per_prompt // critic_dp_size) {critic_mini_batch_size_per_gpu}"
+        )
 
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
@@ -156,15 +177,16 @@ def validate_batch_sizes(cfg: DictConfig):
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
-    assert cfg.trainer.train_batch_size >= lcm_dp_size, (
-        f"train_batch_size ({cfg.trainer.train_batch_size}) should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
+    assert cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt >= lcm_dp_size, (
+        f"train_batch_size * n_samples_per_prompt ({cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt}) "
+        f"should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
         f"policy_dp_size={policy_dp_size}, "
         f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
         f"lcm_dp_size={lcm_dp_size}"
     )
 
 
-def validate_megatron_cfg(cfg: DictConfig):
+def validate_megatron_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # not yet supported + tested features
     assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
@@ -174,8 +196,8 @@ def validate_megatron_cfg(cfg: DictConfig):
         import flash_attn
 
         version = flash_attn.__version__
-        if version > "2.7.4.post1":
-            raise ValueError("flash_attn <= 2.7.4.post1 is required for using the megatron backend with flash_attn")
+        if version > "2.8.1":
+            logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -183,13 +205,13 @@ def validate_megatron_cfg(cfg: DictConfig):
         if config.megatron_config.context_parallel_size > 1:
             assert cfg.trainer.use_sample_packing, "context parallel is only supported with sample packing"
         # check that sequence parallel is not configured outside of megatron
-        assert (
-            config.sequence_parallel_size == 1
-        ), f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence parallel is not supported for megatron"
+        assert config.sequence_parallel_size == 1, (
+            f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence "
+            f"parallel is not supported for megatron"
+        )
 
 
-def validate_cfg(cfg: DictConfig):
-
+def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
@@ -216,16 +238,12 @@ def validate_cfg(cfg: DictConfig):
             cfg.trainer.critic.fsdp_config.cpu_offload and cfg.trainer.strategy == "fsdp"
         ), "fwd pass cpu offloading is not supported for FSDP1 critic worker, use FSDP2 instead"
 
-    if cfg.trainer.strategy == "deepspeed":
-        assert (
-            cfg.trainer.policy.deepspeed_config.zero_optimization.stage == 3
-        ), "only deepspeed stage 3 is currently supported!"
-
     validate_batch_sizes(cfg)
 
     if cfg.trainer.max_ckpts_to_keep == 0:
         raise ValueError(
-            "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints or negative to keep all checkpoints"
+            "`max_ckpts_to_keep` must be greater than 0 to keep the last N checkpoints "
+            "or negative to keep all checkpoints"
         )
 
     # TODO (devpatel): move to initializing ray and syncing registries codepath at startup
@@ -238,75 +256,90 @@ def validate_cfg(cfg: DictConfig):
     ), f"invalid policy_loss_type: {cfg.trainer.algorithm.policy_loss_type}. Must be one of {available_policy_losses}"
 
     available_advantage_estimators = AdvantageEstimatorRegistry.list_available()
-    assert (
-        cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators
-    ), f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. Must be one of {available_advantage_estimators}"
+    assert cfg.trainer.algorithm.advantage_estimator in available_advantage_estimators, (
+        f"invalid advantage_estimator: {cfg.trainer.algorithm.advantage_estimator}. "
+        f"Must be one of {available_advantage_estimators}"
+    )
 
     assert cfg.trainer.algorithm.loss_reduction in (
         "token_mean",
         "sequence_mean",
         "seq_mean_token_sum_norm",
-    ), f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+    ), (
+        f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
+        f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+    )
 
-    # add field to algorithm config needed for loss functions
-    # create a new config to make it modifiable
-    algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
     # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
     # per batch can be variable based on the prompt length. This is used to normalize the loss for
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
     # fixed max response budget.
-    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-
-    # TODO (erictang000): remove these after deprecation period
-    if algorithm_config.use_abs_kl:
-        logger.warning("`use_abs_kl` will be deprecated, overriding to use `kl_estimator_type='abs'` instead")
-        algorithm_config.kl_estimator_type = "abs"
-    elif algorithm_config.use_kl_estimator_k3:
-        logger.warning("`use_kl_estimator_k3` will be deprecated, overriding to use `kl_estimator_type='k3'` instead")
-        algorithm_config.kl_estimator_type = "k3"
-    cfg.trainer.algorithm = algorithm_config
-
-    if cfg.trainer.strategy == "deepspeed" and not (
-        cfg.trainer.policy.optimizer_config.offload_after_step
-        and cfg.trainer.critic.optimizer_config.offload_after_step
-    ):
-        raise ValueError(
-            "`offload_after_step=False` is not supported for DeepSpeed, please set `offload_after_step` to `true` for both policy and critic"
+    if isinstance(cfg, DictConfig):
+        new_cfg = OmegaConf.create(cfg.trainer.algorithm)
+        new_cfg.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+        cfg.trainer.algorithm = new_cfg
+    else:
+        cfg.trainer.algorithm.max_seq_len = (
+            cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
         )
 
+    # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:
-        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
-            raise ValueError(
-                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap }"
-            )
+        logger.warning(
+            f"`trainer.algorithm.use_tis` is deprecated. Setting `trainer.algorithm.off_policy_correction` to `token` instead."
+            f"with `token_tis_ratio_clip_high`={cfg.trainer.algorithm.tis_imp_ratio_cap}"
+        )
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "token"
+        cfg.trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high = cfg.trainer.algorithm.tis_imp_ratio_cap
+
+    # off_policy_correction config validation
+    off_policy_correction = cfg.trainer.algorithm.off_policy_correction
+    tis_ratio_type = off_policy_correction.tis_ratio_type
+    sequence_mask_metric = off_policy_correction.sequence_mask_metric
+
+    uses_off_policy_correction = tis_ratio_type is not None or sequence_mask_metric is not None
+
+    if uses_off_policy_correction:
+        # Validate tis_ratio_type
+        if tis_ratio_type:
+            assert tis_ratio_type in [
+                "token",
+                "sequence",
+            ], f"`tis_ratio_type` must be 'None', 'token', or 'sequence', got {tis_ratio_type}"
+
+        # Validate sequence_mask_metric
+        if sequence_mask_metric:
+            assert sequence_mask_metric in [
+                "product",
+                "geometric",
+            ], f"`sequence_mask_metric` must be 'product', or 'geometric', got {sequence_mask_metric}"
+
+        # Ensure logprobs are enabled for rollout correction
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but `trainer.algorithm.use_tis` is `True`. Setting `logprobs` to `True`."
+                "`generator.sampling_params.logprobs` is `None` but off_policy_correction is enabled."
+                " Setting `logprobs` to `True`."
             )
-            # just set to 0 for better user exp
             cfg.generator.sampling_params.logprobs = 0
 
         if cfg.generator.backend == "sglang":
-            raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-        assert cfg.trainer.algorithm.policy_loss_type in [
-            "regular",
-            "dual_clip",
-        ], "TIS is only implemented for regular and dual_clip policy loss types"
+            raise NotImplementedError(
+                "`trainer.algorithm.off_policy_correction` doesn't support Sglang backend, please use vLLM"
+            )
+        if cfg.trainer.algorithm.policy_loss_type in ["clip_cov", "kl_cov"]:
+            raise NotImplementedError(
+                "`trainer.algorithm.off_policy_correction` doesn't support clip_cov or kl_cov policy loss types"
+            )
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
         assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
-        assert cfg.trainer.strategy in ("fsdp", "fsdp2"), "LoRA enabled requires fsdp/fsdp2 training backend"
-
-        if cfg.trainer.target_modules is not None:
-            logger.warning(
-                "`trainer.target_modules` is deprecated, use `trainer.policy.model.lora.target_modules` or `trainer.critic.model.lora.target_modules` instead"
-            )
-        if cfg.trainer.exclude_modules is not None:
-            logger.warning(
-                "`trainer.exclude_modules` is deprecated, use `trainer.policy.model.lora.exclude_modules` or `trainer.critic.model.lora.exclude_modules` instead"
-            )
+        assert cfg.trainer.strategy in (
+            "fsdp",
+            "fsdp2",
+            "megatron",
+        ), "LoRA enabled requires fsdp/fsdp2/megatron training backend"
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -317,25 +350,29 @@ def validate_cfg(cfg: DictConfig):
             * cfg.generator.inference_engine_pipeline_parallel_size
             * cfg.generator.inference_engine_data_parallel_size
         )
-        assert (
-            num_policy_gpus == num_rollout_gpus
-        ), f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) must be the same when colocating all models"
+        assert num_policy_gpus == num_rollout_gpus, (
+            f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) "
+            "must be the same when colocating all models"
+        )
     else:
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
-            assert (
-                cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
-            ), f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes ({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
-            assert (
-                cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
-            ), f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same when colocate policy and ref model."
+            assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
+                f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes "
+                f"({cfg.trainer.placement.ref_num_nodes}) must be the same when colocate policy and ref model."
+            )
+            assert cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node, (
+                f"policy_num_gpus_per_node ({cfg.trainer.placement.policy_num_gpus_per_node}) and "
+                f"ref_num_gpus_per_node ({cfg.trainer.placement.ref_num_gpus_per_node}) must be the same "
+                f"when colocate policy and ref model."
+            )
 
 
-def validate_generator_cfg(cfg: DictConfig):
+def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     """Validates the correctness of generator-related config.
 
     Args:
-        cfg (DictConfig): config to validate
+        cfg (SkyRLConfig): config to validate
 
     Raises:
         NotImplementedError: if feature is not supported, such as sglang for multiturn generation
@@ -347,9 +384,10 @@ def validate_generator_cfg(cfg: DictConfig):
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
         ), "generator.max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
     else:
-        assert (
-            cfg.generator.max_input_length >= cfg.trainer.max_prompt_length
-        ), "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length for multi-turn generation"
+        assert cfg.generator.max_input_length >= cfg.trainer.max_prompt_length, (
+            "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length "
+            "for multi-turn generation"
+        )
 
     if not cfg.generator.run_engines_locally:
         assert cfg.generator.num_inference_engines == len(
@@ -387,7 +425,8 @@ def validate_generator_cfg(cfg: DictConfig):
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
         if cfg.generator.sampling_params.logprobs > 0:
             raise ValueError(
-                f"`logprobs` if set should be 0 i.e only for the chosen token, got {cfg.generator.sampling_params.logprobs}"
+                f"`logprobs` if set should be 0 i.e only for the chosen token, "
+                f"got {cfg.generator.sampling_params.logprobs}"
             )
         if not cfg.generator.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
@@ -399,7 +438,8 @@ def validate_generator_cfg(cfg: DictConfig):
         if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
             raise ValueError(
                 "`sampling_params.stop` and `eval_sampling_params.stop` are not supported for SGLang backend "
-                "since we always set `skip_tokenizer_init` to True. If you have to use these parameters, you can switch to vLLM. "
+                "since we always set `skip_tokenizer_init` to True. If you have to use these parameters, you can switch "
+                "to vLLM. "
                 "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
             )
         if "min_new_tokens" in cfg.generator.sampling_params or "min_new_tokens" in cfg.generator.eval_sampling_params:
@@ -416,8 +456,9 @@ def validate_generator_cfg(cfg: DictConfig):
         ) and not cfg.generator.append_eos_token_after_stop_str_in_multi_turn:
             logger.warning(
                 "WARNING: `sampling_params.stop` and `eval_sampling_params.stop` are specified and we "
-                "are using multi-turn generation. You might want to set `append_eos_token_after_stop_str_in_multi_turn` "
-                "to `True` to append tokenizer.eos_token_id to the assistant-generated response to match the chat template."
+                "are using multi-turn generation. You might want to set `append_eos_token_after_stop_str_in_multi_turn`"
+                " to `True` to append tokenizer.eos_token_id to the assistant-generated response "
+                "to match the chat template."
             )
 
     if cfg.generator.enable_http_endpoint:
@@ -427,7 +468,8 @@ def validate_generator_cfg(cfg: DictConfig):
             # instead. sglang_engine.py not supported yet because we still need to figure out how
             # to make SGLang Python engine take OAI request.
             raise ValueError(
-                'generator.enable_http_endpoint is not supported for SGLang backend yet. Please set generator.backend="vllm".'
+                "generator.enable_http_endpoint is not supported for SGLang backend yet. "
+                'Please set generator.backend="vllm".'
             )
         if not cfg.generator.async_engine:
             raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
@@ -441,8 +483,49 @@ def validate_generator_cfg(cfg: DictConfig):
         assert ep_size == 1, "Inference expert parallelism is not yet supported for SGLang backend."
     if ep_size > 1:
         assert dp_size * tp_size == ep_size, (
-            f"If inference expert parallel is enabled, data parallel size * tensor parallel size must equal expert parallel size. "
+            f"If inference expert parallel is enabled, data parallel size * tensor parallel size must equal expert "
+            f"parallel size. "
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
+        )
+
+    # Validate new inference config options
+    _validate_new_inference_cfg(cfg)
+
+
+def _validate_new_inference_cfg(cfg: DictConfig):
+    """Validates config options for the new inference layer.
+
+    This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
+
+    Config combinations:
+    - Colocated + external URLs → ERROR (requires driver-managed servers for PG sharing)
+    - Neither set → Build servers internally
+    - external_server_urls only → Create router over external servers
+    - external_proxy_url only → Use proxy for both data + control plane
+    - Both set → Fully external (proxy for data plane, servers for control plane)
+
+    Args:
+        cfg: The config to validate.
+
+    Raises:
+        ValueError: If colocated mode is used with external URLs.
+    """
+    if not _SKYRL_USE_NEW_INFERENCE:
+        # Only validate when using the new inference path
+        return
+
+    is_colocated = cfg.trainer.placement.colocate_all
+    has_external_proxy = cfg.generator.get("external_proxy_url") is not None
+    has_external_servers = cfg.generator.get("external_server_urls") is not None
+
+    # Colocated mode cannot use external endpoints
+    if is_colocated and (has_external_proxy or has_external_servers):
+        raise ValueError(
+            "Cannot use external_proxy_url or external_server_urls with colocate_all=true. "
+            "Colocated mode requires driver-managed inference servers to share placement groups "
+            "between trainer and inference workers. Please either:\n"
+            "  1. Set colocate_all=false to use external inference servers, or\n"
+            "  2. Remove external_proxy_url and external_server_urls to build servers internally."
         )
 
 
@@ -484,7 +567,7 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
-def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
+def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
 
@@ -504,24 +587,29 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
     if cfg.trainer.strategy == "megatron":
+        # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core
+        env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
         # useful when tp > 1 (and thus megatron sequence_parallel is enabled)
         # see: https://github.com/NVIDIA/Megatron-LM/issues/533#issuecomment-1760193239
         env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
         if cfg.trainer.flash_attn:
-            # disable fused attention for megatron with flash_attn (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
+            # disable fused attention for megatron with flash_attn
+            # (otherwise flash_attn choice is overridden in TransformerEngine for Hopper+ devices)
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if cfg.generator.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
-        # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle for collective RPCs.
-        # During weight transfer, we use IPC handles, which contains a `function` object and requires pickling.
+        # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle
+        # for collective RPCs. During weight transfer, we use IPC handles, which contains a `function`
+        # object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-        # NOTE (sumanthrh): In vLLM >= 0.9.0, we've observed compilatiion failures with torch compile. removing the compilation directory and trying
-        # again does not fix the issue. Temporarily we disable compilation cache, which seems to fix the issue.
-        # This should not have any effect on performance - compilation will still happen, it's just not cached
+        # NOTE (sumanthrh): In vLLM >= 0.9.0, we've observed compilatiion failures with torch compile.
+        # removing the compilation directory and trying again does not fix the issue. Temporarily we disable
+        # compilation cache, which seems to fix the issue. This should not have any effect on performance -
+        # compilation will still happen, it's just not cached
         # TODO (sumanthrh): remove this once vLLM fixes the issue
         env_vars["VLLM_DISABLE_COMPILE_CACHE"] = "1"
 
@@ -565,6 +653,12 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
+    # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
+    for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting {var_name} to ray runtime env")
+            env_vars[var_name] = value
+
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
@@ -573,7 +667,8 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
     if SKYRL_PYTHONPATH_EXPORT:
         # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
-        # not recommended since it can cause unexpected conflicts with UV packages, but keeping for backwards compatibility
+        # not recommended since it can cause unexpected conflicts with UV packages,
+        # but keeping for backwards compatibility
         logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
         env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
 
@@ -618,16 +713,14 @@ def configure_ray_worker_logging() -> None:
     logging.root.setLevel(level)
 
 
-def initialize_ray(cfg: DictConfig):
+def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Initialize Ray cluster with prepared runtime environment.
 
     Args:
         cfg: Training config
     """
-    from .ppo_utils import (
-        sync_registries,
-    )
+    from .ppo_utils import sync_registries
 
     env_vars = prepare_runtime_environment(cfg)
     ray.init(runtime_env={"env_vars": env_vars})
@@ -663,13 +756,13 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-
     # use info actor to get the GPU id
     info_actors = []
     for i in range(num_bundles):
         info_actors.append(
             InfoActor.options(
-                num_cpus=0.01,  # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
+                # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
+                num_cpus=0.01,
                 num_gpus=0.01,
                 resources=None,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
@@ -691,9 +784,9 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     return pg_reordered_bundle_indices
 
 
-# NOTE (sumanthrh): For SGLang, the string representations here should also match those used by (and supported by) SGLang.
-# This is because we do not control the update weight implementation with SGLang backend.
-# With VLLM, we use a custom Worker extension to have a custom update weight implementation.
+# NOTE (sumanthrh): For SGLang, the string representations here should also match those used by
+# (and supported by) SGLang. This is because we do not control the update weight implementation
+# with SGLang backend. With VLLM, we use a custom Worker extension to have a custom update weight implementation.
 def torch_dtype_to_str(dtype: torch.dtype) -> str:
     if dtype == torch.bfloat16:
         return "bfloat16"
@@ -770,6 +863,7 @@ def peer_access_supported(max_num_gpus_per_node: int):
 
 def update_model_config(module_config, override_config_kwargs):
     """Update the module config with the override_config_kwargs.
+
     Args:
         module_config: The module config from Huggingface Transformers.
         override_config_kwargs: The kwargs to override the module config.
@@ -783,8 +877,8 @@ def update_model_config(module_config, override_config_kwargs):
 
 def get_tcp_url(host: str, port: int) -> str:
     """
-    Formats the TCP URL for the given host and port,
-    handling IPv6 addresses correctly.
+    Formats the TCP URL for the given host and port, handling IPv6 addresses correctly.
+
     Args:
         host (str): The hostname or IP address.
         port (int): The port number.

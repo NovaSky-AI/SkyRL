@@ -1,16 +1,20 @@
+from typing import TYPE_CHECKING, Any, Dict, List
+
 import ray
 from packaging import version
 from ray.actor import ActorHandle
-from typing import Any, List, Dict
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl_train.inference_engines.base import (
-    InferenceEngineInterface,
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
 from skyrl_train.inference_engines.utils import get_rendezvous_addr_port
+from skyrl_train.weight_sync import WeightUpdateRequest
 
 
 class RayWrappedInferenceEngine(InferenceEngineInterface):
@@ -34,20 +38,28 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         return await self.inference_engine_actor.generate.remote(input_batch=input_batch)
 
+    async def sample(
+        self,
+        prompt_token_ids: List[int],
+        num_samples: int,
+        sampling_params: Dict[str, Any],
+    ) -> InferenceEngineOutput:
+        return await self.inference_engine_actor.sample.remote(
+            prompt_token_ids=prompt_token_ids,
+            num_samples=num_samples,
+            sampling_params=sampling_params,
+        )
+
     async def wake_up(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.wake_up.remote(*args, **kwargs)
 
     async def sleep(self, *args: Any, **kwargs: Any):
         return await self.inference_engine_actor.sleep.remote(*args, **kwargs)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
-        return await self.inference_engine_actor.init_weight_update_communicator.remote(
-            master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing
-        )
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        return await self.inference_engine_actor.init_weight_update_communicator.remote(init_info)
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
+    async def update_named_weights(self, request: WeightUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
     async def teardown(self):
@@ -94,16 +106,27 @@ def create_ray_wrapped_inference_engines(
     engine_init_kwargs: Dict[str, Any] = {},
     rope_scaling: Dict[str, Any] = {},
     rope_theta: float | None = None,
+    enable_ray_prometheus_stats: bool = False,
+    served_model_name: str | None = None,
 ) -> List[InferenceEngineInterface]:
     """
-    Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
+    Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
+    instances.
     """
-    from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
-    from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+    from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+    from skyrl_train.utils import (
+        get_all_env_variables,
+        get_ray_pg_ready_with_timeout,
+        ray_noset_visible_devices,
+    )
 
     if backend == "vllm":
         import vllm
-        from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
+
+        from skyrl_train.inference_engines.vllm.vllm_engine import (
+            AsyncVLLMRayActor,
+            VLLMRayActor,
+        )
 
         # if a dev version is being used, skip the version check
         if "dev" not in vllm.__version__:
@@ -116,7 +139,8 @@ def create_ray_wrapped_inference_engines(
 
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
-    # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1 to explicitly manage resource allocation
+    # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1
+    # to explicitly manage resource allocation
     # TODO: we should be able to support mp backend by allocating resources at engine level
     distributed_executor_backend = "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else "ray"
     data_parallel_backend = "mp"
@@ -167,6 +191,13 @@ def create_ray_wrapped_inference_engines(
                     rope_engine_kwargs["max_model_len"] = int(rope_factor * rope_max_pos)
             if rope_theta is not None:
                 rope_engine_kwargs["rope_theta"] = rope_theta
+
+            other_kwargs = {}
+
+            # served_model_name allows using a different model name for HTTP endpoint validation
+            # than the actual model path. See generator.served_model_name in ppo_base_config.yaml.
+            if served_model_name is not None:
+                other_kwargs["served_model_name"] = served_model_name
 
             # Launch one actor per DP rank
             for dp_rank in range(data_parallel_size):
@@ -220,10 +251,12 @@ def create_ray_wrapped_inference_engines(
                     max_num_batched_tokens=max_num_batched_tokens,
                     max_num_seqs=max_num_seqs,
                     max_logprobs=1,  # only need chosen-token logprobs
+                    enable_ray_prometheus_stats=enable_ray_prometheus_stats,
                     **dp_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,
                     **rope_engine_kwargs,
+                    **other_kwargs,
                 )
                 inference_engine_actors.append(engine)
         elif backend == "sglang":
@@ -249,7 +282,9 @@ def create_ray_wrapped_inference_engines(
 
                 before_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
                 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-                from skyrl_train.inference_engines.sglang.sglang_engine import SGLangRayActor
+                from skyrl_train.inference_engines.sglang.sglang_engine import (
+                    SGLangRayActor,
+                )
 
                 os.environ["CUDA_VISIBLE_DEVICES"] = before_cuda_visible_devices
 
@@ -294,7 +329,8 @@ def create_ray_wrapped_inference_engines(
             sleep_level = 1 if enable_lora else sleep_level
             sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
         elif backend == "sglang":
-            # NOTE(Charlie): we always need to sync weights after waking up: https://github.com/sgl-project/sglang/issues/7939
+            # NOTE(Charlie): we always need to sync weights after waking up,
+            # see: https://github.com/sgl-project/sglang/issues/7939 for more details.
             assert sleep_level == 2, "SGLang always discards weights, so sleep_level is not applicable."
             sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
         ray.get(sleep_refs)

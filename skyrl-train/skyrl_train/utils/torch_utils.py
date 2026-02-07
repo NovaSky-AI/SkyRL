@@ -120,7 +120,7 @@ def logprobs_from_logits(
     """
     Compute per-token log-probabilities for the given labels.
 
-    Uses a Flash-Attention–based cross-entropy (if available) for efficient backward,
+    Uses a Flash-Attention-based cross-entropy (if available) for efficient backward,
     otherwise falls back to a standard log-softmax+gather approach.
 
     See: https://github.com/pytorch/pytorch/issues/563#issuecomment-330103591
@@ -175,3 +175,18 @@ def logprobs_from_logits_v2(
             logprobs_labels.append(row_logprobs_labels)
         logprobs_labels = torch.stack(logprobs_labels)
     return logprobs_labels
+
+
+def masked_mean(tensor: torch.Tensor, mask: torch.Tensor | None, dim: int | None = None) -> torch.Tensor:
+    """Compute the mean of tensor elements, optionally masked and reduced along a dimension."""
+    if mask is None:
+        return tensor.mean(axis=dim)
+    return (tensor * mask).sum(axis=dim) / mask.sum(axis=dim).clamp(min=1.0)
+
+
+def safe_exp_delta(delta: torch.Tensor, clip: float = 20.0, out_dtype=None) -> torch.Tensor:
+    """
+    Clamp the delta before exponentiating to avoid potential overflow.
+    """
+    y = torch.clamp(delta.to(torch.float32), -clip, clip).exp()
+    return y.to(out_dtype or delta.dtype)

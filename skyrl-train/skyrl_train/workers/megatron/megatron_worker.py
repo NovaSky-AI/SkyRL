@@ -5,19 +5,20 @@ import ray
 from transformers import AutoTokenizer, AutoConfig
 from huggingface_hub import snapshot_download
 
-import asyncio
 import os
 from datetime import timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from collections import defaultdict
-from tqdm import tqdm
 from omegaconf import OmegaConf
 
 from megatron.bridge import AutoBridge
+from megatron.bridge.peft.lora import LoRA
+from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 import megatron.core.parallel_state as mpu
-from megatron.core.optimizer import DistributedOptimizer
+from megatron.core.optimizer import DistributedOptimizer, ChainedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+from skyrl_train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl_train.distributed.megatron.optimizer import (
     init_megatron_optim_config,
     get_megatron_optimizer,
@@ -26,10 +27,10 @@ from skyrl_train.distributed.megatron.optimizer import (
 from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
-from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype, get_physical_gpu_id
-from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
-from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype
+from skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -184,7 +185,14 @@ class MegatronWeightExtractor(WeightExtractor):
 
 class MegatronWorker:
     def init_configs(
-        self, model_path, megatron_config, model_config_kwargs, transformer_config_kwargs, bf16=True, flash_attn=False
+        self,
+        model_path,
+        megatron_config,
+        model_config_kwargs,
+        transformer_config_kwargs,
+        bf16=True,
+        flash_attn=False,
+        lora_config=None,
     ):
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
@@ -201,7 +209,11 @@ class MegatronWorker:
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
         # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
-        transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+        transformer_config_kwargs = (
+            transformer_config_kwargs
+            if isinstance(transformer_config_kwargs, dict)
+            else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+        )
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         if not self.cfg.trainer.gradient_checkpointing:
@@ -221,6 +233,7 @@ class MegatronWorker:
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
         provider.moe_token_dispatcher_type = "alltoall"
+        provider.moe_router_load_balancing_type = "none"
 
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
@@ -232,10 +245,51 @@ class MegatronWorker:
         self.strategy.hf_config = hf_config
         self.tokenizer = tokenizer
 
+    def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
+        if lora_type == "lora":
+            self.lora_cls = LoRA(
+                target_modules=(
+                    ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
+                    if lora_config.target_modules == "all-linear"
+                    else lora_config.target_modules
+                ),
+                dim=lora_config.rank,
+                alpha=lora_config.alpha,
+                dropout=lora_config.dropout,
+                lora_A_init_method=lora_config.init_method,
+                lora_B_init_method="zero",
+                exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
+                lora_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
+            )
+        elif lora_type == "canonical_lora":
+            self.lora_cls = CanonicalLoRA(
+                target_modules=(
+                    [
+                        "linear_q",
+                        "linear_k",
+                        "linear_v",
+                        "linear_proj",
+                        "linear_fc1_up",
+                        "linear_fc1_gate",
+                        "linear_fc2",
+                    ]
+                    if lora_config.target_modules == "all-linear"
+                    else lora_config.target_modules
+                ),
+                dim=lora_config.rank,
+                alpha=lora_config.alpha,
+                dropout=lora_config.dropout,
+                lora_A_init_method=lora_config.init_method,
+                lora_B_init_method="zero",
+                exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
+            )
+
     def make_megatron_module(
         self,
         wrap_with_ddp: bool = True,
-        ddp_config: Optional[Dict[str, Any]] = None,
+        ddp_config: Optional[Union[MegatronDDPConfig, Dict[str, Any]]] = None,
+        lora_config: Optional[Dict[str, Any]] = None,
+        lora_type: Optional[str] = "lora",
         bf16: bool = True,
     ) -> List[nn.Module]:
         """
@@ -243,18 +297,29 @@ class MegatronWorker:
         """
         from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 
+        if lora_config is not None:
+            self.configure_lora(lora_config, lora_type)
+
+            def lora_pre_wrap_hook(model):
+                lora_model = self.lora_cls(model, training=True)
+                self.lora_cls.set_params_to_save(lora_model)
+
+                return lora_model
+
+            self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
+
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
             default_ddp_config.use_distributed_optimizer = True
         if ddp_config is not None:
-            for k, v in ddp_config.items():
+            for k, v in get_config_as_dict(ddp_config).items():
                 setattr(default_ddp_config, k, v)
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
         return model
 
-    def forward(self, data):
+    def forward(self, data: TrainingInputBatch):
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
@@ -315,6 +380,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
+        self._is_lora = self.cfg.trainer.policy.model.lora.rank > 0
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
@@ -355,6 +421,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             megatron_config=self.cfg.trainer.policy.megatron_config,
             optimizer_config=self.cfg.trainer.policy.optimizer_config,
             seed=self.cfg.trainer.seed,
+            is_lora=self._is_lora,
         )
         self.strategy.setup_distributed()
 
@@ -386,6 +453,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=True,
             ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config,
+            lora_config=self.cfg.trainer.policy.model.lora if self._is_lora else None,
+            lora_type=self.cfg.trainer.policy.megatron_config.lora_config.lora_type,
             bf16=self.cfg.trainer.bf16,
         )
 
@@ -408,8 +477,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
-        self._normalize_mini_batch_size()
-
         # create scheduler
         self.scheduler = get_megatron_optimizer_param_scheduler(
             optimizer=self.optimizer,
@@ -426,151 +493,167 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         # Initialize weight extractor
-        self.use_cuda_ipc = self.cfg.generator.weight_sync_backend == "nccl" and self.cfg.trainer.placement.colocate_all
         # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
+        from skyrl_train.weight_sync import CudaIpcTransferStrategy
+
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
-            enable_bucketing=self.use_cuda_ipc,
+            enable_bucketing=self._transfer_strategy_cls is CudaIpcTransferStrategy,
             bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
         )
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
 
-    def ppo_train(self, train_data) -> "TrainingOutputBatch":
+    def forward_backward(
+        self,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
         """
-        Overrides `PolicyWorkerBase.ppo_train` for megatron.
+        Perform forward and backward passes for a batch, handling micro-batching internally.
 
-        Since we want megatron to handle gradient accumulation over micro batches, we directly pass mini batches into the
-        worker MegatronModelWrapper.forward_backward_mini_batch method.
+        The batch is split into micro batches based on micro_train_batch_size_per_gpu.
+        Megatron Core's forward_backward_func handles gradient accumulation internally.
+
+        Args:
+            data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
+            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
+                     If provided, overrides the config's policy_loss_type.
+            loss_fn_config: Optional config overrides for the loss function.
+
+        Returns:
+            Aggregated metrics dict across all micro batches
         """
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
+        self.model.train()
+        for chunk in self.actor_module:
+            # if use distributed optimizer, zero grad buffer will be handled by optimizer
+            chunk.zero_grad_buffer()
 
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-
-        status_list = []
+        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
-        policy_update_steps = 0
 
-        if self.profiler is not None:
-            self.profiler.start()
+        # Move data to GPU
+        data.to(torch.cuda.current_device())
 
-        for epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            self.optimizer.zero_grad()
-            pbar = tqdm(
-                dataloader,
-                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
-                disable=not self.strategy.is_rank_0(),
+        # Build micro-batch dicts expected by forward_backward_mini_batch
+        micro_buffer = []
+        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
+            sequences = experience.sequences
+            attention_mask = experience.attention_mask
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+
+            micro_buffer.append(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": experience.num_actions,
+                    "old_action_log_probs": experience.action_log_probs,
+                    "base_action_log_probs": experience.base_action_log_probs,
+                    "advantages": experience.advantages,
+                    "loss_mask": experience.loss_mask,
+                    "rollout_action_logprobs": experience.rollout_logprobs,
+                    "action_mask": experience.action_mask,
+                }
             )
 
-            micro_buffer = []
-            for local_step, experience in enumerate(pbar):
-                experience.to_device(torch.cuda.current_device())
-                sequences = experience.sequences
-                attention_mask = experience.attention_mask
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 0)
+        if not micro_buffer:
+            return {}
 
-                micro_buffer.append(
-                    {
-                        "sequences": sequences,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "num_actions": experience.num_actions,
-                        "old_action_log_probs": experience.action_log_probs,
-                        "base_action_log_probs": experience.base_action_log_probs,
-                        "advantages": experience.advantages,
-                        "loss_mask": experience.loss_mask,
-                        "rollout_action_logprobs": experience.rollout_logprobs,
-                    }
-                )
+        seq_len = micro_buffer[0]["sequences"].shape[1]
+        micro_bsz = micro_buffer[0]["sequences"].shape[0]
 
-                if len(micro_buffer) == micro_batches_per_mini_batch:
-                    # run mini-batch forward-backward and then one optimizer step
-                    self.model.train()
-                    for chunk in self.actor_module:
-                        # if use distributed optimizer, zero grad buffer will be handled by optimizer
-                        chunk.zero_grad_buffer()
-                    seq_len = micro_buffer[0]["sequences"].shape[1]
-                    micro_bsz = micro_buffer[0]["sequences"].shape[0]
+        metrics_list = self.model.forward_backward_mini_batch(
+            micro_batches=micro_buffer,
+            seq_len=seq_len,
+            micro_batch_size=micro_bsz,
+            temperature=self.cfg.generator.sampling_params.temperature,
+            loss_fn=loss_fn,
+            loss_fn_config=loss_fn_config,
+        )
 
-                    metrics_list = self.model.forward_backward_mini_batch(
-                        micro_batches=micro_buffer,
-                        seq_len=seq_len,
-                        micro_batch_size=micro_bsz,
-                        temperature=self.cfg.generator.sampling_params.temperature,
-                    )
+        if self.empty_cuda_cache:
+            torch.cuda.empty_cache()
 
-                    if self.empty_cuda_cache:
-                        torch.cuda.empty_cache()
+        # Track number of micro-batches for metrics
+        self._micro_batches_accumulated += len(micro_buffer)
 
-                    grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        # Aggregate metrics across micro-batches
+        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        for metrics in metrics_list:
+            # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
+            if "loss_fn_outputs" in metrics:
+                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            for k, v in metrics.items():
+                all_metrics[k].append(v)
 
-                    # within a DP group, metrics are already the same across all workers - we then just all reduce across
-                    # the whole world size to get the metrics for the global micro batch
-                    for i, metrics in enumerate(metrics_list):
-                        status = {
-                            "final_loss": metrics["final_loss"],
-                            "policy_loss": metrics["policy_loss"],
-                            "policy_lr": self.optimizer.param_groups[0]["lr"],
-                            "ppo_clip_ratio": metrics["ppo_clip_ratio"],
-                            "policy_entropy": metrics["policy_entropy"],
-                        }
-                        if self.cfg.trainer.algorithm.use_kl_loss:
-                            status["policy_kl"] = metrics["policy_kl"]
+        # Reduce and all-reduce metrics
+        status = reduce_metrics(dict(all_metrics))
+        status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+        status = all_reduce_metrics(status, self.strategy)
 
-                        # Attach grad norm only for the last micro in the mini-batch
-                        if i == len(metrics_list) - 1 and grad_norm is not None:
-                            status["raw_grad_norm"] = grad_norm
+        # Add loss_fn_outputs back (not reduced, kept as list)
+        if all_loss_fn_outputs:
+            status["loss_fn_outputs"] = all_loss_fn_outputs
 
-                        # attach response_length
-                        status["response_length"] = micro_buffer[i]["num_actions"]
+        return status
 
-                        status = self.strategy.all_reduce(status)
-                        status_list.append(status)
-                        for k, v in status.items():
-                            all_metrics[k].append(v)
+    def optim_step(self) -> Optional[float]:
+        """
+        Perform optimizer step.
 
-                    short_status = {
-                        "pg": status_list[-1]["policy_loss"],
-                        "glen": status_list[-1]["response_length"],
-                        "policy_lr": status_list[-1]["policy_lr"],
-                        "ent": status_list[-1]["policy_entropy"],
-                    }
-                    if "raw_grad_norm" in status_list[-1]:
-                        short_status["grad_norm"] = status_list[-1]["raw_grad_norm"]
-                    pbar.set_postfix(short_status)
+        Note: Unlike FSDP workers, Megatron doesn't need manual gradient scaling here
+        because Megatron Core's forward_backward_func handles loss scaling internally.
 
-                    policy_update_steps += 1
-                    micro_buffer = []
+        Returns:
+            The gradient norm (before scaling, after clipping), or None if unavailable.
+        """
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 
-            # drop any trailing micros that don't fill a mini-batch (keep behavior consistent)
-            micro_buffer = []
+        # Reset counter for next accumulation cycle
+        self._micro_batches_accumulated = 0
 
-        torch.distributed.barrier()
-        if self.profiler is not None:
-            self.profiler.stop_and_save()
-            self.profiler.stop_trace()
+        if grad_norm is not None:
+            grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
+        return grad_norm
 
-        # not needed beyond status logging
-        all_metrics.pop("response_length", None)
+    def get_lr(self) -> float:
+        """
+        Get current learning rate from optimizer.
 
-        status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = policy_update_steps
+        Handles both regular optimizers and ChainedOptimizer.
+        """
+        if isinstance(self.optimizer, ChainedOptimizer):
+            return self.optimizer.chained_optimizers[0].param_groups[0]["lr"]
+        return self.optimizer.param_groups[0]["lr"]
 
-        output = TrainingOutputBatch()
-        output.metadata = {"train_status": status_mean}
-        return output
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        Handles both regular optimizers and ChainedOptimizer (used with
+        distributed optimizer). Updates all param_groups across all
+        underlying optimizers.
+
+        Note: This bypasses the scheduler. The next scheduler.step() call
+        will override this value unless the scheduler is configured for
+        constant LR.
+        """
+        if isinstance(self.optimizer, ChainedOptimizer):
+            # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
+            for opt in self.optimizer.chained_optimizers:
+                for param_group in opt.param_groups:
+                    param_group["lr"] = learning_rate
+        else:
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = learning_rate
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
-        from torch.multiprocessing.reductions import reduce_tensor
-
         use_prefix_cache = self.cfg.generator.enable_prefix_caching
         generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
         cache_reset_task = None
@@ -580,84 +663,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         torch.cuda.empty_cache()
 
-        # Extract weights using the initialized extractor
-        if not self.use_cuda_ipc:
-            # Broadcast path: one chunk per parameter
-            # NOTE: need to optimize this to use buckets for non-colocated weight sync as well
-            for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                # Each chunk contains one parameter
-                assert len(chunk) == 1
-                name = chunk.names[0]
-                tensor = chunk.tensors[0]
-
-                if torch.distributed.get_rank() == 0:
-                    update_weight_task = asyncio.create_task(
-                        inference_engine_client.update_named_weights(
-                            {
-                                "names": [name],
-                                "dtypes": [self.cfg.generator.model_dtype],
-                                "shapes": [list(tensor.shape)],
-                            }
-                        )
-                    )
-
-                # Broadcast weights from training rank 0 to inference engine ranks via the update group
-                def broadcast_tensor(tensor):
-                    if torch.distributed.get_rank() == 0:
-                        torch.distributed.broadcast(tensor.data, 0, group=self._model_update_group)
-
-                await asyncio.to_thread(broadcast_tensor, tensor)
-                if torch.distributed.get_rank() == 0:
-                    await update_weight_task
-                torch.distributed.barrier()
-        else:
-            # CUDA IPC path: one chunk per bucket (for packing)
-            device = torch.cuda.current_device()
-            weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
-
-            for chunk in self.weight_extractor.extract_weights(generator_dtype):
-                # Each chunk contains all parameters in one bucket
-                # Calculate total size for packing (in number of elements)
-                total_numel = sum(t.numel() for t in chunk.tensors)
-                packed_tensor = torch.empty(
-                    total_numel,
-                    device=device,
-                    dtype=generator_dtype,
-                    requires_grad=False,
-                )
-
-                offset = 0
-                # Copy tensors into consolidated buffers
-                for name, tensor, shape in zip(chunk.names, chunk.tensors, chunk.shapes):
-                    size = tensor.numel()
-                    packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
-                    offset += size
-                    weights_update_request["names"].append(name)
-                    weights_update_request["dtypes"].append(self.cfg.generator.model_dtype)
-                    weights_update_request["shapes"].append(shape)
-                    weights_update_request["sizes"].append(size)
-
-                ipc_handle = reduce_tensor(packed_tensor)
-                ipc_handle = {get_physical_gpu_id(): ipc_handle}
-                ipc_handle_list = [None] * torch.distributed.get_world_size()
-                torch.distributed.all_gather_object(ipc_handle_list, ipc_handle)
-
-                ipc_handles = {}
-                for d in ipc_handle_list:
-                    ipc_handles.update(d)
-
-                weights_update_request["extras"].append({"ipc_handles": ipc_handles})
-                weights_update_request["packed"] = True
-
-                if torch.distributed.get_rank() == 0:
-                    await inference_engine_client.update_named_weights(weights_update_request)
-                    weights_update_request = {"names": [], "dtypes": [], "shapes": [], "sizes": [], "extras": []}
-
-                # force collect any sent tensors if possible to be memory efficient
-                torch.cuda.ipc_collect()
-
-        torch.distributed.barrier()
-        torch.cuda.synchronize()
+        # Extract and send weights using the sender created at init time
+        await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
 
         if cache_reset_task is not None:
             await cache_reset_task

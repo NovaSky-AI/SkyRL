@@ -16,6 +16,7 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
+from tx.models.configs import ModelConfig
 from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack, pack_and_upload
 from tx.tinker.types import LoraConfig
@@ -60,11 +61,17 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
+    import tx.models.llama3
     import tx.models.qwen3
+    import tx.models.deepseekv3
 
     for architecture in config.architectures or []:
+        if hasattr(tx.models.llama3, architecture):
+            return getattr(tx.models.llama3, architecture)
         if hasattr(tx.models.qwen3, architecture):
             return getattr(tx.models.qwen3, architecture)
+        if hasattr(tx.models.deepseekv3, architecture):
+            return getattr(tx.models.deepseekv3, architecture)
 
     raise ValueError(f"None of the architectures {config.architectures} is currently supported.")
 
@@ -86,7 +93,7 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
 
 def load_safetensors(
     checkpoint_dir: str | os.PathLike,
-    config: PretrainedConfig,
+    config: ModelConfig,
     model: nnx.Module,
     skip_lora: bool = True,
     prefix: str = "",
@@ -107,7 +114,9 @@ def load_safetensors(
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         if "experts" in path:
-            tensors[key] = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.num_experts)], axis=0)
+            tensors[key] = np.stack(
+                [tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0
+            )
         else:
             tensors[key] = tensors[key] if "embed_tokens" in path else tensors[key].T
         if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
@@ -119,7 +128,7 @@ def load_safetensors(
 
 
 def save_safetensors(
-    config: PretrainedConfig,
+    config: ModelConfig,
     model: nnx.Module,
     filename: Path,
     prefix: str = "",
@@ -134,7 +143,7 @@ def save_safetensors(
             continue
         key = get_param_key(path, prefix=prefix)
         if "experts" in path:
-            for i in range(config.num_experts):
+            for i in range(config.get_num_experts()):
                 tensors[get_expert_key(path, i)] = param[i, :, :].T
             continue
         if "q_proj" in path or "k_proj" in path or "v_proj" in path:
@@ -142,7 +151,14 @@ def save_safetensors(
         elif "o_proj" in path:
             param = param.reshape(-1, param.shape[-1])
         tensors[key] = param if "embed_tokens" in path else param.T
-    safetensors.numpy.save_file(tensors, filename)
+
+    # In multi-host mode, gather all shards and only save from rank 0
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+
+        tensors = {k: multihost_utils.process_allgather(v, tiled=True) for k, v in tensors.items()}
+
+    safetensors.numpy.save_file({k: np.asarray(v) for k, v in tensors.items()}, filename)
 
 
 def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:

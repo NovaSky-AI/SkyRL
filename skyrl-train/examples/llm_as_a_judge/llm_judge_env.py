@@ -1,10 +1,10 @@
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from typing import Any
-from typing import Dict
-from omegaconf import DictConfig
+from typing import Any, Dict, Optional, Union
 from openai import OpenAI
 import os
 import re
+from dataclasses import dataclass
+from omegaconf import DictConfig
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 PROMPT = """
 You are a strict math evaluation assistant.
@@ -31,6 +31,12 @@ Do not include any explanation after the final score.
 """
 
 
+@dataclass
+class GSM8kLLMJudgeEnvConfig:
+    model: str = "gpt-4o-mini"
+    base_url: Optional[str] = None
+
+
 class GSM8kLLMJudgeEnv(BaseTextEnv):
     """
     Example implementtion of GSM8k environment with LLM as judge.
@@ -38,7 +44,7 @@ class GSM8kLLMJudgeEnv(BaseTextEnv):
     Use LLM as judge to evaluate the answer similarity with the ground truth.
     """
 
-    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: Union[GSM8kLLMJudgeEnvConfig, DictConfig], extras: Dict[str, Any] = {}):
         super().__init__()
 
         assert "reward_spec" in extras, "reward_spec field is required"

@@ -50,12 +50,14 @@ class MegatronStrategy(DistributedStrategy):
         megatron_config,
         optimizer_config=None,
         seed: int = 42,
+        is_lora: bool = False,
     ) -> None:
         super().__init__()
         self.megatron_config = megatron_config
         self.optimizer_config = optimizer_config
         self.seed = seed
         self.hf_config = None  # Set by the megatron worker once configs are initialized.
+        self.is_lora = is_lora
 
         # NOTE: Set Megatron dist checkpoint async backend to persistent to avoid `os.fork()`-ing
         # short-lived background workers, which does not work well with Ray.
@@ -145,9 +147,9 @@ class MegatronStrategy(DistributedStrategy):
         # Extract base model.
         model: List[nn.Module] = model.actor_module
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
-        model = model[0]
-        if hasattr(model, "module"):
-            model = model.module
+        unwrapped_model = model[0]
+        while hasattr(unwrapped_model, "module"):
+            unwrapped_model = unwrapped_model.module
 
         # Create checkpoint directory if it doesn't exist.
         if node_local_rank == 0:
@@ -158,8 +160,9 @@ class MegatronStrategy(DistributedStrategy):
 
         # Collect the sharded state dicts for model and optimizer, and full state dict for the scheduler.
         sharded_state_dict = {}
-        model_sharded_state_dict = model.sharded_state_dict()
-        sharded_state_dict["model"] = model_sharded_state_dict
+        model_sharded_state_dict = unwrapped_model.sharded_state_dict()
+        if not self.is_lora:
+            sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
         if scheduler:
@@ -190,10 +193,42 @@ class MegatronStrategy(DistributedStrategy):
                 hf_dir = os.path.join(work_dir, "huggingface")
                 self.save_hf_configs(self.hf_config, hf_dir, tokenizer)
 
+        if self.is_lora:
+            self._save_lora_adapters(unwrapped_model, ckpt_dir)
+
         dist.barrier()
         ckpt_base.async_calls.close()
         ckpt_base.async_calls = AsyncCallsQueue(persistent=True)
         self.print(f"Checkpoint successfully saved to {ckpt_dir}")
+
+    def _get_rank_path(self, ckpt_dir):
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        pp_rank = mpu.get_pipeline_model_parallel_rank()
+        cp_rank = mpu.get_context_parallel_rank()
+        dp_rank = mpu.get_data_parallel_rank()
+        ep_rank = mpu.get_expert_model_parallel_rank()
+        etp_rank = mpu.get_expert_tensor_parallel_rank()
+
+        return os.path.join(
+            ckpt_dir, f"adapter_tp{tp_rank}_pp{pp_rank}_cp{cp_rank}_dp{dp_rank}_ep{ep_rank}_etp{etp_rank}.pt"
+        )
+
+    def _save_lora_adapters(self, model, ckpt_dir):
+        """Save LoRA adapters to checkpoint."""
+        if not self.is_lora:
+            return
+
+        assert isinstance(model, nn.Module), "Model must be a nn.Module"
+
+        model_state_dict = {}
+        for name, param in model.named_parameters():
+            if ".adapter" in name.lower():
+                model_state_dict[name] = param.data
+
+        with io.local_work_dir(ckpt_dir) as work_dir:
+            adapter_path = self._get_rank_path(work_dir)
+            torch.save({"model_state_dict": model_state_dict}, adapter_path)
+            self.print(f"Saved {len(model_state_dict)} LoRA adapter parameters to {adapter_path}")
 
     def load_checkpoint(
         self,
@@ -212,13 +247,14 @@ class MegatronStrategy(DistributedStrategy):
         model: List[nn.Module] = model.actor_module
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
         unwrapped_model = model[0]
-        if hasattr(unwrapped_model, "module"):
+        while hasattr(unwrapped_model, "module"):
             unwrapped_model = unwrapped_model.module
 
         # Extract sharded state dicts.
         sharded_state_dict = {}
         model_sharded_state_dict = unwrapped_model.sharded_state_dict()
-        sharded_state_dict["model"] = model_sharded_state_dict
+        if not self.is_lora:
+            sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
         if scheduler and load_lr_scheduler_states:
@@ -233,13 +269,15 @@ class MegatronStrategy(DistributedStrategy):
             state_dict = dist_checkpointing.load(
                 sharded_state_dict=sharded_state_dict, checkpoint_dir=read_dir, sharded_strategy=load_strategy
             )
-
-        # Load the model, optimizer, and scheduler state dicts.
-        assert (
-            "model" in state_dict
-        ), f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
-        model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
-        self.print("Loaded model state dict.")
+        if not self.is_lora:
+            # Load the model, optimizer, and scheduler state dicts.
+            assert (
+                "model" in state_dict
+            ), f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
+            model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
+            self.print("Loaded model state dict.")
+        else:
+            self._load_lora_adapters(unwrapped_model, ckpt_dir)
 
         if optimizer and load_optimizer_states:
             assert (
@@ -260,6 +298,22 @@ class MegatronStrategy(DistributedStrategy):
             self.load_rng_state(state_dict["rng"])
 
         return ckpt_dir, {}
+
+    def _load_lora_adapters(self, model, ckpt_dir):
+        """Load LoRA adapters from checkpoint."""
+        # TODO (erictang000): Update this logic once LoRA checkpointing is upstreamed to Megatron-Bridge
+        if not self.is_lora:
+            return
+
+        assert isinstance(model, nn.Module), "Model must be a nn.Module"
+
+        with io.local_read_dir(ckpt_dir) as read_dir:
+            adapter_path = self._get_rank_path(read_dir)
+            state_dict = torch.load(adapter_path, map_location="cpu")
+            _, unexpected = model.load_state_dict(state_dict["model_state_dict"], strict=False)
+            if len(unexpected) > 0:
+                raise ValueError(f"Unexpected keys in LoRA adapter state dict: {unexpected}")
+            self.print(f"Loaded {len(state_dict['model_state_dict'])} LoRA adapters from {adapter_path}.")
 
     def save_hf_model(self, bridge, model: MegatronModelWrapper, output_dir: str, tokenizer=None, **kwargs) -> None:
         # Create checkpoint directory if it doesn't exist.

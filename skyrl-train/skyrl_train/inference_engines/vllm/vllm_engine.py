@@ -1,9 +1,11 @@
 import os
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 from dataclasses import dataclass
 from http import HTTPStatus
 import ray
-import torch
 import asyncio
 import vllm
 from types import SimpleNamespace
@@ -20,19 +22,15 @@ from vllm.entrypoints.openai.protocol import (
     CompletionResponse,
 )
 from vllm.lora.request import LoRARequest
-from torch.distributed import destroy_process_group
-from skyrl_train.distributed.utils import init_custom_process_group
 from uuid import uuid4
-import warnings
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
     InferenceEngineOutput,
-    NamedWeightsUpdateRequest,
 )
+from skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 from skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
 from loguru import logger
-from skyrl_train.utils import str_to_torch_dtype, get_tcp_url
 import time
 from packaging import version
 
@@ -66,131 +64,10 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         logger.info(f"creating LLM with bundle_indices={bundle_indices}")
 
 
-class WorkerWrap:
-    def test_rpc(self, *args, **kwargs):
-        """Test RPC call to worker"""
-        return args, kwargs
-
-    def init_weight_update_communicator(
-        self,
-        master_address,
-        master_port,
-        rank_offset,
-        world_size,
-        group_name,
-        backend="nccl",
-        override_existing: bool = False,
-    ):
-        """Init torch process group for model weights update"""
-        assert torch.distributed.is_initialized(), "default torch process group must be initialized"
-        assert group_name != "", "group name must not be empty"
-
-        if getattr(self, "_model_update_group", None):
-            if override_existing:
-                logger.info("Destroying existing model update group")
-                destroy_process_group(self._model_update_group)
-                self._model_update_group = None
-            else:
-                warnings.warn(
-                    "Detected an existing weights update group. For overriding, use `generator.override_existing_update_group=True`"
-                )
-
-        rank = torch.distributed.get_rank() + rank_offset
-        logger.info(
-            f"torch.distributed.get_rank(): {torch.distributed.get_rank()}, rank_offset: {rank_offset}, rank: {rank}, world_size: {world_size}, group_name: {group_name}"
-        )
-
-        self._model_update_group = init_custom_process_group(
-            backend=backend,
-            init_method=get_tcp_url(master_address, master_port),
-            world_size=world_size,
-            rank=rank,
-            group_name=group_name,
-        )
-        logger.info(
-            f"init_weight_update_communicator: master_address={master_address}, master_port={master_port}, ",
-            f"rank={rank}, world_size={world_size}, group_name={group_name}",
-        )
-
-    def update_weights(self, names: List[str], dtypes: List[str], shapes: List[List[int]]):
-        """Broadcast weight to all vllm workers from source rank 0 (actor model)"""
-        weight_list = []
-        for name, dtype, shape in zip(names, dtypes, shapes):
-            dtype = str_to_torch_dtype(dtype)
-            assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-            weight = torch.empty(shape, dtype=dtype, device="cuda")
-            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
-            weight_list.append((name, weight))
-
-        self.model_runner.model.load_weights(weights=weight_list)
-        for weight in weight_list:
-            del weight
-
-    def update_weights_cuda_ipc(
-        self,
-        names: List[str],
-        dtypes: List[str],
-        shapes: List[int],
-        sizes: List[int],
-        ipc_handles: List[Dict[str, Any]],
-        packed: bool = False,
-    ):
-        weight_list = []
-
-        if packed:
-            assert len(ipc_handles) == 1, "packed weight update should receive one ipc handle for all tensors"
-            assert len(set(dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
-            assert (
-                str_to_torch_dtype(dtypes[0]) == self.model_config.dtype
-            ), f"mismatch dtype: src {dtypes[0]}, dst {self.model_config.dtype}"
-            assert len(sizes) == len(names), "sizes must be provided for packed weight update"
-            assert all(isinstance(size, int) for size in sizes), "sizes should be a list of integers"
-
-            device = torch.cuda.current_device()
-            props = torch.cuda.get_device_properties(device)
-            physical_gpu_id = str(props.uuid)
-
-            handle = ipc_handles[0][physical_gpu_id]
-            device_id = self.device.index
-            func, args = handle
-            list_args = list(args)
-            list_args[6] = device_id
-            packed_tensor = func(*list_args)
-
-            offset = 0
-            for name, shape, size in zip(names, shapes, sizes):
-                weight_list.append((name, packed_tensor[offset : offset + size].view(*shape)))
-                offset += size
-        else:
-            for name, dtype, shape, ipc_handle in zip(names, dtypes, shapes, ipc_handles):
-
-                dtype = str_to_torch_dtype(dtype)
-                device = torch.cuda.current_device()
-                props = torch.cuda.get_device_properties(device)
-                physical_gpu_id = str(props.uuid)
-
-                assert dtype == self.model_config.dtype, f"mismatch dtype: src {dtype}, dst {self.model_config.dtype}"
-
-                handle = ipc_handle[physical_gpu_id]
-
-                device_id = self.device.index
-                func, args = handle
-                list_args = list(args)
-                list_args[6] = device_id
-                weight = func(*list_args)
-                weight_list.append((name, weight))
-
-        self.model_runner.model.load_weights(weights=weight_list)
-
-        for weight in weight_list:
-            del weight
-
-    # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
-    def destroy_weights_update_group(self):
-        if not self._model_update_group:
-            warnings.warn("No model update group to destroy")
-            return
-        destroy_process_group(self._model_update_group)
+# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
+# This alias preserves the old import path for existing scripts/configs.
+# TODO (Kourosh): Remove this alias once all references are updated.
+from skyrl_train.inference_servers.vllm_worker import WorkerWrap  # noqa: F401, E402
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -211,6 +88,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
+
+        # Weight loader is created by subclass after engine initialization
+        self._weight_loader = None
 
     def tp_size(self):
         return self._tp_size
@@ -282,15 +162,6 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
-    def _is_lora_disk_loading_request(self, request: NamedWeightsUpdateRequest) -> bool:
-        """Check if this is a LoRA disk loading request."""
-        is_lora = request["names"][0] == "lora_disk_load"
-        if is_lora:
-            assert request.get("extras") and len(request["extras"]) > 0 and "lora_disk_path" in request["extras"][0], (
-                "vLLM LoRA weight update requests must contain the disk load " "path under key `lora_disk_path`"
-            )
-        return is_lora
-
     def reset_prefix_cache(self):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
@@ -302,12 +173,23 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Synchronous VLLM engine."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._weight_loader = VLLMWeightLoader(self.llm, is_async=False)
+
     def _create_engine(self, *args, **kwargs):
         # Pipeline parallelism requires AsyncLLMEngine
         if kwargs.get("pipeline_parallel_size", 1) > 1:
             raise ValueError(
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
                 "Please set `generator.async_engine=true` in your config."
+            )
+        # Pop enable_ray_prometheus_stats - only supported for async engine
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+        if enable_ray_prometheus_stats:
+            logger.warning(
+                "enable_ray_prometheus_stats is only supported with AsyncVLLMInferenceEngine. "
+                "Set `generator.async_engine=true` to enable Ray Prometheus stats logging."
             )
         return vllm.LLM(*args, **kwargs)
 
@@ -337,11 +219,11 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
-        raise NotImplementedError()
+        raise NotImplementedError("`chat_completion` is only supported in AsyncVLLMInferenceEngine.")
 
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Only supported in AsyncVLLMInferenceEngine."""
-        raise NotImplementedError()
+        raise NotImplementedError("`completion` is only supported in AsyncVLLMInferenceEngine.")
 
     async def wake_up(self, *args: Any, **kwargs: Any):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
@@ -361,14 +243,16 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await asyncio.to_thread(self.llm.sleep, level=level)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        import pickle
+
         engine = self._get_engine()
+        # Pickle the init_info to preserve type through collective_rpc
+        pickled_init_info = pickle.dumps(init_info)
         return await asyncio.to_thread(
             engine.collective_rpc,
             "init_weight_update_communicator",
-            args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
+            args=(pickled_init_info,),
         )
 
     async def _load_lora_from_disk(self, lora_path: str):
@@ -378,82 +262,85 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         result = self.llm.llm_engine.add_lora(lora_request)
         return result
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
-
-        if not len(request["names"]):
-            raise ValueError("Update weight request should have at least one entry in 'names'")
+    async def update_named_weights(self, request: WeightUpdateRequest):
+        from skyrl_train.weight_sync import LoraLoadRequest
 
         # Handle LoRA disk loading request
-        if self._is_lora_disk_loading_request(request):
-            lora_path = request["extras"][0]["lora_disk_path"]
-            return await self._load_lora_from_disk(lora_path)
+        if isinstance(request, LoraLoadRequest):
+            return await self._load_lora_from_disk(request.lora_path)
 
-        engine = self._get_engine()
-        # Use IPC if handles are provided
-        if request.get("extras") and "ipc_handles" in request["extras"][0]:
-            return await asyncio.to_thread(
-                engine.collective_rpc,
-                "update_weights_cuda_ipc",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                    request.get("sizes", []),
-                    [extra["ipc_handles"] for extra in request["extras"]],
-                    request.get("packed", False),
-                ),
-            )
-        else:
-            assert (
-                len(request["names"]) == 1
-            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
-            return await asyncio.to_thread(
-                engine.collective_rpc, "update_weights", args=(request["names"], request["dtypes"], request["shapes"])
-            )
+        if not len(request):
+            raise ValueError("Weight update request must not be empty")
+
+        # Use the weight loader to coordinate weight transfer
+        return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
-        await self._destroy_weights_update_group()
+        await self._teardown_weight_receiver()
 
     async def reset_prefix_cache(self):
         return await asyncio.to_thread(self.llm.llm_engine.reset_prefix_cache)
 
-    async def _destroy_weights_update_group(self):
+    async def _teardown_weight_receiver(self):
         engine = self._get_engine()
-        return await asyncio.to_thread(engine.collective_rpc, "destroy_weights_update_group")
+        return await asyncio.to_thread(engine.collective_rpc, "teardown_weight_receiver")
 
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
+
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+
         # TODO (erictang000): potentially enable log requests for a debugging mode
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
             engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
         else:
             engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
-        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+
+        # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
+        stat_loggers = None
+        if enable_ray_prometheus_stats:
+            stat_loggers = self._create_ray_prometheus_stat_loggers()
+
+        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
         model_path = kwargs.get("model")
-        # TODO(Charlie): add a config similar to vllm's `served_model_name`. See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
-        model_name = model_path
+        # Use served_model_name if provided (from generator.served_model_name config),
+        # otherwise fall back to model_path. This allows using a different model name
+        # in HTTP endpoint requests than the actual model path.
+        # See: https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
+        served_model_name = kwargs.get("served_model_name", None)
+        model_name = served_model_name if served_model_name is not None else model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-        models = OpenAIServingModels(engine, model_config, base_model_paths)
+
+        # vllm >= 0.11.2 removed model_config from OpenAI serving APIs
+        is_new_api = version.parse(vllm.__version__) >= version.parse("0.11.2")
+        legacy_kwargs = {}
+        if is_new_api:
+            models = OpenAIServingModels(engine, base_model_paths)
+        else:
+            models = OpenAIServingModels(engine, model_config, base_model_paths)
+            legacy_kwargs["model_config"] = model_config
+
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
-            model_config=model_config,
             models=models,
             response_role="assistant",
             request_logger=None,
-            chat_template=None,
+            chat_template=openai_kwargs.pop("chat_template", None),  # used to template /chat/completions requests
             chat_template_content_format="auto",
+            **legacy_kwargs,
             **openai_kwargs,
         )
 
@@ -461,11 +348,35 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
-            model_config=model_config,
             models=models,
             request_logger=None,
+            **legacy_kwargs,
         )
         return engine
+
+    def _create_ray_prometheus_stat_loggers(self):
+        """Create Ray Prometheus stat loggers for vLLM metrics.
+
+        Returns stat_loggers in the format expected by vLLM's from_engine_args().
+        For vLLM v1 (0.9.0+), this returns a list of StatLoggerFactory callables.
+        For older versions where the v1 API is not available, this returns `None`.
+
+        See: https://docs.vllm.ai/en/latest/api/vllm/v1/metrics/ray_wrappers/
+        """
+        try:
+            # Try vLLM v1 API first (0.9.0+)
+            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+            logger.info("Enabling RayPrometheusStatLogger for vLLM inference engine metrics")
+            # For v1, stat_loggers is a list of factory callables
+            return [RayPrometheusStatLogger]
+        except ImportError:
+            logger.warning(
+                "RayPrometheusStatLogger not available in this vLLM version. "
+                "For Ray-integrated metrics, upgrade to vLLM >= 0.9.0. "
+                "Stat logging will be disabled."
+            )
+            return None
 
     async def _load_lora_from_disk(self, lora_path: str):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
@@ -537,67 +448,40 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         level = 1 if self._is_lora else kwargs.get("level", 2)
         await self.llm.sleep(level=level)
 
-    async def init_weight_update_communicator(
-        self, master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing: bool = False
-    ):
+    async def init_weight_update_communicator(self, init_info: "WeightSyncInitInfo"):
+        import pickle
+
         engine = self._get_engine()
+        # Pickle the init_info to preserve type through collective_rpc
+        pickled_init_info = pickle.dumps(init_info)
         return await engine.collective_rpc(
             "init_weight_update_communicator",
-            args=(master_addr, master_port, rank_offset, world_size, group_name, backend, override_existing),
+            args=(pickled_init_info,),
         )
 
-    async def update_named_weights(self, request: NamedWeightsUpdateRequest):
-        if "names" not in request:
-            raise ValueError(f"Expected update weight request with 'names' entry, got keys: {request.keys()}")
-
-        if not len(request["names"]):
-            raise ValueError("Update weight request should have atleast one entry in 'names'")
+    async def update_named_weights(self, request: WeightUpdateRequest):
+        from skyrl_train.weight_sync import LoraLoadRequest
 
         # Check for LoRA disk loading request
-        if self._is_lora_disk_loading_request(request):
-            lora_path = request["extras"][0]["lora_disk_path"]
-            return await self._load_lora_from_disk(lora_path)
+        if isinstance(request, LoraLoadRequest):
+            return await self._load_lora_from_disk(request.lora_path)
 
-        engine = self._get_engine()
-        # Use IPC if handles are provided
+        if not len(request):
+            raise ValueError("Weight update request must not be empty")
 
-        is_ipc = request.get("extras") and "ipc_handles" in request["extras"][0]
-
-        if is_ipc:
-            return await engine.collective_rpc(
-                "update_weights_cuda_ipc",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                    request.get("sizes", []),
-                    [extra["ipc_handles"] for extra in request["extras"]],
-                    request.get("packed", False),
-                ),
-            )
-        else:
-            assert (
-                len(request["names"]) == 1
-            ), f"Update weights without cuda IPC only supports a single named weight at a time , got request with {len(request['names'])} entries"
-            return await engine.collective_rpc(
-                "update_weights",
-                args=(
-                    request["names"],
-                    request["dtypes"],
-                    request["shapes"],
-                ),
-            )
+        # Use the weight loader to coordinate weight transfer
+        return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
-        await self._destroy_weights_update_group()
+        await self._teardown_weight_receiver()
 
     async def reset_prefix_cache(self):
         engine = self._get_engine()
         await engine.reset_prefix_cache()
 
-    async def _destroy_weights_update_group(self):
+    async def _teardown_weight_receiver(self):
         engine = self._get_engine()
-        return await engine.collective_rpc("destroy_weights_update_group")
+        return await engine.collective_rpc("teardown_weight_receiver")
 
     # ----------------------------------------
     # Methods for handling OpenAI API requests
@@ -649,21 +533,39 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
+
+            # Determine appropriate HTTP status code based on error message to mimic vllm serve error
+            # handling. Here, we handle context length errors, which should return 400 according to
+            # vllm serve error handling, so that downstream users can handle these properly rather
+            # than seeing a 500 SkyRL INTERNAL_SERVER_ERROR. For instance, LiteLLM can wraps them as
+            # BadRequestError, enabling Harbor to detect ContextLengthExceededError.
+            # NOTE(Charlie): This is hacky. With the refactored inference stack, we
+            # should be able to directly reuse the error handling from the served vllm.
+            error_message = str(e).lower()
+            is_context_length_error = (
+                "maximum context length" in error_message or "maximum model length" in error_message
+            )
+
+            if is_context_length_error:
+                http_status = HTTPStatus.BAD_REQUEST
+            else:
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
                 from vllm.entrypoints.openai.protocol import ErrorInfo
 
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
-                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                        type=http_status.phrase,
+                        code=http_status.value,
                     ),
                 ).model_dump()
             else:
                 return ErrorResponse(
                     message=str(e),
-                    type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                    code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    type=http_status.phrase,
+                    code=http_status.value,
                 ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -714,6 +616,50 @@ class _MinimalRequest:
     def __init__(self, headers):
         self.headers = headers  # Expect a mapping with .get support
         self.state = SimpleNamespace()  # vLLM sets raw_request.state.request_metadata
+
+
+class VLLMWeightLoader(WeightLoader):
+    """Loads weights into vLLM engine, managing RPC coordination.
+
+    This loader encapsulates the collective_rpc calls to workers.
+    Workers create the appropriate receiver locally for the actual weight transfer.
+    """
+
+    def __init__(self, engine: Any, is_async: bool = False) -> None:
+        """Initialize the loader.
+
+        Args:
+            engine: The vLLM engine (LLM or AsyncLLMEngine).
+            is_async: Whether this is for AsyncVLLMInferenceEngine.
+        """
+        self._engine = engine.engine if hasattr(engine, "engine") else engine
+        self._is_async = is_async
+
+    async def load_weights(self, request: WeightUpdateRequest) -> None:
+        """Load weights by coordinating RPC to workers.
+
+        Sends the request to workers via collective_rpc. Workers create
+        the receiver locally and use it to receive and load weights.
+
+        Args:
+            request: Weight update request.
+        """
+        import pickle
+
+        # Pickle the request to preserve type through collective_rpc
+        pickled_request = pickle.dumps(request)
+
+        if self._is_async:
+            await self._engine.collective_rpc(
+                "load_weights",
+                args=(pickled_request,),
+            )
+        else:
+            await asyncio.to_thread(
+                self._engine.collective_rpc,
+                "load_weights",
+                args=(pickled_request,),
+            )
 
 
 VLLMRayActor = ray.remote(VLLMInferenceEngine)

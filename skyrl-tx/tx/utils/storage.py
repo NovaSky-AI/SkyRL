@@ -5,7 +5,11 @@ from pathlib import Path
 import tarfile
 from tempfile import TemporaryDirectory
 from typing import Generator
+
+import jax
 from cloudpathlib import AnyPath
+
+from tx.utils.log import logger
 
 
 @contextmanager
@@ -14,11 +18,20 @@ def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
 
     Args:
         dest: Destination path for the tar.gz file
+
+    Note:
+        If a probe file exists at {dest}.probe, only rank 0 writes to avoid
+        redundant uploads on shared filesystems.
     """
     with TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
 
         yield tmp_path
+
+        # If probe file exists, filesystem is shared - only rank 0 should write
+        if dest.with_name(dest.name + ".probe").exists() and jax.process_index() != 0:
+            logger.info(f"Skipping write to {dest} (shared filesystem, rank {jax.process_index()})")
+            return
 
         dest.parent.mkdir(parents=True, exist_ok=True)
 

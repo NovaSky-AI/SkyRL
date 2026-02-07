@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
-from examples.terminal_bench.terminal_bench_generator import TerminalBenchGenerator
+from examples.terminal_bench.generator.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
 
 

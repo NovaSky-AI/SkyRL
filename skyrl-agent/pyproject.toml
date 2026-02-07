@@ -97,8 +97,8 @@ flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 # -------------------------------
 # tool.setuptools - Additional config
 # -------------------------------
-[tool.setuptools]
-packages = ["skyrl_agent"]
+[tool.setuptools.packages.find]
+include = ["skyrl_agent*"]
 
 # We read the version from a file in 'skyagent/version/version'
 [tool.setuptools.dynamic]

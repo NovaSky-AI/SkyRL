@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-Coder-7B-Instruct on SkyRL-SQL-653 data.
 # Uses 1 node with 8 GPUs.
-# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+# hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/step_wise/run_skyrl_sql_step_wise.sh
 
@@ -71,5 +71,5 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.algorithm.policy_loss_type="dual_clip" \
-  trainer.step_wise_training=true \
+  generator.step_wise_trajectories=true \
   $@

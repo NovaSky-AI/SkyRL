@@ -131,7 +131,7 @@ Logging and Debugging Configuration
 Training Backends
 -----------------
 
-We support four backends: FSDP1, FSDP2, Megatron, and DeepSpeed. The backend can be chosen with ``trainer.strategy`` field.
+We support three backends: FSDP1, FSDP2, and Megatron. The backend can be chosen with ``trainer.strategy`` field.
 
 .. _fsdp-configurations:
 
@@ -184,6 +184,9 @@ Megatron Configuration
       transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
         # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
         ...
+      lora_config:
+        # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
+        lora_type: "lora"
       # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
       # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
       empty_cuda_cache: true
@@ -208,17 +211,6 @@ Some rules for configuring these parameters:
 
   We recommend leaving this setting to ``false``
 
-
-.. _deepspeed-configurations:
-
-DeepSpeed Configuration
-~~~~~~~~~~~~~~~~~~~~~~~
-
-For DeepSpeed, please refer to DeepSpeed's `configuration guide <https://www.deepspeed.ai/docs/config-json/>`_ for more details. In general, the user experience with DeepSpeed is better and most parameters can set to ``auto`` for DeepSpeed to automatically configure. Here are a couple of important parameters:
-
-- ``deepspeed_config.zero_optimization.stage``: Which ZeRO stage to use. Currently, we only support stage 3.
-- ``deepspeed_config.zero_optimization.zero_hpz_partition_size``: Hierarchical Partitioning size. This is similar (although not equivalent) to hybrid sharding in FSDP.
-- ``deepspeed_config.gradient_clipping``: This should not be set during training. We instead provide a common optimizer config ``optimizer_config.max_grad_norm`` that will handle gradient clipping configuration for all training backends.
 
 Optimizer Configuration
 -----------------------
@@ -261,8 +253,9 @@ This section configures the policy model used for training, including optimizer,
          target_modules: "all-linear"  # Apply to all linear layers OR
          # specify specific modules as a list
          exclude_modules: null  # Modules to exclude from LoRA
-     deepspeed_config: ${deepspeed_config.train}  # Reference to default deepspeed config
-
+         # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig
+         # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
+         init_method: "kaiming" # Initialization method for LoRA layers
      optimizer_config:
        lr: 1.0e-6  # Learning rate
        adam_betas: [0.9, 0.999]  # Betas for Adam optimizer
@@ -280,7 +273,8 @@ This section configures the policy model used for training, including optimizer,
      use_torch_compile: false  # Enable torch compile for the entropy calculation
      record_memory: false  # Dump memory snapshot for debugging
 
-- ``policy.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
+     model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP training backends (i.e. for overriding vocab size, etc) - for megatron, use policy.megatron_config.transformer_config_kwargs instead
+
 - ``policy.optimizer_config``: Optimizer configuration for the policy model
 - ``policy.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``policy.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
@@ -296,6 +290,7 @@ LoRA (Low-Rank Adaptation) enables parameter-efficient fine-tuning by training o
 - ``policy.model.lora.alpha``: Scaling factor for LoRA updates.
 - ``policy.model.lora.dropout``: Dropout probability applied to LoRA layers. Helps prevent overfitting during training.
 - ``policy.model.lora.lora_sync_path``: Directory path where LoRA adapter weights are saved and synchronized between training and inference processes. Must be accessible to all workers in distributed setups.
+- ``policy.model.lora.init_method``: Initialization method for LoRA layers. For FSDP, this corresponds to `init_lora_weights <https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights>`_ in PEFT. 'kaiming' is mapped to 'true' by default for PEFT. For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
 
 
 Critic Configuration
@@ -314,7 +309,7 @@ We support similar configuration options as the policy model, including LoRA.
           dropout: 0                 # LoRA dropout rate
           target_modules: "all-linear"
           exclude_modules: null  # Modules to exclude from LoRA
-      deepspeed_config: ${deepspeed_config.train}
+          init_method: "kaiming" # Initialization method for LoRA layers
       optimizer_config:
         lr: 5.0e-6
         adam_betas: [0.9, 0.999]
@@ -326,6 +321,7 @@ We support similar configuration options as the policy model, including LoRA.
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
+      model_config_kwargs: {} # pass through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
 
 
 Reference Model Configuration
@@ -337,15 +333,14 @@ Reference Model Configuration
     ref:
       model:
         path: ${trainer.policy.model.path}
-      deepspeed_config: ${deepspeed_config.eval}
       fsdp_config:
         cpu_offload: false
         reshard_after_forward: true
         fsdp_size: -1
       sequence_parallel_size: 1
+      model_config_kwargs: {}     # pass through kwargs to the HuggingFace model config for FSDP training backends (i.e. for overriding vocab size, etc) - for megatron, use ref.megatron_config.transformer_config_kwargs instead
 
 - ``ref.model.path``: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
-- ``ref.deepspeed_config``: To be customized if using ``trainer.strategy='deepspeed'``.
 - ``ref.fsdp_config``: FSDP configuration, applicable if ``trainer.strategy='fsdp'``.
 - ``ref.sequence_parallel_size``: Sequence parallel size. We implement `Ulysses sequence parallelism <https://arxiv.org/abs/2309.14509>`_
 
@@ -369,8 +364,6 @@ Algorithm Configuration
         horizon: 10000 # controls the update rate of the adaptive KL controller
   
       kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
-      use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
-      use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
 
       # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
       use_kl_in_reward: false # apply kl loss to rewards
@@ -382,6 +375,7 @@ Algorithm Configuration
       policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov" or customizable with PolicyLossRegistry
       loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
       grpo_norm_by_std: true # set to false to disable normalization by std in GRPO (used in Dr. GRPO)
+      zero_variance_filter: false # set to true to loss mask out prompts with zero variance rewards. only applicable when rewards are response-level.
 
       # GAE parameters
       lambd: 1.0
@@ -392,6 +386,46 @@ Algorithm Configuration
       eps_clip_high: 0.2
       # dual clip parameters
       clip_ratio_c: 3.0
+
+      # To be deprecated in favor of off_policy_correction.tis_ratio_type = "token"
+      # and "token_tis_ratio_clip_high"
+      use_tis: false 
+      tis_imp_ratio_cap: -1.0
+
+      # references
+      # - https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
+      # - https://fengyao.notion.site/off-policy-rl
+      off_policy_correction:
+        # type of importance sampling ratio to use for ppo loss correction
+        # here importance sampling ratio refers to exp(logprobs_{policy_old} - logprobs_{rollout_policy})
+        tis_ratio_type: null # null, "token", "sequence"
+
+        # used if tis_ratio_type = "token", 1.5-5.0 is recommended for "token" tis_ratio_type
+        token_tis_ratio_clip_high: 2.0
+        # used if tis_ratio_type = "sequence", 2.0-10.0 is recommended for "sequence" tis_ratio_type
+        sequence_tis_ratio_clip_high: 5.0
+
+        # method of masking out sequences with cumulative importance sampling ratios outside the cap
+        # "product" masks out sequences with product of importance ratios outside the cap
+        # "geometric" masks out sequences with geometric mean of importance ratios outside the cap
+        sequence_mask_metric: null # null, "product", "geometric"
+
+        # used if sequence_mask_metric = "geometric"
+        # values around 0.99-1.01 are recommended for "geometric" sequence_mask_metric - MoE models may need larger allowed ranges due to higher mismatch
+        geo_mask_high: 1.01
+        geo_mask_low: 0.99
+
+        # used if sequence_mask_metric = "product"
+        # values around 0.5-2.0 are recommended for "product" sequence_mask_metric
+        product_mask_high: 2.0
+        product_mask_low: 0.5
+
+        # separate from sequence_mask_metric and tis_ratio_type 
+        # if any off_policy_correction is enabled, masks out sequences with any token having importance ratio
+        # far outside an acceptable range (low and high thresholds) - set to null to disable
+        # suggested values: 1e-4 for low and 100 for high
+        outlier_token_is_threshold_low: null
+        outlier_token_is_threshold_high: null
 
       # clip-cov parameters (only used when policy_loss_type: "clip_cov")
       clip_cov:
@@ -417,10 +451,6 @@ Algorithm Configuration
         type: null # filter (DAPO), replace (POLARIS/WebSailor), or null
         max_sample_batches: 30 # sample at most this many batches before stopping, -1 to sample forever
         min_replace_ratio: 0.3 # minimum proportion of good samples with which to replace bad samples (for replace strategy only)
-      
-      # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
-      use_tis: false 
-      tis_imp_ratio_cap: -1.0
 
       # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
       sapo:
@@ -435,8 +465,6 @@ Algorithm Configuration
  - ``horizon``: Controls the update rate of the adaptive KL controller.
 
 - ``algorithm.kl_estimator_type``: KL estimator type to use. Options include: ``k1``, ``k2``, ``k3``, ``abs``. See `this blog post <http://joschu.net/blog/kl-approx.html>`_ for details. We use ``k3`` as the default.
-- ``algorithm.use_kl_estimator_k3``: Whether to use the k3 estimator for KL divergence calculation. The k3 estimator is the non negative kl approximation in `this blog post <http://joschu.net/blog/kl-approx.html>`_. Besides non negative, it is also unbiased and has lower variance. This flag is to be deprecated, use ``kl_estimator_type="k3"`` instead.
-- ``algorithm.use_abs_kl``: Whether to use the absolute KL divergence for KL divergence calculation. This flag is to be deprecated, use ``kl_estimator_type="abs"`` instead.
 - ``algorithm.use_kl_in_reward``: Whether to apply KL divergence penalty to rewards. The new rewards will be computed as ``rewards - kl * kl_loss_coef``.
 - ``algorithm.use_kl_loss``: Whether to add a KL divergence loss to the policy model. The policy loss will be computed as ``policy_loss + kl * kl_loss_coef``.
 - ``algorithm.kl_loss_coef``: Coefficient for the KL divergence loss.
@@ -459,6 +487,7 @@ Algorithm Configuration
   - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 
 - ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+- ``algorithm.zero_variance_filter``: Whether to loss mask out prompts with zero variance rewards. This is only applicable when rewards are response-level.
 - ``algorithm.lambd``: Lambda parameter for GAE.
 - ``algorithm.gamma``: Gamma parameter for GAE.
 - ``algorithm.eps_clip_low``: Lower bound for PPO clipping.
@@ -469,8 +498,8 @@ Algorithm Configuration
   - ``algorithm.dynamic_sampling.type``: Type of dynamic sampling to use. Currently, we support ``filter`` (`DAPO <https://dapo-sia.github.io/>`_), ``replace`` (`POLARIS <https://hkunlp.github.io/blog/2025/Polaris/>`_ / `WebSailor <https://arxiv.org/abs/2507.02592>`_), or ``null`` for no dynamic sampling.
   - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
-- ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. 
-- ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS.
+- ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. This flag is to be deprecated, use ``off_policy_correction.tis_ratio_type = "token"`` instead.
+- ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS. This flag is to be deprecated, use ``off_policy_correction.token_tis_ratio_clip_high`` instead.
 - ``algorithm.clip_cov``: Clip-Cov parameters (only used when ``policy_loss_type`` is ``clip_cov``):
 
   - ``clip_ratio``: Fraction of tokens to clip based on covariance values.
@@ -492,6 +521,35 @@ Algorithm Configuration
   - ``tau_pos``: Temperature for gating function for tokens with positive advantages.
   - ``tau_neg``: Temperature for gating function for tokens with negative (or zero) advantages.
 
+Off Policy Correction Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+- ``algorithm.off_policy_correction``: Off policy correction configuration. See the full configuration below
+
+.. code-block:: yaml
+
+  off_policy_correction:
+    tis_ratio_type: null # null, "token", "sequence"
+    token_tis_ratio_clip_high: 2.0
+    sequence_tis_ratio_clip_high: 5.0
+    sequence_mask_metric: null # null, "product", "geometric"
+    geo_mask_high: 1.01
+    geo_mask_low: 0.99
+    product_mask_high: 2.0
+    product_mask_low: 0.5
+    outlier_token_is_threshold_low: null
+    outlier_token_is_threshold_high: null
+
+- ``algorithm.off_policy_correction.tis_ratio_type``: Type of importance sampling ratio to use for ppo loss correction. Options include: ``null``, ``token``, ``sequence``.
+- ``algorithm.off_policy_correction.token_tis_ratio_clip_high``: Cap parameter for "token" tis_ratio_type.
+- ``algorithm.off_policy_correction.sequence_tis_ratio_clip_high``: Cap parameter for "sequence" tis_ratio_type.
+- ``algorithm.off_policy_correction.sequence_mask_metric``: Method of masking out sequences with cumulative importance sampling ratios outside the cap. Options include: ``null``, ``product``, ``geometric``.
+- ``algorithm.off_policy_correction.geo_mask_high``: High threshold for "geometric" sequence_mask_metric.
+- ``algorithm.off_policy_correction.geo_mask_low``: Low threshold for "geometric" sequence_mask_metric.
+- ``algorithm.off_policy_correction.product_mask_high``: High threshold for "product" sequence_mask_metric.
+- ``algorithm.off_policy_correction.product_mask_low``: Low threshold for "product" sequence_mask_metric.
+- ``algorithm.off_policy_correction.outlier_token_is_threshold_low``: Low threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to ``null`` to disable. Suggested values: ``1e-4``.
+- ``algorithm.off_policy_correction.outlier_token_is_threshold_high``: High threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to ``null`` to disable. Suggested values: ``100``.
+
 Policy Loss Formulation
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -505,7 +563,7 @@ It can be helpful to understand the final loss formulation to see how the differ
       advantages: torch.Tensor,
       config: DictConfig, # trainer.algorithm config
       loss_mask: Optional[torch.Tensor] = None,
-  ) -> torch.Tensor:
+  ) -> Tuple[torch.Tensor, dict]:
 
       ratio = (log_probs - old_log_probs).exp()
       surr1 = ratio * advantages
@@ -518,7 +576,7 @@ It can be helpful to understand the final loss formulation to see how the differ
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
       loss = reduce_loss(loss, loss_mask, config.loss_reduction)
-      return loss, clip_ratio
+      return loss, {"clip_ratio": clip_ratio}
 
 
 Generator Configuration
@@ -567,6 +625,7 @@ Generator Configuration
       top_p: 1.0
       min_p: 0.0
       top_k: -1
+      logprobs: 0
 
     use_conversation_multi_turn: true
 
@@ -577,6 +636,7 @@ Generator Configuration
       top_p: 1.0
       min_p: 0.0
       top_k: -1
+      logprobs: 0
 
     # number of samples per prompt for evaluation
     eval_n_samples_per_prompt: 1
@@ -634,6 +694,7 @@ Generation Parameters
     - ``generator.sampling_params.top_p``: Top-p sampling parameter for the inference engine.
     - ``generator.sampling_params.min_p``: Min-p sampling parameter for the inference engine, as proposed in `this paper <https://arxiv.org/pdf/2407.01082>`_.
     - ``generator.sampling_params.top_k``: Top-k sampling parameter for the inference engine.
+    - ``generator.sampling_params.logprobs``: Number of logprobs to return from the inference engine. Set to ``0`` to return only the chosen token's logprob.
 - ``generator.eval_sampling_params``: Sampling parameters for evaluation.
 - ``generator.eval_n_samples_per_prompt``: Number of samples to generate per prompt for evaluation.
 - ``generator.max_turns``: Maximum number of turns for generation with multi-turn RL.
@@ -649,4 +710,4 @@ Misc Configuration
 
 - ``generator.zero_reward_on_non_stop``: Whether to set the reward to 0 if the `stop_reason` is not `stop`. Cases where this is useful: Often, we have format rewards for the LLM to follow, but in cases where the LLM didn't finish the response, we typically don't want to reward it. This is a general setting for all environments.
 - ``generator.apply_overlong_filtering``: Whether to apply DAPO Overlong Filtering to the loss masks. For each trajectory that exceeds the max length (i.e., truncated and does not end with an EOS token), this masks out every token in the loss mask.
-- ``trainer.step_wise_training``: Whether to use step-wise training. If ``true``, then the generator will return multi-turn generations with each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.
+- ``generator.step_wise_trajectories``: Whether to return outputs in a step-wise fashion. If ``true``, then the generator will return multi-turn generations with the (prompt, response) pair of each turn being a separate trajectory. Advantages are computed based on the last step of each trajectory and propagated to the previous steps.

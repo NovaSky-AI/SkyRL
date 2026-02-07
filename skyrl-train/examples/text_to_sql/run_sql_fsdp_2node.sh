@@ -4,7 +4,7 @@ set -x
 # Uses 2 nodes with 8 GPUs each.
 # NOTE: you may need to download the DB files for env interaction onto each node for multi-node training, since the driver worker 
 # will be scheduled on a worker node
-# huggingface-cli download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
+# hf download NovaSky-AI/SkyRL-SQL-653-data-newfmt --local-dir $HOME/data/sql --repo-type dataset
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/text_to_sql/run_sql_fsdp_2node.sh
 

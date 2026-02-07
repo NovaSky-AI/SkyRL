@@ -10,7 +10,7 @@ For details on configuring the Megatron backend, and enabling checkpointing, see
 When to use the Megatron backend
 --------------------------------
 
-SkyRL supports efficient data-parallel training with the FSDP and the DeepSpeed backend, with support for Ulysses sequence parallelism for long context training. The Megatron backend is useful to stack additional parallelism strategies (TP, PP, EP) on top of data and sequence/context parallelism. This is helpful both for fitting larger models into memory and for training throughput for MoE models (with EP). The Megatron backend is thus useful for efficient training of small MoE models like ``Qwen3-30B-A3B`` as well as large-scale training with large models such as ``Qwen3-235B-A22B`` and/or large datasets. For resources on understanding different parallelism strategies, see :ref:`parallelism-resources`.
+SkyRL supports efficient data-parallel training with the FSDP backend, with support for Ulysses sequence parallelism for long context training. The Megatron backend is useful to stack additional parallelism strategies (TP, PP, EP) on top of data and sequence/context parallelism. This is helpful both for fitting larger models into memory and for training throughput for MoE models (with EP). The Megatron backend is thus useful for efficient training of small MoE models like ``Qwen3-30B-A3B`` as well as large-scale training with large models such as ``Qwen3-235B-A22B`` and/or large datasets. For resources on understanding different parallelism strategies, see :ref:`parallelism-resources`.
 
 Comparison to FSDP
 ------------------
@@ -121,6 +121,9 @@ for advanced users to fully take advantage of all of Megatron-Core's feature fla
     transformer_config_kwargs: # pass-through kwargs to the Megatron's `TransformerConfig` object
       # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
       ...
+    lora_config:
+      # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
+      lora_type: "lora"
     # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
     # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
     empty_cuda_cache: true
@@ -138,5 +141,4 @@ the `The Mesh Parallelism Zoo <https://blog.ezyang.com/2025/08/the-parallelism-m
 Below, we show a diagram displaying how all 5 parallelism strategies - tensor, pipeline, context, expert, and data parallelism - can be utilized in SkyRL, as well as how dispatching data across these parallel groups works.
 
 .. image:: images/parallelism.svg
-
 

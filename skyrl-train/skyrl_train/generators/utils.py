@@ -1,12 +1,64 @@
+import os
 import torch
 from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
-from skyrl_train.generators.base import GeneratorOutput, GeneratorInput, TrajectoryID, BatchMetadata, TrainingPhase
+from skyrl_train.generators.base import (
+    GeneratorOutput,
+    GeneratorInput,
+    TrajectoryID,
+    BatchMetadata,
+    TrainingPhase,
+    MetricsOutput,
+)
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
+from skyrl_train.config import ChatTemplateConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
+
+
+def _validate_template_file_path(file_path: str) -> str:
+    """
+    Validate and sanitize a template file path.
+
+    NOTE(Charlie): this is vibe coded to address comment https://github.com/NovaSky-AI/SkyRL/pull/890#discussion_r2699773416.
+    Could be too strict.
+    """
+    # Resolve to absolute path first
+    resolved_path = os.path.abspath(os.path.expanduser(file_path))
+
+    # Check for path traversal attempts in the original path
+    # Normalize path separators for consistent checking
+    normalized_input = os.path.normpath(file_path)
+
+    # Check if the path contains parent directory references that could indicate traversal
+    # After normpath, legitimate paths won't start with .. but malicious ones trying to escape might
+    if normalized_input.startswith(".."):
+        raise ValueError(
+            f"Invalid template file path '{file_path}': Path traversal sequences are not allowed. "
+            "Please use an absolute path or a path relative to the current working directory."
+        )
+
+    # Additional check: ensure the path doesn't contain null bytes (which could bypass checks)
+    if "\x00" in file_path:
+        raise ValueError(f"Invalid template file path '{file_path}': Null bytes are not allowed in paths.")
+
+    # Ensure the resolved path is a regular file (not a directory, symlink to sensitive location, etc.)
+    if os.path.exists(resolved_path):
+        if not os.path.isfile(resolved_path):
+            raise ValueError(f"Invalid template file path '{file_path}': Path must point to a regular file.")
+
+        # Check that the file has a reasonable size (prevent reading very large files)
+        file_size = os.path.getsize(resolved_path)
+        max_template_size = 1024 * 1024  # 1MB should be more than enough for any chat template
+        if file_size > max_template_size:
+            raise ValueError(
+                f"Template file '{file_path}' is too large ({file_size} bytes). "
+                f"Maximum allowed size is {max_template_size} bytes."
+            )
+
+    return resolved_path
+
 
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 that preserves thinking tokens
@@ -44,27 +96,10 @@ CUSTOM_CHAT_TEMPLATES = {
         "{% endif %}"
         "{% endfor %}"
     ),
-    # Qwen2.5 chat template but with `generation` and `endgeneration` tags, and simplified
-    "qwen2_5_with_generation_tag_simplified": (
-        "{% for message in messages %}"
-        "{% if (message.role == 'user') or (message.role == 'system' and not loop.first) %}"
-        "{{ '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}"
-        "{% elif message.role == 'assistant' %}"
-        "{{ '<|im_start|>' + message.role + '\n'}}"
-        "{% generation %}"
-        "{{ message.content + '<|im_end|>'}}"
-        "{% endgeneration %}"
-        "{{ '\n' }}"
-        "{% endif %}"
-        "{% endfor %}"
-        "{% if add_generation_prompt %}"
-        "{{ '<|im_start|>assistant\n' }}"
-        "{% endif %}"
-    ),
 }
 
 
-def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConfig]] = None) -> Optional[str]:
+def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemplateConfig]] = None) -> Optional[str]:
     """
     Get custom chat template based on the new config structure.
 
@@ -77,11 +112,14 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
     if chat_template_config is None:
         return None
 
-    source = chat_template_config.get("source")
+    if isinstance(chat_template_config, dict):
+        chat_template_config = ChatTemplateConfig(**chat_template_config)
+
+    source = chat_template_config.source
     if not source:
         raise ValueError("'source' is required in chat_template_config")
 
-    name_or_path = chat_template_config.get("name_or_path")
+    name_or_path = chat_template_config.name_or_path
     if not name_or_path:
         return None  # if name_or_path is not provided, use the default chat template from the tokenizer
 
@@ -93,8 +131,10 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
                 f"Template name '{name_or_path}' not found. Available templates: {list(CUSTOM_CHAT_TEMPLATES.keys())}"
             )
     elif source == "file":
+        # Validate and sanitize the file path to prevent path traversal attacks
+        validated_path = _validate_template_file_path(name_or_path)
         try:
-            with open(name_or_path, "r", encoding="utf-8") as f:
+            with open(validated_path, "r", encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError as e:
             raise ValueError(f"Template file '{name_or_path}' not found") from e
@@ -104,13 +144,22 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
         raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
-def get_generation_prompt_ids(tokenizer) -> List[int]:
+def get_generation_prompt_ids(tokenizer, chat_template: Optional[str] = None) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
+
+    Args:
+        tokenizer: HuggingFace tokenizer with chat_template support.
+        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+
+    Returns:
+        List[int]: Token IDs for the generation prompt (e.g., "<|im_start|>assistant\n" for Qwen).
     """
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True)
+    empty_user = tokenizer.apply_chat_template(
+        [{"role": "user", "content": ""}], tokenize=True, chat_template=chat_template
+    )
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
+        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=chat_template
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -118,9 +167,9 @@ def get_generation_prompt_ids(tokenizer) -> List[int]:
 
 
 @torch.no_grad()
-def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> Tuple[float, float]:
+def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: List[str]) -> MetricsOutput:
     """
-    Get `mean_raw_reward` (or avg_score), `pass_at_n` from generator output.
+    Get `mean_raw_reward` (or avg_score), `pass_at_n`, and `mean_positive_reward` from generator output.
 
     The `n` in `pass_at_n` is the number of trajectories we generate for each example. It is
     calculated as `len(generator_output["rewards"]) / len(uids)`, where `len(uids)` is the number of
@@ -139,6 +188,12 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         # Token-level rewards: rewards is List[List[float]]
         # For each trajectory, we sum over the token rewards for `mean_raw_reward` computation
         mean_raw_reward = float(np.mean([sum(trajectory_rewards) for trajectory_rewards in rewards]))
+
+        # For each trajectory, we sum over the positive token rewards for mean_positive_reward computation
+        mean_positive_reward = float(
+            np.mean([sum(max(r, 0) for r in trajectory_rewards) for trajectory_rewards in rewards])
+        )
+
         # Assume the last token's reward signifies the trajectory's reward for `pass_at_n` computation
         for i, cur_trajectory_rewards in enumerate(rewards):
             if len(cur_trajectory_rewards) == 0:
@@ -146,6 +201,7 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
             uid_to_trajectory_rewards[uids[i]].append(cur_trajectory_rewards[-1])
     else:
         mean_raw_reward = float(np.mean(rewards))
+        mean_positive_reward = float(np.mean(np.maximum(rewards, 0.0)))
         for i, reward in enumerate(rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)
 
@@ -155,7 +211,11 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         uid_to_trajectory_rewards
     )
 
-    return mean_raw_reward, pass_at_n
+    return MetricsOutput(
+        avg_score=mean_raw_reward,
+        pass_at_n=pass_at_n,
+        mean_positive_reward=mean_positive_reward,
+    )
 
 
 def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
@@ -344,7 +404,7 @@ def prepare_generator_input(
     return generator_input, uids
 
 
-def encode_messages_subset(messages: ConversationType, tokenizer):
+def encode_messages_subset(messages: ConversationType, tokenizer, chat_template: Optional[str] = None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
     This function tokenizes messages as if they are part of a larger conversation, ensuring
@@ -367,10 +427,16 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
                  one message. These are assumed to be a subset from a larger conversation.
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
 
     Returns:
         List[int]: Token IDs for the given messages, with proper multi-turn context handling.
     """
+    # TODO(Charlie): what are the tokenizers that could lead to clipping issues? Namely the previous turn ending
+    # token can be combined with the tokens of the start of a turn. e.g. Qwen3 with a dummy chat template in
+    # `test_utils.py` have this issue. Try `encode_messages_subset(messages, qwen3_tokenizer, chat_template=dummy_chat_template)`
+    # But this case is not realistic.
+
     assert len(messages), "messages list cannot be empty"
     # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
     base_conversation = [
@@ -381,6 +447,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         base_conversation,
         add_generation_prompt=False,
         tokenize=True,
+        chat_template=chat_template,
     )
 
     full_conversation = base_conversation + messages
@@ -388,12 +455,15 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         full_conversation,
         add_generation_prompt=False,
         tokenize=True,
+        chat_template=chat_template,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None):
+def get_response_ids_and_loss_mask_from_messages(
+    messages: ConversationType, tokenizer, assistant_logprobs=None, chat_template: Optional[str] = None
+):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -406,6 +476,8 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
         assistant_logprobs: Optional list of logprobs for each assistant message. In the format of
                 `[[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]`.
+        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+                       This should be the same chat template used for serving if a custom one was used.
 
     Returns:
         Tuple[List[int], List[int], Optional[List[float]]]: response ids, loss mask, and rollout logprobs
@@ -413,7 +485,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     assert len(messages), "messages list cannot be empty"
 
     # Needed to correctly mask it zero for assistant messages.
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer, chat_template=chat_template)
 
     # 1. Initalize the things to accumulate
     response_ids = []
@@ -424,7 +496,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer)
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer, chat_template=chat_template)
         response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.

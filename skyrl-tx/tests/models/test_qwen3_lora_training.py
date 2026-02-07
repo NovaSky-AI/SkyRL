@@ -8,7 +8,7 @@ from transformers import PretrainedConfig
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
-from tx.layers.lora import update_adapter_config
+from tx.layers.lora import init_lora_adapter
 from tx.tinker.types import LoraConfig
 
 
@@ -18,14 +18,14 @@ def test_lora_training():
     config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
-    mesh = jax.make_mesh((1, 1), ("dp", "tp"))
+    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
     with jax.set_mesh(mesh):
         model = Qwen3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
         load_safetensors(checkpoint_path, config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
-        update_adapter_config(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16))
-        update_adapter_config(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8))
+        init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16, seed=0))
+        init_lora_adapter(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8, seed=1))
 
         # Create optimizer that only targets LoRA A and B parameters
         optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)
@@ -38,7 +38,7 @@ def test_lora_training():
 
         def loss_fn(model, input_ids, target_ids, attention_mask):
             outputs = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
-            logits = outputs.logits
+            logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
             return optax.softmax_cross_entropy_with_integer_labels(logits=logits, labels=target_ids).mean()
 
         # Compute gradients - we need to use nnx.split to separate parameters

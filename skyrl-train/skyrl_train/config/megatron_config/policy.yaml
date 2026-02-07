@@ -21,6 +21,10 @@ torch_profiler_config:
   ranks: []
   save_path: null
 
+lora_config:
+  # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
+  lora_type: "lora"
+
 # pass-through kwargs to Megatron's `OptimizerConfig` object
 # any overlapping arguments with those we attempt to resolve in trainer.policy.optimizer_config will be overridden by the values here
 # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/optimizer/optimizer_config.py#L12

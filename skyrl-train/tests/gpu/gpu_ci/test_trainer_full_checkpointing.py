@@ -5,29 +5,27 @@ This test validates that the RayPPOTrainer can save and restore ALL training sta
 ensuring that training can resume exactly where it left off.
 
 Run with:
-For FSDP and DeepSpeed, run:
-uv run --isolated --extra dev --extra deepspeed --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
+For FSDP and FSDP2, run:
+uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
 
 For Megatron, run:
-uv run --isolated --extra dev --extra mcore --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
+uv run --isolated --extra dev --extra mcore pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
 """
 
 import ray
 import pytest
-import hydra
 import torch
 import os
 import shutil
 import tempfile
-from omegaconf import DictConfig
 from torch.utils.data import Dataset
 from unittest.mock import MagicMock
 from transformers import AutoTokenizer
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer
 from tests.gpu.utils import import_worker, ray_init_for_tests
-from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_GPUS = 2
@@ -49,11 +47,9 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> DictConfig:
+def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLConfig:
     """Create minimal trainer config for testing"""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.critic.model.path = MODEL_NAME  # Enable critic for testing
     cfg.trainer.strategy = strategy
@@ -70,6 +66,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
     )
     cfg.trainer.placement.colocate_all = False  # Disable colocation for simpler testing
     cfg.trainer.train_batch_size = NUM_GPUS
+    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
     cfg.trainer.micro_train_batch_size_per_gpu = 1
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.epochs = 1
@@ -97,7 +94,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
     return cfg
 
 
-def create_minimal_trainer(cfg: DictConfig):
+def create_minimal_trainer(cfg: SkyRLConfig):
     """Create a minimal trainer setup for testing"""
     # Create minimal tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -131,16 +128,24 @@ def create_minimal_trainer(cfg: DictConfig):
 
 
 @pytest.mark.parametrize(
-    ("strategy, fsdp2_cpu_offload"),
+    ("strategy", "fsdp2_cpu_offload", "lora"),
     [
-        ("deepspeed", False),
-        ("fsdp", False),
-        ("fsdp2", False),
-        ("fsdp2", True),
-        pytest.param("megatron", False, marks=pytest.mark.megatron),
+        ("fsdp", False, False),
+        ("fsdp", False, False),
+        ("fsdp2", False, False),
+        ("fsdp2", True, False),
+        pytest.param("megatron", False, False, marks=pytest.mark.megatron),
+    ],
+    ids=[
+        "fsdp_no_lora",
+        "fsdp_lora",
+        "fsdp2_no_lora",
+        "fsdp2_lora",
+        "megatron_no_lora",
+        # TODO (erictang000): add megatron lora test - currently full checkpointing fails
     ],
 )
-def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload):
+def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offload, lora):
     """
     Test full trainer checkpointing by:
     1. Creating trainer and setting it up
@@ -153,6 +158,9 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
     8. Continuing training to ensure it works
     """
     cfg = get_test_trainer_config(strategy, fsdp2_cpu_offload)
+    if lora:
+        cfg.trainer.policy.model.lora.rank = 32
+        cfg.trainer.policy.model.lora.alpha = 32
 
     checkpoint_dir = None
     try:
@@ -206,9 +214,9 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
 
         # Check key configuration values are preserved
         assert (
-            loaded_trainer_state["config"]["trainer"]["train_batch_size"] == cfg.trainer.train_batch_size
+            loaded_trainer_state["config"].trainer.train_batch_size == cfg.trainer.train_batch_size
         ), "train_batch_size not preserved in checkpoint"
-        assert loaded_trainer_state["config"]["trainer"]["strategy"] == strategy, "strategy not preserved in checkpoint"
+        assert loaded_trainer_state["config"].trainer.strategy == strategy, "strategy not preserved in checkpoint"
         assert loaded_trainer_state["global_step"] == saved_global_step, "global_step not preserved in checkpoint"
 
         # Cleanup first trainer

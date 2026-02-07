@@ -2,6 +2,7 @@
 Main entrypoint for training.
 """
 
+from typing import Union
 from ray.util.placement_group import placement_group, PlacementGroup
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -9,12 +10,15 @@ from skyrl_train.dataset import PromptDataset
 from skyrl_train.utils import validate_cfg
 
 from skyrl_train.trainer import RayPPOTrainer
+from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl_train.utils.constants import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.generators.base import GeneratorInterface
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig, get_config_as_yaml_str
 from pathlib import Path
 import ray
 
@@ -23,6 +27,7 @@ import hydra
 from loguru import logger
 from skyrl_train.utils.tracking import Tracking
 import multiprocessing as mp
+import asyncio
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -34,7 +39,9 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
-def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
+def create_ray_wrapped_inference_engines_from_config(
+    cfg: Union[SkyRLConfig, DictConfig], colocate_pg, tokenizer: PreTrainedTokenizerBase
+):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
     engine_kwargs = {
@@ -58,17 +65,19 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
         "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+        "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
-    if cfg.trainer.policy.model.lora.rank > 0:
+    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
         engine_kwargs["enable_lora"] = True
         engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
         engine_kwargs["sleep_level"] = 1
         engine_kwargs["max_loras"] = 1
         engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
 
-        # TODO(devpatel): Bandaid solution, replace this once we have a better solution for LoRA performance degradation on the vLLM side
+        # TODO(devpatel): Bandaid solution, replace this once we have a better
+        # solution for LoRA performance degradation on the vLLM side
         if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
             logger.warning(
                 "LoRA is enabled but generator.enforce_eager=true. "
@@ -77,16 +86,21 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
             )
             engine_kwargs["enforce_eager"] = False
 
-    if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
-        engine_kwargs["rope_scaling"] = rope_scaling
-    if (rope_theta := cfg.generator.get("rope_theta", None)) is not None:
-        engine_kwargs["rope_theta"] = rope_theta
+    if cfg.generator.rope_scaling is not None:
+        engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
+    if cfg.generator.rope_theta is not None:
+        engine_kwargs["rope_theta"] = cfg.generator.rope_theta
+    if cfg.generator.served_model_name is not None:
+        engine_kwargs["served_model_name"] = cfg.generator.served_model_name
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
-def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
-    # TODO(tgriggs): We may want a separate config for the model name in case it's different from the name used in the OpenAI API
+def create_remote_inference_engines_from_config(
+    cfg: Union[SkyRLConfig, DictConfig], tokenizer: PreTrainedTokenizerBase
+):
+    # TODO(tgriggs): We may want a separate config for the model name in case
+    # it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
         urls=cfg.generator.remote_inference_engine_urls,
         model_name=cfg.trainer.policy.model.path,
@@ -100,21 +114,26 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 
 class BasePPOExp:
-    def __init__(self, cfg: DictConfig):
+    def __init__(self, cfg: Union[SkyRLConfig, DictConfig]):
         """
         Initializes a PPO experiment.
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
+        # TODO (sumanthrh): Migrate to using SkyRLConfig
         self.cfg = cfg
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
 
+        # New inference resources (created lazily when _SKYRL_USE_NEW_INFERENCE=1)
+        self._server_group = None
+        self._inference_router = None
+
     @staticmethod
-    def get_cfg_as_str(dict_cfg: DictConfig) -> str:
-        return OmegaConf.to_yaml(dict_cfg)
+    def get_cfg_as_str(cfg: Union[SkyRLConfig, DictConfig]) -> str:
+        return get_config_as_yaml_str(cfg)
 
     def get_tokenizer(self, padding_side="left"):
         """Initializes a tokenizer for the given model."""
@@ -144,7 +163,7 @@ class BasePPOExp:
         # make sure the dataset is large enough to train on
         assert (
             len(prompts_dataset) >= self.cfg.trainer.train_batch_size
-        ), f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        ), f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
         return prompts_dataset
 
     def get_eval_dataset(self):
@@ -196,17 +215,6 @@ class BasePPOExp:
         """
         from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 
-        if cfg.trainer.step_wise_training:
-            from skyrl_train.generators.step_wise_generator import StepWiseGenerator
-
-            return StepWiseGenerator(
-                generator_cfg=cfg.generator,
-                skyrl_gym_cfg=cfg.environment.skyrl_gym,
-                inference_engine_client=inference_engine_client,
-                tokenizer=tokenizer,
-                model_name=cfg.trainer.policy.model.path,
-            )
-
         return SkyRLGymGenerator(
             generator_cfg=cfg.generator,
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
@@ -255,6 +263,108 @@ class BasePPOExp:
             config=self.cfg,
         )
 
+    def get_inference_client(self) -> InferenceEngineInterface:
+        """Setup and return the inference engine client.
+
+        This is a hook method that can be overridden by subclasses to customize
+        inference engine creation (e.g., FlashRL, custom backends).
+
+        Returns:
+            InferenceEngineInterface: The inference engine client.
+        """
+        if _SKYRL_USE_NEW_INFERENCE:
+            logger.info("Initializing new inference client")
+            return self._get_new_inference_client()
+        else:
+            return self._get_legacy_inference_client()
+
+    def _get_legacy_inference_client(self) -> InferenceEngineInterface:
+        """Legacy inference client using Ray actors."""
+        if self.cfg.generator.run_engines_locally:
+            inference_engines = create_ray_wrapped_inference_engines_from_config(
+                self.cfg, self.colocate_pg, self.tokenizer
+            )
+        else:
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
+
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+
+    def _get_new_inference_client(self):
+        """New inference client using HTTP endpoints.
+
+        Config combinations:
+        - Colocated + external URLs → ERROR (validated earlier)
+        - Neither set → Build servers internally
+        - external_server_urls only → Create router over external servers
+        - external_proxy_url only → Use proxy for both data + control plane
+        - Both set → Fully external (proxy for data plane, servers for control plane)
+
+        Returns:
+            RemoteInferenceClient: The new inference client.
+        """
+        from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+        from skyrl_train.inference_servers.router import InferenceRouter
+        from skyrl_train.inference_servers.server_group import ServerGroup
+
+        is_colocated = self.cfg.trainer.placement.colocate_all
+        external_proxy_url = self.cfg.generator.get("external_proxy_url")
+        external_server_urls = self.cfg.generator.get("external_server_urls")
+
+        has_external_proxy = external_proxy_url is not None
+        has_external_servers = external_server_urls is not None
+
+        if has_external_proxy and has_external_servers:
+            # Case: Both external - fully external setup
+            proxy_url = external_proxy_url
+            server_urls = list(external_server_urls)
+            logger.info(
+                f"HTTP Inference: Using fully external setup - " f"proxy_url={proxy_url}, server_urls={server_urls}"
+            )
+
+        elif has_external_proxy and not has_external_servers:
+            # Case: Proxy only - assume proxy handles control plane too
+            proxy_url = external_proxy_url
+            server_urls = [proxy_url]
+            logger.info(
+                f"HTTP Inference: Using external proxy for both data and " f"control plane - proxy_url={proxy_url}"
+            )
+
+        elif has_external_servers and not has_external_proxy:
+            # Case: Servers only - create internal router over them
+            server_urls = list(external_server_urls)
+            self._inference_router = InferenceRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Created internal router over external "
+                f"servers - server_urls={server_urls}, proxy_url={proxy_url}"
+            )
+
+        else:
+            # Case: Neither - build servers and router internally
+            cli_args = build_vllm_cli_args(self.cfg)
+
+            self._server_group = ServerGroup(
+                cli_args=cli_args,
+                num_servers=self.cfg.generator.num_inference_engines,
+                placement_group=self.colocate_pg if is_colocated else None,
+                enable_dp=self.cfg.generator.inference_engine_data_parallel_size > 1,
+            )
+            server_infos = self._server_group.start()
+            server_urls = [info.url for info in server_infos]
+
+            self._inference_router = InferenceRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Built servers and router internally - "
+                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
+            )
+
+        return RemoteInferenceClient(
+            proxy_url=proxy_url,
+            server_urls=server_urls,
+            model_name=self.cfg.trainer.policy.model.path,
+        )
+
     def _setup_trainer(self):
         """Setup and return the trainer.
 
@@ -267,13 +377,7 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy == "deepspeed":
-            from skyrl_train.workers.deepspeed.deepspeed_worker import (
-                PolicyWorker,
-                CriticWorker,
-                RefWorker,
-            )
-        elif self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
+        if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
             from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
         elif self.cfg.trainer.strategy == "megatron":
             from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
@@ -284,20 +388,14 @@ class BasePPOExp:
         # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
 
-        tokenizer = self.tokenizer
-        if self.cfg.generator.run_engines_locally:
-            inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
-        else:
-            inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
+        inference_engine_client = self.get_inference_client()
 
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
-
-        generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
+        generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
 
         trainer = self.get_trainer(
             cfg=self.cfg,
             tracker=tracker,
-            tokenizer=tokenizer,
+            tokenizer=self.tokenizer,
             train_dataset=self.train_dataset,
             eval_dataset=self.eval_dataset,
             inference_engine_client=inference_engine_client,
@@ -312,7 +410,7 @@ class BasePPOExp:
     def run(self):
         trainer = self._setup_trainer()
         # Start the training loop
-        trainer.train()
+        asyncio.run(trainer.train())
 
 
 @ray.remote(num_cpus=1)

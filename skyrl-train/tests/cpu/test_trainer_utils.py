@@ -2,6 +2,8 @@
 uv run --isolated --extra dev pytest tests/cpu/test_trainer_utils.py
 """
 
+import copy
+
 from skyrl_train.utils.trainer_utils import (
     run_on_each_node,
     cleanup_old_checkpoints,
@@ -13,6 +15,7 @@ from skyrl_train.utils.trainer_utils import (
     handle_replace_sampling,
     handle_filter_sampling,
     filter_generator_output,
+    zero_variance_filter,
     validate_generator_output,
     build_dataloader,
 )
@@ -654,6 +657,37 @@ def test_filter_generator_output():
     assert filtered["rollout_logprobs"] == [[0.16, 0.4], [0.3, 0.4]]
 
 
+def test_zero_variance_filter_mixed_groups():
+    """uid groups with non-zero variance and singletons are kept; zero-variance duplicates are removed."""
+    rewards = [1.0, 2.0, 3.0, 3.0, 5.0]
+    uids = ["uid1", "uid1", "uid2", "uid2", "uid3"]
+
+    kept_indices = zero_variance_filter(rewards, uids)
+
+    # uid1 has variance > 0 -> keep indices 0,1; uid2 has variance 0 with size>1 -> drop 2,3; uid3 singleton -> keep 4
+    assert kept_indices == [0, 1, 4]
+
+
+def test_zero_variance_filter_all_zero_variance_duplicates():
+    """All duplicate groups with zero variance should be filtered out, yielding no kept indices."""
+    rewards = [1.0, 1.0, 2.0, 2.0]
+    uids = ["a", "a", "b", "b"]
+
+    kept_indices = zero_variance_filter(rewards, uids)
+
+    assert kept_indices == []
+
+
+def test_zero_variance_filter_singletons_kept():
+    """Singleton groups should always be kept regardless of reward values."""
+    rewards = [1.0, 1.0, 1.0]
+    uids = ["x", "y", "z"]
+
+    kept_indices = zero_variance_filter(rewards, uids)
+
+    assert kept_indices == [0, 1, 2]
+
+
 def test_validate_generator_output_valid_case():
     """Test validate_generator_output with valid case."""
     input_batch = GeneratorInput(
@@ -826,11 +860,11 @@ def test_build_dataloader_seeding(dummy_config):
     dataset = MultiItemDataset(size=20)
 
     # Test 1: Same seed should produce same shuffling
-    config1 = dummy_config.copy()
+    config1 = copy.deepcopy(dummy_config)
     config1.trainer.seed = 42
     config1.trainer.train_batch_size = 5
 
-    config2 = dummy_config.copy()
+    config2 = copy.deepcopy(dummy_config)
     config2.trainer.seed = 42  # Same seed
     config2.trainer.train_batch_size = 5
 
@@ -848,7 +882,7 @@ def test_build_dataloader_seeding(dummy_config):
     ), f"Same seed should produce same first batch, got {first_batch1} vs {first_batch2}"
 
     # Test 2: Different seeds should produce different shuffling
-    config3 = dummy_config.copy()
+    config3 = copy.deepcopy(dummy_config)
     config3.trainer.seed = 123  # Different seed
     config3.trainer.train_batch_size = 5
 

@@ -13,8 +13,8 @@ LOGGER="wandb"  # change to "console" to print to stdout
 DATA_DIR="$HOME/data/gsm8k"
 # download Qwen/Qwen3-235B-A22B-Instruct-2507 from huggingface
 # `pip install huggingface_hub hf_transfer`
-# `HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
-MODEL_NAME="$HOME/qwen235b"
+# `HF_HUB_ENABLE_HF_TRANSFER=1 hf download Qwen/Qwen3-235B-A22B-Instruct-2507 --local-dir ~/qwen235b`
+MODEL_NAME="Qwen/Qwen3-235B-A22B-Instruct-2507"
 
 NUM_NODES=8
 NUM_GPUS=8
@@ -26,7 +26,7 @@ MEGATRON_PP=16
 MEGATRON_CP=1
 MEGATRON_EP=4
 MEGATRON_ETP=1
-# Qwen3-235B-A22B has 94 blocks, so we need to set the last pipeline stage layer to use 4 blocks
+# Qwen3-235B-A22B has 94 blocks, so we set the last pipeline stage layer to use 4 blocks
 MEGATRON_LAST_PIPELINE_STAGE_LAYER=4
 FLASH_ATTN=true
 # configure optimizer offloading

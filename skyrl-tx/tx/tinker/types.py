@@ -17,11 +17,13 @@ class RequestType(str, Enum):
 
     CREATE_MODEL = "create_model"
     FORWARD_BACKWARD = "forward_backward"
+    FORWARD = "forward"
     OPTIM_STEP = "optim_step"
     SAVE_WEIGHTS_FOR_SAMPLER = "save_weights_for_sampler"
     SAVE_WEIGHTS = "save_weights"
     LOAD_WEIGHTS = "load_weights"
     SAMPLE = "sample"
+    UNLOAD_MODEL = "unload_model"
 
     # External request that should not be processed by the engine
     EXTERNAL = "external"
@@ -58,11 +60,13 @@ class AdamParams(BaseModel):
     beta1: float
     beta2: float
     eps: float
+    weight_decay: float
 
 
 class LoraConfig(BaseModel):
     rank: int
     alpha: float
+    seed: int
     train_attn: bool = True
     train_mlp: bool = True
     train_unembed: bool = False
@@ -76,6 +80,16 @@ class CreateModelOutput(BaseModel):
     model_id: str
     base_model: str
     lora_config: LoraConfig
+
+
+class UnloadModelInput(BaseModel):
+    pass
+
+
+class UnloadModelOutput(BaseModel):
+    model_id: str
+    status: str
+    type: str = "unload_model"
 
 
 class ModelInputChunk(BaseModel):
@@ -127,12 +141,16 @@ class OptimStepOutput(BaseModel):
 
 
 class SaveWeightsForSamplerInput(BaseModel):
-    path: str
+    path: str | None = None
+    sampling_session_seq_id: int | None = None
+    seq_id: int | None = None
+    sampling_session_id: str | None = None
 
 
 class SaveWeightsForSamplerOutput(BaseModel):
-    path: str
+    path: str | None = None
     type: str
+    sampling_session_id: str | None = None
 
 
 class SaveWeightsInput(BaseModel):
@@ -157,7 +175,10 @@ class SamplingParams(BaseModel):
     temperature: float
     max_tokens: int
     seed: int
-    stop: list[int] | None = None
+    stop_tokens: list[int] | None = None
+    stop_strings: list[str] | None = None
+    top_k: int = -1  # -1 for no limit
+    top_p: float = 1.0  # 1.0 for no filtering
 
 
 class ModelMetadata(BaseModel):
@@ -190,3 +211,56 @@ class SampleOutput(BaseModel):
 class EngineMetrics(BaseModel):
     train_seq_len_jit_times: dict[int, float] = {}
     sample_seq_len_jit_times: dict[int, float] = {}
+
+
+# Prepared batch data for backend processing
+# These are prepared by the engine and passed to the backend
+
+
+class PreparedModelPassBatch(BaseModel):
+    """Prepared batch data for forward/forward_backward operations.
+
+    Engine extracts this from requests, backend converts to JAX arrays and computes.
+    """
+
+    # Per-example data (list of lists)
+    all_input_ids: list[list[int]]
+    all_targets: list[list[int]]
+    all_token_weights: list[list[float]]
+    all_sampling_logprobs: list[list[float]]
+    all_advantages: list[list[float]]
+
+    # Per-example scalars
+    all_model_ids: list[str]
+    all_loss_fn_types: list[int]
+
+    # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
+    request_batch_slices: list[tuple[str, str, int, int]]
+
+
+class PreparedSampleBatch(BaseModel):
+    """Prepared batch data for sample operations.
+
+    Engine extracts this from requests, backend converts to JAX arrays and computes.
+    """
+
+    # Per-sample data
+    all_prompts: list[list[int]]
+    all_sampling_params: list[SamplingParams]
+    all_model_ids: list[str]
+    all_checkpoint_ids: list[str]
+    all_checkpoint_paths: list[str]
+
+    # Whether any request needs prompt logprobs
+    needs_prompt_logprobs: bool
+
+    # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
+    request_batch_slices: list[tuple[str, str, int, int, bool]]
+
+
+# Loss function type mappings (used for validation and backend dispatch)
+LOSS_TYPES = {
+    "cross_entropy": 0,
+    "importance_sampling": 1,
+    "ppo": 2,
+}

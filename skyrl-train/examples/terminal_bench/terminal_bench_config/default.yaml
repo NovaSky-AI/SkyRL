@@ -1,0 +1,78 @@
+# @package terminal_bench_config
+#
+# Default Harbor Configuration for SkyRL Terminal Bench
+#
+# This config is passed directly to Harbor's TrialConfig. You can use any
+# Harbor-supported options here. SkyRL only injects a few runtime values:
+#   - task.path (from the prompt)
+#   - agent.model_name (constructed from served_model_name)
+#   - agent.kwargs.api_base (from SkyRL's HTTP endpoint)
+#   - agent.kwargs.session_id (generated per-trial)
+#
+# See Harbor documentation for all available options:
+# https://harborframework.com/docs
+# And a full list of fields that TrialConfig supports:
+# https://github.com/laude-institute/harbor/blob/5921cc40e8f6b5b0df0a3dc6354e0e679447eb54/src/harbor/models/trial/config.py
+
+# Harbor TrialConfig fields below
+# --------------------------------
+
+# Where to store trial logging outputs
+trials_dir: ~/trials
+
+# Trial timeout multiplier (applied to default timeouts)
+timeout_multiplier: 1.0
+
+# Agent configuration
+# See: harbor.models.trial.config.AgentConfig
+agent:
+  # Agent name. Options: terminus-2, terminus-1, terminus, oracle, claude-code,
+  # aider, swe-agent, openhands, etc.
+  name: terminus-2
+
+  # Agent-specific settings passed to the agent constructor
+  kwargs:
+    # Maximum number of agent episodes/iterations
+    max_turns: 32
+
+    # Suppress Harbor override warnings for max_turns
+    suppress_max_turns_warning: true
+
+    # Whether to enable context summarization when approaching token limits
+    enable_summarize: false
+
+    # Store all messages in the trial output (required for SkyRL training)
+    store_all_messages: true
+
+    # Model info for token budgeting
+    model_info:
+      max_input_tokens: 24576
+      max_output_tokens: 8192
+      # Set costs to 0 for local training
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+
+# Environment configuration
+# See: harbor.models.trial.config.EnvironmentConfig
+environment:
+  # Environment type. Options: daytona, docker, e2b, modal, runloop, gke
+  type: daytona
+
+  # Resource overrides (optional)
+  override_cpus: 1
+  override_memory_mb: 1024
+  override_storage_mb: 1024
+  suppress_override_warnings: true
+
+  # Environment-specific settings
+  # kwargs: {}
+
+# Verifier configuration
+# See: harbor.models.trial.config.VerifierConfig
+verifier:
+  # Set to true to skip verification (useful for debugging)
+  disable: false
+
+  # Override the verifier timeout (seconds)
+  # override_timeout_sec: 300
+

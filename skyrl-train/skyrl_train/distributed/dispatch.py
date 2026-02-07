@@ -8,7 +8,6 @@ from abc import ABC, abstractmethod
 import ray
 from ray import ObjectRef
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-import inspect
 
 
 @dataclass
@@ -66,7 +65,7 @@ class Dispatch(ABC):
     @classmethod
     @abstractmethod
     def dispatch(cls, actor_infos: List[ActorInfo], method: str, *args, **kwargs) -> List[ObjectRef]:
-        """Dispatches method calls to the actors with data sharing if necessary."""
+        """Dispatches method calls to the actors with data sharding if necessary."""
         pass
 
     @classmethod
@@ -121,7 +120,7 @@ class MeshDispatch(Dispatch):
     """
 
     @classmethod
-    def dispatch(cls, actor_infos: List[ActorInfo], method: str, data: TrainingInputBatch) -> List[ObjectRef]:
+    def dispatch(cls, actor_infos: List[ActorInfo], method: str, data: TrainingInputBatch, **kwargs) -> List[ObjectRef]:
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
         object_refs = []
         dp_size = actor_infos[0].rank.dp_size
@@ -131,10 +130,14 @@ class MeshDispatch(Dispatch):
         chunk_size = len(data) // dp_size
         data_chunks: List[TrainingInputBatch] = data.chunk(chunk_size)
 
+        # Put each unique chunk in object store ONCE to avoid redundant serialization
+        # when the same chunk is sent to multiple workers (e.g., SP/TP replicas)
+        chunk_refs: List[ObjectRef] = [ray.put(chunk) for chunk in data_chunks]
+
         for actor_info in actor_infos:
-            # index into tensordict to get the correct data to send
-            data_to_send = data_chunks[actor_info.rank.dp]
-            object_refs.append(getattr(actor_info.handle, method).remote(data_to_send))
+            # Pass ObjectRef instead of data - workers will fetch from object store
+            chunk_ref = chunk_refs[actor_info.rank.dp]
+            object_refs.append(getattr(actor_info.handle, method).remote(chunk_ref, **kwargs))
         return object_refs
 
     @classmethod
@@ -158,26 +161,65 @@ class MeshDispatch(Dispatch):
         return
 
     @classmethod
+    def dispatch_from_staged(
+        cls, actor_infos: List[ActorInfo], method: str, data_ref: ObjectRef, start_idx: int, end_idx: int, **kwargs
+    ) -> List[ObjectRef]:
+        """
+        Dispatch to workers using pre-staged data from object store.
+
+        Workers receive the full batch ObjectRef and slice indices, then fetch
+        and slice locally. This avoids serialization on each mini-batch iteration.
+
+        Args:
+            actor_infos: List of actor info objects
+            method: Name of method to call on workers
+            data_ref: ObjectRef to full TrainingInputBatch in object store
+            start_idx: Start index for mini-batch slice (before DP chunking)
+            end_idx: End index for mini-batch slice (before DP chunking)
+            **kwargs: Additional keyword arguments to pass to the method
+
+        Returns:
+            List of ObjectRefs for worker results
+        """
+        assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
+        object_refs = []
+        dp_size = actor_infos[0].rank.dp_size
+
+        # Compute per-DP-rank slice indices
+        mini_batch_size = end_idx - start_idx
+        assert (
+            mini_batch_size % dp_size == 0
+        ), f"mini_batch_size must be divisible by dp_size, got {mini_batch_size} and {dp_size}"
+        chunk_size = mini_batch_size // dp_size
+
+        for actor_info in actor_infos:
+            dp_rank = actor_info.rank.dp
+            # Compute this worker's slice of the mini-batch
+            worker_start = start_idx + dp_rank * chunk_size
+            worker_end = worker_start + chunk_size
+            object_refs.append(
+                getattr(actor_info.handle, method).remote(
+                    data_ref, start_idx=worker_start, end_idx=worker_end, **kwargs
+                )
+            )
+        return object_refs
+
+    @classmethod
     def validate_dispatch_args(cls, *args, **kwargs) -> Tuple[Tuple, Dict[str, Any]]:
-        sig = inspect.signature(cls.dispatch)
-        # pass dummy actor_infos and method_name
-        bound_args = sig.bind([], "dummy", *args, **kwargs)
-        bound_args.apply_defaults()
-        data = bound_args.arguments.get("data")
+        # Extract data from either positional arg or kwarg
+        if args:
+            data = args[0]
+            remaining_kwargs = kwargs
+        elif "data" in kwargs:
+            data = kwargs.pop("data")
+            remaining_kwargs = kwargs
+        else:
+            raise ValueError("MeshDispatch requires 'data' as first positional argument or keyword argument")
 
-        # Check if there are any extra arguments
-        if len(bound_args.arguments) > 3:  #  data, actor_infos, method_name
-            # remove actor_infos and method_name - not added by user
-            bound_args.arguments.pop("actor_infos")
-            bound_args.arguments.pop("method")
-            raise ValueError(f"MeshDispatch only accepts 'data' as an argument, got extra args: {bound_args.arguments}")
-
-        data = bound_args.arguments.get("data")
         if not isinstance(data, TrainingInputBatch):
-            raise ValueError(f"For MeshDispatch, `data` entry should be a `TrainingInput`, got {data}")
-        args = (data,)
-        kwargs = {}
-        return args, kwargs
+            raise ValueError(f"For MeshDispatch, `data` entry should be a `TrainingInputBatch`, got {type(data)}")
+        # Pass through data as positional arg, and any other kwargs (e.g., loss_fn, loss_fn_config)
+        return (data,), remaining_kwargs
 
 
 class PassThroughDispatch(Dispatch):
