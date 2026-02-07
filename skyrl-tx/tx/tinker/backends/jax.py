@@ -207,6 +207,21 @@ class JaxBackendImpl(AbstractBackend):
             f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
         )
 
+        if config.train_micro_batch_size <= 0:
+            logger.warning(
+                "train_micro_batch_size is not set. This can lead to OOMs. "
+                "Consider setting train_micro_batch_size to limit memory usage during training. "
+                "In the future, we plan to add a heuristic to set this automatically: "
+                "https://github.com/NovaSky-AI/SkyRL/issues/1048"
+            )
+        if config.sample_max_num_sequences <= 0:
+            logger.warning(
+                "sample_max_num_sequences is not set. This can lead to OOMs. "
+                "Consider setting sample_max_num_sequences to limit memory usage during sampling. "
+                "In the future, we plan to add a heuristic to set this automatically: "
+                "https://github.com/NovaSky-AI/SkyRL/issues/1048"
+            )
+
         self._create_loss_and_grad_fn()
 
     def _micro_batch_size(self, total: int) -> int:
