@@ -233,9 +233,7 @@ def save_safetensors(
 
 
 def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:
-    """Check if a LoRA weight path matches the adapter config's training targets."""
-    if "lora_A" not in path and "lora_B" not in path:
-        return False
+    """Check if a path's module matches the adapter config's training targets."""
     if not adapter_config.train_attn and "self_attn" in path:
         return False
     if not adapter_config.train_mlp and ("mlp" in path or "experts" in path):
@@ -263,7 +261,7 @@ def load_lora_checkpoint(
             model,
             skip_lora=False,
             prefix="base_model.model.",
-            filter_fn=lambda path: filter_lora(adapter_config, path),
+            filter_fn=lambda path: ("lora_A" in path or "lora_B" in path) and filter_lora(adapter_config, path),
             adapter_index=adapter_index,
             rank=adapter_config.rank,
         )
@@ -294,7 +292,7 @@ def save_lora_checkpoint(
             model,
             temp_dir / "adapter_model.safetensors",
             prefix="base_model.model.",
-            filter_fn=lambda path: filter_lora(adapter_config, path),
+            filter_fn=lambda path: ("lora_A" in path or "lora_B" in path) and filter_lora(adapter_config, path),
             adapter_index=adapter_index,
             rank=adapter_config.rank,
         )
