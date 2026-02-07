@@ -323,8 +323,8 @@ class MegatronModelWrapper:
             loss = unscaled_loss * loss_scale
 
             metrics = {
-                "final_loss": unscaled_loss.detach().item() * dp_size,
-                "policy_loss": policy_loss.detach().item() * dp_size,
+                "final_loss": unscaled_loss.detach().item(),
+                "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
                 "policy_kl": kl_loss.detach().item(),
             }
