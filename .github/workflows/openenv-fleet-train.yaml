@@ -41,11 +41,17 @@ permissions:
   contents: read
   actions: write  # Required to trigger monitor workflow
 
+# Allow cancellation of the workflow
+concurrency:
+  group: train-${{ github.run_id }}
+  cancel-in-progress: true
+
 env:
   RUN_NAME_PREFIX: "fleet-task"
 
 jobs:
   launch-training:
+    name: "Launch Training (by ${{ github.actor }})"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -154,7 +160,8 @@ jobs:
             --field cluster_name="${{ steps.cluster.outputs.name }}" \
             --field wandb_run_name="${{ steps.cluster.outputs.wandb_run_name }}" \
             --field slack_thread_ts="${{ steps.slack_start.outputs.ts }}" \
-            --field iteration=1
+            --field iteration=1 \
+            --field triggered_by="${{ github.actor }}"
 
       - name: Notify Slack - Launch Failed
         if: failure()

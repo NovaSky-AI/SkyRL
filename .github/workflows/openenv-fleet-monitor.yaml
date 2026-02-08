@@ -20,13 +20,24 @@ on:
         type: string
         required: true
         default: "1"
+      triggered_by:
+        description: "Original user who triggered the training"
+        type: string
+        required: false
+        default: "unknown"
 
 permissions:
   contents: read
   actions: write  # Required to trigger next iteration
 
+# Cancel previous monitor runs for the same cluster
+concurrency:
+  group: monitor-${{ inputs.cluster_name }}
+  cancel-in-progress: false
+
 jobs:
   monitor:
+    name: "Monitor ${{ inputs.cluster_name }} (iter ${{ inputs.iteration }}) by ${{ inputs.triggered_by }}"
     runs-on: ubuntu-latest
     timeout-minutes: 350  # ~5.8 hours, leaving buffer before 6h limit
 
@@ -67,8 +78,23 @@ jobs:
           echo "Cluster: $CLUSTER"
           echo ""
 
+          # First check if cluster exists
+          if ! sky status "$CLUSTER" 2>/dev/null | grep -q "$CLUSTER"; then
+            echo "ERROR: Cluster '$CLUSTER' does not exist!"
+            echo "status=CLUSTER_NOT_FOUND" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # Stream logs - blocks until job completes or timeout
-          sky logs "$CLUSTER" 2>&1 | tee /tmp/logs.txt || true
+          sky logs "$CLUSTER" 2>&1 | tee /tmp/logs.txt
+          LOG_EXIT_CODE=$?
+
+          # Check for cluster not found error in logs
+          if grep -q "ClusterDoesNotExist\|does not exist" /tmp/logs.txt 2>/dev/null; then
+            echo "ERROR: Cluster no longer exists!"
+            echo "status=CLUSTER_NOT_FOUND" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           # Determine status
           if grep -q "Job finished (status: SUCCEEDED)" /tmp/logs.txt 2>/dev/null; then
@@ -77,6 +103,9 @@ jobs:
           elif grep -q "Job finished (status: FAILED)" /tmp/logs.txt 2>/dev/null; then
             echo "status=FAILED" >> $GITHUB_OUTPUT
             echo "Training failed!"
+          elif [ $LOG_EXIT_CODE -ne 0 ]; then
+            echo "ERROR: sky logs failed with exit code $LOG_EXIT_CODE"
+            echo "status=ERROR" >> $GITHUB_OUTPUT
           else
             echo "status=RUNNING" >> $GITHUB_OUTPUT
             echo "Training still running after this monitoring window"
@@ -130,6 +159,23 @@ jobs:
               ]
             }
 
+      - name: Notify Slack - Cluster Not Found
+        if: steps.monitor.outputs.status == 'CLUSTER_NOT_FOUND' || steps.monitor.outputs.status == 'ERROR'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "thread_ts": "${{ inputs.slack_thread_ts }}",
+              "text": "⚠️ Cluster Not Found",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "⚠️ Cluster Not Found" } },
+                { "type": "section", "text": { "type": "mrkdwn", "text": "*Cluster:* `${{ inputs.cluster_name }}`\n*Status:* `${{ steps.monitor.outputs.status }}`\n\nThe cluster no longer exists. It may have been terminated or failed to launch." } }
+              ]
+            }
+
       - name: Trigger Next Monitor (if still running and under 72h)
         if: steps.monitor.outputs.status == 'RUNNING' && inputs.iteration != '12'
         env:
@@ -142,7 +188,8 @@ jobs:
             --field cluster_name="${{ inputs.cluster_name }}" \
             --field wandb_run_name="${{ inputs.wandb_run_name }}" \
             --field slack_thread_ts="${{ inputs.slack_thread_ts }}" \
-            --field iteration="$NEXT_ITERATION"
+            --field iteration="$NEXT_ITERATION" \
+            --field triggered_by="${{ inputs.triggered_by }}"
 
       - name: Notify Slack - 72h Limit Reached
         if: steps.monitor.outputs.status == 'RUNNING' && inputs.iteration == '12'
