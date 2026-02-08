@@ -10,23 +10,8 @@ from transformers.utils.generic import TransformersKwargs
 from transformers.processing_utils import Unpack 
 
 from tx.models.configs import Olmo3Config
+from tx.extra.torch.layers.rotary_embedding import RotaryEmbedding
 from tx.extra.torch.models.modeling_outputs import ModelOutput, CausalLMOutput
-
-
-def apply_rope(
-    inputs: torch.Tensor, position_ids: torch.Tensor, head_dim: int, theta: int
-) -> torch.Tensor:
-    """Apply rotary position embeddings to the input tensor.
-    
-    For the original implementation, please refer to:
-    https://github.com/tyler-griggs/SkyRL/blob/56ecfcd51c1bf4acfdd9d96ea70704b2a387b629/skyrl-tx/tx/torch/models/qwen3.py#L12-L29
-    """
-    fraction = 2 * torch.arange(0, head_dim // 2, dtype=torch.float32, device=inputs.device) / head_dim
-    timescale = theta**fraction
-    x = position_ids[:, None, :, None] / timescale[None, None, None, :]
-    sin, cos = x.sin().to(dtype=inputs.dtype), x.cos().to(dtype=inputs.dtype)
-    a, b = inputs.chunk(2, dim=-1)
-    return torch.cat([a * cos - b * sin, b * cos + a * sin], dim=-1)
 
 
 class Olmo3RMSNorm(nn.Module):
@@ -88,6 +73,16 @@ class Olmo3Attention(nn.Module):
         # self.sliding_window = config.sliding_window if self.attention_type == "sliding_attention" else None
         # self._rope_theta = _rope_theta(config)
 
+        # TODO(jwj): Support YaRN-style scaling.
+        self.rotary_emb = RotaryEmbedding(
+            head_size=self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position_embeddings=config.max_position_embeddings,
+            base=config.rope_theta,
+            is_neox_style=True,
+            dtype=config.dtype,
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -110,9 +105,7 @@ class Olmo3Attention(nn.Module):
         key_states = key_states.view(hidden_shape).transpose(1, 2)
         value_states = value_states.view(hidden_shape).transpose(1, 2)
 
-        # TODO(jwj): Modularize RoPE.
-        query_states = apply_rope(query_states, position_ids, self.head_dim, self.config.rope_theta)
-        key_states = apply_rope(key_states, position_ids, self.head_dim, self.config.rope_theta)
+        query_states, key_states = self.rotary_emb(query_states, key_states, position_ids)
 
         # TODO(jwj): Support KV cache update.
 
