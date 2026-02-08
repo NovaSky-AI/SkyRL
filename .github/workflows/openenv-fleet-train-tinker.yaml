@@ -44,15 +44,22 @@ on:
 
 permissions:
   contents: read
+  actions: write  # Required to trigger training workflow
+
+# Allow cancellation of the workflow
+concurrency:
+  group: tinker-train-${{ github.run_id }}
+  cancel-in-progress: true
 
 env:
   TASKS_BUCKET: "fleet-internal-datasets"
   TASKS_PREFIX: "${{ inputs.data_version }}/openenv"
 
 jobs:
-  train:
+  launch:
+    name: "Launch Training (by ${{ github.actor }})"
     runs-on: ubuntu-latest
-    timeout-minutes: 720  # 12 hours max
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -71,12 +78,8 @@ jobs:
         run: |
           uv venv
           source .venv/bin/activate
-          # Install base skyrl-train (no vLLM needed - Tinker handles inference)
           uv pip install -e .
-          # Install tinker SDK
           uv pip install "tinker>=0.8.0"
-          # Install OpenEnv with [fleet] extra for MCP support (includes mcp and fleet-python)
-          # Use --no-cache-dir to always fetch latest from git
           uv pip install --no-cache-dir "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
 
       - name: Configure AWS credentials
@@ -98,24 +101,17 @@ jobs:
           TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
           RUN_ID=$(head -c 4 /dev/urandom | xxd -p)
           MODALITY="${{ inputs.modality }}"
-          # Convert underscores to dashes (tool_use -> tool-use)
           MODALITY_DASH=$(echo "$MODALITY" | tr '_' '-')
           RUN_NAME="fleet-${MODALITY_DASH}-${RUN_ID}-${TIMESTAMP}"
           echo "name=$RUN_NAME" >> $GITHUB_OUTPUT
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "Generated run name: $RUN_NAME"
 
       - name: Validate data version
         run: |
           DATA_VERSION="${{ inputs.data_version }}"
-          echo "Checking if data version '$DATA_VERSION' exists in S3..."
           if ! aws s3 ls "s3://${{ env.TASKS_BUCKET }}/${DATA_VERSION}/openenv/" > /dev/null 2>&1; then
-            echo "ERROR: Data version '$DATA_VERSION' not found in S3"
-            echo "Available versions:"
-            aws s3 ls "s3://${{ env.TASKS_BUCKET }}/" | grep PRE | awk '{print $2}'
-            exit 1
+            echo "ERROR: Data version '$DATA_VERSION' not found"; exit 1
           fi
-          echo "Data version '$DATA_VERSION' validated"
 
       - name: Download tasks from S3
         run: |
@@ -123,41 +119,25 @@ jobs:
           TASKS_FILE="all_${MODALITY}.json"
           mkdir -p ./data
           aws s3 cp "s3://${{ env.TASKS_BUCKET }}/${{ env.TASKS_PREFIX }}/${TASKS_FILE}" ./data/tasks.json
-          echo "Downloaded tasks to ./data/tasks.json"
-          TASK_COUNT=$(python -c "import json; d=json.load(open('./data/tasks.json')); print(len(d) if isinstance(d,list) else len(d.get('tasks',[])))")
-          echo "Task count: $TASK_COUNT"
 
       - name: Prepare dataset
         working-directory: skyrl-train
         run: |
           source .venv/bin/activate
-
-          MODALITY="${{ inputs.modality }}"
-          ENV_KEY="${{ inputs.env_key }}"
-          MAX_TASKS="${{ inputs.max_tasks }}"
-
-          PREPARE_CMD="python -m integrations.fleet.prepare_dataset"
-          PREPARE_CMD="$PREPARE_CMD --tasks-json ../data/tasks.json"
-          PREPARE_CMD="$PREPARE_CMD --output-dir ../data/fleet"
-          PREPARE_CMD="$PREPARE_CMD --modality $MODALITY"
-
-          if [ -n "$ENV_KEY" ]; then
-            PREPARE_CMD="$PREPARE_CMD --env-key $ENV_KEY"
-          fi
-
-          if [ -n "$MAX_TASKS" ]; then
-            PREPARE_CMD="$PREPARE_CMD --max-tasks $MAX_TASKS"
-          fi
-
-          echo "Running: $PREPARE_CMD"
+          PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json ../data/tasks.json --output-dir ../data/fleet --modality ${{ inputs.modality }}"
+          [ -n "${{ inputs.env_key }}" ] && PREPARE_CMD="$PREPARE_CMD --env-key ${{ inputs.env_key }}"
+          [ -n "${{ inputs.max_tasks }}" ] && PREPARE_CMD="$PREPARE_CMD --max-tasks ${{ inputs.max_tasks }}"
           eval "$PREPARE_CMD"
 
-          echo "Dataset prepared:"
-          ls -la ../data/fleet/
+      - name: Upload prepared data as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-data-${{ steps.run.outputs.run_id }}
+          path: data/
+          retention-days: 1
 
-      - name: Notify Slack - Training Started
+      - name: Notify Slack - Started
         id: slack_start
-        if: success()
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -167,185 +147,40 @@ jobs:
               "channel": "#fleet-training-runs",
               "text": "🚀 Training Run Started",
               "blocks": [
-                {
-                  "type": "header",
-                  "text": { "type": "plain_text", "text": "🚀 Training Run Started" }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
-                    { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
-                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" }
-                  ]
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" },
-                    { "type": "mrkdwn", "text": "*Max Steps:*\n`${{ inputs.max_steps }}`" },
-                    { "type": "mrkdwn", "text": "*Batch Size:*\n`${{ inputs.batch_size }}`" }
-                  ]
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>" }
-                  ]
-                }
+                { "type": "header", "text": { "type": "plain_text", "text": "🚀 Training Run Started" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
+                  { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
+                  { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
+                  { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" }
+                ]},
+                { "type": "context", "elements": [
+                  { "type": "mrkdwn", "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow> | <https://wandb.ai/thefleet/fleet-tinker-grpo|WandB>" }
+                ]}
               ]
             }
 
-      - name: Run training
-        working-directory: skyrl-train
+      - name: Trigger Training Workflow
         env:
-          # TINKER_API_URL is optional - SDK uses default if not set
-          TINKER_API_URL: ${{ secrets.TINKER_API_URL }}
-          TINKER_API_KEY: ${{ secrets.TINKER_API_KEY }}
-          FLEET_API_KEY: ${{ secrets.FLEET_API_KEY }}
-          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY_TOOL_USE }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          source .venv/bin/activate
-
-          python -m integrations.fleet.entrypoints.main_fleet_tinker \
-            --model-name "${{ inputs.model_name }}" \
-            --tasks-file ../data/tasks.json \
-            --dataset-file ../data/fleet/train.parquet \
-            --eval-dataset-file ../data/fleet/validation.parquet \
-            --batch-size ${{ inputs.batch_size }} \
-            --max-steps ${{ inputs.max_steps }} \
-            --n-samples-per-prompt ${{ inputs.n_samples_per_prompt }} \
-            --max-turns 50 \
-            --eval-every 20 \
-            --wandb-project fleet-tinker-grpo \
-            --wandb-name "${{ steps.run.outputs.name }}"
-
-      - name: Notify Slack - Training Completed
-        if: success() && steps.slack_start.outputs.ts
-        uses: slackapi/slack-github-action@v2.0.0
-        with:
-          method: chat.postMessage
-          token: ${{ secrets.SLACK_BOT_TOKEN }}
-          payload: |
-            {
-              "channel": "#fleet-training-runs",
-              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
-              "text": "✅ Training Completed",
-              "blocks": [
-                {
-                  "type": "header",
-                  "text": { "type": "plain_text", "text": "✅ Training Completed" }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
-                    { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
-                    { "type": "mrkdwn", "text": "*Status:*\n`COMPLETED`" }
-                  ]
-                },
-                {
-                  "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*WandB:* <https://wandb.ai/thefleet/fleet-tinker-grpo|View Dashboard>" }
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>" }
-                  ]
-                }
-              ]
-            }
-
-      - name: Notify Slack - Training Failed
-        if: failure() && steps.slack_start.outputs.ts
-        uses: slackapi/slack-github-action@v2.0.0
-        with:
-          method: chat.postMessage
-          token: ${{ secrets.SLACK_BOT_TOKEN }}
-          payload: |
-            {
-              "channel": "#fleet-training-runs",
-              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
-              "text": "❌ Training Failed",
-              "blocks": [
-                {
-                  "type": "header",
-                  "text": { "type": "plain_text", "text": "❌ Training Failed" }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
-                    { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
-                    { "type": "mrkdwn", "text": "*Status:*\n`FAILED`" }
-                  ]
-                },
-                {
-                  "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Check logs:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Logs>" }
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }}" }
-                  ]
-                }
-              ]
-            }
-
-      - name: Notify Slack - Training Cancelled
-        if: cancelled() && steps.slack_start.outputs.ts
-        uses: slackapi/slack-github-action@v2.0.0
-        with:
-          method: chat.postMessage
-          token: ${{ secrets.SLACK_BOT_TOKEN }}
-          payload: |
-            {
-              "channel": "#fleet-training-runs",
-              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
-              "text": "⚠️ Training Cancelled",
-              "blocks": [
-                {
-                  "type": "header",
-                  "text": { "type": "plain_text", "text": "⚠️ Training Cancelled" }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
-                    { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
-                    { "type": "mrkdwn", "text": "*Status:*\n`CANCELLED`" }
-                  ]
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>" }
-                  ]
-                }
-              ]
-            }
+          gh workflow run openenv-fleet-tinker-train.yaml \
+            --field run_name="${{ steps.run.outputs.name }}" \
+            --field run_id="${{ steps.run.outputs.run_id }}" \
+            --field model_name="${{ inputs.model_name }}" \
+            --field modality="${{ inputs.modality }}" \
+            --field max_steps="${{ inputs.max_steps }}" \
+            --field batch_size="${{ inputs.batch_size }}" \
+            --field n_samples_per_prompt="${{ inputs.n_samples_per_prompt }}" \
+            --field slack_thread_ts="${{ steps.slack_start.outputs.ts }}" \
+            --field iteration=1 \
+            --field triggered_by="${{ github.actor }}"
 
       - name: Summary
-        if: always()
         run: |
-          echo "## Tinker Fleet Training - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Tinker Training Launch" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Run | \`${{ steps.run.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Model | \`${{ inputs.model_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Backend | Tinker (hosted) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Modality | \`${{ inputs.modality }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Env Filter | \`${{ inputs.env_key || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Max Tasks | \`${{ inputs.max_tasks || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Max Steps | \`${{ inputs.max_steps }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Batch Size | \`${{ inputs.batch_size }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Links" >> $GITHUB_STEP_SUMMARY
-          echo "- [WandB Dashboard](https://wandb.ai/thefleet/fleet-tinker-grpo)" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | Training workflow triggered |" >> $GITHUB_STEP_SUMMARY
