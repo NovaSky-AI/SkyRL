@@ -432,8 +432,8 @@ def main():
     parser.add_argument(
         "--eval-ratio",
         type=float,
-        default=0.10,
-        help="Fraction of data for evaluation (default: 0.10)",
+        default=0.20,
+        help="Fraction of data for evaluation (default: 0.20)",
     )
     parser.add_argument(
         "--env-filter",
