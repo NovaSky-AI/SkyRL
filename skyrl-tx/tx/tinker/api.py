@@ -28,6 +28,7 @@ from tx.tinker.db_models import (
     SessionDB,
     SamplingSessionDB,
     get_async_database_url,
+    enable_sqlite_wal,
 )
 from tx.tinker.extra import ExternalInferenceClient
 from tx.utils.storage import download_file
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI):
 
     db_url = get_async_database_url(app.state.engine_config.database_url)
     app.state.db_engine = create_async_engine(db_url, echo=False)
+    enable_sqlite_wal(app.state.db_engine.sync_engine)
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
