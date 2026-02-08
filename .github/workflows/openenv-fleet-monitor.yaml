@@ -79,11 +79,18 @@ jobs:
           echo ""
 
           # First check if cluster exists (--refresh queries cloud providers directly)
-          if ! sky status --refresh "$CLUSTER" 2>/dev/null | grep -q "$CLUSTER"; then
-            echo "ERROR: Cluster '$CLUSTER' does not exist!"
+          echo "Running: sky status --refresh"
+          sky status --refresh 2>&1 | tee /tmp/sky_status.txt || true
+          echo "sky status output:"
+          cat /tmp/sky_status.txt
+          echo ""
+
+          if ! grep -q "$CLUSTER" /tmp/sky_status.txt; then
+            echo "ERROR: Cluster '$CLUSTER' not found in sky status output!"
             echo "status=CLUSTER_NOT_FOUND" >> $GITHUB_OUTPUT
             exit 0
           fi
+          echo "Cluster found in sky status, proceeding to stream logs..."
 
           # Stream logs - blocks until job completes or timeout
           sky logs "$CLUSTER" 2>&1 | tee /tmp/logs.txt
