@@ -6,7 +6,7 @@
 # Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
 #
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
-# GPUs: B200:8
+# GPUs: B200:8 (preferred), H200:8 (fallback - 141GB HBM3e per GPU)
 #
 # Batch sizes doubled from 4-GPU variant to utilize 8 GPUs efficiently
 
@@ -26,6 +26,17 @@ resources:
     - accelerators: B200:8
       cloud: primeintellect
     - accelerators: B200:8
+      cloud: nebius
+    # Fallback to H200:8 (141GB HBM3e per GPU)
+    - accelerators: H200:8
+      cloud: lambda
+    - accelerators: H200:8
+      cloud: runpod
+    - accelerators: H200:8
+      cloud: vast
+    - accelerators: H200:8
+      cloud: primeintellect
+    - accelerators: H200:8
       cloud: nebius
 
 num_nodes: 1

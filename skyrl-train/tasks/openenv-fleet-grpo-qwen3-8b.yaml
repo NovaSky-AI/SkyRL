@@ -6,7 +6,7 @@
 # Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
 #
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
-# GPUs: B200:4 only
+# GPUs: B200:4 (preferred), H200:4 (fallback - 141GB HBM3e per GPU)
 #
 # v0.3.4: Enable use_hybrid_env_sampling to ensure every env is sampled every batch
 # v0.3.3: Reduced eval_interval (40→20) for more frequent eval checkpoints
@@ -35,6 +35,22 @@ resources:
       cloud: primeintellect
       memory: 500+
     - accelerators: B200:4
+      cloud: nebius
+      memory: 500+
+    # Fallback to H200:4 (141GB HBM3e per GPU)
+    - accelerators: H200:4
+      cloud: lambda
+      memory: 500+
+    - accelerators: H200:4
+      cloud: runpod
+      memory: 500+
+    - accelerators: H200:4
+      cloud: vast
+      memory: 500+
+    - accelerators: H200:4
+      cloud: primeintellect
+      memory: 500+
+    - accelerators: H200:4
       cloud: nebius
       memory: 500+
 
