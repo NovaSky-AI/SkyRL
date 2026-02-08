@@ -11,7 +11,15 @@ from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, CheckpointStatus, ModelDB, SessionDB, enable_sqlite_wal
+from tx.tinker.db_models import (
+    FutureDB,
+    RequestStatus,
+    CheckpointDB,
+    CheckpointStatus,
+    ModelDB,
+    SessionDB,
+    enable_sqlite_wal,
+)
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.backends.utils import log_timing
