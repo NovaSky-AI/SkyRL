@@ -12,9 +12,13 @@ Usage:
 Split Strategy:
     - Stratified by environment (each env maintains train/eval ratio)
     - Hash-based deterministic assignment (same task always goes to same split)
-    - 10% eval ratio, capped at 30 samples per env (MAX_EVAL_SAMPLES)
-    - Minimum 1 eval sample per env (otherwise all go to train)
+    - 20% eval ratio, capped at 20 samples per env (MAX_EVAL_SAMPLES)
+    - Minimum 5 eval samples per env (otherwise all go to train)
     - Held-out eval envs: instacart (computer_use only)
+
+v0.3.2 Changes:
+    - Increased eval_ratio from 10% to 20% to include carlisle/outlook in eval
+    - Result: 11 envs in eval (was 9), ~183 eval samples (was ~146)
 
 v0.3.1 Changes:
     - Added MAX_ENV_TRAIN_RATIO=0.20 to prevent any single env from dominating
@@ -144,7 +148,7 @@ def prepare_fleet_dataset(
     tasks_json: str,
     output_dir: str,
     modality: Optional[str] = "tool_use",
-    eval_ratio: float = 0.10,  # v0.3: increased from 0.02 to ensure ticketmaster gets eval samples
+    eval_ratio: float = 0.20,  # v0.3.2: increased to 20% to include carlisle/outlook in eval
     env_filter: Optional[str] = None,
     max_tasks: Optional[int] = None,
     max_env_ratio: float = MAX_ENV_TRAIN_RATIO,  # v0.3.1: cap dominant environments

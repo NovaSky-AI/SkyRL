@@ -222,11 +222,28 @@ class FleetTaskEnv(BaseTextEnv):
         tools_json = json.dumps(self.tools, indent=2)
         # Include current date so model uses correct year for date-related tasks
         current_date = datetime.now().strftime("%Y-%m-%d")
+
+        # Build environment context section from env_variables
+        env_context = ""
+        env_vars = self.task_config.get("env_variables", {})
+        if env_vars:
+            env_lines = []
+            if "LOGGED_IN_USER" in env_vars:
+                env_lines.append(f"- Logged in user ID: {env_vars['LOGGED_IN_USER']}")
+            if "LOGGED_IN_NAME" in env_vars:
+                env_lines.append(f"- Logged in as: {env_vars['LOGGED_IN_NAME']}")
+            # Include other env variables (skip CURRENT_DATE as it's handled separately)
+            for key, value in env_vars.items():
+                if key not in ("LOGGED_IN_USER", "LOGGED_IN_NAME", "CURRENT_DATE"):
+                    env_lines.append(f"- {key}: {value}")
+            if env_lines:
+                env_context = "\n## Environment Context\n" + "\n".join(env_lines) + "\n"
+
         system_content = f"""You are a helpful agent. Complete the task by calling tools.
 
 ## Current Date
 Today's date is {current_date}. When dates are mentioned without a year, assume the current year ({datetime.now().year}) or a future date.
-
+{env_context}
 ## Available Tools
 {tools_json}
 
