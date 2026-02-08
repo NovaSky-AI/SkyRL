@@ -60,7 +60,7 @@ def init_inference_client(backend: str, tp_size: int, config: SkyRLConfig) -> In
         engines,
         tokenizer,
         config.trainer.policy.model.path,
-        config.trainer.policy.lora,
+        config.trainer.policy.model.lora,
         config.generator.inference_engine,
     )
 
@@ -151,7 +151,7 @@ def test_e2e_tinker_sample_flow(ray_init_fixture, backend: str, tp_size: int):
     5. Client receives and validates response
     """
     cfg = get_test_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -213,7 +213,7 @@ def test_e2e_tinker_sample_flow(ray_init_fixture, backend: str, tp_size: int):
 def test_e2e_multiple_requests(ray_init_fixture, backend: str, tp_size: int):
     """Test multiple concurrent Tinker requests through skyrl-train."""
     cfg = get_test_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     llm_client = init_inference_client(backend, tp_size, cfg)

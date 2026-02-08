@@ -63,7 +63,7 @@ def init_ray_inference_engines(
         engine,
         tokenizer,
         config.trainer.policy.model.path,
-        config.trainer.policy.lora,
+        config.trainer.policy.model.lora,
         config.generator.inference_engine,
     )
     return client
@@ -133,14 +133,16 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     prompts = get_test_prompts(MODEL)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     try:
         llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         # Batched generation
         remote_batch_responses, batch_finish_reasons = asyncio.run(
@@ -177,7 +179,9 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
 
     # Get responses from Ray engine
     llm_client = init_ray_inference_engines(backend, tp_size, pp_size, dp_size, cfg)
-    sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+    sampling_params = get_sampling_params_for_backend(
+        cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+    )
 
     # Batched generation
     local_batch_responses, batch_finish_reasons = asyncio.run(
@@ -229,7 +233,7 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, dp
     """Test generation using prompt_token_ids for the specified backend."""
 
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     prompts = get_test_prompts(MODEL, 3)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -238,7 +242,9 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, dp
     )["input_ids"]
 
     llm_client = init_ray_inference_engines(backend, tp_size=tp_size, pp_size=1, dp_size=dp_size, config=cfg)
-    sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+    sampling_params = get_sampling_params_for_backend(
+        cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+    )
 
     # Test batch generation with tokens
     token_batch_responses, _ = asyncio.run(
@@ -271,7 +277,7 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, dp
 def test_sample_api(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
     """Test the Tinker-compatible sample() API for generating multiple independent samples."""
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
     cfg.generator.sampling_params.temperature = 0.7
 
     prompts = get_test_prompts(MODEL, 1)
@@ -281,7 +287,9 @@ def test_sample_api(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
     )["input_ids"][0]
 
     llm_client = init_ray_inference_engines(backend, tp_size=tp_size, pp_size=1, dp_size=dp_size, config=cfg)
-    sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+    sampling_params = get_sampling_params_for_backend(
+        cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+    )
 
     num_samples = 3
 

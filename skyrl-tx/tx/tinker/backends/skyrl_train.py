@@ -25,7 +25,7 @@ try:  # Optional dependency: keep other backends importable without ray/skyrl-tr
     from skyrl_train.workers.worker_dispatch import WorkerDispatch
     from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
     from skyrl_train.utils import get_ray_pg_ready_with_timeout
-    from skyrl_train.config.utils import get_default_config
+    from skyrl_train.config.utils import get_legacy_config
     from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 
     SKYRL_TRAIN_AVAILABLE = True
@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - exercised only in non-ray installs
     WorkerDispatch = Any
     PolicyWorker = Any
     get_ray_pg_ready_with_timeout = None
-    get_default_config = None
+    get_legacy_config = None
     SKYRL_RAY_PG_TIMEOUT_IN_S = None
     SKYRL_TRAIN_AVAILABLE = False
 
@@ -50,7 +50,7 @@ class SkyRLTrainBackendConfig(BaseModel, extra="forbid"):
 
 def _build_config(base_model: str, config: SkyRLTrainBackendConfig, lora_config: types.LoraConfig | None = None):
     """Build config for SkyRL-Train workers using default config."""
-    cfg = get_default_config()
+    cfg = get_legacy_config()
     cfg.trainer.policy.model.path = base_model
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()

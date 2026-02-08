@@ -157,7 +157,7 @@ async def run_generator_end_to_end(
         inference_engines,
         tokenizer,
         cfg.trainer.policy.model.path,
-        cfg.trainer.policy.lora,
+        cfg.trainer.policy.model.lora,
         cfg.generator.inference_engine,
     )
 

@@ -40,7 +40,7 @@ def test_main_generate(tmp_path):
     cfg.generator.sampling_params.max_generate_length = 4
     cfg.generator.eval_sampling_params.max_generate_length = 4
     cfg.generator.eval_n_samples_per_prompt = 1
-    cfg.generator.async_engine = True
+    cfg.generator.inference_engine.async_engine = True
 
     cfg.environment.skyrl_gym.max_env_workers = 1
 

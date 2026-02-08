@@ -357,7 +357,10 @@ class WorkerDispatch:
         """Broadcast policy weights to inference engines."""
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", inference_engine_client
+                "pass_through",
+                "broadcast_to_inference_engines",
+                inference_engine_client,
+                inference_engine_client.inference_engine_cfg,
             )
         )
 

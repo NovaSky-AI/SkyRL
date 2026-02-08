@@ -355,7 +355,7 @@ class InferenceEngineConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = False
     gpu_memory_utilization: float = 0.8
     max_num_seqs: int = 1024
-    remote_urls: List[str] = field(default_factory=lambda: ["127.0.0.1:8001"])
+    remote_urls: List[str] = field(default_factory=lambda: [])
     enable_http_endpoint: bool = False
     http_endpoint_host: str = "127.0.0.1"
     http_endpoint_port: int = 8000
@@ -584,7 +584,7 @@ class SkyRLConfig(BaseConfig):
             translate_legacy_config,
             warn_legacy_config,
         )
-        from skyrl_train.config.utils import get_default_config
+        from skyrl_train.config.utils import get_legacy_config
 
         # Check for unsupported '+' prefix
         for arg in args:
@@ -601,7 +601,7 @@ class SkyRLConfig(BaseConfig):
         except ValueError:
             # Fall back to legacy format: load base YAML, merge overrides, translate
             try:
-                base_cfg = get_default_config()
+                base_cfg = get_legacy_config()
                 merged = OmegaConf.merge(base_cfg, overrides)
                 merged_dict = OmegaConf.to_container(merged, resolve=True)
 

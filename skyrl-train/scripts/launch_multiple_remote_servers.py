@@ -20,7 +20,7 @@ import time
 import sys
 import tempfile
 from pathlib import Path
-from omegaconf import OmegaConf
+from skyrl_train.config import SkyRLConfig
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 import psutil
@@ -180,11 +180,9 @@ def main():
     parser.add_argument("--timeout", type=int, default=180, help="Timeout in seconds for server readiness")
     args = parser.parse_args()
 
-    cfg = OmegaConf.create()
-    cfg.generator = OmegaConf.create()
-    cfg.generator.backend = "vllm"
-    cfg.generator.weight_sync_backend = "nccl"
-    # Initialize Ray
+    cfg = SkyRLConfig()
+    cfg.generator.inference_engine.backend = "vllm"
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
     initialize_ray(cfg)
 
     # Create placement group for the server

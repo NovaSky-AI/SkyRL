@@ -223,18 +223,18 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         # 1. Build engine
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
@@ -291,17 +291,17 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         client, pg = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=2,  # since we explicitly sync weights
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
@@ -314,12 +314,16 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             "policy",
             shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
             cfg=cfg,
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+            )
+        )
 
         # 2. Do tests
         num_samples = 20
@@ -539,18 +543,18 @@ def test_structured_generation(ray_init_fixture):
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
 
@@ -602,18 +606,18 @@ def test_http_endpoint_error_handling(ray_init_fixture):
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
 
@@ -735,7 +739,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         template_path = "skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
         engine_init_kwargs = {}
@@ -748,12 +752,12 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN3,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
             engine_init_kwargs=engine_init_kwargs,
         )
@@ -832,20 +836,20 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         # 1. Set up engine with served_model_name
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         # Set the served_model_name to be different from the model path
-        cfg.generator.served_model_name = SERVED_MODEL_NAME
+        cfg.generator.inference_engine.served_model_name = SERVED_MODEL_NAME
 
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
 

@@ -131,7 +131,7 @@ class DAPOExp(BasePPOExp):
             inference_engines,
             self.tokenizer,
             self.cfg.trainer.policy.model.path,
-            self.cfg.trainer.policy.lora,
+            self.cfg.trainer.policy.model.lora,
             self.cfg.generator.inference_engine,
         )
 

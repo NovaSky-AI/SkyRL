@@ -28,7 +28,7 @@ def get_test_config() -> SkyRLConfig:
     cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 1
-    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.inference_engine.tensor_parallel_size = 1
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.use_sample_packing = False
     cfg.trainer.logger = "console"

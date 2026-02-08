@@ -156,7 +156,7 @@ def init_inference_client(backend: str, tp_size: int, config: SkyRLConfig) -> In
         engines,
         tokenizer,
         config.trainer.policy.model.path,
-        config.trainer.policy.lora,
+        config.trainer.policy.model.lora,
         config.generator.inference_engine,
     )
 
@@ -216,7 +216,7 @@ def test_tinker_sample_integration(ray_init_fixture, backend: str, tp_size: int)
     4. Convert result to Tinker SampleOutput
     """
     cfg = get_test_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     llm_client = init_inference_client(backend, tp_size, cfg)
@@ -285,7 +285,7 @@ def test_tinker_sample_integration(ray_init_fixture, backend: str, tp_size: int)
 def test_tinker_stop_tokens(ray_init_fixture, backend: str, tp_size: int):
     """Test that stop tokens are handled correctly in Tinker format."""
     cfg = get_test_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     llm_client = init_inference_client(backend, tp_size, cfg)
@@ -337,7 +337,7 @@ def test_tinker_stop_tokens(ray_init_fixture, backend: str, tp_size: int):
 def test_multi_engine_load_balancing(ray_init_fixture, backend: str, tp_size: int):
     """Test that sample() works with multiple inference engines using random load-balancing."""
     cfg = get_test_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
@@ -363,7 +363,7 @@ def test_multi_engine_load_balancing(ray_init_fixture, backend: str, tp_size: in
         backend=backend,
     )
     llm_client = InferenceEngineClient(
-        engines, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.lora, cfg.generator.inference_engine
+        engines, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.model.lora, cfg.generator.inference_engine
     )
 
     # Create Tinker-style input

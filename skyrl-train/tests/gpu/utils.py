@@ -367,7 +367,7 @@ def init_inference_engines(
         pg, sleep = None, False
 
     # Extract served_model_name from config if set
-    served_model_name = cfg.generator.served_model_name
+    served_model_name = cfg.generator.inference_engine.served_model_name
 
     tokenizer = AutoTokenizer.from_pretrained(model)
     eps = create_ray_wrapped_inference_engines(
@@ -393,7 +393,7 @@ def init_inference_engines(
         served_model_name=served_model_name,
     )
     client = InferenceEngineClient(
-        eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.lora, cfg.generator.inference_engine
+        eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.model.lora, cfg.generator.inference_engine
     )
     if sleep:
         asyncio.run(client.wake_up())
@@ -511,7 +511,7 @@ def init_remote_inference_servers(
         engines,
         tokenizer,
         config.trainer.policy.model.path,
-        config.trainer.policy.lora,
+        config.trainer.policy.model.lora,
         config.generator.inference_engine,
     )
     return client, server_process

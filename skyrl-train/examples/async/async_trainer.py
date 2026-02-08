@@ -167,7 +167,9 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
                 generator_input, uids = prepare_generator_input(
                     rand_prompts,
                     self.cfg.generator.n_samples_per_prompt,
-                    get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                    get_sampling_params_for_backend(
+                        self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
+                    ),
                     self.cfg.environment.env_class,
                     "train",
                     self.global_step,
@@ -197,5 +199,8 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
 
     async def async_sync_policy_weights_to_inference_engines(self):
         return await self.policy_model.async_run_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            "pass_through",
+            "broadcast_to_inference_engines",
+            self.inference_engine_client,
+            self.inference_engine_client.inference_engine_cfg,
         )

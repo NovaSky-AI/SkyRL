@@ -596,7 +596,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def async_sync_policy_weights_to_inference_engines(self):
         return await self.policy_model.async_run_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            "pass_through",
+            "broadcast_to_inference_engines",
+            self.inference_engine_client,
+            self.inference_engine_client.inference_engine_cfg,
         )
 
     def convert_generation_group_mini_batch_to_training_input(

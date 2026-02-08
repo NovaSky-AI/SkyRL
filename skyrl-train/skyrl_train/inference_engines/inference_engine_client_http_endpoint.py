@@ -260,7 +260,7 @@ def create_app() -> fastapi.FastAPI:
         Takes in OpenAI's `ChatCompletionRequest` and returns OpenAI's `ChatCompletionResponse`.
 
         Note that the specific fields inside the request and response depend on the backend you use.
-        If `config.generator.backend` is `vllm`, then the request and response will be vLLM's.
+        If `config.generator.inference_engine.backend` is `vllm`, then the request and response will be vLLM's.
         Same for SGLang. SkyRL does not perform field validation beyond `model` and `session_id`,
         and otherwise depends on the underlying engines' validation.
 
@@ -281,7 +281,7 @@ def create_app() -> fastapi.FastAPI:
         Takes in OpenAI's `CompletionRequest` and returns OpenAI's `CompletionResponse`.
 
         Note that the specific fields inside the request and response depend on the backend you use.
-        If `config.generator.backend` is `vllm`, then the request and response will be vLLM's.
+        If `config.generator.inference_engine.backend` is `vllm`, then the request and response will be vLLM's.
         SkyRL only validates the fields `model` and `session_id`, and otherwise offloads
         field validation to the underlying engines.
 

@@ -45,12 +45,12 @@ def make_cfg(
     Assumes no intra-engine parallelism (tp=pp=dp=1).
     """
     cfg = SkyRLConfig()
-    cfg.generator.weight_sync_backend = weight_sync_backend
-    cfg.generator.model_dtype = model_dtype
-    cfg.generator.num_inference_engines = num_inference_engines
-    cfg.generator.inference_engine_tensor_parallel_size = 1
-    cfg.generator.inference_engine_pipeline_parallel_size = 1
-    cfg.generator.inference_engine_data_parallel_size = 1
+    cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
+    cfg.generator.inference_engine.model_dtype = model_dtype
+    cfg.generator.inference_engine.num_engines = num_inference_engines
+    cfg.generator.inference_engine.tensor_parallel_size = 1
+    cfg.generator.inference_engine.pipeline_parallel_size = 1
+    cfg.generator.inference_engine.data_parallel_size = 1
     cfg.trainer.placement.colocate_all = colocate_all
     return cfg
 
@@ -231,7 +231,7 @@ def _run_weight_sync_e2e(
 
     # Simplifying assumption: each receiver represents one complete engine with 1 rank
     # (not testing intra-engine parallelism like TP/PP/DP)
-    assert num_inference_engines == cfg.generator.num_inference_engines, "Test assumes 1 rank per engine"
+    assert num_inference_engines == cfg.generator.inference_engine.num_engines, "Test assumes 1 rank per engine"
 
     # For CUDA IPC, each sender-receiver pair must share the same GPU (required for IPC handles)
     pg = None

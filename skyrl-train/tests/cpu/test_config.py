@@ -4,10 +4,11 @@ uv run --isolated --extra dev pytest -s tests/cpu/test_config.py
 
 import pytest
 import typing
+from typing import List
 from dataclasses import dataclass, field
 from typing import Annotated, Optional
 
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, DictConfig
 
 from skyrl_train.config.config import (
     BaseConfig,
@@ -15,6 +16,7 @@ from skyrl_train.config.config import (
     build_nested_dataclass,
     _resolve_dataclass_type,
 )
+from skyrl_train.config.utils import get_legacy_config
 
 
 # Helper dataclasses for testing
@@ -133,6 +135,27 @@ def test_legacy_config_translation():
 
     # Value should be translated to the new nested location
     assert cfg.generator.inference_engine.backend == "sglang"
+
+    # test with full YAML
+    full_legacy_cfg = get_legacy_config()
+    # custom override
+    full_legacy_cfg.generator.backend = "sglang"
+
+    # convert to CLI overrides
+    def traverse_and_convert(cfg: DictConfig, parent_key: str = "") -> List[str]:
+        overrides = []
+        for key, value in cfg.items():
+            if isinstance(value, DictConfig):
+                overrides.extend(traverse_and_convert(value, f"{parent_key}.{key}" if parent_key else key))
+            else:
+                overrides.append(f"{parent_key}.{key}={value}" if parent_key else f"{key}={value}")
+        return overrides
+
+    full_legacy_cfg_as_overrides = traverse_and_convert(full_legacy_cfg)
+
+    # should pass without error
+    translated_cfg = SkyRLConfig.from_cli_overrides(full_legacy_cfg_as_overrides)
+    assert translated_cfg.generator.inference_engine.backend == "sglang"
 
 
 def test_legacy_config_field_rename():

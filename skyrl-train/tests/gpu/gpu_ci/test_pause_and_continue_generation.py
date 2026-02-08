@@ -41,7 +41,7 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
         # 1. Build engine and start server
         cfg = get_test_actor_config(num_inference_engines=num_engines, model=MODEL)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         sampling_params = {
             "max_tokens": 2048,
@@ -58,12 +58,12 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
         client, _ = init_inference_engines(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,
             # We test aborting 2 running requests and 1 waiting requests
             max_num_seqs=max_num_seqs,
@@ -186,7 +186,7 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     # 1. Build engines (no HTTP server needed for generate())
     cfg = get_test_actor_config(num_inference_engines=num_engines, model=MODEL)
     cfg.trainer.placement.colocate_all = True
-    cfg.generator.weight_sync_backend = "nccl"
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
     sampling_params = {
         "max_tokens": 2048,
@@ -200,12 +200,12 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     client, _ = init_inference_engines(
         cfg=cfg,
         use_local=True,
-        async_engine=cfg.generator.async_engine,
-        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         backend="vllm",
         model=MODEL,
-        num_inference_engines=cfg.generator.num_inference_engines,
+        num_inference_engines=cfg.generator.inference_engine.num_engines,
         sleep_level=1,
         max_num_seqs=max_num_seqs,
     )
@@ -272,7 +272,7 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
     # 1. Build engine
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
     cfg.trainer.placement.colocate_all = True
-    cfg.generator.weight_sync_backend = "nccl"
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
     # We generate 8192 tokens ad ignore eos.
     sampling_params = {
@@ -285,12 +285,12 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
     client, _ = init_inference_engines(
         cfg=cfg,
         use_local=True,
-        async_engine=cfg.generator.async_engine,
-        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         backend="vllm",
         model=MODEL,
-        num_inference_engines=cfg.generator.num_inference_engines,
+        num_inference_engines=cfg.generator.inference_engine.num_engines,
         sleep_level=1,
         # We test aborting 2 running requests and 2 waiting requests
         max_num_seqs=2,

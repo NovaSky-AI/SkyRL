@@ -579,7 +579,10 @@ class RayPPOTrainer:
         TODO(tgriggs): Remove this method when migration is complete.
         """
         return self.policy_model.async_run_ray_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            "pass_through",
+            "broadcast_to_inference_engines",
+            self.inference_engine_client,
+            self.inference_engine_client.inference_engine_cfg,
         )
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:

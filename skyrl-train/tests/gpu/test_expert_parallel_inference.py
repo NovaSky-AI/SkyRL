@@ -92,7 +92,7 @@ def init_ray_inference_engines(
     engine = create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
-        expert_parallel_size=config.generator.inference_engine_expert_parallel_size,
+        expert_parallel_size=config.generator.inference_engine.expert_parallel_size,
         model_dtype="bfloat16",
         pretrain=MODEL,
         seed=42,
@@ -112,7 +112,7 @@ def init_ray_inference_engines(
         engine,
         tokenizer,
         config.trainer.policy.model.path,
-        config.trainer.policy.lora,
+        config.trainer.policy.model.lora,
         config.generator.inference_engine,
     )
     return client
@@ -134,14 +134,16 @@ def test_ep_generation():
         initialize_ray(cfg)
 
         client = init_ray_inference_engines(
-            backend=cfg.generator.backend,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            backend=cfg.generator.inference_engine.backend,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             shared_pg=None,
             config=cfg,
         )
 
         prompts = get_test_prompts(MODEL, num_samples=4)
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         responses, reasons = asyncio.run(_run_single_generation(client, prompts, sampling_params))
         assert len(responses) == len(prompts)
@@ -173,8 +175,8 @@ def test_ep_weight_sync():
 
         # Spin up two inference engines with EP enabled, colocated
         client = init_ray_inference_engines(
-            backend=cfg.generator.backend,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            backend=cfg.generator.inference_engine.backend,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             shared_pg=pg,
             config=cfg,
         )
@@ -182,7 +184,9 @@ def test_ep_weight_sync():
 
         # Generate before weight sync
         prompts = get_test_prompts(MODEL, num_samples=4)
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
         out_before = asyncio.run(
             client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
         )
@@ -202,7 +206,11 @@ def test_ep_weight_sync():
         # Sync weights to inference engines
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.wake_up(tags=["weights"]))
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+            )
+        )
         policy.offload_to_cpu()
         asyncio.run(client.wake_up(tags=["kv_cache"]))
         asyncio.run(client.reset_prefix_cache())
