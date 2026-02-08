@@ -1,0 +1,175 @@
+name: "Fleet Training Monitor"
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster_name:
+        description: "SkyPilot cluster name to monitor"
+        type: string
+        required: true
+      wandb_run_name:
+        description: "WandB run name for reference"
+        type: string
+        required: true
+      slack_thread_ts:
+        description: "Slack thread timestamp for replies"
+        type: string
+        required: true
+      iteration:
+        description: "Monitor iteration (1-12, each ~6h)"
+        type: string
+        required: true
+        default: "1"
+
+permissions:
+  contents: read
+  actions: write  # Required to trigger next iteration
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # ~5.8 hours, leaving buffer before 6h limit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install SkyPilot
+        run: |
+          pip install "skypilot[lambda,runpod,vast,primeintellect,nebius]" runpod prime
+
+      - name: Configure Cloud Credentials
+        run: |
+          mkdir -p ~/.lambda_cloud && echo "api_key = ${{ secrets.LAMBDA_API_KEY }}" > ~/.lambda_cloud/lambda_keys
+          runpod config "${{ secrets.RUNPOD_API_KEY }}"
+          mkdir -p ~/.config/vastai && echo "${{ secrets.VAST_API_KEY }}" > ~/.config/vastai/vast_api_key
+          prime config set-api-key "${{ secrets.PRIME_INTELLECT_API_KEY }}"
+          mkdir -p ~/.nebius && echo '${{ secrets.NEBIUS_CREDENTIALS_JSON }}' > ~/.nebius/credentials.json
+          echo "${{ secrets.NEBIUS_TENANT_ID }}" > ~/.nebius/NEBIUS_TENANT_ID.txt
+
+      - name: Verify Cloud Credentials
+        run: sky check lambda runpod vast primeintellect nebius
+
+      - name: Stream Training Logs
+        id: monitor
+        run: |
+          CLUSTER="${{ inputs.cluster_name }}"
+          ITERATION="${{ inputs.iteration }}"
+          START_HOUR=$((($ITERATION - 1) * 6))
+          END_HOUR=$(($ITERATION * 6))
+
+          echo "=== Monitor iteration $ITERATION/12 (hours $START_HOUR-$END_HOUR) ==="
+          echo "Cluster: $CLUSTER"
+          echo ""
+
+          # Stream logs - blocks until job completes or timeout
+          sky logs "$CLUSTER" 2>&1 | tee /tmp/logs.txt || true
+
+          # Determine status
+          if grep -q "Job finished (status: SUCCEEDED)" /tmp/logs.txt 2>/dev/null; then
+            echo "status=SUCCEEDED" >> $GITHUB_OUTPUT
+            echo "Training completed successfully!"
+          elif grep -q "Job finished (status: FAILED)" /tmp/logs.txt 2>/dev/null; then
+            echo "status=FAILED" >> $GITHUB_OUTPUT
+            echo "Training failed!"
+          else
+            echo "status=RUNNING" >> $GITHUB_OUTPUT
+            echo "Training still running after this monitoring window"
+          fi
+
+      - name: Cleanup Cluster (on completion)
+        if: steps.monitor.outputs.status == 'SUCCEEDED' || steps.monitor.outputs.status == 'FAILED'
+        run: |
+          echo "Training finished. Terminating cluster..."
+          sky down "${{ inputs.cluster_name }}" -y || true
+
+      - name: Notify Slack - Completed
+        if: steps.monitor.outputs.status == 'SUCCEEDED'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "thread_ts": "${{ inputs.slack_thread_ts }}",
+              "text": "✅ Training Completed",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "✅ Training Completed" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Cluster:*\n`${{ inputs.cluster_name }}`" },
+                  { "type": "mrkdwn", "text": "*Status:*\n`SUCCEEDED`" }
+                ]},
+                { "type": "section", "text": { "type": "mrkdwn", "text": "<https://wandb.ai/thefleet/fleet-task-grpo|View Results on WandB>" } }
+              ]
+            }
+
+      - name: Notify Slack - Failed
+        if: steps.monitor.outputs.status == 'FAILED'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "thread_ts": "${{ inputs.slack_thread_ts }}",
+              "text": "❌ Training Failed",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "❌ Training Failed" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Cluster:*\n`${{ inputs.cluster_name }}`" },
+                  { "type": "mrkdwn", "text": "*Status:*\n`FAILED`" }
+                ]},
+                { "type": "section", "text": { "type": "mrkdwn", "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>" } }
+              ]
+            }
+
+      - name: Trigger Next Monitor (if still running and under 72h)
+        if: steps.monitor.outputs.status == 'RUNNING' && inputs.iteration != '12'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEXT_ITERATION=$((  ${{ inputs.iteration }} + 1 ))
+          echo "Training still running. Triggering monitor iteration $NEXT_ITERATION..."
+
+          gh workflow run openenv-fleet-monitor.yaml \
+            --field cluster_name="${{ inputs.cluster_name }}" \
+            --field wandb_run_name="${{ inputs.wandb_run_name }}" \
+            --field slack_thread_ts="${{ inputs.slack_thread_ts }}" \
+            --field iteration="$NEXT_ITERATION"
+
+      - name: Notify Slack - 72h Limit Reached
+        if: steps.monitor.outputs.status == 'RUNNING' && inputs.iteration == '12'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "thread_ts": "${{ inputs.slack_thread_ts }}",
+              "text": "⏳ Training Still Running (72h limit)",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "⏳ Training Still Running" } },
+                { "type": "section", "text": { "type": "mrkdwn", "text": "GHA monitoring hit 72h limit. Training continues on GPU.\n\n*Cluster:* `${{ inputs.cluster_name }}`\n*Monitor:* <https://wandb.ai/thefleet/fleet-task-grpo|WandB>\n*Logs:* `sky logs ${{ inputs.cluster_name }}`\n*Stop:* `sky down ${{ inputs.cluster_name }} -y`" } }
+              ]
+            }
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Monitor Iteration ${{ inputs.iteration }}/12" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster | \`${{ inputs.cluster_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | \`${{ steps.monitor.outputs.status }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| WandB | \`${{ inputs.wandb_run_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.monitor.outputs.status }}" == "RUNNING" ] && [ "${{ inputs.iteration }}" != "12" ]; then
+            echo "| Next | Iteration $(( ${{ inputs.iteration }} + 1 )) triggered |" >> $GITHUB_STEP_SUMMARY
+          fi

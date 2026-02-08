@@ -39,6 +39,7 @@ on:
 
 permissions:
   contents: read
+  actions: write  # Required to trigger monitor workflow
 
 env:
   RUN_NAME_PREFIX: "fleet-task"
@@ -46,9 +47,8 @@ env:
 jobs:
   launch-training:
     runs-on: ubuntu-latest
-    timeout-minutes: 1440  # 24 hours (default is 6 hours which cuts off training)
+    timeout-minutes: 30
     env:
-      # Make both keys available as env vars for bash selection
       WANDB_KEY_TOOL_USE: ${{ secrets.WANDB_API_KEY_TOOL_USE }}
       WANDB_KEY_COMPUTER_USE: ${{ secrets.WANDB_API_KEY_COMPUTER_USE }}
 
@@ -66,25 +66,11 @@ jobs:
 
       - name: Configure Cloud Credentials
         run: |
-          # Lambda
-          mkdir -p ~/.lambda_cloud
-          echo "api_key = ${{ secrets.LAMBDA_API_KEY }}" > ~/.lambda_cloud/lambda_keys
-
-          # RunPod
-          pip install runpod
-          runpod config "${{ secrets.RUNPOD_API_KEY }}"
-
-          # Vast.ai
-          mkdir -p ~/.config/vastai
-          echo "${{ secrets.VAST_API_KEY }}" > ~/.config/vastai/vast_api_key
-
-          # Prime Intellect
-          pip install prime
-          prime config set-api-key "${{ secrets.PRIME_INTELLECT_API_KEY }}"
-
-          # Nebius
-          mkdir -p ~/.nebius
-          echo '${{ secrets.NEBIUS_CREDENTIALS_JSON }}' > ~/.nebius/credentials.json
+          mkdir -p ~/.lambda_cloud && echo "api_key = ${{ secrets.LAMBDA_API_KEY }}" > ~/.lambda_cloud/lambda_keys
+          pip install runpod && runpod config "${{ secrets.RUNPOD_API_KEY }}"
+          mkdir -p ~/.config/vastai && echo "${{ secrets.VAST_API_KEY }}" > ~/.config/vastai/vast_api_key
+          pip install prime && prime config set-api-key "${{ secrets.PRIME_INTELLECT_API_KEY }}"
+          mkdir -p ~/.nebius && echo '${{ secrets.NEBIUS_CREDENTIALS_JSON }}' > ~/.nebius/credentials.json
           echo "${{ secrets.NEBIUS_TENANT_ID }}" > ~/.nebius/NEBIUS_TENANT_ID.txt
 
       - name: Verify Cloud Credentials
@@ -96,103 +82,45 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           DATA_VERSION="${{ inputs.data_version }}"
-          S3_BUCKET="fleet-internal-datasets"
-          echo "Checking if data version '$DATA_VERSION' exists in S3..."
-          if ! aws s3 ls "s3://${S3_BUCKET}/${DATA_VERSION}/openenv/" > /dev/null 2>&1; then
-            echo "ERROR: Data version '$DATA_VERSION' not found in S3"
-            echo "Available versions:"
-            aws s3 ls "s3://${S3_BUCKET}/" | grep PRE | awk '{print $2}'
-            exit 1
+          if ! aws s3 ls "s3://fleet-internal-datasets/${DATA_VERSION}/openenv/" > /dev/null 2>&1; then
+            echo "ERROR: Data version '$DATA_VERSION' not found"; exit 1
           fi
-          echo "Data version '$DATA_VERSION' validated"
 
-      - name: Generate Cluster Name and Run Name
+      - name: Generate Cluster Name
         id: cluster
         run: |
           TIMESTAMP=$(date -u +"%Y%m%d-%H%M")
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          # SkyPilot cluster names must be lowercase, alphanumeric, and can contain hyphens
           CLUSTER_NAME="fleet-${{ inputs.modality }}-${SHORT_SHA}-${TIMESTAMP}"
           CLUSTER_NAME=$(echo "$CLUSTER_NAME" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
           echo "name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
-          echo "Generated cluster name: $CLUSTER_NAME"
-
-          # Generate WandB run name (matches trainer.run_name in YAML)
-          MODALITY="${{ inputs.modality }}"
           RUN_ID=$(head -c 4 /dev/urandom | xxd -p)
-          WANDB_RUN_NAME="fleet_${MODALITY}_${RUN_ID}"
-          echo "wandb_run_name=$WANDB_RUN_NAME" >> $GITHUB_OUTPUT
+          echo "wandb_run_name=fleet_${{ inputs.modality }}_${RUN_ID}" >> $GITHUB_OUTPUT
           echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "Generated WandB run name: $WANDB_RUN_NAME"
 
       - name: Launch Training Cluster
-        id: launch
         run: |
           MODALITY="${{ inputs.modality }}"
-          ENV_KEY="${{ inputs.env_key }}"
-          MAX_TASKS="${{ inputs.max_tasks }}"
-          CLUSTER_NAME="${{ steps.cluster.outputs.name }}"
+          if [ "$MODALITY" == "tool_use" ]; then WANDB_KEY="$WANDB_KEY_TOOL_USE"; else WANDB_KEY="$WANDB_KEY_COMPUTER_USE"; fi
+          [ -z "$WANDB_KEY" ] && echo "ERROR: WANDB key not set" && exit 1
 
-          # Select WandB key based on modality
-          if [ "$MODALITY" == "tool_use" ]; then
-            WANDB_KEY="$WANDB_KEY_TOOL_USE"
-          else
-            WANDB_KEY="$WANDB_KEY_COMPUTER_USE"
-          fi
-
-          # Validate key is set
-          if [ -z "$WANDB_KEY" ]; then
-            echo "ERROR: WANDB_API_KEY_${MODALITY^^} secret is not set!"
-            exit 1
-          fi
-
-          # Build launch command - direct GPU provisioning (no controller)
           LAUNCH_CMD="sky launch skyrl-train/tasks/${{ inputs.task_name }}.yaml"
-          LAUNCH_CMD="$LAUNCH_CMD --cluster $CLUSTER_NAME"
+          LAUNCH_CMD="$LAUNCH_CMD --cluster ${{ steps.cluster.outputs.name }}"
           LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
           LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
           LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
           LAUNCH_CMD="$LAUNCH_CMD --env RUN_ID=${{ steps.cluster.outputs.run_id }}"
           LAUNCH_CMD="$LAUNCH_CMD --env DATA_VERSION=${{ inputs.data_version }}"
-
-          # AWS credentials (required for S3 dataset download and checkpoint upload)
-          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
-            echo "ERROR: AWS_ACCESS_KEY_ID secret is required for S3 dataset download"
-            exit 1
-          fi
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-          echo "AWS credentials configured for S3 dataset download and checkpoint upload"
-
-          if [ -n "$ENV_KEY" ]; then
-            LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=$ENV_KEY"
-          fi
-
-          if [ -n "$MAX_TASKS" ]; then
-            LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=$MAX_TASKS"
-          fi
-
-          # -d for detached mode (returns after cluster is provisioned)
+          [ -n "${{ inputs.env_key }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=${{ inputs.env_key }}"
+          [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
           LAUNCH_CMD="$LAUNCH_CMD -d -y"
 
-          echo "Launching GPU cluster..."
           echo "Command: $LAUNCH_CMD"
-          eval "$LAUNCH_CMD" 2>&1 | tee /tmp/launch_output.txt
-          LAUNCH_EXIT_CODE=${PIPESTATUS[0]}
+          eval "$LAUNCH_CMD"
 
-          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
-
-          # Check if launch succeeded
-          if [ $LAUNCH_EXIT_CODE -ne 0 ]; then
-            echo "Cluster launch failed with exit code $LAUNCH_EXIT_CODE"
-            cat /tmp/launch_output.txt
-            exit $LAUNCH_EXIT_CODE
-          fi
-
-          echo "Cluster launched successfully!"
-          sky status
-
-      - name: Notify Slack - Training Run Started
+      - name: Notify Slack - Started
         id: slack_start
         if: success()
         uses: slackapi/slack-github-action@v2.0.0
@@ -204,76 +132,32 @@ jobs:
               "channel": "#fleet-training-runs",
               "text": "🚀 Training Run Started",
               "blocks": [
-                {
-                  "type": "header",
-                  "text": { "type": "plain_text", "text": "🚀 Training Run Started" }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Backend:*\n`SkyRL`" },
-                    { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
-                    { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" }
-                  ]
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Env Filter:*\n`${{ inputs.env_key || 'all' }}`" },
-                    { "type": "mrkdwn", "text": "*WandB Run:*\n`${{ steps.cluster.outputs.wandb_run_name }}`" }
-                  ]
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow> | <https://wandb.ai/thefleet/fleet-task-grpo|WandB>" }
-                  ]
-                }
+                { "type": "header", "text": { "type": "plain_text", "text": "🚀 Training Run Started" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
+                  { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
+                  { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
+                  { "type": "mrkdwn", "text": "*WandB:*\n`${{ steps.cluster.outputs.wandb_run_name }}`" }
+                ]},
+                { "type": "context", "elements": [
+                  { "type": "mrkdwn", "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow> | <https://wandb.ai/thefleet/fleet-task-grpo|WandB>" }
+                ]}
               ]
             }
 
-      - name: Stream Training Logs
-        id: stream
+      - name: Trigger Monitor Workflow
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          CLUSTER_NAME="${{ steps.cluster.outputs.name }}"
+          gh workflow run openenv-fleet-monitor.yaml \
+            --field cluster_name="${{ steps.cluster.outputs.name }}" \
+            --field wandb_run_name="${{ steps.cluster.outputs.wandb_run_name }}" \
+            --field slack_thread_ts="${{ steps.slack_start.outputs.ts }}" \
+            --field iteration=1
 
-          echo "Streaming logs for cluster $CLUSTER_NAME..."
-          echo "This step will run until training completes or fails."
-          echo ""
-
-          # Stream logs until job completes (this blocks)
-          # Save to file to check for success pattern
-          sky logs --follow "$CLUSTER_NAME" 2>&1 | tee /tmp/training_logs.txt || true
-
-          # Get final cluster status
-          echo ""
-          echo "=== Final Cluster Status ==="
-          sky status "$CLUSTER_NAME" || true
-
-          # Check if job succeeded by looking for SkyPilot success pattern
-          if grep -q "Job finished (status: SUCCEEDED)" /tmp/training_logs.txt 2>/dev/null; then
-            echo "Job completed successfully"
-            JOB_SUCCEEDED=true
-          else
-            echo "Job did not complete successfully"
-            JOB_SUCCEEDED=false
-          fi
-
-          # Always terminate cluster to save costs
-          echo "Terminating cluster..."
-          sky down "$CLUSTER_NAME" -y || true
-
-          if [ "$JOB_SUCCEEDED" == "true" ]; then
-            echo "cluster_status=COMPLETED" >> $GITHUB_OUTPUT
-            exit 0
-          else
-            echo "cluster_status=FAILED" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
-      - name: Notify Slack - Training Completed
-        if: success() && steps.slack_start.outputs.ts
+      - name: Notify Slack - Launch Failed
+        if: failure()
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -281,134 +165,19 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
-              "text": "✅ Training Completed",
+              "text": "❌ Cluster Launch Failed",
               "blocks": [
-                {
-                  "type": "header",
-                  "text": { "type": "plain_text", "text": "✅ Training Completed" }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Backend:*\n`SkyRL`" },
-                    { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
-                    { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.cluster_status }}`" }
-                  ]
-                },
-                {
-                  "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*WandB Run:* `${{ steps.cluster.outputs.wandb_run_name }}`\n*Dashboard:* <https://wandb.ai/thefleet/fleet-task-grpo|View Project>" }
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>" }
-                  ]
-                }
+                { "type": "header", "text": { "type": "plain_text", "text": "❌ Cluster Launch Failed" } },
+                { "type": "section", "text": { "type": "mrkdwn", "text": "*Cluster:* `${{ steps.cluster.outputs.name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>" } }
               ]
             }
-
-      - name: Notify Slack - Training Failed
-        if: failure() && steps.slack_start.outputs.ts
-        uses: slackapi/slack-github-action@v2.0.0
-        with:
-          method: chat.postMessage
-          token: ${{ secrets.SLACK_BOT_TOKEN }}
-          payload: |
-            {
-              "channel": "#fleet-training-runs",
-              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
-              "text": "❌ Training Failed",
-              "blocks": [
-                {
-                  "type": "header",
-                  "text": { "type": "plain_text", "text": "❌ Training Failed" }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Backend:*\n`SkyRL`" },
-                    { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
-                    { "type": "mrkdwn", "text": "*Status:*\n`${{ steps.stream.outputs.cluster_status || 'FAILED' }}`" }
-                  ]
-                },
-                {
-                  "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Check logs:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Logs>" }
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }}" }
-                  ]
-                }
-              ]
-            }
-
-      - name: Notify Slack - Training Cancelled
-        if: cancelled() && steps.slack_start.outputs.ts
-        uses: slackapi/slack-github-action@v2.0.0
-        with:
-          method: chat.postMessage
-          token: ${{ secrets.SLACK_BOT_TOKEN }}
-          payload: |
-            {
-              "channel": "#fleet-training-runs",
-              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
-              "text": "⚠️ Training Cancelled",
-              "blocks": [
-                {
-                  "type": "header",
-                  "text": { "type": "plain_text", "text": "⚠️ Training Cancelled" }
-                },
-                {
-                  "type": "section",
-                  "fields": [
-                    { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.cluster.outputs.name }}`" },
-                    { "type": "mrkdwn", "text": "*Backend:*\n`SkyRL`" },
-                    { "type": "mrkdwn", "text": "*Task:*\n`${{ inputs.task_name }}`" },
-                    { "type": "mrkdwn", "text": "*Status:*\n`CANCELLED`" }
-                  ]
-                },
-                {
-                  "type": "section",
-                  "text": { "type": "mrkdwn", "text": "*Cluster cleanup:* Terminating GPU resources..." }
-                },
-                {
-                  "type": "context",
-                  "elements": [
-                    { "type": "mrkdwn", "text": "Cancelled by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>" }
-                  ]
-                }
-              ]
-            }
-
-      - name: Cleanup on Failure or Cancel
-        if: failure() || cancelled()
-        run: |
-          CLUSTER_NAME="${{ steps.cluster.outputs.name }}"
-          if [ -n "$CLUSTER_NAME" ]; then
-            echo "Cleaning up cluster $CLUSTER_NAME..."
-            sky down "$CLUSTER_NAME" -y || true
-          fi
 
       - name: Summary
         if: always()
         run: |
-          echo "## SkyRL Training - ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Training Launch Summary" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Run | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Task | \`${{ inputs.task_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Final Status | \`${{ steps.stream.outputs.cluster_status || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Modality | \`${{ inputs.modality }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Env Filter | \`${{ inputs.env_key || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Max Tasks | \`${{ inputs.max_tasks || 'all' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Links" >> $GITHUB_STEP_SUMMARY
-          echo "- WandB Run: \`${{ steps.cluster.outputs.wandb_run_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- [WandB Dashboard](https://wandb.ai/thefleet/fleet-task-grpo)" >> $GITHUB_STEP_SUMMARY
+          echo "| Cluster | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| WandB | \`${{ steps.cluster.outputs.wandb_run_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | Launched, monitoring started |" >> $GITHUB_STEP_SUMMARY
