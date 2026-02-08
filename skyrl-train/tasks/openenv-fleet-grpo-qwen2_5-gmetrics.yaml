@@ -5,7 +5,7 @@
 # It loads tasks from the Fleet API and runs training with verifier-based rewards.
 # Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
 #
-# GPUs: B200:2 (preferred) or H100:4 (fallback)
+# GPUs: B200:2 only (H100 removed - unreliable CUDA environments)
   
 name: fleet-task-grpo-qwen2_5-gmetrics
 

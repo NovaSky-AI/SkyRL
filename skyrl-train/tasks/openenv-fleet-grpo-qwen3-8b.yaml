@@ -6,7 +6,7 @@
 # Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
 #
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
-# GPUs: B200:4 (preferred), H100:8 (fallback)
+# GPUs: B200:4 only (H100:8 removed - unreliable Triton/CUDA environments across providers)
 #
 # v0.3.4: Enable use_hybrid_env_sampling to ensure every env is sampled every batch
 # v0.3.3: Reduced eval_interval (40→20) for more frequent eval checkpoints
@@ -37,22 +37,6 @@ resources:
     - accelerators: B200:4
       cloud: nebius
       memory: 500+
-    # Fallback to H100:8 (min 1000GB RAM to ensure proper CUDA environment)
-    - accelerators: H100:8
-      cloud: lambda
-      memory: 1000+
-    - accelerators: H100:8
-      cloud: runpod
-      memory: 1000+
-    - accelerators: H100:8
-      cloud: vast
-      memory: 1000+
-    - accelerators: H100:8
-      cloud: primeintellect
-      memory: 1000+
-    - accelerators: H100:8
-      cloud: nebius
-      memory: 1000+
 
 num_nodes: 1
 

@@ -6,7 +6,7 @@
 # Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
 #
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
-# GPUs: B200:2 (preferred) or H100:4 (fallback)
+# GPUs: B200:2 only (H100 removed - unreliable CUDA environments)
 
 name: fleet-task-grpo-qwen3-8b
 

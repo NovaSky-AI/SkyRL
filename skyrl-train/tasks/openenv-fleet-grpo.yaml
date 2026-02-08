@@ -11,27 +11,27 @@ resources:
   disk_size: 200  # Needs space for: model (~3GB), optimizer (~6GB), Ray temp (~50GB), vLLM cache, checkpoints
   ports: 6479
   any_of:
-    # Prefer H100
-    - accelerators: H100:1
+    # Prefer B200 (H100 has unreliable Triton/CUDA environments)
+    - accelerators: B200:1
       cloud: lambda
-    - accelerators: H100:1
+    - accelerators: B200:1
       cloud: runpod
-    - accelerators: H100:1
+    - accelerators: B200:1
       cloud: vast
-    - accelerators: H100:1
+    - accelerators: B200:1
       cloud: primeintellect
-    - accelerators: H100:1
+    - accelerators: B200:1
       cloud: nebius
-    # Fallback to B200
-    - accelerators: B200:1
+    # Fallback to H100
+    - accelerators: H100:1
       cloud: lambda
-    - accelerators: B200:1
+    - accelerators: H100:1
       cloud: runpod
-    - accelerators: B200:1
+    - accelerators: H100:1
       cloud: vast
-    - accelerators: B200:1
+    - accelerators: H100:1
       cloud: primeintellect
-    - accelerators: B200:1
+    - accelerators: H100:1
       cloud: nebius
 
 num_nodes: 1
