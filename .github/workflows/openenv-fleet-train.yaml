@@ -186,6 +186,29 @@ jobs:
               ]
             }
 
+      - name: Notify Slack - Cancelled
+        if: cancelled()
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
+              "text": "⚠️ Training Cancelled",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "⚠️ Training Cancelled" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
+                  { "type": "mrkdwn", "text": "*Status:*\n`CANCELLED`" }
+                ]},
+                { "type": "context", "elements": [
+                  { "type": "mrkdwn", "text": "Cancelled by user or superseded by new run" }
+                ]}
+              ]
+            }
+
       - name: Summary
         if: always()
         run: |
