@@ -65,7 +65,7 @@ Here's a minimal SFT training loop using the Tinker API:
 import tinker
 
 # Connect to the SkyRL server
-service = tinker.ServiceClient(base_url="http://localhost:8000")
+service = tinker.ServiceClient(base_url="http://localhost:8000", api_key="tml-dummy-key")
 
 # Create a LoRA training client
 training = service.create_lora_training_client(
