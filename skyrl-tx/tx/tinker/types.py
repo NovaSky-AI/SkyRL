@@ -267,3 +267,4 @@ LOSS_TYPES = {
     "importance_sampling": 1,
     "ppo": 2,
 }
+LOSS_TYPES_REVERSE = {v: k for k, v in LOSS_TYPES.items()}
