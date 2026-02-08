@@ -29,6 +29,12 @@ from skyrl_train.generators.utils import (
 )
 
 
+class TrajectoryTimeoutError(Exception):
+    """Raised when a trajectory exceeds its timeout."""
+
+    pass
+
+
 @dataclass
 class TrajectoryOutput:
     """Output from a single agent_loop execution."""
@@ -298,140 +304,183 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Track trajectory start time for timeout
         trajectory_start_time = time.time()
 
-        while not agent_loop_state.done:
-            # Check for trajectory timeout at the start of each turn
-            if self.trajectory_timeout_seconds > 0:
-                elapsed = time.time() - trajectory_start_time
-                if elapsed > self.trajectory_timeout_seconds:
+        try:
+            while not agent_loop_state.done:
+                # Check for trajectory timeout at the start of each turn
+                if self.trajectory_timeout_seconds > 0:
+                    elapsed = time.time() - trajectory_start_time
+                    if elapsed > self.trajectory_timeout_seconds:
+                        logger.warning(
+                            f"Trajectory timeout after {elapsed:.1f}s (limit: {self.trajectory_timeout_seconds}s) "
+                            f"for session {session_id}. Returning zero-reward trajectory."
+                        )
+                        await self._run_in_executor_if_available(env.close)
+                        # Use token-level reward format [0.0] to match normal trajectories when custom_chat_template is None
+                        zero_reward = 0.0 if self.custom_chat_template else [0.0]
+                        return TrajectoryOutput(
+                            response_ids=[self.tokenizer.eos_token_id],
+                            reward=zero_reward,
+                            stop_reason="timeout",
+                            loss_mask=[0],
+                            prompt_ids=initial_input_ids,
+                            rollout_logprobs=[0.0],
+                            env_metrics={"trajectory_timeout": 1.0},
+                        )
+
+                if len(agent_loop_state.input_ids) > max_input_length:
+                    stop_reason = "length"
+                    break
+
+                # 1. Generate output
+                if is_step_wise or retokenize_chat_history:
+                    # re-apply whole chat template so length check is correct
+                    agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
+                        chat_history,
+                        chat_template=self.custom_chat_template if retokenize_chat_history else None,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        **self.generator_cfg.chat_template_kwargs,
+                    )
+                    agent_loop_state.loss_mask = []
+                    agent_loop_state.rollout_logprobs = None
+
+                engine_input = InferenceEngineInput(
+                    prompt_token_ids=[agent_loop_state.input_ids],
+                    session_ids=[session_id],
+                    sampling_params=sampling_params,
+                )
+                try:
+                    remaining = (
+                        self.trajectory_timeout_seconds - (time.time() - trajectory_start_time)
+                        if self.trajectory_timeout_seconds > 0
+                        else None
+                    )
+                    engine_output = await asyncio.wait_for(
+                        self.inference_engine_client.generate(engine_input), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    raise TrajectoryTimeoutError(
+                        f"Timeout during generate after {time.time() - trajectory_start_time:.1f}s"
+                    )
+                output = engine_output["responses"][0]
+                output_ids = engine_output["response_ids"][0]
+                stop_reason = engine_output["stop_reasons"][0]
+                response_logprobs = engine_output.get("response_logprobs", None)
+                if response_logprobs is not None:
+                    response_logprobs = response_logprobs[0]
+                    if self.custom_chat_template is not None:
+                        raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
+
+                # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
+                # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
+                stop_strs = current_sampling_params.get("stop", None)
+                added_eos = False
+                if (
+                    stop_strs is not None
+                    and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
+                    and self.use_conversation_multi_turn
+                ):
+                    if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
+                        output_ids.append(self.tokenizer.eos_token_id)
+                        # dummy logprobs for EOS token id. It will be loss masked with 0 in TurnOutput.get_turn_loss_mask
+                        if response_logprobs is not None:
+                            response_logprobs.append(0.0)
+                        added_eos = True
+
+                # 2. Environment step
+                try:
+                    remaining = (
+                        self.trajectory_timeout_seconds - (time.time() - trajectory_start_time)
+                        if self.trajectory_timeout_seconds > 0
+                        else None
+                    )
+                    env_step_output: BaseTextEnvStepOutput = await asyncio.wait_for(
+                        self._run_in_executor_if_available(env.step, output), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    raise TrajectoryTimeoutError(
+                        f"Timeout during env.step after {time.time() - trajectory_start_time:.1f}s"
+                    )
+                new_obs = env_step_output["observations"]
+                step_reward: float = env_step_output["reward"]
+                agent_loop_state.done = env_step_output["done"]
+
+                if env_step_output.get("postprocessed_action", None) is not None:
+                    # TODO(Charlie): come back to this, we should deprecate postprocessed action
                     logger.warning(
-                        f"Trajectory timeout after {elapsed:.1f}s (limit: {self.trajectory_timeout_seconds}s) "
-                        f"for session {session_id}. Returning zero-reward trajectory."
+                        "WARNING: postprocessed action may violate token-in-token-out. Ideally you "
+                        "post-process it in the token space rather than string space. "
+                        "A better solution coming soon."
                     )
-                    await self._run_in_executor_if_available(env.close)
-                    # Use token-level reward format [0.0] to match normal trajectories when custom_chat_template is None
-                    zero_reward = 0.0 if self.custom_chat_template else [0.0]
-                    return TrajectoryOutput(
-                        response_ids=[self.tokenizer.eos_token_id],
-                        reward=zero_reward,
-                        stop_reason="timeout",
-                        loss_mask=[0],
-                        prompt_ids=initial_input_ids,
-                        rollout_logprobs=[0.0],
-                        env_metrics={"trajectory_timeout": 1.0},
-                    )
+                    output = env_step_output["postprocessed_action"]
+                    output_ids = self.tokenizer.encode(output, add_special_tokens=False)
 
-            if len(agent_loop_state.input_ids) > max_input_length:
-                stop_reason = "length"
-                break
+                obs_ids = self.get_obs_ids_from_obs(new_obs, agent_loop_state.done)
 
-            # 1. Generate output
-            if is_step_wise or retokenize_chat_history:
-                # re-apply whole chat template so length check is correct
-                agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
-                    chat_history,
-                    chat_template=self.custom_chat_template if retokenize_chat_history else None,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    **self.generator_cfg.chat_template_kwargs,
-                )
-                agent_loop_state.loss_mask = []
-                agent_loop_state.rollout_logprobs = None
-
-            engine_input = InferenceEngineInput(
-                prompt_token_ids=[agent_loop_state.input_ids], session_ids=[session_id], sampling_params=sampling_params
-            )
-            engine_output = await self.inference_engine_client.generate(engine_input)
-            output = engine_output["responses"][0]
-            output_ids = engine_output["response_ids"][0]
-            stop_reason = engine_output["stop_reasons"][0]
-            response_logprobs = engine_output.get("response_logprobs", None)
-            if response_logprobs is not None:
-                response_logprobs = response_logprobs[0]
-                if self.custom_chat_template is not None:
-                    raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
-
-            # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
-            # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
-            stop_strs = current_sampling_params.get("stop", None)
-            added_eos = False
-            if (
-                stop_strs is not None
-                and self.generator_cfg.append_eos_token_after_stop_str_in_multi_turn
-                and self.use_conversation_multi_turn
-            ):
-                if output.endswith(tuple(stop_strs)) and output_ids[-1] != self.tokenizer.eos_token_id:
-                    output_ids.append(self.tokenizer.eos_token_id)
-                    # dummy logprobs for EOS token id. It will be loss masked with 0 in TurnOutput.get_turn_loss_mask
-                    if response_logprobs is not None:
-                        response_logprobs.append(0.0)
-                    added_eos = True
-
-            # 2. Environment step
-            env_step_output: BaseTextEnvStepOutput = await self._run_in_executor_if_available(env.step, output)
-            new_obs = env_step_output["observations"]
-            step_reward: float = env_step_output["reward"]
-            agent_loop_state.done = env_step_output["done"]
-
-            if env_step_output.get("postprocessed_action", None) is not None:
-                # TODO(Charlie): come back to this, we should deprecate postprocessed action
-                logger.warning(
-                    "WARNING: postprocessed action may violate token-in-token-out. Ideally you "
-                    "post-process it in the token space rather than string space. "
-                    "A better solution coming soon."
-                )
-                output = env_step_output["postprocessed_action"]
-                output_ids = self.tokenizer.encode(output, add_special_tokens=False)
-
-            obs_ids = self.get_obs_ids_from_obs(new_obs, agent_loop_state.done)
-
-            # final turn output containing generated response and environment observations
-            turn_output = TurnOutput(
-                output=output,
-                output_ids=output_ids,
-                output_logprobs=response_logprobs,
-                new_obs=new_obs,
-                reward=step_reward,
-                obs_ids=obs_ids,
-                added_eos=added_eos,
-            )
-
-            if is_step_wise:
-                # current response + observation ids
-                turn_response_ids = turn_output.output_ids + turn_output.obs_ids
-                turn_prompt_ids = agent_loop_state.input_ids
-
-                # agent loop only tracks loss mask and rollout logprobs for this turn with step_wise training
-                turn_loss_mask = turn_output.get_turn_loss_mask()
-                turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_rollout_logprobs()
-
-                per_step_output = TrajectoryOutput(
-                    response_ids=turn_response_ids,
+                # final turn output containing generated response and environment observations
+                turn_output = TurnOutput(
+                    output=output,
+                    output_ids=output_ids,
+                    output_logprobs=response_logprobs,
+                    new_obs=new_obs,
                     reward=step_reward,
-                    loss_mask=turn_loss_mask,
-                    prompt_ids=turn_prompt_ids,
-                    rollout_logprobs=turn_response_logprobs,
-                    stop_reason=stop_reason,
-                    env_metrics=env.get_metrics() if agent_loop_state.done else {},
-                )
-                agent_loop_output.step_outputs.append(per_step_output)
-
-            # 3. Update states: input ids, loss_mask, chat_history, etc.
-            # Three ways of managing input
-            if retokenize_chat_history:
-                # a. custom chat template
-                agent_loop_state = self._update_agent_state_by_retokenizing_chat_history(agent_loop_state, turn_output)
-            elif self.use_conversation_multi_turn:
-                # b. Token-in-token-out. Follow multi-turn chat history format.
-                agent_loop_state = self._update_agent_loop_state_with_multiturn_chat_template(
-                    agent_loop_state, turn_output
-                )
-            else:
-                # c. Token-in-token-out. All steps/observations are appended to a single assistant message.
-                agent_loop_state = self._update_agent_loop_state_with_singleturn_chat_template(
-                    agent_loop_state, turn_output
+                    obs_ids=obs_ids,
+                    added_eos=added_eos,
                 )
 
-            per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
+                if is_step_wise:
+                    # current response + observation ids
+                    turn_response_ids = turn_output.output_ids + turn_output.obs_ids
+                    turn_prompt_ids = agent_loop_state.input_ids
+
+                    # agent loop only tracks loss mask and rollout logprobs for this turn with step_wise training
+                    turn_loss_mask = turn_output.get_turn_loss_mask()
+                    turn_response_logprobs: Optional[List[float]] = turn_output.get_turn_rollout_logprobs()
+
+                    per_step_output = TrajectoryOutput(
+                        response_ids=turn_response_ids,
+                        reward=step_reward,
+                        loss_mask=turn_loss_mask,
+                        prompt_ids=turn_prompt_ids,
+                        rollout_logprobs=turn_response_logprobs,
+                        stop_reason=stop_reason,
+                        env_metrics=env.get_metrics() if agent_loop_state.done else {},
+                    )
+                    agent_loop_output.step_outputs.append(per_step_output)
+
+                # 3. Update states: input ids, loss_mask, chat_history, etc.
+                # Three ways of managing input
+                if retokenize_chat_history:
+                    # a. custom chat template
+                    agent_loop_state = self._update_agent_state_by_retokenizing_chat_history(
+                        agent_loop_state, turn_output
+                    )
+                elif self.use_conversation_multi_turn:
+                    # b. Token-in-token-out. Follow multi-turn chat history format.
+                    agent_loop_state = self._update_agent_loop_state_with_multiturn_chat_template(
+                        agent_loop_state, turn_output
+                    )
+                else:
+                    # c. Token-in-token-out. All steps/observations are appended to a single assistant message.
+                    agent_loop_state = self._update_agent_loop_state_with_singleturn_chat_template(
+                        agent_loop_state, turn_output
+                    )
+
+                per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
+
+        except TrajectoryTimeoutError as e:
+            logger.warning(f"Trajectory timeout for session {session_id}: {e}. Returning zero-reward trajectory.")
+            await self._run_in_executor_if_available(env.close)
+            zero_reward = 0.0 if self.custom_chat_template else [0.0]
+            return TrajectoryOutput(
+                response_ids=[self.tokenizer.eos_token_id],
+                reward=zero_reward,
+                stop_reason="timeout",
+                loss_mask=[0],
+                prompt_ids=initial_input_ids,
+                rollout_logprobs=[0.0],
+                env_metrics={"trajectory_timeout": 1.0},
+            )
 
         # Get environment-specific metrics after the episode is done
         env_metrics = env.get_metrics()
