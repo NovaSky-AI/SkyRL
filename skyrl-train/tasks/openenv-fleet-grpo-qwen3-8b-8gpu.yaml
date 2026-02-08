@@ -1,42 +1,28 @@
-# Fleet Task GRPO Training via SkyPilot - Qwen3-8B
-# Usage: sky launch tasks/openenv-fleet-grpo-qwen3-8b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+# Fleet Task GRPO Training via SkyPilot - Qwen3-8B (8 GPU variant)
+# Usage: sky launch tasks/openenv-fleet-grpo-qwen3-8b-8gpu.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
 #
 # This task trains GRPO on Fleet-hosted environments using OpenEnv's FleetTaskEnv.
 # It loads tasks from the Fleet API and runs training with verifier-based rewards.
 # Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
 #
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
-# GPUs: B200:4 only
+# GPUs: B200:8 only (for providers that only offer 8-GPU nodes: PrimeIntellect, Nebius, Vast)
 #
-# v0.3.4: Enable use_hybrid_env_sampling to ensure every env is sampled every batch
-# v0.3.3: Reduced eval_interval (40→20) for more frequent eval checkpoints
-# v0.3.2: Increased batch size (4→32) and GPUs (2→4) for hybrid env sampling
-# v0.3 OOM fix: gpu_memory_utilization reduced from 0.8 to 0.7
-# v0.3 has 3x more data including google-maps (4.7K tasks) with longer tool schemas
-# This leaves more headroom for training activations before vLLM wake_up
+# Batch sizes doubled from 4-GPU variant to utilize 8 GPUs efficiently
 
-name: fleet-task-grpo-qwen3-8b
+name: fleet-task-grpo-qwen3-8b-8gpu
 
 resources:
   disk_size: 200  # Needs space for: model (~16GB), optimizer (~32GB), Ray temp (~50GB), vLLM cache, checkpoints
   ports: 6479
   any_of:
-    # Prefer B200:4 (min 500GB RAM to filter out low-spec instances)
-    - accelerators: B200:4
-      cloud: lambda
-      memory: 500+
-    - accelerators: B200:4
-      cloud: runpod
-      memory: 500+
-    - accelerators: B200:4
-      cloud: vast
-      memory: 500+
-    - accelerators: B200:4
+    # B200:8 only (PrimeIntellect, Nebius, Vast offer 8-GPU nodes)
+    - accelerators: B200:8
       cloud: primeintellect
-      memory: 500+
-    - accelerators: B200:4
+    - accelerators: B200:8
       cloud: nebius
-      memory: 500+
+    - accelerators: B200:8
+      cloud: vast
 
 num_nodes: 1
 
@@ -153,6 +139,7 @@ run: |
   TOTAL_GPUS=$SKYPILOT_NUM_GPUS_PER_NODE
 
   # Run GRPO training with Fleet task integration
+  # Batch sizes doubled from 4-GPU variant (32->64, 2->4)
   uv run --isolated --extra "$INFERENCE_BACKEND" \
     --with "litellm>=1.75.5" \
     --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" \
@@ -175,16 +162,16 @@ run: |
     generator.num_inference_engines=$TOTAL_GPUS \
     generator.inference_engine_tensor_parallel_size=1 \
     trainer.epochs=${NUM_EPOCHS} \
-    trainer.eval_batch_size=32 \
+    trainer.eval_batch_size=64 \
     trainer.eval_before_train=true \
     trainer.eval_interval=20 \
     trainer.update_epochs_per_batch=1 \
-    trainer.train_batch_size=32 \
+    trainer.train_batch_size=64 \
     trainer.use_hybrid_env_sampling=true \
     trainer.min_samples_per_env=1 \
-    trainer.policy_mini_batch_size=32 \
-    trainer.micro_forward_batch_size_per_gpu=2 \
-    trainer.micro_train_batch_size_per_gpu=2 \
+    trainer.policy_mini_batch_size=64 \
+    trainer.micro_forward_batch_size_per_gpu=4 \
+    trainer.micro_train_batch_size_per_gpu=4 \
     trainer.ckpt_interval=10 \
     trainer.max_prompt_length=512 \
     generator.max_input_length=$MAX_INPUT_LENGTH \
