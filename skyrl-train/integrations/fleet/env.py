@@ -22,6 +22,7 @@ from skyrl_gym.envs.base_text_env import (
     ConversationType,
 )
 from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
+from envs.fleet_env import ContextManager
 
 # Reduce MCP client log noise
 # - loguru: some MCP libs use loguru
@@ -165,6 +166,12 @@ class FleetTaskEnv(BaseTextEnv):
         self.tool_calls = 0
         self.tools: List[Dict[str, Any]] = []
 
+        # Context management (uses OpenEnv's ContextManager)
+        self.enable_context_tools = extras.get("enable_context_tools", False)
+        self.context_manager: Optional[ContextManager] = None
+        if self.enable_context_tools:
+            self.context_manager = ContextManager(max_output_chars=extras.get("max_output_chars", 10000))
+
     def _normalize_task_config(self) -> Dict[str, Any]:
         """Normalize task config to OpenEnv's expected format."""
         config = self.task_config.copy()
@@ -210,8 +217,16 @@ class FleetTaskEnv(BaseTextEnv):
         self.turns = 0
         self.tool_calls = 0
 
+        # Reset context manager if enabled
+        if self.context_manager:
+            self.context_manager.reset()
+
         # Get tools from observation (cached from __init__)
         self.tools = obs.get("tools", [])
+
+        # Add context management tools if enabled
+        if self.context_manager:
+            self.tools = self.tools + self.context_manager.get_tools()
         if not self.tools:
             raise RuntimeError(f"Task {self.task_key}: no tools found in observation. Fleet env requires tools.")
 
@@ -295,7 +310,10 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
         """
         step_start = time.time()
         self.turns += 1
-        self.chat_history.append({"role": "assistant", "content": action})
+        assistant_msg = {"role": "assistant", "content": action}
+        self.chat_history.append(assistant_msg)
+        if self.context_manager:
+            self.context_manager.track_message(assistant_msg)
 
         max_turns_reached = self.turns >= self.max_turns
 
@@ -310,8 +328,13 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
         reward = 0.0
         mcp_time = 0.0
 
+        # Handle context management tools locally (no MCP call)
+        if tool_call and self.context_manager and self.context_manager.is_context_tool(tool_call["name"]):
+            tool_result, self.chat_history = self.context_manager.execute_tool(
+                tool_call["name"], tool_call.get("arguments", {}), self.chat_history
+            )
         # Execute tool call if present via OpenEnv
-        if tool_call and self.openenv_task_env:
+        elif tool_call and self.openenv_task_env:
             self.tool_calls += 1
             # Build action dict for OpenEnv
             openenv_action = {
@@ -328,6 +351,10 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
                 tool_result = obs.get("observation")
                 if "tool_error" in info:
                     error = info["tool_error"]
+
+                # Truncate long tool outputs and store full version for retrieval
+                if tool_result and isinstance(tool_result, str) and self.context_manager:
+                    tool_result = self.context_manager.truncate_output(tool_result)
             except Exception as e:
                 mcp_time = time.time() - mcp_start
                 error = str(e)
@@ -371,6 +398,8 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
 
         new_obs = {"role": "user", "content": obs_content}
         self.chat_history.append(new_obs)
+        if self.context_manager:
+            self.context_manager.track_message(new_obs)
 
         step_time = time.time() - step_start
         metadata = {

@@ -80,6 +80,8 @@ envs:
   RUN_ID: ""
   # Optional: limit number of tasks for testing
   MAX_TASKS: ""
+  # Optional: enable context management tools (manage_context, check_context, etc.)
+  ENABLE_CONTEXT_TOOLS: ""
   # AWS credentials (required for S3 dataset download, optional for checkpoint upload)
   AWS_ACCESS_KEY_ID: ""
   AWS_SECRET_ACCESS_KEY: ""
@@ -179,6 +181,7 @@ run: |
     data.val_data="['${DATA_DIR}/validation.parquet']" \
     environment.env_class=fleet_task \
     environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
+    ${ENABLE_CONTEXT_TOOLS:+environment.skyrl_gym.fleet_task.enable_context_tools=true} \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="Qwen/Qwen3-8B" \
     ++trainer.rope_scaling.rope_type=yarn \

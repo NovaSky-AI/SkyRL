@@ -36,6 +36,10 @@ on:
         description: "Dataset version in S3 (e.g., v0.1, v0.2, v0.3)"
         type: string
         default: "v0.3"
+      enable_context_tools:
+        description: "Enable context management tools (manage_context, check_context, etc.)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -132,6 +136,7 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           [ -n "${{ inputs.env_key }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=${{ inputs.env_key }}"
           [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
+          [ "${{ inputs.enable_context_tools }}" == "true" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENABLE_CONTEXT_TOOLS=true"
           LAUNCH_CMD="$LAUNCH_CMD -y"  # No -d flag, run attached to stream logs
 
           echo "Command: $LAUNCH_CMD"
