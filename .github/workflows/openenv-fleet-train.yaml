@@ -26,7 +26,6 @@ on:
           - lambda
           - runpod
           - vast
-          - hyperbolic
           - nebius
         default: any
       task_name:
@@ -63,7 +62,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install SkyPilot
-        run: pip install "skypilot[lambda,runpod,vast,primeintellect,hyperbolic,nebius]"
+        run: pip install "skypilot[lambda,runpod,vast,primeintellect,nebius]"
 
       - name: Configure Cloud Credentials
         run: |
@@ -83,17 +82,13 @@ jobs:
           pip install prime
           prime config set-api-key "${{ secrets.PRIME_INTELLECT_API_KEY }}"
 
-          # Hyperbolic
-          mkdir -p ~/.hyperbolic
-          echo "${{ secrets.HYPERBOLIC_API_KEY }}" > ~/.hyperbolic/api_key
-
           # Nebius
           mkdir -p ~/.nebius
           echo '${{ secrets.NEBIUS_CREDENTIALS_JSON }}' > ~/.nebius/credentials.json
           echo "${{ secrets.NEBIUS_TENANT_ID }}" > ~/.nebius/NEBIUS_TENANT_ID.txt
 
       - name: Verify Cloud Credentials
-        run: sky check lambda runpod vast primeintellect hyperbolic nebius
+        run: sky check lambda runpod vast primeintellect nebius
 
       - name: Validate data version
         env:

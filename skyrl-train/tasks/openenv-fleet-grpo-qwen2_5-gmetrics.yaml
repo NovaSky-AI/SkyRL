@@ -23,8 +23,6 @@ resources:
     - accelerators: B200:2
       cloud: primeintellect
     - accelerators: B200:2
-      cloud: hyperbolic
-    - accelerators: B200:2
       cloud: nebius
 
 num_nodes: 1
