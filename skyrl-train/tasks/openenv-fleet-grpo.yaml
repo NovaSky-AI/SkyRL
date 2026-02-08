@@ -20,6 +20,10 @@ resources:
       cloud: vast
     - accelerators: H100:1
       cloud: primeintellect
+    - accelerators: H100:1
+      cloud: hyperbolic
+    - accelerators: H100:1
+      cloud: nebius
     # Fallback to B200
     - accelerators: B200:1
       cloud: lambda
@@ -29,6 +33,10 @@ resources:
       cloud: vast
     - accelerators: B200:1
       cloud: primeintellect
+    - accelerators: B200:1
+      cloud: hyperbolic
+    - accelerators: B200:1
+      cloud: nebius
 
 num_nodes: 1
 
