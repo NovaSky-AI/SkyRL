@@ -189,11 +189,11 @@ class RayPPOTrainer:
         if self.colocate_all:
             await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
-        # Eval before training
+        # Eval before training - always log at step 0 regardless of resumed checkpoint
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step, commit=True)
+                self.tracker.log(eval_metrics, step=0, commit=True)
 
         # initialize kl controller
         if self.cfg.trainer.algorithm.use_kl_in_reward:

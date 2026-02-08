@@ -355,11 +355,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("sync_weights_to_inference_engines"):
             await self.async_sync_policy_weights_to_inference_engines()
 
-        # Eval before training
+        # Eval before training - always log at step 0 regardless of resumed checkpoint
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step)
+                self.tracker.log(eval_metrics, step=0)
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
