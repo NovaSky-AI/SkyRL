@@ -15,7 +15,6 @@ from tx.tinker.db_models import FutureDB, RequestStatus, CheckpointDB, Checkpoin
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.backends.utils import log_timing
-from tx.tinker.types import LOSS_TYPES
 from tx.utils.log import logger
 
 
@@ -101,13 +100,11 @@ def prepare_model_pass_batch(
     all_model_ids = []
     all_sampling_logprobs = []
     all_advantages = []
-    all_loss_fn_types = []
+    all_loss_fns = []
     all_loss_fn_configs = []
     request_batch_slices = []
 
     for request_id, (model_id, request_data) in requests.items():
-        loss_fn_type = LOSS_TYPES[request_data.loss_fn]
-
         request_start = len(all_input_ids)
         for item in request_data.data:
             tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
@@ -118,7 +115,7 @@ def prepare_model_pass_batch(
             all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
             all_advantages.append(loss_fn_inputs.advantages.data)
             all_model_ids.append(model_id)
-            all_loss_fn_types.append(loss_fn_type)
+            all_loss_fns.append(request_data.loss_fn)
             all_loss_fn_configs.append(request_data.loss_fn_config)
 
         request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
@@ -130,7 +127,7 @@ def prepare_model_pass_batch(
         all_sampling_logprobs=all_sampling_logprobs,
         all_advantages=all_advantages,
         all_model_ids=all_model_ids,
-        all_loss_fn_types=all_loss_fn_types,
+        all_loss_fns=all_loss_fns,
         all_loss_fn_configs=all_loss_fn_configs,
         request_batch_slices=request_batch_slices,
     )

@@ -107,6 +107,7 @@ def test_prepare_model_pass_batch_loss_fn_config():
         ),
     }
     batch = prepare_model_pass_batch(requests_with_config)
+    assert batch.all_loss_fns == ["importance_sampling"]
     assert batch.all_loss_fn_configs == [config]
 
     # Without loss_fn_config (default None)
@@ -120,4 +121,5 @@ def test_prepare_model_pass_batch_loss_fn_config():
         ),
     }
     batch_no_config = prepare_model_pass_batch(requests_without_config)
+    assert batch_no_config.all_loss_fns == ["cross_entropy"]
     assert batch_no_config.all_loss_fn_configs == [None]
