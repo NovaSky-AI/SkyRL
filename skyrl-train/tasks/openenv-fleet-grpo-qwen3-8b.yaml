@@ -21,28 +21,38 @@ resources:
   disk_size: 200  # Needs space for: model (~16GB), optimizer (~32GB), Ray temp (~50GB), vLLM cache, checkpoints
   ports: 6479
   any_of:
-    # Prefer B200:4
+    # Prefer B200:4 (min 500GB RAM to filter out low-spec instances)
     - accelerators: B200:4
       cloud: lambda
+      memory: 500+
     - accelerators: B200:4
       cloud: runpod
+      memory: 500+
     - accelerators: B200:4
       cloud: vast
+      memory: 500+
     - accelerators: B200:4
       cloud: primeintellect
+      memory: 500+
     - accelerators: B200:4
       cloud: nebius
-    # Fallback to H100:8
+      memory: 500+
+    # Fallback to H100:8 (min 1000GB RAM to ensure proper CUDA environment)
     - accelerators: H100:8
       cloud: lambda
+      memory: 1000+
     - accelerators: H100:8
       cloud: runpod
+      memory: 1000+
     - accelerators: H100:8
       cloud: vast
+      memory: 1000+
     - accelerators: H100:8
       cloud: primeintellect
+      memory: 1000+
     - accelerators: H100:8
       cloud: nebius
+      memory: 1000+
 
 num_nodes: 1
 
