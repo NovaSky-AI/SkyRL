@@ -44,22 +44,21 @@ on:
 
 permissions:
   contents: read
-  actions: write  # Required to trigger training workflow
 
-# Allow cancellation of the workflow
+# One training run at a time on the self-hosted runner
 concurrency:
-  group: tinker-train-${{ github.run_id }}
-  cancel-in-progress: true
+  group: fleet-tinker-training
+  cancel-in-progress: false
 
 env:
   TASKS_BUCKET: "fleet-internal-datasets"
   TASKS_PREFIX: "${{ inputs.data_version }}/openenv"
 
 jobs:
-  launch:
-    name: "Launch Training (by ${{ github.actor }})"
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  train:
+    name: "Train ${{ inputs.model_name }} (by ${{ github.actor }})"
+    runs-on: [self-hosted, fleet-runner]
+    timeout-minutes: 4320  # 72 hours max
 
     steps:
       - name: Checkout
@@ -71,7 +70,9 @@ jobs:
           python-version: '3.12'
 
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh || true
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
         working-directory: skyrl-train
@@ -129,13 +130,6 @@ jobs:
           [ -n "${{ inputs.max_tasks }}" ] && PREPARE_CMD="$PREPARE_CMD --max-tasks ${{ inputs.max_tasks }}"
           eval "$PREPARE_CMD"
 
-      - name: Upload prepared data as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: training-data-${{ steps.run.outputs.run_id }}
-          path: data/
-          retention-days: 1
-
       - name: Notify Slack - Started
         id: slack_start
         uses: slackapi/slack-github-action@v2.0.0
@@ -145,42 +139,95 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "🚀 Training Run Started",
+              "text": "🚀 Tinker Training Started",
               "blocks": [
-                { "type": "header", "text": { "type": "plain_text", "text": "🚀 Training Run Started" } },
+                { "type": "header", "text": { "type": "plain_text", "text": "🚀 Tinker Training Started" } },
                 { "type": "section", "fields": [
                   { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
-                  { "type": "mrkdwn", "text": "*Backend:*\n`Tinker`" },
                   { "type": "mrkdwn", "text": "*Model:*\n`${{ inputs.model_name }}`" },
-                  { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" }
+                  { "type": "mrkdwn", "text": "*Modality:*\n`${{ inputs.modality }}`" },
+                  { "type": "mrkdwn", "text": "*Max Steps:*\n`${{ inputs.max_steps }}`" }
                 ]},
                 { "type": "context", "elements": [
-                  { "type": "mrkdwn", "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow> | <https://wandb.ai/thefleet/fleet-tinker-grpo|WandB>" }
+                  { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow> | <https://wandb.ai/thefleet/fleet-tinker-grpo|WandB>" }
                 ]}
               ]
             }
 
-      - name: Trigger Training Workflow
+      - name: Run training
+        id: training
+        working-directory: skyrl-train
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TINKER_API_URL: ${{ secrets.TINKER_API_URL }}
+          TINKER_API_KEY: ${{ secrets.TINKER_API_KEY }}
+          FLEET_API_KEY: ${{ secrets.FLEET_API_KEY }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY_TOOL_USE }}
         run: |
-          gh workflow run openenv-fleet-tinker-train.yaml \
-            --field run_name="${{ steps.run.outputs.name }}" \
-            --field run_id="${{ steps.run.outputs.run_id }}" \
-            --field model_name="${{ inputs.model_name }}" \
-            --field modality="${{ inputs.modality }}" \
-            --field max_steps="${{ inputs.max_steps }}" \
-            --field batch_size="${{ inputs.batch_size }}" \
-            --field n_samples_per_prompt="${{ inputs.n_samples_per_prompt }}" \
-            --field slack_thread_ts="${{ steps.slack_start.outputs.ts }}" \
-            --field iteration=1 \
-            --field triggered_by="${{ github.actor }}"
+          source .venv/bin/activate
+
+          python -m integrations.fleet.entrypoints.main_fleet_tinker \
+            --model-name "${{ inputs.model_name }}" \
+            --tasks-file ../data/tasks.json \
+            --dataset-file ../data/fleet/train.parquet \
+            --eval-dataset-file ../data/fleet/validation.parquet \
+            --batch-size ${{ inputs.batch_size }} \
+            --max-steps ${{ inputs.max_steps }} \
+            --n-samples-per-prompt ${{ inputs.n_samples_per_prompt }} \
+            --max-turns 50 \
+            --eval-every 20 \
+            --wandb-project fleet-tinker-grpo \
+            --wandb-name "${{ steps.run.outputs.name }}"
+
+          echo "status=COMPLETED" >> $GITHUB_OUTPUT
+
+      - name: Notify Slack - Completed
+        if: steps.training.outputs.status == 'COMPLETED'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
+              "text": "✅ Training Completed",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "✅ Tinker Training Completed" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
+                  { "type": "mrkdwn", "text": "*Status:*\n`COMPLETED`" }
+                ]},
+                { "type": "section", "text": { "type": "mrkdwn", "text": "<https://wandb.ai/thefleet/fleet-tinker-grpo|View Results on WandB>" } }
+              ]
+            }
+
+      - name: Notify Slack - Failed
+        if: failure()
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
+              "text": "❌ Training Failed",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "❌ Tinker Training Failed" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Run:*\n`${{ steps.run.outputs.name }}`" },
+                  { "type": "mrkdwn", "text": "*Status:*\n`FAILED`" }
+                ]},
+                { "type": "section", "text": { "type": "mrkdwn", "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>" } }
+              ]
+            }
 
       - name: Summary
+        if: always()
         run: |
-          echo "## Tinker Training Launch" >> $GITHUB_STEP_SUMMARY
+          echo "## Tinker Training Summary" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Run | \`${{ steps.run.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Model | \`${{ inputs.model_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Status | Training workflow triggered |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | \`${{ steps.training.outputs.status || 'FAILED' }}\` |" >> $GITHUB_STEP_SUMMARY

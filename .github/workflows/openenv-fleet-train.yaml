@@ -39,53 +39,41 @@ on:
 
 permissions:
   contents: read
-  actions: write  # Required to trigger monitor workflow
 
-# Allow cancellation of the workflow
+# One training run at a time on the self-hosted runner
 concurrency:
-  group: train-${{ github.run_id }}
-  cancel-in-progress: true
-
-env:
-  RUN_NAME_PREFIX: "fleet-task"
+  group: fleet-training
+  cancel-in-progress: false
 
 jobs:
-  launch-training:
-    name: "Launch Training (by ${{ github.actor }})"
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  train:
+    name: "Train ${{ inputs.modality }} (by ${{ github.actor }})"
+    runs-on: [self-hosted, fleet-runner]
+    timeout-minutes: 4320  # 72 hours max
+
     env:
       WANDB_KEY_TOOL_USE: ${{ secrets.WANDB_API_KEY_TOOL_USE }}
       WANDB_KEY_COMPUTER_USE: ${{ secrets.WANDB_API_KEY_COMPUTER_USE }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install SkyPilot
-        run: pip install "skypilot[lambda,runpod,vast,primeintellect,nebius]"
-
       - name: Configure Cloud Credentials
         run: |
           mkdir -p ~/.lambda_cloud && echo "api_key = ${{ secrets.LAMBDA_API_KEY }}" > ~/.lambda_cloud/lambda_keys
-          pip install runpod && runpod config "${{ secrets.RUNPOD_API_KEY }}"
+          pip3 install runpod 2>/dev/null || true && runpod config "${{ secrets.RUNPOD_API_KEY }}" || true
           mkdir -p ~/.config/vastai && echo "${{ secrets.VAST_API_KEY }}" > ~/.config/vastai/vast_api_key
-          pip install prime && prime config set-api-key "${{ secrets.PRIME_INTELLECT_API_KEY }}"
+          pip3 install prime 2>/dev/null || true && prime config set-api-key "${{ secrets.PRIME_INTELLECT_API_KEY }}" || true
           mkdir -p ~/.nebius && echo '${{ secrets.NEBIUS_CREDENTIALS_JSON }}' > ~/.nebius/credentials.json
           echo "${{ secrets.NEBIUS_TENANT_ID }}" > ~/.nebius/NEBIUS_TENANT_ID.txt
 
       - name: Verify Cloud Credentials
-        run: sky check lambda runpod vast primeintellect nebius
+        run: sky check lambda runpod vast primeintellect nebius || true
 
       - name: Validate data version
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           DATA_VERSION="${{ inputs.data_version }}"
           if ! aws s3 ls "s3://fleet-internal-datasets/${DATA_VERSION}/openenv/" > /dev/null 2>&1; then
@@ -102,33 +90,9 @@ jobs:
           echo "name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
           RUN_ID=$(head -c 4 /dev/urandom | xxd -p)
           echo "wandb_run_name=fleet_${{ inputs.modality }}_${RUN_ID}" >> $GITHUB_OUTPUT
-          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
 
-      - name: Launch Training Cluster
-        run: |
-          MODALITY="${{ inputs.modality }}"
-          if [ "$MODALITY" == "tool_use" ]; then WANDB_KEY="$WANDB_KEY_TOOL_USE"; else WANDB_KEY="$WANDB_KEY_COMPUTER_USE"; fi
-          [ -z "$WANDB_KEY" ] && echo "ERROR: WANDB key not set" && exit 1
-
-          LAUNCH_CMD="sky launch skyrl-train/tasks/${{ inputs.task_name }}.yaml"
-          LAUNCH_CMD="$LAUNCH_CMD --cluster ${{ steps.cluster.outputs.name }}"
-          LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
-          LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
-          LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
-          LAUNCH_CMD="$LAUNCH_CMD --env RUN_ID=${{ steps.cluster.outputs.run_id }}"
-          LAUNCH_CMD="$LAUNCH_CMD --env DATA_VERSION=${{ inputs.data_version }}"
-          LAUNCH_CMD="$LAUNCH_CMD --env AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
-          LAUNCH_CMD="$LAUNCH_CMD --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-          [ -n "${{ inputs.env_key }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=${{ inputs.env_key }}"
-          [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
-          LAUNCH_CMD="$LAUNCH_CMD -d -y"
-
-          echo "Command: $LAUNCH_CMD"
-          eval "$LAUNCH_CMD"
-
-      - name: Notify Slack - Started
+      - name: Notify Slack - Starting
         id: slack_start
-        if: success()
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -146,24 +110,62 @@ jobs:
                   { "type": "mrkdwn", "text": "*WandB:*\n`${{ steps.cluster.outputs.wandb_run_name }}`" }
                 ]},
                 { "type": "context", "elements": [
-                  { "type": "mrkdwn", "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow> | <https://wandb.ai/thefleet/fleet-task-grpo|WandB>" }
+                  { "type": "mrkdwn", "text": "Triggered by: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow> | <https://wandb.ai/thefleet/fleet-task-grpo|WandB>" }
                 ]}
               ]
             }
 
-      - name: Trigger Monitor Workflow
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Launch Training Cluster
+        id: launch
         run: |
-          gh workflow run openenv-fleet-monitor.yaml \
-            --field cluster_name="${{ steps.cluster.outputs.name }}" \
-            --field wandb_run_name="${{ steps.cluster.outputs.wandb_run_name }}" \
-            --field slack_thread_ts="${{ steps.slack_start.outputs.ts }}" \
-            --field iteration=1 \
-            --field triggered_by="${{ github.actor }}"
+          MODALITY="${{ inputs.modality }}"
+          if [ "$MODALITY" == "tool_use" ]; then WANDB_KEY="$WANDB_KEY_TOOL_USE"; else WANDB_KEY="$WANDB_KEY_COMPUTER_USE"; fi
+          [ -z "$WANDB_KEY" ] && echo "ERROR: WANDB key not set" && exit 1
 
-      - name: Notify Slack - Launch Failed
+          LAUNCH_CMD="sky launch skyrl-train/tasks/${{ inputs.task_name }}.yaml"
+          LAUNCH_CMD="$LAUNCH_CMD --cluster ${{ steps.cluster.outputs.name }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
+          LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
+          LAUNCH_CMD="$LAUNCH_CMD --env DATA_VERSION=${{ inputs.data_version }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+          [ -n "${{ inputs.env_key }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=${{ inputs.env_key }}"
+          [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
+          LAUNCH_CMD="$LAUNCH_CMD -y"  # No -d flag, run attached to stream logs
+
+          echo "Command: $LAUNCH_CMD"
+          eval "$LAUNCH_CMD"
+          echo "status=SUCCEEDED" >> $GITHUB_OUTPUT
+
+      - name: Cleanup Cluster
+        if: always()
+        run: |
+          echo "Cleaning up cluster ${{ steps.cluster.outputs.name }}..."
+          sky down "${{ steps.cluster.outputs.name }}" -y || true
+
+      - name: Notify Slack - Completed
+        if: steps.launch.outputs.status == 'SUCCEEDED'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
+              "text": "✅ Training Completed",
+              "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "✅ Training Completed" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
+                  { "type": "mrkdwn", "text": "*Status:*\n`SUCCEEDED`" }
+                ]},
+                { "type": "section", "text": { "type": "mrkdwn", "text": "<https://wandb.ai/thefleet/fleet-task-grpo|View Results on WandB>" } }
+              ]
+            }
+
+      - name: Notify Slack - Failed
         if: failure()
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -172,19 +174,24 @@ jobs:
           payload: |
             {
               "channel": "#fleet-training-runs",
-              "text": "❌ Cluster Launch Failed",
+              "thread_ts": "${{ steps.slack_start.outputs.ts }}",
+              "text": "❌ Training Failed",
               "blocks": [
-                { "type": "header", "text": { "type": "plain_text", "text": "❌ Cluster Launch Failed" } },
-                { "type": "section", "text": { "type": "mrkdwn", "text": "*Cluster:* `${{ steps.cluster.outputs.name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>" } }
+                { "type": "header", "text": { "type": "plain_text", "text": "❌ Training Failed" } },
+                { "type": "section", "fields": [
+                  { "type": "mrkdwn", "text": "*Cluster:*\n`${{ steps.cluster.outputs.name }}`" },
+                  { "type": "mrkdwn", "text": "*Status:*\n`FAILED`" }
+                ]},
+                { "type": "section", "text": { "type": "mrkdwn", "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>" } }
               ]
             }
 
       - name: Summary
         if: always()
         run: |
-          echo "## Training Launch Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Training Summary" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Cluster | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| WandB | \`${{ steps.cluster.outputs.wandb_run_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Status | Launched, monitoring started |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | \`${{ steps.launch.outputs.status || 'FAILED' }}\` |" >> $GITHUB_STEP_SUMMARY
