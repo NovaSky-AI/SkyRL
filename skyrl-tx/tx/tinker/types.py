@@ -235,8 +235,8 @@ class PreparedModelPassBatch(BaseModel):
     all_model_ids: list[str]
     all_loss_fn_types: list[int]
 
-    # Batch-level config
-    loss_fn_config: dict[str, float] | None = None
+    # Per-example config (one per datum, mirrors all_loss_fn_types)
+    all_loss_fn_configs: list[dict[str, float] | None]
 
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
     request_batch_slices: list[tuple[str, str, int, int]]

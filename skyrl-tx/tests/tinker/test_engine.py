@@ -97,18 +97,27 @@ def test_prepare_model_pass_batch_loss_fn_config():
 
     # With loss_fn_config
     requests_with_config = {
-        "req1": ("model1", types.ForwardBackwardInput(
-            data=[datum], loss_fn="importance_sampling", loss_fn_config=config,
-        )),
+        "req1": (
+            "model1",
+            types.ForwardBackwardInput(
+                data=[datum],
+                loss_fn="importance_sampling",
+                loss_fn_config=config,
+            ),
+        ),
     }
     batch = prepare_model_pass_batch(requests_with_config)
-    assert batch.loss_fn_config == config
+    assert batch.all_loss_fn_configs == [config]
 
     # Without loss_fn_config (default None)
     requests_without_config = {
-        "req2": ("model1", types.ForwardBackwardInput(
-            data=[datum], loss_fn="cross_entropy",
-        )),
+        "req2": (
+            "model1",
+            types.ForwardBackwardInput(
+                data=[datum],
+                loss_fn="cross_entropy",
+            ),
+        ),
     }
     batch_no_config = prepare_model_pass_batch(requests_without_config)
-    assert batch_no_config.loss_fn_config is None
+    assert batch_no_config.all_loss_fn_configs == [None]
