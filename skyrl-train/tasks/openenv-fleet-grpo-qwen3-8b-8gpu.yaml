@@ -6,7 +6,7 @@
 # Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
 #
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
-# GPUs: B200:8 only (for providers that only offer 8-GPU nodes: PrimeIntellect, Nebius, Vast)
+# GPUs: B200:8
 #
 # Batch sizes doubled from 4-GPU variant to utilize 8 GPUs efficiently
 
@@ -16,13 +16,17 @@ resources:
   disk_size: 200  # Needs space for: model (~16GB), optimizer (~32GB), Ray temp (~50GB), vLLM cache, checkpoints
   ports: 6479
   any_of:
-    # B200:8 only (PrimeIntellect, Nebius, Vast offer 8-GPU nodes)
+    # B200:8 across all providers
+    - accelerators: B200:8
+      cloud: lambda
+    - accelerators: B200:8
+      cloud: runpod
+    - accelerators: B200:8
+      cloud: vast
     - accelerators: B200:8
       cloud: primeintellect
     - accelerators: B200:8
       cloud: nebius
-    - accelerators: B200:8
-      cloud: vast
 
 num_nodes: 1
 
