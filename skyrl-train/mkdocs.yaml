@@ -5,16 +5,22 @@ edit_uri: edit/main/skyrl-train/new_docs/
 
 theme:
   name: material
+  custom_dir: new_docs/overrides
+  font:
+    text: Inter
+    code: JetBrains Mono
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: indigo
+      primary: white
+      accent: blue
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: indigo
+      primary: custom
+      accent: blue
       toggle:
         icon: material/brightness-2
         name: Switch to light mode
@@ -41,6 +47,9 @@ plugins:
             show_source: true
             show_signature_annotations: true
             members_order: source
+
+extra_css:
+  - stylesheets/custom.css
 
 markdown_extensions:
   - admonition
