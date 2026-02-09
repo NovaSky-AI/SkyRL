@@ -44,9 +44,9 @@ on:
 permissions:
   contents: read
 
-# One training run at a time on the self-hosted runner
+# Allow multiple concurrent training runs for experimentation
 concurrency:
-  group: fleet-training
+  group: fleet-training-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
