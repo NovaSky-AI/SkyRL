@@ -61,6 +61,54 @@ The `learnings/` folder contains documented knowledge about SkyRL internals:
    - When fixing bugs, add regression tests that would have caught the bug
    - Use descriptive test names that explain what is being tested
 
+## Eval Trajectory Analysis (Required for Each Training Run)
+
+When documenting a training run, you MUST analyze eval trajectories from S3.
+
+### 1. Download Eval Trajectories
+
+```bash
+aws s3 cp s3://skyrl-trajectories/evals/{run_name}/global_step_0/{env}.jsonl /tmp/{env}_step0.jsonl
+```
+
+### 2. Trajectory Format
+
+- `input_prompt`: Full prompt string
+- `output_response`: Model's response string
+- `score`: List of per-token scores (check if any > 0 for success)
+- `stop_reason`: Why generation stopped
+- `env_extras`: Contains `task_key`, `data_source`
+
+### 3. Compute These Metrics Per Environment
+
+| Metric | How to compute |
+|--------|----------------|
+| Avg Turns | Count `<\|im_start\|>assistant` in `output_response` |
+| Avg Tool Calls | Count `"name":` patterns in `output_response` |
+| Error Rate | % trajectories with `"error"`, `not found`, `not authorized`, `failed:` |
+| False Completion Rate | % trajectories with `<done>` in output but no positive scores |
+
+### 4. Get Results from aggregated_results.jsonl
+
+```bash
+aws s3 cp s3://skyrl-trajectories/evals/{run_name}/global_step_X/aggregated_results.jsonl -
+```
+
+Extract `eval/{env}/pass_at_3` for each environment.
+
+### 5. Document Error Patterns
+
+Categorize failures:
+- Tool argument errors (validation failures)
+- Authorization errors (permission denied)
+- Resource not found errors
+- False completions (model confident but wrong)
+- Context overflow (hit max_input_length)
+
+### 6. Update experiments.md
+
+Document results in `fleet-research/threads/tool-use-training/experiments.md` following the template in Section 3.1.
+
 ## Project Context
 
 - This is SkyRL, a reinforcement learning training framework
