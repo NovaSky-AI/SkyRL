@@ -69,7 +69,7 @@ aws --version
 
 # 2. Install SkyPilot
 log "Installing SkyPilot..."
-pip3 install --user "skypilot-nightly[lambda,runpod,vast]"
+pip3 install --user "skypilot-nightly[lambda,runpod,vast,nebius]"
 export PATH="$HOME/.local/bin:$PATH"
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
