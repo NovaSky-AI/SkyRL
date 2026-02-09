@@ -7,7 +7,7 @@ Quick reference for launching training runs on Fleet tasks.
 | Backend | Infrastructure | Best For |
 |---------|---------------|----------|
 | **SkyRL (SkyPilot)** | Self-managed GPU (Lambda/RunPod/Vast) | Full control, longer runs |
-| **Tinker** | Hosted GPU (Theseus) | Quick iteration, no GPU setup |
+| **Tinker** | Hosted GPU| Quick iteration, no GPU setup |
 
 ## Launching a Run
 
