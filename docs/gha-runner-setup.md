@@ -10,11 +10,13 @@ This guide explains how to set up self-hosted GitHub Actions runners for SkyRL t
 
 ## Current Runner Pool
 
-| Runner Name | Instance ID | IP | Status |
-|-------------|-------------|-----|--------|
-| fleet-runner-1 | i-04a15158610df980f | 54.224.233.242 | Active |
-| fleet-runner-2 | (check AWS console) | (check AWS console) | Active |
-| fleet-runner-3 | (check AWS console) | (check AWS console) | Active |
+All runners are t3.medium (4GB RAM). IPs may change on restart.
+
+| Runner Name | Instance ID | Instance Type | Status |
+|-------------|-------------|---------------|--------|
+| fleet-runner-1 | i-04a15158610df980f | t3.medium | Active |
+| fleet-runner-2 | i-0f80c703294413a4c | t3.medium | Active |
+| fleet-runner-3 | i-09321b67952c1a208 | t3.medium | Active |
 
 To check runner status: [GitHub Settings → Actions → Runners](https://github.com/fleet-ai/SkyRL/settings/actions/runners)
 
