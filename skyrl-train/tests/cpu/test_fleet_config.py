@@ -39,6 +39,7 @@ class TestFleetTaskConfig:
         assert "tasks_file" in fleet_task, "tasks_file field missing"
         assert "api_key" in fleet_task, "api_key field missing"
         assert "ttl_seconds" in fleet_task, "ttl_seconds field missing"
+        assert "enable_context_tools" in fleet_task, "enable_context_tools field missing"
 
     def test_fleet_task_config_default_values(self):
         """Test that fleet_task config has correct default values."""
@@ -56,3 +57,4 @@ class TestFleetTaskConfig:
         assert fleet_task["tasks_file"] is None, "tasks_file should default to None"
         assert fleet_task["api_key"] is None, "api_key should default to None"
         assert fleet_task["ttl_seconds"] == 600, "ttl_seconds should default to 600"
+        assert fleet_task["enable_context_tools"] is False, "enable_context_tools should default to False"
