@@ -12,7 +12,9 @@ This guide explains how to set up self-hosted GitHub Actions runners for SkyRL t
 
 | Runner Name | Instance ID | IP | Status |
 |-------------|-------------|-----|--------|
-| fleet-gha-runner | i-045e312899d63f130 | 3.88.43.218 | Active |
+| fleet-runner-1 | i-04a15158610df980f | 54.224.233.242 | Pending setup |
+| fleet-runner-2 | (check AWS console) | (check AWS console) | Active |
+| fleet-runner-3 | (check AWS console) | (check AWS console) | Active |
 
 To check runner status: [GitHub Settings → Actions → Runners](https://github.com/fleet-ai/SkyRL/settings/actions/runners)
 
