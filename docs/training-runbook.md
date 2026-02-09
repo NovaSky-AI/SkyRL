@@ -26,7 +26,8 @@ Quick reference for launching training runs on Fleet tasks.
 | `modality` | `tool_use` or `computer_use` | `tool_use` |
 | `env_key` | Filter by environment (empty=all) | `""` |
 | `max_tasks` | Limit tasks for testing | `""` (all) |
-| `data_version` | Dataset version in S3 (e.g., `v0.1`, `v0.2`) | `v0.2` |
+| `data_version` | Dataset version in S3 (e.g., `v0.3`) | `v0.3` |
+| `enable_context_tools` | Enable context management tools (`check_context`, `manage_context`, etc.) | `false` |
 
 #### SkyRL-Specific
 
@@ -78,6 +79,24 @@ env_key: github          # Single environment
 max_tasks: 4             # Few tasks
 max_steps: 10            # Tinker only
 ```
+
+## Context Management Tools
+
+When `enable_context_tools=true`, the model gets 4 additional tools for managing long contexts:
+
+| Tool | Description |
+|------|-------------|
+| `check_context` | Check current token count and context budget |
+| `manage_context` | Drop old turns to free up context space |
+| `search_tool_output` | Search within truncated tool outputs |
+| `view_tool_output` | View specific lines of truncated tool outputs |
+
+**Requirements for context tools:**
+- `step_wise_trajectories=true` (set automatically in YAML)
+- `inject_context_status=true` (adds context status to observations)
+- YaRN rope scaling extends context to 65K tokens
+
+**When to use:** Enable for environments with long tool schemas (e.g., GitHub with 100+ tools) where the model needs to proactively manage context before hitting the 48K limit.
 
 ## Troubleshooting
 
