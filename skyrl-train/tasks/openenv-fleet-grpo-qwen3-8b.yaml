@@ -73,8 +73,8 @@ envs:
   # Training parameters
   MAX_TURNS: 50
   # Context budget: Using YaRN (factor=2.0) to extend Qwen3-8B from 32K to 65K context
-  # Reduced from 48K to 40K to leave headroom for context tools in system prompt
-  MAX_INPUT_LENGTH: 40000
+  # GitHub env needs ~26K tokens for 100 tools, so 48K allows multi-turn growth
+  MAX_INPUT_LENGTH: 48000
   MAX_GENERATE_LENGTH: 8192  # Increased from 4096 to allow thinking + tool calls
   NUM_EPOCHS: 20
   RUN_ID: ""
