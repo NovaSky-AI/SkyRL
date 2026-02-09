@@ -200,11 +200,8 @@ class GeneratorMixin:
             last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
-        # Pad KV cache and attention mask
-        kv_cache = outputs.kv_cache.pad_to_length(max_length)
-
         # Pad KV cache and attention mask to max_length
-        kv_cache = kv_cache.pad_to_length(max_length)
+        kv_cache = outputs.kv_cache.pad_to_length(max_length)
         decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
 
         def cond_fn(s: DecodeState) -> jax.Array:
@@ -306,6 +303,8 @@ class GeneratorMixin:
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
+        if max_new_tokens < 1:
+            raise ValueError(f"max_tokens must be >= 1, got {max_new_tokens}")
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
         top_k_values = jnp.array([sampling_param.top_k for sampling_param in sampling_params], dtype=jnp.int32)
