@@ -85,8 +85,7 @@ aws s3 cp s3://skyrl-trajectories/evals/{run_name}/global_step_0/{env}.jsonl /tm
 |--------|----------------|
 | Avg Turns | Count `<\|im_start\|>assistant` in `output_response` |
 | Avg Tool Calls | Count `"name":` patterns in `output_response` |
-| Error Rate | % trajectories with `"error"`, `not found`, `not authorized`, `failed:` |
-| False Completion Rate | % trajectories with `<done>` in output but no positive scores |
+| Success Rate | From `aggregated_results.jsonl` pass@3 |
 
 ### 4. Get Results from aggregated_results.jsonl
 
