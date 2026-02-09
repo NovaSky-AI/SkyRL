@@ -59,8 +59,8 @@ MAX_ENV_TRAIN_RATIO = 0.20
 
 # Maximum total eval prompts across all environments (v0.3.2)
 # With eval_n_samples_per_prompt=3 and 30s per trajectory:
-# 50 prompts × 3 samples = 150 trajectories ≈ 75 minutes per eval
-MAX_EVAL_PROMPTS = 50
+# 60 prompts × 3 samples = 180 trajectories ≈ 90 minutes per eval
+MAX_EVAL_PROMPTS = 60
 
 
 def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
@@ -311,19 +311,23 @@ def prepare_fleet_dataset(
             take = min(min_per_env, len(records))
             capped_eval_records.extend(records[:take])
 
-        # If we have budget remaining, distribute proportionally
+        # If we have budget remaining, distribute round-robin across envs
         remaining_budget = max_eval_prompts - len(capped_eval_records)
         if remaining_budget > 0:
-            # Records not yet selected
+            # Records not yet selected (sorted by hash for determinism)
             remaining_by_env = {
                 env: records[min_per_env:] for env, records in eval_by_env.items() if len(records) > min_per_env
             }
-            total_remaining = sum(len(r) for r in remaining_by_env.values())
 
-            if total_remaining > 0:
-                for env_key, records in remaining_by_env.items():
-                    quota = int(len(records) / total_remaining * remaining_budget)
-                    capped_eval_records.extend(records[:quota])
+            # Round-robin until budget exhausted
+            env_keys = sorted(remaining_by_env.keys())
+            idx = 0
+            while remaining_budget > 0 and any(remaining_by_env.values()):
+                env = env_keys[idx % len(env_keys)]
+                if remaining_by_env[env]:
+                    capped_eval_records.append(remaining_by_env[env].pop(0))
+                    remaining_budget -= 1
+                idx += 1
 
         # Update env_split_counts
         for env_key in eval_by_env:

@@ -405,6 +405,19 @@ class SkyRLGymGenerator(GeneratorInterface):
                 step_reward: float = env_step_output["reward"]
                 agent_loop_state.done = env_step_output["done"]
 
+                # Inject context status into observation if enabled
+                # This helps models learn when to use context management tools
+                if getattr(self.generator_cfg, "inject_context_status", False) and new_obs:
+                    current_tokens = len(agent_loop_state.input_ids) + len(output_ids)
+                    percentage = min(100, int((current_tokens / max_input_length) * 100))
+                    # Get turn count from env metadata (FleetTaskEnv tracks this)
+                    step_metadata = env_step_output.get("metadata", {})
+                    current_turn = step_metadata.get("turn", 0)
+                    status_line = f"\n[Context: {current_tokens:,}/{max_input_length:,} tokens ({percentage}%), Turn {current_turn}/{self.generator_cfg.max_turns}]"
+                    # Append to last observation's content
+                    if isinstance(new_obs[-1], dict) and "content" in new_obs[-1]:
+                        new_obs[-1]["content"] += status_line
+
                 if env_step_output.get("postprocessed_action", None) is not None:
                     # TODO(Charlie): come back to this, we should deprecate postprocessed action
                     logger.warning(
@@ -465,6 +478,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                     agent_loop_state = self._update_agent_loop_state_with_singleturn_chat_template(
                         agent_loop_state, turn_output
                     )
+
+                # If env modified chat_history (e.g., context management dropped turns),
+                # replace our copy. Must happen AFTER _update_* methods to avoid duplication.
+                step_metadata = env_step_output.get("metadata", {})
+                if step_metadata.get("modified_chat_history") is not None:
+                    agent_loop_state.chat_history = step_metadata["modified_chat_history"]
 
                 per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 

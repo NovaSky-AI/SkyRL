@@ -167,9 +167,13 @@ class FleetTaskEnv(BaseTextEnv):
         self.tools: List[Dict[str, Any]] = []
 
         # Context management (uses OpenEnv's ContextManager)
-        self.enable_context_tools = extras.get("enable_context_tools", False)
+        # Read from env_config (Hydra config) not extras (per-sample dataset config)
+        self.enable_context_tools = env_config.get("enable_context_tools", False)
         self.context_manager: Optional[ContextManager] = None
         if self.enable_context_tools:
+            logger.info(
+                f"Enabling context management tools with max_output_chars={extras.get('max_output_chars', 10000)}"
+            )
             self.context_manager = ContextManager(max_output_chars=extras.get("max_output_chars", 10000))
 
     def _normalize_task_config(self) -> Dict[str, Any]:
@@ -352,7 +356,7 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
                 if "tool_error" in info:
                     error = info["tool_error"]
 
-                # Truncate long tool outputs and store full version for retrieval
+                # Truncate long tool outputs and store full version for retrieval if context management is enabled
                 if tool_result and isinstance(tool_result, str) and self.context_manager:
                     tool_result = self.context_manager.truncate_output(tool_result)
             except Exception as e:
@@ -412,6 +416,12 @@ If the task is complete, say <done>. Otherwise, make a tool call."""
             "step_time": step_time,
             "mcp_time": mcp_time,
         }
+
+        # If context was modified (e.g., manage_context dropped turns), return full chat_history
+        # so the generator can replace its copy. This is required for stepwise training to work.
+        if tool_call and self.context_manager and self.context_manager.is_context_tool(tool_call["name"]):
+            if tool_call["name"] == "manage_context":
+                metadata["modified_chat_history"] = self.chat_history.copy()
 
         return BaseTextEnvStepOutput(
             observations=[new_obs],

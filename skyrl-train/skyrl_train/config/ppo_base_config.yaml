@@ -250,6 +250,9 @@ generator:
   max_turns: 1
   # Maximum time (seconds) for a single trajectory before timeout. 0 = no timeout.
   trajectory_timeout_seconds: 900
+  # Inject context status line into observations (e.g., "[Context: 24K/48K tokens (50%)]")
+  # Useful for training models to use context management tools
+  inject_context_status: false
 
   # chat template configuration for SkyRLGymGenerator.
   # For `/chat/completions` with vllm via the HTTP endpoint for rollout, instead use say

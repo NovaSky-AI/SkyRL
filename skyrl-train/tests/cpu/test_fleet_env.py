@@ -666,6 +666,66 @@ class TestFleetTaskEnvClose:
         assert env.openenv_task_env is None
 
 
+class TestEnableContextTools:
+    """Tests for enable_context_tools configuration."""
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        clear_caches()
+
+    @patch.dict(os.environ, {"FLEET_API_KEY": "test-key"})
+    def test_enable_context_tools_from_env_config(self, tmp_path):
+        """Test that enable_context_tools is read from env_config, not extras.
+
+        This is a regression test for the bug where enable_context_tools
+        was read from extras (per-sample data) instead of env_config (Hydra config).
+        """
+        tasks_file = tmp_path / "tasks.json"
+        tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
+
+        # Set enable_context_tools in env_config (where Hydra puts it)
+        env_config = DictConfig(
+            {
+                "tasks_file": str(tasks_file),
+                "enable_context_tools": True,
+            }
+        )
+
+        # extras should NOT have enable_context_tools
+        env = FleetTaskEnv(env_config, extras={"task_key": "task-1"})
+
+        assert env.enable_context_tools is True
+        assert env.context_manager is not None
+
+    @patch.dict(os.environ, {"FLEET_API_KEY": "test-key"})
+    def test_enable_context_tools_default_false(self, tmp_path):
+        """Test that enable_context_tools defaults to False."""
+        tasks_file = tmp_path / "tasks.json"
+        tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
+
+        env_config = DictConfig({"tasks_file": str(tasks_file)})
+        env = FleetTaskEnv(env_config, extras={"task_key": "task-1"})
+
+        assert env.enable_context_tools is False
+        assert env.context_manager is None
+
+    @patch.dict(os.environ, {"FLEET_API_KEY": "test-key"})
+    def test_extras_enable_context_tools_ignored(self, tmp_path):
+        """Test that enable_context_tools in extras is ignored.
+
+        This ensures the config is read from the right place (env_config).
+        """
+        tasks_file = tmp_path / "tasks.json"
+        tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
+
+        # enable_context_tools in extras should be IGNORED
+        env_config = DictConfig({"tasks_file": str(tasks_file)})
+        env = FleetTaskEnv(env_config, extras={"task_key": "task-1", "enable_context_tools": True})
+
+        # Should be False because env_config doesn't have it
+        assert env.enable_context_tools is False
+
+
 class TestClearCaches:
     """Tests for clear_caches function."""
 
