@@ -95,7 +95,16 @@ aws s3 cp s3://skyrl-trajectories/evals/{run_name}/global_step_X/aggregated_resu
 
 Extract `eval/{env}/pass_at_3` for each environment.
 
-### 5. Update experiments.md
+### 5. Document Error Patterns
+
+Categorize failures by pattern:
+- Tool argument errors (validation failures)
+- Authorization errors (permission denied)
+- Resource not found errors
+- False completions (model confident but wrong)
+- Context overflow (hit max_input_length)
+
+### 6. Update experiments.md
 
 Document results in `fleet-research/threads/tool-use-training/experiments.md` following the template in Section 3.1.
 
