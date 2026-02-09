@@ -183,6 +183,7 @@ run: |
     environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
     ${ENABLE_CONTEXT_TOOLS:+environment.skyrl_gym.fleet_task.enable_context_tools=true} \
     ${ENABLE_CONTEXT_TOOLS:+generator.step_wise_trajectories=true} \
+    ${ENABLE_CONTEXT_TOOLS:+generator.inject_context_status=true} \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="Qwen/Qwen3-8B" \
     ++trainer.rope_scaling.rope_type=yarn \
