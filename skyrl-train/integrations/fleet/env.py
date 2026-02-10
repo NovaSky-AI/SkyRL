@@ -258,11 +258,22 @@ class FleetTaskEnv(BaseTextEnv):
             if env_lines:
                 env_context = "\n## Environment Context\n" + "\n".join(env_lines) + "\n"
 
+        # Add environment-specific hints
+        env_key = self.task_config.get("env_key") or self.task_config.get("env_id")
+        env_hints = ""
+        if env_key == "fostgres":
+            env_hints = """
+## Database Exploration
+Before writing SQL queries, first explore the database schema:
+- List tables: SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'
+- List columns: SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'your_table'
+"""
+
         system_content = f"""You are a helpful agent. Complete the task by calling tools.
 
 ## Current Date
 Today's date is {current_date}. When dates are mentioned without a year, assume the current year ({datetime.now().year}) or a future date.
-{env_context}
+{env_context}{env_hints}
 ## Available Tools
 {tools_json}
 
