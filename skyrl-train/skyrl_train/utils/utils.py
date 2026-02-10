@@ -5,11 +5,12 @@ import sys
 import logging
 import math
 import socket
+from omegaconf import DictConfig, OmegaConf
+from typing import Union
 
 import ray
 import torch
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import (
     placement_group,
     PlacementGroupSchedulingStrategy,
@@ -17,6 +18,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
+from skyrl_train.config.config import SkyRLConfig
 from skyrl_train.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
@@ -51,7 +53,7 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
-def validate_batch_sizes(cfg: DictConfig):
+def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Validate configured batch sizes.
 
@@ -184,7 +186,7 @@ def validate_batch_sizes(cfg: DictConfig):
     )
 
 
-def validate_megatron_cfg(cfg: DictConfig):
+def validate_megatron_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # not yet supported + tested features
     assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
@@ -209,7 +211,7 @@ def validate_megatron_cfg(cfg: DictConfig):
         )
 
 
-def validate_cfg(cfg: DictConfig):
+def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
@@ -268,37 +270,66 @@ def validate_cfg(cfg: DictConfig):
         f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
     )
 
-    # add field to algorithm config needed for loss functions
-    # create a new config to make it modifiable
-    algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
     # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
     # per batch can be variable based on the prompt length. This is used to normalize the loss for
     # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
     # fixed max response budget.
-    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+    if isinstance(cfg, DictConfig):
+        new_cfg = OmegaConf.create(cfg.trainer.algorithm)
+        new_cfg.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+        cfg.trainer.algorithm = new_cfg
+    else:
+        cfg.trainer.algorithm.max_seq_len = (
+            cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+        )
 
-    cfg.trainer.algorithm = algorithm_config
-
+    # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:
-        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
-            raise ValueError(
-                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` "
-                f"should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap }"
-            )
+        logger.warning(
+            f"`trainer.algorithm.use_tis` is deprecated. Setting `trainer.algorithm.off_policy_correction` to `token` instead."
+            f"with `token_tis_ratio_clip_high`={cfg.trainer.algorithm.tis_imp_ratio_cap}"
+        )
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "token"
+        cfg.trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high = cfg.trainer.algorithm.tis_imp_ratio_cap
+
+    # off_policy_correction config validation
+    off_policy_correction = cfg.trainer.algorithm.off_policy_correction
+    tis_ratio_type = off_policy_correction.tis_ratio_type
+    sequence_mask_metric = off_policy_correction.sequence_mask_metric
+
+    uses_off_policy_correction = tis_ratio_type is not None or sequence_mask_metric is not None
+
+    if uses_off_policy_correction:
+        # Validate tis_ratio_type
+        if tis_ratio_type:
+            assert tis_ratio_type in [
+                "token",
+                "sequence",
+            ], f"`tis_ratio_type` must be 'None', 'token', or 'sequence', got {tis_ratio_type}"
+
+        # Validate sequence_mask_metric
+        if sequence_mask_metric:
+            assert sequence_mask_metric in [
+                "product",
+                "geometric",
+            ], f"`sequence_mask_metric` must be 'product', or 'geometric', got {sequence_mask_metric}"
+
+        # Ensure logprobs are enabled for rollout correction
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but `trainer.algorithm.use_tis` is `True`."
+                "`generator.sampling_params.logprobs` is `None` but off_policy_correction is enabled."
                 " Setting `logprobs` to `True`."
             )
-            # just set to 0 for better user exp
             cfg.generator.sampling_params.logprobs = 0
 
         if cfg.generator.backend == "sglang":
-            raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-        assert cfg.trainer.algorithm.policy_loss_type in [
-            "regular",
-            "dual_clip",
-        ], "TIS is only implemented for regular and dual_clip policy loss types"
+            raise NotImplementedError(
+                "`trainer.algorithm.off_policy_correction` doesn't support Sglang backend, please use vLLM"
+            )
+        if cfg.trainer.algorithm.policy_loss_type in ["clip_cov", "kl_cov"]:
+            raise NotImplementedError(
+                "`trainer.algorithm.off_policy_correction` doesn't support clip_cov or kl_cov policy loss types"
+            )
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
@@ -337,11 +368,11 @@ def validate_cfg(cfg: DictConfig):
             )
 
 
-def validate_generator_cfg(cfg: DictConfig):
+def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     """Validates the correctness of generator-related config.
 
     Args:
-        cfg (DictConfig): config to validate
+        cfg (SkyRLConfig): config to validate
 
     Raises:
         NotImplementedError: if feature is not supported, such as sglang for multiturn generation
@@ -536,7 +567,7 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
-def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
+def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
 
@@ -622,9 +653,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
-    if os.environ.get("DAYTONA_API_KEY"):
-        logger.info("Exporting daytona api key to ray runtime env")
-        env_vars["DAYTONA_API_KEY"] = os.environ["DAYTONA_API_KEY"]
+    # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
+    for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting {var_name} to ray runtime env")
+            env_vars[var_name] = value
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
@@ -680,7 +713,7 @@ def configure_ray_worker_logging() -> None:
     logging.root.setLevel(level)
 
 
-def initialize_ray(cfg: DictConfig):
+def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Initialize Ray cluster with prepared runtime environment.
 
@@ -723,7 +756,6 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-
     # use info actor to get the GPU id
     info_actors = []
     for i in range(num_bundles):

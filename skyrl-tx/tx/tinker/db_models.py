@@ -4,10 +4,30 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from sqlmodel import SQLModel, Field, JSON
-from sqlalchemy import DateTime
+from sqlalchemy import DateTime, event
 from sqlalchemy.engine import url as sqlalchemy_url
 
 from tx.tinker import types
+
+
+def enable_sqlite_wal(engine) -> None:
+    """Enable WAL mode and busy timeout for SQLite engines.
+
+    WAL mode allows concurrent readers with a single writer.
+    Busy timeout makes SQLite retry internally instead of immediately
+    raising 'database is locked'.
+
+    No-op for non-SQLite engines.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
 
 
 def get_async_database_url(db_url: str) -> str:

@@ -5,8 +5,9 @@ uv run --isolated --extra vllm -m examples.algorithm.custom_policy_loss.main_cus
 import ray
 import hydra
 import torch
-from typing import Optional
+from typing import Optional, Union
 from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry
@@ -17,7 +18,7 @@ def compute_reinforce_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig,
+    config: Union[SkyRLConfig, DictConfig],
     loss_mask: Optional[torch.Tensor] = None,
 ):
     """
@@ -27,7 +28,7 @@ def compute_reinforce_policy_loss(
     loss = (-log_probs * advantages).mean()
 
     # Return loss and dummy clip_ratio (no clipping in REINFORCE)
-    return loss, 0.0
+    return loss, {"clip_ratio": 0.0}
 
 
 # Register the custom policy loss

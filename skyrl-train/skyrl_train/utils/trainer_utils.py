@@ -1,5 +1,4 @@
 from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
-from omegaconf import OmegaConf, DictConfig
 from enum import Enum
 import ray
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -10,6 +9,9 @@ import json
 import torch
 import numpy as np
 from collections import defaultdict
+from omegaconf import DictConfig
+
+from skyrl_train.config import TrainerConfig, SkyRLConfig
 from skyrl_train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
 from skyrl_train.generators.base import GeneratorOutput
 from transformers import AutoTokenizer
@@ -657,7 +659,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
 
 
 def build_dataloader(
-    cfg: DictConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
+    cfg: Union[SkyRLConfig, DictConfig], dataset: PromptDataset, is_train=True, is_fully_async=False
 ) -> StatefulDataLoader:
     """
     Build the dataloader for the training or evaluation dataset.
@@ -697,15 +699,17 @@ def build_dataloader(
     return dataloader
 
 
-def get_rope_scaling_config(trainer_cfg: DictConfig) -> dict[str, Any]:
-    if "rope_scaling" not in trainer_cfg:
-        return {}
-    if trainer_cfg.rope_scaling is None:
-        return None
-    return OmegaConf.to_container(trainer_cfg.rope_scaling)
+def get_rope_scaling_config(trainer_cfg: Union[TrainerConfig, DictConfig]) -> dict[str, Any]:
+    if isinstance(trainer_cfg, DictConfig):
+        if "rope_scaling" not in trainer_cfg:
+            return None
+        return trainer_cfg.rope_scaling
+    return trainer_cfg.rope_scaling
 
 
-def get_rope_theta_config(trainer_cfg: DictConfig) -> int | None:
-    if "rope_theta" not in trainer_cfg:
-        return None
+def get_rope_theta_config(trainer_cfg: Union[TrainerConfig, DictConfig]) -> int | None:
+    if isinstance(trainer_cfg, DictConfig):
+        if "rope_theta" not in trainer_cfg:
+            return None
+        return trainer_cfg.rope_theta
     return trainer_cfg.rope_theta

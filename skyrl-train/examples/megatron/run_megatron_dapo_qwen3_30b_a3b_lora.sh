@@ -41,7 +41,7 @@ MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
-LR=3e-5
+LR=1e-5 # 10x compared to full finetuning
 
 # megatron config
 MEGATRON_TP=4
@@ -51,12 +51,12 @@ MEGATRON_EP=8
 MEGATRON_ETP=1
 
 # lora config
-LORA_RANK=32
-LORA_ALPHA=64
+LORA_RANK=128
+LORA_ALPHA=128
 
-# TIS parameters
+# rollout correction parameters
+TIS_RATIO_TYPE="token"
 TIS_IMP_RATIO_CAP=2.0
-USE_TIS=true
 
 uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
@@ -88,8 +88,8 @@ uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
   trainer.policy.model.lora.rank=$LORA_RANK \
   trainer.policy.model.lora.alpha=$LORA_ALPHA \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_RATIO_TYPE \
+  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
   trainer.epochs=20 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \

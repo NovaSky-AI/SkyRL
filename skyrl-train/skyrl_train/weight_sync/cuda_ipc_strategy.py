@@ -4,11 +4,12 @@ This module implements the CUDA IPC transfer strategy for synchronizing model we
 from training workers to inference engines using CUDA IPC handles.
 """
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+from dataclasses import dataclass, asdict
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
 
 import torch
 
@@ -85,6 +86,26 @@ class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
             return pickle.loads(request_data_decoded)
         except Exception as e:
             raise ValueError("Failed to deserialize request") from e
+
+    def to_json_dict(self) -> Dict[str, Any]:
+        """Serialize the request to JSON."""
+        data = asdict(self)
+        # serialize the ipc handle
+        import base64
+        import pickle
+
+        data["ipc_handles"] = base64.b64encode(pickle.dumps(self.ipc_handles)).decode("utf-8")
+        return data
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, Any]) -> "CudaIpcWeightUpdateRequest":
+        """Deserialize the request from JSON."""
+        import base64
+        import pickle
+
+        data = data.copy()
+        data["ipc_handles"] = pickle.loads(base64.b64decode(data["ipc_handles"]))
+        return cls(**data)
 
 
 class CudaIpcWeightTransferSender(WeightTransferSender):
@@ -244,7 +265,9 @@ class CudaIpcTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(cfg: "DictConfig", inference_world_size: Optional[int] = None) -> CudaIpcInitInfo:
+    def create_init_info(
+        cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
+    ) -> CudaIpcInitInfo:
         """Create init info with all config-derived args."""
         return CudaIpcInitInfo(
             model_dtype_str=cfg.generator.model_dtype,

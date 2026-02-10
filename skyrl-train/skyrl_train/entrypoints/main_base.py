@@ -2,6 +2,7 @@
 Main entrypoint for training.
 """
 
+from typing import Union
 from ray.util.placement_group import placement_group, PlacementGroup
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -13,9 +14,11 @@ from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.generators.base import GeneratorInterface
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig, get_config_as_yaml_str
 from pathlib import Path
 import ray
 
@@ -36,7 +39,9 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
-def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
+def create_ray_wrapped_inference_engines_from_config(
+    cfg: Union[SkyRLConfig, DictConfig], colocate_pg, tokenizer: PreTrainedTokenizerBase
+):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
     engine_kwargs = {
@@ -81,17 +86,19 @@ def create_ray_wrapped_inference_engines_from_config(cfg: DictConfig, colocate_p
             )
             engine_kwargs["enforce_eager"] = False
 
-    if (rope_scaling := cfg.generator.get("rope_scaling", None)) is not None:
-        engine_kwargs["rope_scaling"] = rope_scaling
-    if (rope_theta := cfg.generator.get("rope_theta", None)) is not None:
-        engine_kwargs["rope_theta"] = rope_theta
-    if (served_model_name := cfg.generator.get("served_model_name", None)) is not None:
-        engine_kwargs["served_model_name"] = served_model_name
+    if cfg.generator.rope_scaling is not None:
+        engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
+    if cfg.generator.rope_theta is not None:
+        engine_kwargs["rope_theta"] = cfg.generator.rope_theta
+    if cfg.generator.served_model_name is not None:
+        engine_kwargs["served_model_name"] = cfg.generator.served_model_name
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
-def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreTrainedTokenizerBase):
+def create_remote_inference_engines_from_config(
+    cfg: Union[SkyRLConfig, DictConfig], tokenizer: PreTrainedTokenizerBase
+):
     # TODO(tgriggs): We may want a separate config for the model name in case
     # it's different from the name used in the OpenAI API
     return create_remote_inference_engines(
@@ -107,12 +114,13 @@ def create_remote_inference_engines_from_config(cfg: DictConfig, tokenizer: PreT
 
 
 class BasePPOExp:
-    def __init__(self, cfg: DictConfig):
+    def __init__(self, cfg: Union[SkyRLConfig, DictConfig]):
         """
         Initializes a PPO experiment.
 
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
+        # TODO (sumanthrh): Migrate to using SkyRLConfig
         self.cfg = cfg
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
@@ -124,8 +132,8 @@ class BasePPOExp:
         self._inference_router = None
 
     @staticmethod
-    def get_cfg_as_str(dict_cfg: DictConfig) -> str:
-        return OmegaConf.to_yaml(dict_cfg)
+    def get_cfg_as_str(cfg: Union[SkyRLConfig, DictConfig]) -> str:
+        return get_config_as_yaml_str(cfg)
 
     def get_tokenizer(self, padding_side="left"):
         """Initializes a tokenizer for the given model."""
@@ -265,6 +273,7 @@ class BasePPOExp:
             InferenceEngineInterface: The inference engine client.
         """
         if _SKYRL_USE_NEW_INFERENCE:
+            logger.info("Initializing new inference client")
             return self._get_new_inference_client()
         else:
             return self._get_legacy_inference_client()
@@ -332,7 +341,7 @@ class BasePPOExp:
 
         else:
             # Case: Neither - build servers and router internally
-            cli_args = self._build_vllm_cli_args()
+            cli_args = build_vllm_cli_args(self.cfg)
 
             self._server_group = ServerGroup(
                 cli_args=cli_args,
@@ -355,40 +364,6 @@ class BasePPOExp:
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
         )
-
-    def _build_vllm_cli_args(self):
-        """Build CLI args for vLLM server from config."""
-        from argparse import Namespace
-
-        cfg = self.cfg
-        args = Namespace(
-            model=cfg.trainer.policy.model.path,
-            tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
-            pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
-            dtype=cfg.generator.model_dtype,
-            data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
-            seed=cfg.trainer.seed,
-            gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
-            enable_prefix_caching=cfg.generator.enable_prefix_caching,
-            enforce_eager=cfg.generator.enforce_eager,
-            max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
-            max_num_seqs=cfg.generator.max_num_seqs,
-            enable_sleep_mode=cfg.trainer.placement.colocate_all,
-        )
-
-        # Add LoRA params if enabled
-        if cfg.trainer.policy.model.lora.rank > 0:
-            args.enable_lora = True
-            args.max_lora_rank = cfg.trainer.policy.model.lora.rank
-            args.max_loras = 1
-            args.fully_sharded_loras = cfg.generator.fully_sharded_loras
-
-        # Add any extra engine_init_kwargs
-        engine_kwargs = OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True)
-        for key, value in engine_kwargs.items():
-            setattr(args, key, value)
-
-        return args
 
     def _setup_trainer(self):
         """Setup and return the trainer.

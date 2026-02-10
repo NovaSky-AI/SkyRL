@@ -7,10 +7,11 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass, replace
-from typing import Iterable, Iterator, Optional, Tuple, TYPE_CHECKING
+from typing import Iterable, Iterator, Optional, Tuple, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
 
 import ray
 import torch
@@ -204,7 +205,9 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(cfg: "DictConfig", inference_world_size: Optional[int] = None) -> BroadcastInitInfo:
+    def create_init_info(
+        cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
+    ) -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:

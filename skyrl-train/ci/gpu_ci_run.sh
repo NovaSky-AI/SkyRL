@@ -30,3 +30,8 @@ uv run --isolated --extra vllm --extra dev \
     --with torch==2.7.0 \
     --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
     -- pytest -s -vvv tests/gpu/gpu_ci/test_engine_generation.py::test_token_based_generation -m "vllm"
+
+
+# Run tests for new inference layer
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci/test_engine_generation.py -m "vllm"

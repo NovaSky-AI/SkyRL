@@ -7,11 +7,11 @@ from typing import List, Dict, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 
+from skyrl_train.config import GeneratorConfig, ChatTemplateConfig
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
-from skyrl_train.config.utils import get_default_config
 
 
 # Mock constants, where 4 is the eos token id
@@ -98,7 +98,7 @@ def mock_env():
 
 @pytest.fixture
 def generator_cfg():
-    cfg = get_default_config().generator
+    cfg = GeneratorConfig()
     cfg.sampling_params.max_generate_length = 5
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -106,7 +106,8 @@ def generator_cfg():
     cfg.batched = True
     cfg.max_turns = 1
     cfg.chat_template_kwargs = {}
-    cfg.chat_template = {"source": "name", "name_or_path": None}
+    cfg.chat_template.source = "name"
+    cfg.chat_template.name_or_path = None
     return cfg
 
 
@@ -554,7 +555,7 @@ async def test_length_limit_exceeded_during_conversation(
     generator_cfg.batched = False  # Use agent_loop mode
     generator_cfg.max_turns = 5  # Allow multiple turns
     generator_cfg.use_conversation_multi_turn = True
-    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
+    generator_cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Configure environment to never set done=True naturally (we want to hit length limit)
@@ -639,7 +640,7 @@ async def test_multi_turn_response_truncation(
     generator_cfg.max_turns = 3  # Ensure multi-turn logic is triggered
     generator_cfg.batched = False  # Test is for agent_loop
     generator_cfg.use_conversation_multi_turn = True
-    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
+    generator_cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     # Configure environment to run for multiple turns to generate enough tokens for truncation
@@ -727,7 +728,7 @@ async def test_postprocessed_action_used(mock_make, mock_tokenizer, mock_llm, mo
     generator_cfg.max_turns = 1  # Single turn
     generator_cfg.batched = False
     # Override to avoid retokenization path for this test
-    generator_cfg.chat_template = {"source": "name", "name_or_path": None}
+    generator_cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
     postprocessed_response = "This is a clean response."
@@ -1044,7 +1045,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     mock_make.return_value = TwoStepEnv()
 
     # Generator config
-    cfg = get_default_config().generator
+    cfg = GeneratorConfig()
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1053,7 +1054,7 @@ async def test_agent_loop_token_level_rewards_multi_turn(mock_make, mock_tokeniz
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = False
-    cfg.chat_template = {"source": "name", "name_or_path": None}
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
@@ -1133,7 +1134,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     mock_make.return_value = MTEnv()
 
     # Generator config
-    cfg = get_default_config().generator
+    cfg = GeneratorConfig()
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1142,7 +1143,7 @@ async def test_agent_loop_token_level_rewards_multi_turn_conversation_format(
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
-    cfg.chat_template = {"source": "name", "name_or_path": None}
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
 
     mock_env_cfg.env_class = "mt_env"
 
@@ -1224,7 +1225,7 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     mock_make.return_value = RetokEnv()
 
     # Generator config enabling retokenize path
-    cfg = get_default_config().generator
+    cfg = GeneratorConfig()
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1233,10 +1234,9 @@ async def test_agent_loop_retokenize_returns_float_reward(mock_make, mock_tokeni
     cfg.max_turns = 10
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
-    cfg.chat_template = {
-        "source": "name",
-        "name_or_path": "qwen3_without_thinking",  # TODO: revisit this test once we separate the retokenize config from the custom chat template config
-    }
+    cfg.chat_template = ChatTemplateConfig(
+        source="name", name_or_path="qwen3_without_thinking"
+    )  # TODO: revisit this test once we separate the retokenize config from the custom chat template config
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
@@ -1316,7 +1316,7 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     mock_make.side_effect = mock_make_func
 
     # Generator config: non-retokenize message mode; max_turns=1 so max_response_tokens = max_tokens
-    cfg = get_default_config().generator
+    cfg = GeneratorConfig()
     cfg.sampling_params.max_generate_length = 5  # enforce truncation
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1325,7 +1325,7 @@ async def test_agent_loop_truncation_drops_out_of_range_rewards(mock_make, mock_
     cfg.max_turns = 1
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = False
-    cfg.chat_template = {"source": "name", "name_or_path": None}
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
@@ -1407,7 +1407,7 @@ async def test_step_wise_trajectories_trajectory_ids(mock_make, mock_tokenizer, 
     mock_make.side_effect = mock_make_func
 
     # Generator config with step_wise_trajectories enabled
-    cfg = get_default_config().generator
+    cfg = GeneratorConfig()
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1417,7 +1417,7 @@ async def test_step_wise_trajectories_trajectory_ids(mock_make, mock_tokenizer, 
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
     cfg.step_wise_trajectories = True
-    cfg.chat_template = {"source": "name", "name_or_path": None}
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
@@ -1525,7 +1525,7 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
     mock_make.return_value = MultiStepEnv()
 
     # Generator config with step_wise_trajectories enabled
-    cfg = get_default_config().generator
+    cfg = GeneratorConfig()
     cfg.sampling_params.max_generate_length = 50
     cfg.sampling_params.logprobs = None
     cfg.apply_overlong_filtering = False
@@ -1535,7 +1535,7 @@ async def test_step_wise_trajectories_basic_output_validation(mock_make, mock_to
     cfg.zero_reward_on_non_stop = False
     cfg.use_conversation_multi_turn = True
     cfg.step_wise_trajectories = True
-    cfg.chat_template = {"source": "name", "name_or_path": None}
+    cfg.chat_template = ChatTemplateConfig(source="name", name_or_path=None)
 
     generator = SkyRLGymGenerator(
         generator_cfg=cfg,
