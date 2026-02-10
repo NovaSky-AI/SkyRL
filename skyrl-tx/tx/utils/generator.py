@@ -303,8 +303,6 @@ class GeneratorMixin:
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
-        if max_new_tokens < 1:
-            raise ValueError(f"max_tokens must be >= 1, got {max_new_tokens}")
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
         top_k_values = jnp.array([sampling_param.top_k for sampling_param in sampling_params], dtype=jnp.int32)

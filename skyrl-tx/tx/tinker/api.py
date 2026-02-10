@@ -357,6 +357,8 @@ class SamplingParams(BaseModel):
     def to_types(self) -> types.SamplingParams:
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
+        if self.max_tokens <= 0:
+            raise HTTPException(status_code=400, detail="max_tokens must be a positive number")
 
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
