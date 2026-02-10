@@ -104,7 +104,35 @@ Categorize failures by pattern:
 - False completions (model confident but wrong)
 - Context overflow (hit max_input_length)
 
-### 6. Update experiments.md
+### 6. Training Signal Analysis (variance_per_prompt)
+
+Extract `reward/{env}/variance_per_prompt` from WandB to measure GRPO learning signal:
+
+```python
+import wandb
+api = wandb.Api()
+run = api.run("thefleet/fleet-task-grpo/{run_id}")
+df = run.history(samples=1000)
+
+variance_cols = [c for c in df.columns if 'variance_per_prompt' in c and c.startswith('reward/')]
+for col in variance_cols:
+    env = col.split('/')[1]
+    vals = df[col].dropna().tolist()
+    avg_var = sum(vals) / len(vals) if vals else 0
+    pct_signal = sum(1 for v in vals if v > 0) / len(vals) * 100 if vals else 0
+    print(f"{env}: avg={avg_var:.4f}, signal={pct_signal:.1f}%")
+```
+
+**Key metrics:**
+- **Avg Variance**: Higher = more learning signal. 0.25 max (1 of 4 samples differs)
+- **% Steps w/ Signal**: % of batches where variance > 0
+
+**Interpretation:**
+- Variance = 0: All 4 samples got same reward (no GRPO signal)
+- Variance > 0: At least one sample differed (model can learn)
+- < 25% signal = environment is too hard or too easy for current model
+
+### 7. Update experiments.md
 
 Document results in `fleet-research/threads/tool-use-training/experiments.md` following the template in Section 3.1.
 
