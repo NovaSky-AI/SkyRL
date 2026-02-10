@@ -247,6 +247,16 @@ class SGLangInferenceEngine(InferenceEngineInterface):
     """SGLang inference engine that implements InferenceEngineInterface."""
 
     def __init__(self, *args, bundle_indices: Optional[List[int]] = None, **kwargs):
+        from skyrl_train.utils.io import io
+
+        original_model_path = kwargs.get("model_path", "")
+
+        self._cloud_model_ctx = None
+        if io.is_cloud_path(original_model_path):
+            self._cloud_model_ctx = io.local_read_dir(original_model_path)
+            local_model_path = self._cloud_model_ctx.__enter__()
+            kwargs["model_path"] = local_model_path
+
         setup_envvars_for_sglang(kwargs, bundle_indices)
 
         # Store common attributes
@@ -272,6 +282,11 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # Create the SGLang engine (signal handler issue is now fixed by patching)
         self.engine = Engine(**kwargs)
         logger.info(f"Created SGLang engine with kwargs: {kwargs}")
+
+        # Clean up temp directory now that model is loaded into GPU memory
+        if self._cloud_model_ctx is not None:
+            self._cloud_model_ctx.__exit__(None, None, None)
+            self._cloud_model_ctx = None
 
         # Create weight loader for coordinating weight updates
         self._weight_loader = SGLangWeightLoader(self.engine, self._tp_size)

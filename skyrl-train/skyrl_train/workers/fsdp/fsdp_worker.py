@@ -98,76 +98,79 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking, backload_optimizer, backload_model)
 
     def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
-        strategy = FSDPStrategy(
-            fsdp_config=self.cfg.trainer.policy.fsdp_config,
-            optimizer_config=self.cfg.trainer.policy.optimizer_config,
-            model_config=self.cfg.trainer.policy.model,
-            fsdp_strategy=self.cfg.trainer.strategy,
-            seed=self.cfg.trainer.seed,
-            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            num_training_steps=num_training_steps,
-        )
-        strategy.setup_distributed()
-        self.strategy = strategy
+        from skyrl_train.utils.io import io
 
-        self._is_lora = self.cfg.trainer.policy.model.lora.rank > 0
-
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
-        )
-        with init_context():
-
-            wrapped_model = HFModelWrapper(
-                model_path,
-                use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=False,
-                lora_rank=self.cfg.trainer.policy.model.lora.rank,
-                lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
-                lora_dropout=self.cfg.trainer.policy.model.lora.dropout,
-                lora_init_method=self.cfg.trainer.policy.model.lora.init_method,
-                target_modules=self.cfg.trainer.policy.model.lora.target_modules,
-                exclude_modules=self.cfg.trainer.policy.model.lora.exclude_modules,
-                sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
-                use_sample_packing=self.cfg.trainer.use_sample_packing,
-                use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
-                rope_scaling=get_rope_scaling_config(self.cfg.trainer),
-                rope_theta=get_rope_theta_config(self.cfg.trainer),
-                model_config_kwargs=self.cfg.trainer.policy.model_config_kwargs,
+        with io.local_read_dir(model_path) as model_path:
+            assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+            strategy = FSDPStrategy(
+                fsdp_config=self.cfg.trainer.policy.fsdp_config,
+                optimizer_config=self.cfg.trainer.policy.optimizer_config,
+                model_config=self.cfg.trainer.policy.model,
+                fsdp_strategy=self.cfg.trainer.strategy,
+                seed=self.cfg.trainer.seed,
+                micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                num_training_steps=num_training_steps,
             )
-            # in-place patch
-            self._seq_parallel_monkey_patch(model=wrapped_model.model)
+            strategy.setup_distributed()
+            self.strategy = strategy
 
-            if self.cfg.trainer.gradient_checkpointing:
-                wrapped_model.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={
-                        "use_reentrant": self.cfg.trainer.gradient_checkpointing_use_reentrant
-                    }
+            self._is_lora = self.cfg.trainer.policy.model.lora.rank > 0
+
+            model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            init_context = get_init_weight_context_manager(
+                use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            )
+            with init_context():
+
+                wrapped_model = HFModelWrapper(
+                    model_path,
+                    use_flash_attention_2=self.cfg.trainer.flash_attn,
+                    # NOTE (sumanthrh): Model initialization should always be in fp32
+                    # during training
+                    bf16=False,
+                    lora_rank=self.cfg.trainer.policy.model.lora.rank,
+                    lora_alpha=self.cfg.trainer.policy.model.lora.alpha,
+                    lora_dropout=self.cfg.trainer.policy.model.lora.dropout,
+                    lora_init_method=self.cfg.trainer.policy.model.lora.init_method,
+                    target_modules=self.cfg.trainer.policy.model.lora.target_modules,
+                    exclude_modules=self.cfg.trainer.policy.model.lora.exclude_modules,
+                    sequence_parallel_size=self.cfg.trainer.policy.sequence_parallel_size,
+                    use_sample_packing=self.cfg.trainer.use_sample_packing,
+                    use_torch_compile=self.cfg.trainer.policy.use_torch_compile,
+                    rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+                    rope_theta=get_rope_theta_config(self.cfg.trainer),
+                    model_config_kwargs=self.cfg.trainer.policy.model_config_kwargs,
                 )
+                # in-place patch
+                self._seq_parallel_monkey_patch(model=wrapped_model.model)
 
-        self.model, self.optimizer, self.scheduler = strategy.prepare(
-            (wrapped_model, None, None),
-        )
-        assert (
-            self.optimizer is not None and self.scheduler is not None
-        ), "FSDP preparation should create optimizer and scheduler"
+                if self.cfg.trainer.gradient_checkpointing:
+                    wrapped_model.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={
+                            "use_reentrant": self.cfg.trainer.gradient_checkpointing_use_reentrant
+                        }
+                    )
 
-        # Initialize weight extractor
-        # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
-        # transfer strategy, we can enable it for other strategies as well.
-        from skyrl_train.weight_sync import CudaIpcTransferStrategy
+            self.model, self.optimizer, self.scheduler = strategy.prepare(
+                (wrapped_model, None, None),
+            )
+            assert (
+                self.optimizer is not None and self.scheduler is not None
+            ), "FSDP preparation should create optimizer and scheduler"
 
-        group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy
-        self.weight_extractor = FSDPWeightExtractor(
-            self.model.model,
-            group_by_module=group_by_module,
-            batch_size_threshold_gb=(
-                self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
-            ),
-        )
+            # Initialize weight extractor
+            # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
+            # transfer strategy, we can enable it for other strategies as well.
+            from skyrl_train.weight_sync import CudaIpcTransferStrategy
+
+            group_by_module = self._transfer_strategy_cls is CudaIpcTransferStrategy
+            self.weight_extractor = FSDPWeightExtractor(
+                self.model.model,
+                group_by_module=group_by_module,
+                batch_size_threshold_gb=(
+                    self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
+                ),
+            )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
         """Collect LoRA parameters, save and call inference engine to load."""
@@ -261,55 +264,58 @@ class FSDPCriticWorkerBase(CriticWorkerBase):
         self.strategy.backload_to_gpu(self.model, self.optimizer, non_blocking, backload_optimizer, backload_model)
 
     def init_model(self, model_path, num_training_steps: int = None):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
-        strategy = FSDPStrategy(
-            fsdp_config=self.cfg.trainer.critic.fsdp_config,
-            optimizer_config=self.cfg.trainer.critic.optimizer_config,
-            fsdp_strategy=self.cfg.trainer.strategy,
-            seed=self.cfg.trainer.seed,
-            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-            num_training_steps=num_training_steps,
-        )
-        strategy.setup_distributed()
-        self.strategy = strategy
+        from skyrl_train.utils.io import io
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
-        )
-        with init_context():
-            critic = get_llm_for_sequence_regression(
-                model_path,
-                "critic",
-                use_flash_attention_2=self.cfg.trainer.flash_attn,
-                # NOTE (sumanthrh): Model initialization should always be in fp32
-                # during training
-                bf16=False,
-                lora_rank=self.cfg.trainer.critic.model.lora.rank,
-                lora_alpha=self.cfg.trainer.critic.model.lora.alpha,
-                lora_dropout=self.cfg.trainer.critic.model.lora.dropout,
-                target_modules=self.cfg.trainer.critic.model.lora.target_modules,
-                exclude_modules=self.cfg.trainer.critic.model.lora.exclude_modules,
-                value_head_prefix=self.cfg.trainer.algorithm.value_head_prefix,
-                init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
-                sequence_parallel_size=self.cfg.trainer.critic.sequence_parallel_size,
-                use_sample_packing=self.cfg.trainer.use_sample_packing,
-                model_config_kwargs=self.cfg.trainer.critic.model_config_kwargs,
+        with io.local_read_dir(model_path) as model_path:
+            assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+            strategy = FSDPStrategy(
+                fsdp_config=self.cfg.trainer.critic.fsdp_config,
+                optimizer_config=self.cfg.trainer.critic.optimizer_config,
+                fsdp_strategy=self.cfg.trainer.strategy,
+                seed=self.cfg.trainer.seed,
+                micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                num_training_steps=num_training_steps,
             )
-            self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
+            strategy.setup_distributed()
+            self.strategy = strategy
 
-            if self.cfg.trainer.gradient_checkpointing:
-                critic.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={
-                        "use_reentrant": self.cfg.trainer.gradient_checkpointing_use_reentrant
-                    }
+            model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            init_context = get_init_weight_context_manager(
+                use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            )
+            with init_context():
+                critic = get_llm_for_sequence_regression(
+                    model_path,
+                    "critic",
+                    use_flash_attention_2=self.cfg.trainer.flash_attn,
+                    # NOTE (sumanthrh): Model initialization should always be in fp32
+                    # during training
+                    bf16=False,
+                    lora_rank=self.cfg.trainer.critic.model.lora.rank,
+                    lora_alpha=self.cfg.trainer.critic.model.lora.alpha,
+                    lora_dropout=self.cfg.trainer.critic.model.lora.dropout,
+                    target_modules=self.cfg.trainer.critic.model.lora.target_modules,
+                    exclude_modules=self.cfg.trainer.critic.model.lora.exclude_modules,
+                    value_head_prefix=self.cfg.trainer.algorithm.value_head_prefix,
+                    init_value_head=self.cfg.trainer.policy.model.path == self.cfg.trainer.critic.model.path,
+                    sequence_parallel_size=self.cfg.trainer.critic.sequence_parallel_size,
+                    use_sample_packing=self.cfg.trainer.use_sample_packing,
+                    model_config_kwargs=self.cfg.trainer.critic.model_config_kwargs,
                 )
+                self._seq_parallel_monkey_patch(model=critic, use_parent_class=True)
 
-        # prepare models/optimizers...
-        self.model, self.optimizer, self.scheduler = strategy.prepare(
-            (critic, None, None),
-        )
-        assert self.optimizer is not None
+                if self.cfg.trainer.gradient_checkpointing:
+                    critic.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={
+                            "use_reentrant": self.cfg.trainer.gradient_checkpointing_use_reentrant
+                        }
+                    )
+
+            # prepare models/optimizers...
+            self.model, self.optimizer, self.scheduler = strategy.prepare(
+                (critic, None, None),
+            )
+            assert self.optimizer is not None
 
     def forward(
         self,
@@ -335,36 +341,39 @@ class FSDPRefWorkerBase(RefWorkerBase):
         self.strategy.backload_to_gpu(self.model, None, non_blocking)
 
     def init_model(self, model_path):
-        assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
-        strategy = FSDPStrategy(
-            fsdp_config=self.cfg.trainer.ref.fsdp_config,
-            fsdp_strategy=self.cfg.trainer.strategy,
-            seed=self.cfg.trainer.seed,
-            micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
-        )
-        strategy.setup_distributed()
-        self.strategy = strategy
+        from skyrl_train.utils.io import io
 
-        model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
-        )
-
-        with init_context():
-            wrapped_model = HFModelWrapper(
-                model_path,
-                use_flash_attention_2=self.cfg.trainer.flash_attn,
-                bf16=self.cfg.trainer.bf16,
-                sequence_parallel_size=self.cfg.trainer.ref.sequence_parallel_size,
-                use_sample_packing=self.cfg.trainer.use_sample_packing,
-                rope_scaling=get_rope_scaling_config(self.cfg.trainer),
-                rope_theta=get_rope_theta_config(self.cfg.trainer),
-                model_config_kwargs=self.cfg.trainer.ref.model_config_kwargs,
+        with io.local_read_dir(model_path) as model_path:
+            assert self.cfg.trainer.strategy in ("fsdp", "fsdp2")
+            strategy = FSDPStrategy(
+                fsdp_config=self.cfg.trainer.ref.fsdp_config,
+                fsdp_strategy=self.cfg.trainer.strategy,
+                seed=self.cfg.trainer.seed,
+                micro_train_batch_size_per_gpu=self.cfg.trainer.micro_train_batch_size_per_gpu,
             )
-            self._seq_parallel_monkey_patch(model=wrapped_model.model)
+            strategy.setup_distributed()
+            self.strategy = strategy
 
-        self.model = strategy.prepare(wrapped_model)
-        self.model.eval()
+            model_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            init_context = get_init_weight_context_manager(
+                use_meta_tensor=not model_config.tie_word_embeddings, mesh=self.strategy.device_mesh
+            )
+
+            with init_context():
+                wrapped_model = HFModelWrapper(
+                    model_path,
+                    use_flash_attention_2=self.cfg.trainer.flash_attn,
+                    bf16=self.cfg.trainer.bf16,
+                    sequence_parallel_size=self.cfg.trainer.ref.sequence_parallel_size,
+                    use_sample_packing=self.cfg.trainer.use_sample_packing,
+                    rope_scaling=get_rope_scaling_config(self.cfg.trainer),
+                    rope_theta=get_rope_theta_config(self.cfg.trainer),
+                    model_config_kwargs=self.cfg.trainer.ref.model_config_kwargs,
+                )
+                self._seq_parallel_monkey_patch(model=wrapped_model.model)
+
+            self.model = strategy.prepare(wrapped_model)
+            self.model.eval()
 
     def forward(
         self,

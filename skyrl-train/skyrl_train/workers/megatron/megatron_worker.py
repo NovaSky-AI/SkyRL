@@ -199,14 +199,6 @@ class MegatronWorker:
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
-        override_config_kwargs = {
-            "bos_token_id": tokenizer.bos_token_id,
-            "eos_token_id": tokenizer.eos_token_id,
-            "pad_token_id": tokenizer.pad_token_id,
-        }
-        override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
-        update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
-
         # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
@@ -434,30 +426,33 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """
         Initialize the model, optimizer, and scheduler for the policy worker.
         """
-        # initialize the bridge and provider objects
-        self.init_configs(
-            model_path,
-            self.cfg.trainer.policy.megatron_config,
-            self.cfg.trainer.policy.megatron_config.model_config_kwargs,
-            self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
-            bf16=self.cfg.trainer.bf16,
-            flash_attn=self.cfg.trainer.flash_attn,
-        )
+        from skyrl_train.utils.io import io
 
-        # wrap with DDP for training
-        self.actor_module = self.make_megatron_module(
-            wrap_with_ddp=True,
-            ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config,
-            lora_config=self.cfg.trainer.policy.model.lora if self._is_lora else None,
-            lora_type=self.cfg.trainer.policy.megatron_config.lora_config.lora_type,
-            bf16=self.cfg.trainer.bf16,
-        )
+        with io.local_read_dir(model_path) as model_path:
+            # initialize the bridge and provider objects
+            self.init_configs(
+                model_path,
+                self.cfg.trainer.policy.megatron_config,
+                self.cfg.trainer.policy.megatron_config.model_config_kwargs,
+                self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
+                bf16=self.cfg.trainer.bf16,
+                flash_attn=self.cfg.trainer.flash_attn,
+            )
 
-        if self._local_rank == 0 and not os.path.exists(
-            model_path
-        ):  # if not local path, try downloading model weights from huggingface
-            snapshot_download(model_path)  # will be no-op if already downloaded
-        torch.distributed.barrier()
+            # wrap with DDP for training
+            self.actor_module = self.make_megatron_module(
+                wrap_with_ddp=True,
+                ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config,
+                lora_config=self.cfg.trainer.policy.model.lora if self._is_lora else None,
+                lora_type=self.cfg.trainer.policy.megatron_config.lora_config.lora_type,
+                bf16=self.cfg.trainer.bf16,
+            )
+
+            if self._local_rank == 0 and not os.path.exists(
+                model_path
+            ):  # if not local path, try downloading model weights from huggingface
+                snapshot_download(model_path)  # will be no-op if already downloaded
+            torch.distributed.barrier()
 
         if self._rank == 0:
             print_model_size(self.actor_module[0])
@@ -719,28 +714,31 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         """
         Initialize the model for the ref worker.
         """
-        # initialize the bridge and provider objects
-        self.init_configs(
-            model_path,
-            self.cfg.trainer.ref.megatron_config,
-            self.cfg.trainer.ref.megatron_config.model_config_kwargs,
-            self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
-            bf16=self.cfg.trainer.bf16,
-            flash_attn=self.cfg.trainer.flash_attn,
-        )
+        from skyrl_train.utils.io import io
 
-        self.actor_module = self.make_megatron_module(
-            wrap_with_ddp=False,
-            ddp_config=None,
-            bf16=self.cfg.trainer.bf16,
-        )
+        with io.local_read_dir(model_path) as model_path:
+            # initialize the bridge and provider objects
+            self.init_configs(
+                model_path,
+                self.cfg.trainer.ref.megatron_config,
+                self.cfg.trainer.ref.megatron_config.model_config_kwargs,
+                self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
+                bf16=self.cfg.trainer.bf16,
+                flash_attn=self.cfg.trainer.flash_attn,
+            )
 
-        # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)
-        if self._local_rank == 0 and not os.path.exists(
-            model_path
-        ):  # if not local path, try downloading model weights from huggingface
-            snapshot_download(model_path)  # will be no-op if already downloaded
-        torch.distributed.barrier()
+            self.actor_module = self.make_megatron_module(
+                wrap_with_ddp=False,
+                ddp_config=None,
+                bf16=self.cfg.trainer.bf16,
+            )
+
+            # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)
+            if self._local_rank == 0 and not os.path.exists(
+                model_path
+            ):  # if not local path, try downloading model weights from huggingface
+                snapshot_download(model_path)  # will be no-op if already downloaded
+            torch.distributed.barrier()
 
         # load weights
         if self._rank == 0:
