@@ -217,9 +217,18 @@ class MegatronModelWrapper:
             loss_mask = data["loss_mask"]
             rollout_action_logprobs = data["rollout_action_logprobs"]
             action_mask = data.get("action_mask")
+            num_microbatches = data.get("num_microbatches")
 
+            dp_size = mpu.get_data_parallel_world_size()
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
+
+            # Megatron's pipeline parallel forward_backward_func internally divides loss by num_microbatches
+            # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/pipeline_parallel/schedules.py#L248
+            # we want to maintain a sum of losses across all micro batches, so we reverse this division.
+            # we additionally multiply by the data parallelism size to undo the DDP all-reduce mean
+            # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.15.2/megatron/core/distributed/distributed_data_parallel.py#L285
+            loss_scale = num_microbatches * dp_size
 
             # temperature normalization
             if temperature != 1.0:
@@ -250,13 +259,15 @@ class MegatronModelWrapper:
 
             # SFT path: cross_entropy loss (negative log likelihood)
             if resolved_loss_name == "cross_entropy":
-                loss = policy_loss
+                unscaled_loss = policy_loss
+                loss = unscaled_loss * loss_scale
 
                 # Compute elementwise loss for Tinker API (per-token NLL)
                 with torch.no_grad():
                     elementwise_loss = -action_log_probs
                     if loss_mask is not None:
                         elementwise_loss = elementwise_loss * loss_mask
+                elementwise_loss = elementwise_loss * loss_scale
 
                 # Build per-sequence loss_fn_outputs
                 batch_size = action_log_probs.shape[0]
@@ -278,7 +289,7 @@ class MegatronModelWrapper:
                     )
 
                 metrics = {
-                    "loss": loss.detach().item(),
+                    "loss": unscaled_loss.detach().item(),
                     "response_length": num_actions,
                     "loss_fn_outputs": loss_fn_outputs,
                 }
@@ -308,10 +319,11 @@ class MegatronModelWrapper:
                 kl_loss = torch.tensor(0.0)
             kl_loss_term = kl_loss * loss_config.kl_loss_coef
 
-            loss = policy_loss + kl_loss_term - entropy_loss_term
+            unscaled_loss = policy_loss + kl_loss_term - entropy_loss_term
+            loss = unscaled_loss * loss_scale
 
             metrics = {
-                "final_loss": loss.detach().item(),
+                "final_loss": unscaled_loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
                 "policy_kl": kl_loss.detach().item(),

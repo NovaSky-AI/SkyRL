@@ -13,7 +13,9 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     for k, v in metrics.items():
         assert len(v) > 0, f"No metrics for key {k}"
         assert all(isinstance(x, (int, float)) for x in v), f"Metrics for key {k} are not all numbers"
-        if k.endswith("_max"):
+        if k.endswith("_loss"):
+            reduced_metrics[k] = sum(v)
+        elif k.endswith("_max"):
             reduced_metrics[k] = max(v)
         elif k.endswith("_min"):
             reduced_metrics[k] = min(v)
@@ -22,16 +24,21 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     return reduced_metrics
 
 
-def all_reduce_metrics(metrics: Dict[str, List[float]], strategy: DistributedStrategy) -> Dict[str, float]:
+def all_reduce_metrics(metrics: Dict[str, List[float]], strategy: DistributedStrategy, group=None) -> Dict[str, float]:
     """All reduce metrics across all processes."""
     min_metrics = {k: v for k, v in metrics.items() if k.endswith("_min")}
     max_metrics = {k: v for k, v in metrics.items() if k.endswith("_max")}
-    mean_metrics = {k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics}
-    status_mean = strategy.all_reduce(mean_metrics, op="mean")
-    status_min = strategy.all_reduce(min_metrics, op="min")
-    status_max = strategy.all_reduce(max_metrics, op="max")
+    sum_metrics = {k: v for k, v in metrics.items() if k.endswith("_loss")}
+    mean_metrics = {
+        k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics and k not in sum_metrics
+    }
+    status_mean = strategy.all_reduce(mean_metrics, op="mean", group=group)
+    status_min = strategy.all_reduce(min_metrics, op="min", group=group)
+    status_max = strategy.all_reduce(max_metrics, op="max", group=group)
+    status_sum = strategy.all_reduce(sum_metrics, op="sum", group=group)
     status_mean.update(status_min)
     status_mean.update(status_max)
+    status_mean.update(status_sum)
     return status_mean
 
 

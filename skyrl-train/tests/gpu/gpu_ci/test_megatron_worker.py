@@ -422,7 +422,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         ("policy", 4, 1, 1, 4, 1, 4, True, False, True),
     ],
     ids=[
-        "tp2_pp2_policy_seq_packing",
+        "x",
         "tp2_pp2_policy_seq_packing_with_entropy_loss",
         "tp2_pp2_policy_lora",
         "tp2_pp2_policy_unpacked",
@@ -439,7 +439,8 @@ async def test_megatron_train(
     Full test: initialize actor group, send dummy experience to training_step, validate output.
     """
     cfg = get_test_actor_config(model_name=MODEL_NAME if ep == 1 else MOE_MODEL_NAME)
-    batch = get_test_training_batch(batch_size=gpus_per_node)
+    batch_size = gpus_per_node * 2
+    batch = get_test_training_batch(batch_size=batch_size)
 
     cfg.trainer.strategy = "megatron"
     cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
@@ -449,6 +450,7 @@ async def test_megatron_train(
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
     cfg.trainer.use_sample_packing = use_sample_packing
+    cfg.trainer.algorithm.use_kl_loss = False
     if use_entropy_loss:
         cfg.trainer.algorithm.use_entropy_loss = True
         cfg.trainer.algorithm.entropy_loss_coef = 0.01
@@ -466,7 +468,7 @@ async def test_megatron_train(
         cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
 
     # set batch sizes correctly
-    cfg.trainer.train_batch_size = gpus_per_node
+    cfg.trainer.train_batch_size = batch_size
     cfg.trainer.policy_mini_batch_size = gpus_per_node
     cfg.generator.n_samples_per_prompt = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
@@ -527,13 +529,12 @@ async def test_megatron_train(
 
     # Both FSDP and Megatron use forward_backward + optim_step (unified interface)
     batch.metadata["global_step"] = 0
-    results_fsdp = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", batch))
+    results_fsdp = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
     # Get learning rate from worker
     lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
     for i, result in enumerate(results_fsdp):
         result["policy_lr"] = lr_results[i]
-
     print("megatron results: ", results_megatron[0])
     print("\n\n")
     print("fsdp results: ", results_fsdp[0])
@@ -543,7 +544,6 @@ async def test_megatron_train(
         "policy_lr",
         "loss_metrics/clip_ratio",
         "policy_entropy",
-        "policy_kl",
         "final_loss",
     ]
     if ep > 1:

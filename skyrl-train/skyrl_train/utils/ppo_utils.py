@@ -19,7 +19,7 @@
 from collections import defaultdict
 from enum import StrEnum
 from functools import wraps
-from typing import Callable, List, Literal, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import ray
@@ -29,7 +29,6 @@ from loguru import logger
 from omegaconf import DictConfig
 
 from skyrl_train.config import AlgorithmConfig
-from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.utils.off_policy_correction_utils import apply_off_policy_correction
 from skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
 
@@ -124,27 +123,6 @@ def compute_approx_kl(
     return kld
 
 
-@torch.no_grad()
-def normalize_advantages_dict(data: TrainingInputBatch) -> TrainingInputBatch:
-    """Normalizes the advantages in the data batch.
-
-    Expects:
-        - `["advantages"]`: Float[torch.Tensor, "batch_size seqlen"]
-        - `["response_mask"]`: Float[torch.Tensor, "batch_size seqlen"]
-    """
-    advantages: Float[torch.Tensor, "batch_size seqlen"] = data["advantages"]
-    response_masks: Float[torch.Tensor, "batch_size seqlen"] = data["response_mask"]
-    num_actions: float = response_masks.sum()
-    # mean
-    mean: float = advantages.mean()
-    # std
-    std: float = ((advantages - mean).pow(2) * response_masks).sum()
-    rstd: float = (std / num_actions).clamp(min=1e-8).rsqrt()
-
-    data["advantages"] = (advantages - mean) * rstd
-    return data
-
-
 def masked_var(values, mask, unbiased=True):
     """Compute variance of tensor with masked values."""
     mean = masked_mean(values, mask)
@@ -189,6 +167,7 @@ def ppo_critic_loss(
         clipfrac = None
         loss = (values - returns) ** 2
 
+    # TODO: We separately run into the "mean of means" problem here.
     loss = masked_mean(loss, loss_mask, dim=-1).mean()
     return 0.5 * loss, clipfrac
 
@@ -556,12 +535,6 @@ def ppo_policy_loss(
     rollout_logprobs: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     assert config.policy_loss_type in ["regular", "dual_clip"], "loss_type must be either 'regular' or 'dual_clip'"
-    loss_reduction = config.loss_reduction
-    assert loss_reduction in [
-        "token_mean",
-        "sequence_mean",
-        "seq_mean_token_sum_norm",
-    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
 
     ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
     surr1 = ratio * advantages
@@ -582,7 +555,8 @@ def ppo_policy_loss(
     )
     loss_metrics.update(off_policy_metrics)
 
-    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    loss = reduce_loss(loss, loss_mask)
+
     return loss, loss_metrics
 
 
@@ -603,16 +577,7 @@ def sapo_policy_loss(
     See https://arxiv.org/pdf/2511.20347 for more details.
 
     """
-    # SAPO must use sequence_mean reduction
-    loss_reduction = config.loss_reduction
-    if loss_reduction != "sequence_mean":
-        # The SAPO paper uses sequence_mean reduction; there's no reason
-        # why a user couldn't use token_mean reduction, but
-        # it's not clear whether it would be stable or not.
-        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
-
-        logger_.warning(f"With SAPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
-
+    # SAPO should use sequence_mean reduction to avoid length bias
     # temperature for positive and negative token updates
     tau_pos = torch.as_tensor(config.sapo.tau_pos, dtype=advantages.dtype, device=advantages.device)
     tau_neg = torch.as_tensor(config.sapo.tau_neg, dtype=advantages.dtype, device=advantages.device)
@@ -653,7 +618,7 @@ def sapo_policy_loss(
     loss_metrics.update(off_policy_metrics)
 
     # for SAPO, we need to aggregate the loss at the sequence level (seq-mean-token-mean)
-    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    loss = reduce_loss(loss, loss_mask)
 
     return loss, loss_metrics
 
@@ -679,16 +644,7 @@ def gspo_policy_loss(
     The variant of GSPO used here is GSPO-token, a generalization which allows for token-level
     advantages [equations 14 and 15 in the paper].
     """
-    # GSPO must use sequence_mean reduction
-    loss_reduction = config.loss_reduction
-    if loss_reduction != "sequence_mean":
-        # The GSPO paper uses sequence_mean reduction; there's no reason
-        # why a user couldn't use token_mean reduction, but
-        # it's not clear whether it would be stable or not.
-        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
-
-        logger_.warning(f"With GSPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
-
+    # GSPO should use sequence_mean reduction to avoid length bias
     # Compute log ratios
     log_ratio = log_probs - old_log_probs
 
@@ -720,7 +676,7 @@ def gspo_policy_loss(
     )
     loss_metrics.update(off_policy_metrics)
 
-    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
+    loss = reduce_loss(loss, loss_mask)
 
     return loss, loss_metrics
 
@@ -757,7 +713,7 @@ def compute_policy_loss_cispo(
     )
     loss_metrics.update(off_policy_metrics)
 
-    loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
+    loss = reduce_loss(loss, loss_mask)
     return loss, loss_metrics
 
 
@@ -822,8 +778,6 @@ def compute_policy_loss_clip_cov(
     pg_loss = reduce_loss(
         loss=pg_losses,
         loss_mask=loss_mask,
-        loss_reduction=config.loss_reduction,
-        max_seq_len=config.max_seq_len,
     )
 
     return pg_loss, {"clip_ratio": clip_frac.item()}
@@ -878,12 +832,7 @@ def compute_policy_loss_kl_cov(
                     large_cov_idxs % advantages.shape[1],
                 ]
 
-    pg_loss = reduce_loss(
-        loss=pg_losses,
-        loss_mask=loss_mask,
-        loss_reduction=config.loss_reduction,
-        max_seq_len=config.max_seq_len,
-    )
+    pg_loss = reduce_loss(loss=pg_losses, loss_mask=loss_mask)
 
     # NOTE (sumanthrh): Since the pg clip ratio is not applicable for KL-COV so we just use 0.0
     return pg_loss, {"clip_ratio": 0.0}
@@ -922,10 +871,7 @@ def cross_entropy_loss(
     elementwise_loss = -log_probs
 
     # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
-    if loss_mask is not None:
-        loss = (elementwise_loss * loss_mask).sum()
-    else:
-        loss = elementwise_loss.sum()
+    loss = reduce_loss(elementwise_loss, loss_mask)
 
     # No clipping in cross-entropy loss
     return loss, {"clip_ratio": 0.0}
@@ -984,29 +930,8 @@ def importance_sampling_loss(
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm"],
-    max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
-    if loss_reduction == "token_mean":
-        # sum over *all* valid tokens, divide by total valid-token count
-        loss = masked_mean(loss, loss_mask)
-    elif loss_reduction == "sequence_mean":
-        # per-sequence token-mean (dim=-1), then batch-mean
-        loss = masked_mean(loss, loss_mask, dim=-1).mean()
-    elif loss_reduction == "seq_mean_token_sum_norm":
-        # per-sequence token-sum, normalized by the max sequence length, then batch mean
-        # this is the Dr. GRPO loss reduction to avoid length bias by normalizing by a constant
-        assert max_seq_len is not None, "max_seq_len must be provided for seq_mean_token_sum_norm loss reduction"
-        # NOTE: max_seq_len is computed as cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length by default
-        if loss_mask is not None:
-            seq_losses = torch.sum(loss * loss_mask, dim=-1) / max_seq_len
-        else:
-            # If no mask, assume all tokens are valid
-            seq_losses = torch.sum(loss, dim=-1) / max_seq_len
-        loss = torch.mean(seq_losses)
-    else:
-        raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
-    return loss
+    return (loss * loss_mask).sum() if loss_mask is not None else loss.sum()
 
 
 # NOTE (erictang000): below ported from verl

@@ -5,7 +5,6 @@ from loguru import logger
 from skyrl_train.trainer import RayPPOTrainer
 from tqdm import tqdm
 from skyrl_train.utils import Timer
-from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode
@@ -144,9 +143,6 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             for key in ["rewards"]:
                 training_input.pop(key)
             training_input.metadata.pop("uids")
-
-            if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                training_input = normalize_advantages_dict(training_input)
 
         if self.cfg.trainer.dump_data_batch:
             # dump data to file

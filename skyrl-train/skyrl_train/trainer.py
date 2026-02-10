@@ -53,9 +53,8 @@ from skyrl_train.utils.ppo_utils import (
     FixedKLController,
     compute_approx_kl,
     get_kl_controller,
-    normalize_advantages_dict,
+    masked_mean,
 )
-from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -271,9 +270,6 @@ class RayPPOTrainer:
                         for key in ["rewards"]:
                             training_input.pop(key)
                         training_input.metadata.pop("uids")
-
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                            training_input = normalize_advantages_dict(training_input)
 
                     if self.cfg.trainer.dump_data_batch:
                         # dump data to file
@@ -1034,6 +1030,53 @@ class RayPPOTrainer:
 
         return data
 
+    def normalize_minibatch_advantages(self, data: TrainingInputBatch) -> TrainingInputBatch:
+        """Normalize the advantages in the mini-batch.
+
+        This function handles two types of normalization:
+        1. Batch normalization (z-score): if advantage_batch_normalize is True,
+           normalizes advantages to have zero mean and unit variance.
+        2. Loss reduction normalization: scales advantages based on the loss_reduction
+           type to calculate the correct minibatch loss when reducing with a sum.
+        """
+        advantages = data["advantages"]
+        loss_mask = data["loss_mask"]
+        response_mask = data["response_mask"]
+
+        # NOTE: Do not modify the tensor in place!
+        # Otherwise subsequent epochs will keep dividing the same tensor.
+
+        # Step 1: Z-score normalization (if enabled)
+        if self.cfg.trainer.algorithm.advantage_batch_normalize:
+            num_actions = response_mask.sum()
+            mean = advantages.mean()
+            std = ((advantages - mean).pow(2) * response_mask).sum()
+            rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
+            advantages = (advantages - mean) * rstd
+
+        # Step 2: Loss reduction normalization
+        # Option 1: token mean
+        if self.cfg.trainer.algorithm.loss_reduction == "token_mean":
+            data["advantages"] = advantages / loss_mask.sum().clamp(min=1)
+
+        # Option 2: sequence mean
+        elif self.cfg.trainer.algorithm.loss_reduction == "sequence_mean":
+            batch_size = len(data)
+            data["advantages"] = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
+
+        # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
+        elif self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
+            batch_size = len(data)
+            max_seq_len = self.cfg.trainer.algorithm.max_seq_len
+            data["advantages"] = advantages / (batch_size * max_seq_len)
+
+        else:
+            # No loss reduction normalization, but still apply batch normalization if it was done
+            if self.cfg.trainer.algorithm.advantage_batch_normalize:
+                data["advantages"] = advantages
+
+        return data
+
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
         Execute training step for FSDP strategy using forward_backward + optim_step.
@@ -1059,13 +1102,22 @@ class RayPPOTrainer:
             mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
+        num_mini_batches = len(data) // mini_batch_size
+
+        # iterate over mini-batches to do mini batch level normalization
+        for local_step in range(num_mini_batches):
+            start_idx = local_step * mini_batch_size
+            end_idx = (local_step + 1) * mini_batch_size
+            mini_batch = data[start_idx:end_idx]
+            mini_batch = self.normalize_minibatch_advantages(mini_batch)
+            # Copy normalized advantages back to original batch
+            data["advantages"][start_idx:end_idx] = mini_batch["advantages"]
 
         # Stage full batch in object store ONCE to avoid repeated serialization
         data_ref = self.dispatch.stage_data(data)
 
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            num_mini_batches = len(data) // mini_batch_size
             for local_step in range(num_mini_batches):
                 start_idx = local_step * mini_batch_size
                 end_idx = (local_step + 1) * mini_batch_size

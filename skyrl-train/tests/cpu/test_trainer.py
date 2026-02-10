@@ -448,7 +448,11 @@ def test_forward_backward_batch_calculations():
         # Mock dependencies
         worker.strategy = MagicMock()
         worker.strategy.is_rank_0.return_value = False  # Disable progress bars
-        worker.strategy.all_reduce.return_value = {"loss": 0.5, "lr": 1e-4}
+        worker.strategy.all_reduce.side_effect = lambda d, op, group=None: d  # Return input dict unchanged
+
+        # Mock device_mesh for DP group access
+        worker.device_mesh = MagicMock()
+        worker.device_mesh.get_group.return_value = None  # No actual process group in tests
 
         # Always set model for all worker types
         worker.model = MagicMock()

@@ -74,6 +74,7 @@ uv run --isolated --extra vllm -m examples.on_policy_distillation.main_on_policy
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
+  trainer.algorithm.loss_reduction="seq_mean_token_sum_norm" \
   generator.backend=vllm \
   generator.run_engines_locally=true \
   generator.async_engine=false \

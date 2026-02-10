@@ -13,14 +13,19 @@ MODEL_NAME="Qwen/Qwen3-0.6B"
 
 INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 
-MEGATRON_TP=2
-MEGATRON_PP=2
+MEGATRON_TP=1
+MEGATRON_PP=1
 MEGATRON_CP=1
 
-# torch profiler config
-ENABLE_TORCH_PROFILER=false
-RANKS_TO_PROFILE="[0]"
-SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
+# # torch profiler config
+# ENABLE_TORCH_PROFILER=false
+# RANKS_TO_PROFILE="[0]"
+# SAVE_PATH="$HOME/megatron_prof/tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}"
+
+# TIS_TYPE="token"
+# TIS_RATIO_CLIP_HIGH=2.0
+  # trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
+  # trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_RATIO_CLIP_HIGH \
 
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -52,11 +57,12 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.policy_mini_batch_size=64 \
   trainer.micro_forward_batch_size_per_gpu=4 \
   trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.algorithm.loss_reduction="seq_mean_token_sum_norm" \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
-  trainer.algorithm.use_kl_loss=true \
+  trainer.algorithm.use_kl_loss=false \
   generator.backend=$INFERENCE_BACKEND \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
@@ -67,7 +73,7 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   generator.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_megatron" \
-  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}" \
+  trainer.run_name="gsm8k_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_${MODEL_NAME}_seq_mean_token_sum_norm" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_megatron_ckpt" \
   $@

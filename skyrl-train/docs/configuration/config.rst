@@ -575,7 +575,7 @@ It can be helpful to understand the final loss formulation to see how the differ
         pg_losses3 = -advantages * config.clip_ratio_c
         clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
         loss = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
-      loss = reduce_loss(loss, loss_mask, config.loss_reduction)
+      loss = reduce_loss(loss, loss_mask)
       return loss, {"clip_ratio": clip_ratio}
 
 

@@ -51,7 +51,7 @@ def compute_importance_sampling_policy_loss(
     # as defined here: https://tinker-docs.thinkingmachines.ai/losses#policy-gradient-importance_sampling
     loss = -torch.exp(log_probs - old_log_probs) * advantages
 
-    loss = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", config.max_seq_len)
+    loss = reduce_loss(loss, loss_mask)
     # return loss and a dummy clip ratio value as we aren't clipping here
     return loss, {"clip_ratio": 0.0}
 

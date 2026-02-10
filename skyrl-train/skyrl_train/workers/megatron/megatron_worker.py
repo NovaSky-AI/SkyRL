@@ -562,6 +562,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 }
             )
 
+        for m_batch in micro_buffer:
+            m_batch["num_microbatches"] = len(micro_buffer)
+
         if not micro_buffer:
             return {}
 
@@ -580,9 +583,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self.empty_cuda_cache:
             torch.cuda.empty_cache()
 
-        # Track number of micro-batches for metrics
-        self._micro_batches_accumulated += len(micro_buffer)
-
         # Aggregate metrics across micro-batches
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
         for metrics in metrics_list:
@@ -592,10 +592,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        # Reduce and all-reduce metrics
+        # Reduce and all-reduce metrics across DP ranks only
+        # (metrics should be identical within DP groups, i.e., across TP/PP/SP ranks)
         status = reduce_metrics(dict(all_metrics))
         status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
-        status = all_reduce_metrics(status, self.strategy)
+        group = mpu.get_data_parallel_group(with_context_parallel=True)
+        status = all_reduce_metrics(status, self.strategy, group=group)
 
         # Add loss_fn_outputs back (not reduced, kept as list)
         if all_loss_fn_outputs:
@@ -614,9 +616,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             The gradient norm (before scaling, after clipping), or None if unavailable.
         """
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
-
-        # Reset counter for next accumulation cycle
-        self._micro_batches_accumulated = 0
 
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
