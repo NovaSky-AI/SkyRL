@@ -394,6 +394,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     "seed": sampling_params.seed,
                     "top_k": sampling_params.top_k,
                     "top_p": sampling_params.top_p,
+                    "logprobs": 0,
                 }
                 if sampling_params.stop_strings:
                     params_dict["stop"] = sampling_params.stop_strings

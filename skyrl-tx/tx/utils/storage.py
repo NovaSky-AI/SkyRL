@@ -6,7 +6,6 @@ import tarfile
 from tempfile import TemporaryDirectory
 from typing import Generator
 
-import jax
 from cloudpathlib import AnyPath
 
 from tx.utils.log import logger
@@ -29,6 +28,8 @@ def pack_and_upload(dest: AnyPath) -> Generator[Path, None, None]:
         yield tmp_path
 
         # If probe file exists, filesystem is shared - only rank 0 should write
+        import jax
+
         if dest.with_name(dest.name + ".probe").exists() and jax.process_index() != 0:
             logger.info(f"Skipping write to {dest} (shared filesystem, rank {jax.process_index()})")
             return
