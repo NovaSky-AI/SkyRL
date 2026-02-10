@@ -1048,12 +1048,12 @@ class RayPPOTrainer:
         # Step 2: Loss reduction normalization
         # Option 1: token mean
         if self.cfg.trainer.algorithm.loss_reduction == "token_mean":
-            data["advantages"] = advantages / loss_mask.sum()
+            data["advantages"] = advantages / loss_mask.sum().clamp(min=1)
 
         # Option 2: sequence mean
         elif self.cfg.trainer.algorithm.loss_reduction == "sequence_mean":
             batch_size = len(data)
-            data["advantages"] = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True))
+            data["advantages"] = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
 
         # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
         elif self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
