@@ -57,6 +57,7 @@ class ServerActorProtocol(Protocol):
         dp_rpc_port: Optional[int],
         enable_pd: bool,
         nixl_side_channel_base: int,
+        colocated_training: bool,
     ) -> None:
         """
         Initialize the server actor.
@@ -71,6 +72,7 @@ class ServerActorProtocol(Protocol):
             dp_rpc_port: DP RPC port (for non-rank-0 servers).
             enable_pd: Enable prefill-decode disaggregation.
             nixl_side_channel_base: Base port for NIXL side channels.
+            colocated_training: Whether the server is colocated with training workers.
         """
         ...
 

@@ -238,6 +238,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api 
 | Gradient Checkpointing | ✅ |
 | JIT Compilation | ✅ |
 | Tensor Parallelism | ✅ |
+| Expert Parallelism | ✅ |
 | FSDP | ✅ |
 | Multi-Node | ✅ |
 | PostgreSQL | ✅ |
@@ -280,6 +281,7 @@ We welcome contributions! The project is early and hackable — now is a great t
 - **[SkyRL tx v0.1.0](https://novasky-ai.notion.site/skyrl-tx-v010)**
 - **[SkyRL tx v0.2.0](https://novasky-ai.notion.site/skyrl-tx-v02)**
 - **[SkyRL tx v0.2.1](https://novasky-ai.notion.site/skyrl-tx-v021)**
+- **[SkyRL tx v0.3.0](https://novasky-ai.notion.site/skyrl-tx-v030)**
 
 ## 📬 Contact
 

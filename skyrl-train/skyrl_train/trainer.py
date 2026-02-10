@@ -134,9 +134,12 @@ class RayPPOTrainer:
         this to customize dataloader behavior. For instance, fully async training
         needs a batch size of 1, among other features.
         Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
+        When train_dataset is None (e.g. Tinker backend provides data externally),
+        the dataloader is not built.
         """
-        self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
-        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+        if self.train_dataset is not None:
+            self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
+            self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
 
     @torch.no_grad()
     async def eval(self) -> Dict[str, float]:
@@ -502,6 +505,12 @@ class RayPPOTrainer:
             critic_steps_per_train_batch = (
                 cfg.trainer.train_batch_size // cfg.trainer.critic_mini_batch_size * cfg.trainer.update_epochs_per_batch
             )
+        policy_num_training_steps = (
+            self.total_training_steps * policy_steps_per_train_batch if self.total_training_steps is not None else None
+        )
+        critic_num_training_steps = (
+            self.total_training_steps * critic_steps_per_train_batch if self.total_training_steps is not None else None
+        )
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
@@ -509,14 +518,14 @@ class RayPPOTrainer:
             refs.extend(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
+                    num_training_steps=policy_num_training_steps,
                 )
             )
             if cfg.trainer.critic.model.path:
                 refs.extend(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
+                        num_training_steps=critic_num_training_steps,
                     )
                 )
             ray.get(refs)
@@ -528,7 +537,7 @@ class RayPPOTrainer:
             ray.get(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
+                    num_training_steps=policy_num_training_steps,
                 )
             )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
@@ -537,7 +546,7 @@ class RayPPOTrainer:
                 ray.get(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
+                        num_training_steps=critic_num_training_steps,
                     )
                 )
                 critic_model.offload_to_cpu()
@@ -1072,6 +1081,8 @@ class RayPPOTrainer:
                     all_metrics["grad_norm"].append(grad_norm)
 
         # Reduce metrics across all mini-batches and epochs
+        # pop out loss_fn_outputs since it's not a scalar metric and to avoid logging it
+        all_metrics.pop("loss_fn_outputs", None)
         reduced_metrics = reduce_metrics(all_metrics)
         return reduced_metrics
 

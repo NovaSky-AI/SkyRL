@@ -653,9 +653,11 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
-    if os.environ.get("DAYTONA_API_KEY"):
-        logger.info("Exporting daytona api key to ray runtime env")
-        env_vars["DAYTONA_API_KEY"] = os.environ["DAYTONA_API_KEY"]
+    # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
+    for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting {var_name} to ray runtime env")
+            env_vars[var_name] = value
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
@@ -754,7 +756,6 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-
     # use info actor to get the GPU id
     info_actors = []
     for i in range(num_bundles):

@@ -9,6 +9,7 @@ uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_policy
 import pytest
 import asyncio
 import ray
+from transformers import AutoTokenizer
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
 from skyrl_train.config import SkyRLConfig
@@ -69,8 +70,10 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         cfg.generator.backend = backend
         cfg.generator.inference_engine_tensor_parallel_size = tp_size
 
+        tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             model=MODEL,
             cfg=cfg,
             use_local=True,
@@ -80,7 +83,6 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
             backend=backend,
             sleep_level=2,  # since we explicitly sync weights
         )
-
         policy = init_worker_with_type(
             "policy",
             shared_pg=pg,
@@ -88,12 +90,18 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
             num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
             cfg=cfg,
         )
+
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
         ray.shutdown()
+        if "router" in locals() and router is not None:
+            router.shutdown()
+        if "server_group" in locals() and server_group is not None:
+            server_group.shutdown()

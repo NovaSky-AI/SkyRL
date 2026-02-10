@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 import uvicorn
 import vllm.envs as envs
-from fastapi import Request
+from fastapi import Request, HTTPException
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.api_server import (
@@ -75,6 +75,7 @@ class VLLMServerActor(ServerActorProtocol):
         # PD disaggregation settings
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
+        colocated_training: bool = False,
     ):
         """
         Initialize the vLLM server actor.
@@ -91,6 +92,7 @@ class VLLMServerActor(ServerActorProtocol):
             dp_rpc_port: DP RPC port (for non-rank-0 servers)
             enable_pd: Enable prefill-decode disaggregation
             nixl_side_channel_base: Base port for NIXL side channel
+            colocated_training: Whether the server is colocated with training workers
         """
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
@@ -100,6 +102,10 @@ class VLLMServerActor(ServerActorProtocol):
 
         # Ensure SkyRL's custom worker extension is used for weight sync
         self._ensure_worker_extension()
+
+        # Ensure vLLM sleep endpoints are enabled by using dev mode
+        os.environ["VLLM_SERVER_DEV_MODE"] = "1"
+        os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
 
         # Ensure Ray executor is used (required for GPU inheritance in placement groups)
         self._ensure_ray_executor()
@@ -308,10 +314,20 @@ class VLLMServerActor(ServerActorProtocol):
         @app.post("/init_weight_transfer")
         async def _init_weight_transfer(request: Request):
             """Initialize weight sync process group."""
-            from skyrl_train.weight_sync import BroadcastInitInfo
+            from skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcInitInfo
 
             data = await request.json()
-            init_info = BroadcastInitInfo(**data).for_engine(
+            # simple way to figure out the strategy type: try to load with BroadcastInitInfo else fallback to CudaIpcInitInfo
+            # Can be derived from vllm cli args once https://github.com/vllm-project/vllm/pull/31943/ is merged.
+            try:
+                init_info = BroadcastInitInfo(**data)
+            except Exception:
+                try:
+                    init_info = CudaIpcInitInfo(**data)
+                except Exception:
+                    raise HTTPException(status_code=400, detail="Received invalid init info")
+
+            init_info = init_info.for_engine(
                 engine_index=self._server_idx,
                 tp_size=self._cli_args.tensor_parallel_size,
                 pp_size=self._cli_args.pipeline_parallel_size,
@@ -327,10 +343,17 @@ class VLLMServerActor(ServerActorProtocol):
         @app.post("/update_weights")
         async def _update_weights(request: Request):
             """Update model weights via NCCL broadcast."""
-            from skyrl_train.weight_sync import BroadcastWeightUpdateRequest
+            from skyrl_train.weight_sync import BroadcastWeightUpdateRequest, CudaIpcWeightUpdateRequest
 
             data = await request.json()
-            weight_request = BroadcastWeightUpdateRequest(**data)
+            try:
+                weight_request = BroadcastWeightUpdateRequest.from_json_dict(data)
+            except Exception:
+                try:
+                    weight_request = CudaIpcWeightUpdateRequest.from_json_dict(data)
+                except Exception:
+                    raise HTTPException(status_code=400, detail="Received invalid weight update request")
+
             pickled_request = pickle.dumps(weight_request)
 
             await engine.collective_rpc(
@@ -349,6 +372,12 @@ class VLLMServerActor(ServerActorProtocol):
             details.
             """
             # No-op for now - placeholder for future post-processing
+            return {"status": "ok"}
+
+        @app.post("/reset_prefix_cache")
+        async def _reset_prefix_cache(request: Request):
+            """Reset the prefix cache."""
+            await engine.reset_prefix_cache()
             return {"status": "ok"}
 
     async def shutdown(self) -> None:

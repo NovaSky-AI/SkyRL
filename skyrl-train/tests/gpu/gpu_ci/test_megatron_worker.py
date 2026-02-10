@@ -138,7 +138,7 @@ def test_megatron_policy_weight_sync(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             model=MODEL_NAME,
             cfg=cfg,
             use_local=True,

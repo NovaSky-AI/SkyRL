@@ -12,7 +12,7 @@
 # See Harbor documentation for all available options:
 # https://harborframework.com/docs
 # And a full list of fields that TrialConfig supports:
-# https://github.com/laude-institute/harbor/blob/fdfe296145cf13663dc6a0233f8faab7bfcf5fe1/src/harbor/models/trial/config.py
+# https://github.com/laude-institute/harbor/blob/5921cc40e8f6b5b0df0a3dc6354e0e679447eb54/src/harbor/models/trial/config.py
 
 # Harbor TrialConfig fields below
 # --------------------------------
@@ -33,7 +33,10 @@ agent:
   # Agent-specific settings passed to the agent constructor
   kwargs:
     # Maximum number of agent episodes/iterations
-    max_episodes: 32
+    max_turns: 32
+
+    # Suppress Harbor override warnings for max_turns
+    suppress_max_turns_warning: true
 
     # Whether to enable context summarization when approaching token limits
     enable_summarize: false
@@ -59,6 +62,7 @@ environment:
   override_cpus: 1
   override_memory_mb: 1024
   override_storage_mb: 1024
+  suppress_override_warnings: true
 
   # Environment-specific settings
   # kwargs: {}

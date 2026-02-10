@@ -38,7 +38,7 @@ def verifiers_runtime():
     cfg.generator.sampling_params.max_generate_length = 256
 
     # Reuse shared initializer for local engines and client
-    client, _ = init_inference_engines(
+    client, _, router, server_group = init_inference_engines(
         cfg=cfg,
         model=model,
         use_local=True,
