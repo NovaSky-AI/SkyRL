@@ -1081,6 +1081,8 @@ class RayPPOTrainer:
                     all_metrics["grad_norm"].append(grad_norm)
 
         # Reduce metrics across all mini-batches and epochs
+        # pop out loss_fn_outputs since it's not a scalar metric and to avoid logging it
+        all_metrics.pop("loss_fn_outputs", None)
         reduced_metrics = reduce_metrics(all_metrics)
         return reduced_metrics
 

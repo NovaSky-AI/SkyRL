@@ -61,7 +61,8 @@ def init_ray_inference_engines(backend: str, tp_size: int, pp_size: int, dp_size
         backend=backend,
         gpu_memory_utilization=0.8,
         num_inference_engines=1,
-        sleep_level=1,
+        # SGLang always discards weights, so sleep_level is not applicable.
+        sleep_level=1 if backend == "vllm" else 2,
     )
     return client, pg, router, server_group
 
@@ -280,9 +281,9 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, pp
     [
         pytest.param("vllm", 2, 1, 1, marks=pytest.mark.vllm),
         # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param("sglang", 2, 1, 1, marks=pytest.mark.sglang),
+        pytest.param("sglang", 1, 1, 1, marks=pytest.mark.sglang),
     ],
-    ids=["vllm_tp2_pp1_dp1", "sglang_tp2_pp1_dp1"],
+    ids=["vllm_tp2_pp1_dp1", "sglang_tp1_pp1_dp1"],
 )
 def test_token_based_generation_consistency(ray_init_fixture, backend: str, tp_size: int, pp_size: int, dp_size: int):
     cfg = get_test_actor_config()

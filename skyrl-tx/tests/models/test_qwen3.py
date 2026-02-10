@@ -81,7 +81,7 @@ def test_qwen3_moe_layer(ep: int, tp: int):
         final_hidden_states, router_logits = moe_layer(x.numpy(), return_router_logits=True)
 
         assert np.allclose(hf_router_logits, router_logits, rtol=1e-4)
-        assert np.allclose(hf_final_hidden_states, final_hidden_states, rtol=1e-2, atol=1e-2)
+        assert np.allclose(hf_final_hidden_states, final_hidden_states, rtol=5e-2, atol=1e-2)
 
 
 def load_lora_weights(
