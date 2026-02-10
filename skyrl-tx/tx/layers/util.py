@@ -97,16 +97,18 @@ def shard_map_ep(module: nnx.Module, func, *args):
     """
     graphdef, state = nnx.split(module)
 
-    def to_ep_spec(path, s):
-        if not isinstance(s, PartitionSpec):
-            return s
-        # Strip leading stacking dimension if path contains "_stacked"
-        dims = s[1:] if "_stacked" in str(path) else s
+    def make_ep_spec(spec, value):
+        if not isinstance(spec, PartitionSpec):
+            return spec
+        # When a layer is extracted from stacked layers via x[layer_idx], the tensor
+        # loses a dimension but the PartitionSpec metadata still has the extra leading None.
+        # Truncate the spec to match the actual tensor rank.
+        truncated = spec[-value.ndim:]
         # Extract only 'ep' dims from PartitionSpecs, replacing others with None
-        return PartitionSpec(*(p if p == "ep" else None for p in dims))
+        return PartitionSpec(*(p if p == "ep" else None for p in truncated))
 
-    state_specs = jax.tree_util.tree_map_with_path(
-        to_ep_spec, nnx.get_partition_spec(state), is_leaf=lambda x: isinstance(x, PartitionSpec)
+    state_specs = jax.tree.map(
+        make_ep_spec, nnx.get_partition_spec(state), state, is_leaf=lambda x: isinstance(x, PartitionSpec)
     )
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
