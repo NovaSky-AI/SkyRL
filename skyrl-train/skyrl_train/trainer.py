@@ -529,6 +529,10 @@ class RayPPOTrainer:
                     )
                 )
             ray.get(refs)
+
+            if getattr(cfg.trainer, "auto_micro_batch_size", False):
+                self._auto_determine_micro_batch_sizes(cfg, policy_model, critic_model)
+
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
         else:
             if ref_model is not None:
@@ -541,6 +545,10 @@ class RayPPOTrainer:
                 )
             )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
+
+            if getattr(cfg.trainer, "auto_micro_batch_size", False):
+                self._auto_determine_micro_batch_sizes(cfg, policy_model, critic_model=None)
+
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
                 ray.get(
@@ -569,6 +577,51 @@ class RayPPOTrainer:
             self.dispatch.mark_all_offloaded()
 
         logger.info("init policy/ref/critic models done")
+
+    def _auto_determine_micro_batch_sizes(
+        self,
+        cfg,
+        policy_model: PPORayActorGroup,
+        critic_model: Optional[PPORayActorGroup],
+    ):
+        """Profile GPU memory to auto-determine `micro_train_batch_size_per_gpu`.
+
+        Calls `auto_determine_micro_batch_size` on every policy worker via
+        Ray, takes the minimum across workers, and
+        writes the result back into `cfg.trainer`.
+        """
+        from skyrl_train.utils.utils import (
+            get_policy_mini_batch_size_per_gpu,
+            validate_auto_batch_sizes,
+        )
+
+        max_seq_len = (
+            cfg.trainer.max_prompt_length + cfg.generator.sampling_params.max_generate_length
+        )
+
+        policy_mini_batch_size_per_gpu = get_policy_mini_batch_size_per_gpu(cfg)
+
+        logger.info(
+            f"Auto micro-batch sizing: profiling policy workers "
+            f"(max_seq_len={max_seq_len}, mini_batch_per_gpu={policy_mini_batch_size_per_gpu})"
+        )
+        policy_refs = policy_model.async_run_ray_method(
+            "pass_through",
+            "auto_determine_micro_batch_size",
+            max_seq_len,
+            policy_mini_batch_size_per_gpu,
+        )
+        policy_sizes = ray.get(policy_refs)
+        determined_size = min(policy_sizes)
+
+        logger.info(
+            f"Auto micro-batch sizing: per-worker results={policy_sizes}, "
+            f"using min={determined_size}"
+        )
+
+        cfg.trainer.micro_train_batch_size_per_gpu = determined_size
+        cfg.trainer.micro_forward_batch_size_per_gpu = determined_size
+        validate_auto_batch_sizes(cfg)
 
     def init_weight_sync_state(self):
         """

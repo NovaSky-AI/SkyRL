@@ -53,6 +53,28 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
+def get_policy_dp_size(cfg: Union[SkyRLConfig, DictConfig]) -> int:
+    """Compute the policy data-parallel size from the config."""
+    policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
+    if cfg.trainer.strategy == "megatron":
+        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
+        cp = cfg.trainer.policy.megatron_config.context_parallel_size
+        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
+        assert policy_world_size % (pp * cp * tp) == 0, (
+            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+            "This ensures that the data parallel size is an integer."
+        )
+        return policy_world_size // (pp * cp * tp)
+    else:
+        return policy_world_size // cfg.trainer.policy.sequence_parallel_size
+
+
+def get_policy_mini_batch_size_per_gpu(cfg: Union[SkyRLConfig, DictConfig]) -> int:
+    """Compute the per-GPU policy mini-batch size from the config."""
+    policy_dp_size = get_policy_dp_size(cfg)
+    return cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
+
+
 def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Validate configured batch sizes.
@@ -73,45 +95,35 @@ def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     if cfg.trainer.critic.model.path is not None:
         assert cfg.trainer.train_batch_size >= cfg.trainer.critic_mini_batch_size
         assert cfg.trainer.critic_mini_batch_size > 0, "critic_mini_batch_size must be greater than 0"
-    assert cfg.trainer.micro_train_batch_size_per_gpu > 0, "micro_train_batch_size_per_gpu must be greater than 0"
-    assert cfg.trainer.micro_forward_batch_size_per_gpu > 0, "micro_forward_batch_size_per_gpu must be greater than 0"
+    if not getattr(cfg.trainer, "auto_micro_batch_size", False):
+        assert cfg.trainer.micro_train_batch_size_per_gpu > 0, "micro_train_batch_size_per_gpu must be greater than 0"
+        assert (
+            cfg.trainer.micro_forward_batch_size_per_gpu > 0
+        ), "micro_forward_batch_size_per_gpu must be greater than 0"
 
     # Validate policy mini batch size
-    policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
-
-    if cfg.trainer.strategy == "megatron":
-        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
-        cp = cfg.trainer.policy.megatron_config.context_parallel_size
-        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
-        assert policy_world_size % (pp * cp * tp) == 0, (
-            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-            "This ensures that the data parallel size is an integer."
-        )
-        policy_dp_size = policy_world_size // (pp * cp * tp)
-    else:
-        policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
+    policy_dp_size = get_policy_dp_size(cfg)
 
     assert cfg.trainer.train_batch_size % cfg.trainer.policy_mini_batch_size == 0, (
         f"train_batch_size {cfg.trainer.train_batch_size} should be divisible by "
         f"policy_mini_batch_size {cfg.trainer.policy_mini_batch_size}"
     )
-    policy_mini_batch_size_per_gpu = (
-        cfg.trainer.policy_mini_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
-    )
+    policy_mini_batch_size_per_gpu = get_policy_mini_batch_size_per_gpu(cfg)
     assert policy_mini_batch_size_per_gpu > 0, (
         f"Invalid policy_mini_batch_size_per_gpu: {policy_mini_batch_size_per_gpu}. "
         f"mini_batch_size={cfg.trainer.policy_mini_batch_size}, "
         f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
         f"dp_size={policy_dp_size}"
     )
-    assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
-        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
-        f"by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-    )
-    assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
-        f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
-        f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-    )
+    if not getattr(cfg.trainer, "auto_micro_batch_size", False):
+        assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+            f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be divisible "
+            f"by micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
+        assert policy_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+            f"normalized policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu} should be larger than "
+            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+        )
     policy_train_batch_size_per_gpu = (
         cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // policy_dp_size
     )
@@ -141,14 +153,15 @@ def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
             f"n_samples_per_prompt={cfg.generator.n_samples_per_prompt}, "
             f"dp_size={critic_dp_size}"
         )
-        assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
-            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by "
-            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        )
-        assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
-            f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than "
-            f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
-        )
+        if not getattr(cfg.trainer, "auto_micro_batch_size", False):
+            assert critic_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+                f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be divisible by "
+                f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+            )
+            assert critic_mini_batch_size_per_gpu // cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+                f"normalized critic_mini_batch_size_per_gpu {critic_mini_batch_size_per_gpu} should be larger than "
+                f"micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu}"
+            )
         critic_train_batch_size_per_gpu = (
             cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt // critic_dp_size
         )
@@ -183,6 +196,30 @@ def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
         f"policy_dp_size={policy_dp_size}, "
         f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
         f"lcm_dp_size={lcm_dp_size}"
+    )
+
+
+def validate_auto_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
+    """Validate batch sizes after auto micro-batch sizing has set the micro batch sizes.
+
+    Should be called after `determine_micro_batch_size` has populated
+    `cfg.trainer.micro_train_batch_size_per_gpu` and
+    `cfg.trainer.micro_forward_batch_size_per_gpu`.
+    """
+    assert cfg.trainer.micro_train_batch_size_per_gpu > 0, (
+        f"Auto micro-batch sizing produced invalid micro_train_batch_size_per_gpu: "
+        f"{cfg.trainer.micro_train_batch_size_per_gpu}"
+    )
+    assert cfg.trainer.micro_forward_batch_size_per_gpu > 0, (
+        f"Auto micro-batch sizing produced invalid micro_forward_batch_size_per_gpu: "
+        f"{cfg.trainer.micro_forward_batch_size_per_gpu}"
+    )
+
+    # Verify divisibility with mini-batch sizes
+    policy_mini_batch_size_per_gpu = get_policy_mini_batch_size_per_gpu(cfg)
+    assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
+        f"Auto-determined micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu} "
+        f"does not evenly divide policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu}"
     )
 
 

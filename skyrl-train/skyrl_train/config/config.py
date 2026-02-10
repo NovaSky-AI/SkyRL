@@ -453,6 +453,7 @@ class TrainerConfig(BaseConfig):
     critic_mini_batch_size: int = 256
     micro_train_batch_size_per_gpu: int = 1
     micro_forward_batch_size_per_gpu: int = 1
+    auto_micro_batch_size: bool = False
     update_ref_every_epoch: bool = False
     use_sample_packing: bool = True
     eval_batch_size: int = 1024

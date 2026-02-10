@@ -654,6 +654,33 @@ class PolicyWorkerBase(Worker):
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._micro_batches_accumulated = 0
 
+    def auto_determine_micro_batch_size(
+        self, max_seq_len: int, mini_batch_size_per_gpu: int
+    ) -> int:
+        """Profile GPU memory to find the largest micro-batch size that fits.
+
+        Called via Ray after `init_model` when
+        `cfg.trainer.auto_micro_batch_size` is enabled.  The result is
+        collected by the trainer and written back into the config so that
+        every subsequent `forward_backward` call uses the determined size.
+
+        Returns:
+            The largest micro-batch size that fits in GPU memory.
+        """
+        from skyrl_train.utils.auto_microbatch import determine_micro_batch_size
+
+        determined = determine_micro_batch_size(
+            model=self.model,
+            strategy=self.strategy,
+            max_seq_len=max_seq_len,
+            mini_batch_size_per_gpu=mini_batch_size_per_gpu,
+            safety_margin=0.85,
+            temperature=self.cfg.generator.sampling_params.temperature,
+            compute_entropy=self.cfg.trainer.algorithm.use_entropy_loss,
+            entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
+        )
+        return determined
+
     def forward_backward(
         self,
         data: TrainingInputBatch,
