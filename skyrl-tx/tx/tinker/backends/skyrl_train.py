@@ -263,7 +263,8 @@ class SkyRLTrainBackend(AbstractBackend):
         if len(set(prepared_batch.all_loss_fns)) > 1:
             logger.warning(
                 "SkyRL backend received mixed loss functions %s in one batch; using '%s' for all",
-                set(prepared_batch.all_loss_fns), loss_fn,
+                set(prepared_batch.all_loss_fns),
+                loss_fn,
             )
         loss_fn_config = next((c for c in prepared_batch.all_loss_fn_configs if c is not None), None)
         data = self._trainer.dispatch.forward_backward(
