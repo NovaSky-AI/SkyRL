@@ -291,8 +291,10 @@ EVERY response MUST end with exactly ONE of:
 1. A tool call: <tool_call>...</tool_call> - to perform an action
 2. Done signal: <done> - ONLY when the task is fully complete
 
+IMPORTANT: When the task is complete, first output your final answer with the requested information, THEN say <done>. Do not just say <done> without providing the answer.
+
 NEVER respond with just a message. NEVER say "feel free to ask" or offer further help.
-If the task is complete, say <done>. Otherwise, make a tool call."""
+If the task is complete, provide your answer then say <done>. Otherwise, make a tool call."""
 
         # Build conversation with system prompt
         system_message = {"role": "system", "content": system_content}
