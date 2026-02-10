@@ -8,6 +8,7 @@
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
 # GPUs: B200:4 (preferred), H200:4 (fallback - 141GB HBM3e per GPU)
 #
+# v0.3.5: Reduced train_batch_size (32→24) to fix OOM during convert_to_training_input
 # v0.3.4: Enable use_hybrid_env_sampling to ensure every env is sampled every batch
 # v0.3.3: Reduced eval_interval (40→20) for more frequent eval checkpoints
 # v0.3.2: Increased batch size (4→32) and GPUs (2→4) for hybrid env sampling
@@ -21,38 +22,38 @@ resources:
   disk_size: 200  # Needs space for: model (~16GB), optimizer (~32GB), Ray temp (~50GB), vLLM cache, checkpoints
   ports: 6479
   any_of:
-    # Prefer B200:4 (min 500GB RAM to filter out low-spec instances)
+    # Prefer B200:4 (min 750GB RAM to avoid OOM during convert_to_training_input)
     - accelerators: B200:4
       cloud: lambda
-      memory: 500+
+      memory: 750+
     - accelerators: B200:4
       cloud: runpod
-      memory: 500+
+      memory: 750+
     - accelerators: B200:4
       cloud: vast
-      memory: 500+
+      memory: 750+
     - accelerators: B200:4
       cloud: primeintellect
-      memory: 500+
+      memory: 750+
     - accelerators: B200:4
       cloud: nebius
-      memory: 500+
+      memory: 750+
     # Fallback to H200:4 (141GB HBM3e per GPU)
     - accelerators: H200:4
       cloud: lambda
-      memory: 500+
+      memory: 750+
     - accelerators: H200:4
       cloud: runpod
-      memory: 500+
+      memory: 750+
     - accelerators: H200:4
       cloud: vast
-      memory: 500+
+      memory: 750+
     - accelerators: H200:4
       cloud: primeintellect
-      memory: 500+
+      memory: 750+
     - accelerators: H200:4
       cloud: nebius
-      memory: 500+
+      memory: 750+
 
 num_nodes: 1
 
@@ -196,14 +197,14 @@ run: |
     generator.num_inference_engines=$TOTAL_GPUS \
     generator.inference_engine_tensor_parallel_size=1 \
     trainer.epochs=${NUM_EPOCHS} \
-    trainer.eval_batch_size=32 \
+    trainer.eval_batch_size=24 \
     trainer.eval_before_train=true \
     trainer.eval_interval=20 \
     trainer.update_epochs_per_batch=1 \
-    trainer.train_batch_size=32 \
+    trainer.train_batch_size=24 \
     trainer.use_hybrid_env_sampling=true \
     trainer.min_samples_per_env=1 \
-    trainer.policy_mini_batch_size=32 \
+    trainer.policy_mini_batch_size=24 \
     trainer.micro_forward_batch_size_per_gpu=2 \
     trainer.micro_train_batch_size_per_gpu=2 \
     trainer.ckpt_interval=10 \
