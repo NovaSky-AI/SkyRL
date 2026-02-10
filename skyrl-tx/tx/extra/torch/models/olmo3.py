@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers.utils.generic import TransformersKwargs
 from transformers.processing_utils import Unpack
 
 from tx.models.configs import Olmo3Config
 from tx.extra.torch.layers.rotary_embedding import RotaryEmbedding
 from tx.extra.torch.models.modeling_outputs import ModelOutput, CausalLMOutput
+from tx.extra.torch.layers.spda_attention import sdpa_attention_forward
 
 
 class Olmo3RMSNorm(nn.Module):
@@ -46,12 +46,10 @@ class Olmo3Attention(nn.Module):
         self.layer_idx = layer_idx
         # Guard against partial configuration with falsy head_dim
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
-        # self.num_heads = config.num_attention_heads
-        # self.num_kv_heads = config.num_key_value_heads
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
-        self.is_causal = True  # Seems redundant
+        self.is_causal = True
 
         self.q_proj = nn.Linear(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
@@ -68,12 +66,12 @@ class Olmo3Attention(nn.Module):
         self.q_norm = Olmo3RMSNorm(config.num_attention_heads * self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Olmo3RMSNorm(config.num_key_value_heads * self.head_dim, eps=config.rms_norm_eps)
         # TODO(jwj): Support sliding window attention.
-        # assert config.layer_types is not None
-        # self.attention_type = config.layer_types[layer_idx]
-        # self.sliding_window = config.sliding_window if self.attention_type == "sliding_attention" else None
-        # self._rope_theta = _rope_theta(config)
+        assert config.layer_types is not None, "layer_types must be provided for Olmo 3 model."
+        self.attention_type = config.layer_types[layer_idx]
+        self.sliding_window = config.sliding_window if self.attention_type == "sliding_attention" else None
 
         # TODO(jwj): Support YaRN-style scaling.
+        # self._rope_theta = _rope_theta(config)
         self.rotary_emb = RotaryEmbedding(
             head_size=self.head_dim,
             rotary_dim=self.head_dim,
@@ -86,10 +84,12 @@ class Olmo3Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        # TODO(jwj): Support position embeddings if needed.
+        # position_embeddings: tuple[torch.Tensor, torch.Tensor],  # (cos, sin)
         position_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # hidden_states: [B, T, C]
         # B is the batch size, T is the sequence length, and C is the embedding dimension.
         input_shape = hidden_states.shape[:-1]
@@ -105,26 +105,31 @@ class Olmo3Attention(nn.Module):
         key_states = key_states.view(hidden_shape).transpose(1, 2)
         value_states = value_states.view(hidden_shape).transpose(1, 2)
 
+        # Apply RoPE
         query_states, key_states = self.rotary_emb(query_states, key_states, position_ids)
 
         # TODO(jwj): Support KV cache update.
 
-        # TODO(jwj): Support GQA for Olmo 3 32B.
-        # Olmo 3 7B uses MHA, so we skip repeating kv.
-        attn_mask_bool = attention_mask[:, None, None, :].to(dtype=torch.bool)
-        attn_output = F.scaled_dot_product_attention(
+        # Olmo 3 7B uses MHA, and Olmo 3 32B uses GQA.
+        # For now, we directly use sdpa_attention_forward without handling attention interfaces. For details, see:
+        # https://github.com/huggingface/transformers/blob/b2028e77/src/transformers/models/olmo3/modeling_olmo3.py#L196-L198
+        attn_output, attn_weights = sdpa_attention_forward(
+            self,
             query_states,
             key_states,
             value_states,
-            attn_mask=attn_mask_bool,
-            dropout_p=0.0 if not self.training else self.attention_dropout,
-            is_causal=self.is_causal,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            sliding_window=self.sliding_window,
+            **kwargs,
         )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()  # Why contiguous?
         attn_output = self.o_proj(attn_output)
 
-        return attn_output
+        # TODO(jwj): Support returning attn_weights if needed.
+        return attn_output, attn_weights
 
 
 class Olmo3MLP(nn.Module):
@@ -168,7 +173,7 @@ class Olmo3DecoderLayer(nn.Module):
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
         residual = hidden_states
-        hidden_states = self.self_attn(hidden_states, position_ids, attention_mask, **kwargs)
+        hidden_states, _ = self.self_attn(hidden_states, position_ids, attention_mask, **kwargs)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = residual + hidden_states
 
