@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers.utils.generic import TransformersKwargs
-from transformers.processing_utils import Unpack 
+from transformers.processing_utils import Unpack
 
 from tx.models.configs import Olmo3Config
 from tx.extra.torch.layers.rotary_embedding import RotaryEmbedding
@@ -16,7 +16,7 @@ from tx.extra.torch.models.modeling_outputs import ModelOutput, CausalLMOutput
 
 class Olmo3RMSNorm(nn.Module):
     """Olmo3RMSNorm is equivalent to T5LayerNorm.
-    
+
     For the original implementation, please refer to:
     https://github.com/huggingface/transformers/blob/7769f660935b5d48b73bf6711d0a78b6f8f98739/src/transformers/models/t5/modeling_t5.py#L46-L68
     """
@@ -51,7 +51,7 @@ class Olmo3Attention(nn.Module):
         self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
-        self.is_causal = True # Seems redundant
+        self.is_causal = True  # Seems redundant
 
         self.q_proj = nn.Linear(
             config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
@@ -121,7 +121,7 @@ class Olmo3Attention(nn.Module):
             is_causal=self.is_causal,
         )
 
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous() # Why contiguous?
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()  # Why contiguous?
         attn_output = self.o_proj(attn_output)
 
         return attn_output
@@ -207,10 +207,7 @@ class Olmo3Model(nn.Module):
         hidden_states = input_embeds
         for decoder_layer in self.layers:
             hidden_states = decoder_layer(
-                hidden_states, 
-                position_ids=position_ids,
-                attention_mask=attention_mask, 
-                **kwargs
+                hidden_states, position_ids=position_ids, attention_mask=attention_mask, **kwargs
             )
 
         hidden_states = self.norm(hidden_states)
@@ -236,12 +233,7 @@ class Olmo3ForCausalLM(nn.Module):
         attention_mask: torch.Tensor,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutput:
-        outputs = self.model(
-            input_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            **kwargs
-        )
+        outputs = self.model(input_ids, position_ids=position_ids, attention_mask=attention_mask, **kwargs)
 
         hidden_states = outputs.last_hidden_state
         logits = self.lm_head(hidden_states)
@@ -250,6 +242,7 @@ class Olmo3ForCausalLM(nn.Module):
             logits=logits,
             last_hidden_state=outputs.last_hidden_state,
         )
+
 
 if __name__ == "__main__":
     from huggingface_hub import hf_hub_download

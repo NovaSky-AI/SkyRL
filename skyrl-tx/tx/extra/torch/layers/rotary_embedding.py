@@ -47,7 +47,7 @@ class RotaryEmbedding(nn.Module):
         inv_freq = self._compute_inv_freq(self.base)
         t = torch.arange(self.max_position_embeddings, dtype=torch.float)
 
-        freqs = torch.einsum("i,j->ij", t, inv_freq)  
+        freqs = torch.einsum("i,j->ij", t, inv_freq)
         freqs = torch.cat((freqs, freqs), dim=-1)  # [max_position_embeddings, rotary_dim]
         cos = freqs.cos()
         sin = freqs.sin()
@@ -57,13 +57,7 @@ class RotaryEmbedding(nn.Module):
     def _compute_inv_freq(self, base: int | float) -> torch.Tensor:
         """Compute the inverse frequencies."""
         # [rotary_dim // 2]
-        inv_freq = 1.0 /  (
-            base
-            ** (
-                torch.arange(0, self.rotary_dim, 2, dtype=torch.float)
-                / self.rotary_dim
-            )
-        )
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim))
 
         return inv_freq
 
@@ -86,7 +80,7 @@ class RotaryEmbedding(nn.Module):
             q: The query tensor.
             k: The key tensor.
             position_ids: The position IDs.
-        
+
         Returns:
             A tuple of torch.Tensor comprising of the embedded query and key.
         """
@@ -111,7 +105,7 @@ class RotaryEmbedding(nn.Module):
     def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
         """Rotate half of the hidden dimension of the input."""
         hidden_size = x.shape[-1]
-        x1 = x[..., :hidden_size // 2]
-        x2 = x[..., hidden_size // 2:]
+        x1 = x[..., : hidden_size // 2]
+        x2 = x[..., hidden_size // 2 :]
 
         return torch.cat((-x2, x1), dim=-1)

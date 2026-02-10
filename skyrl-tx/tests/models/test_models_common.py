@@ -17,7 +17,7 @@ MODEL_PARAMS = [
     ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
     # ("olm/olmo-3-mini", Olmo3Config, Olmo3ForCausalLM, ("fsdp", "tp")),
 ]
-MODEL_IDS = ["llama3", "qwen3"] #, "olmo3"]
+MODEL_IDS = ["llama3", "qwen3"]  # , "olmo3"]
 
 
 def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
