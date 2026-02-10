@@ -1,28 +1,22 @@
-# Fleet Task GRPO Training via SkyPilot - Qwen3-8B
-# Usage: sky launch tasks/openenv-fleet-grpo-qwen3-8b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+# Fleet Task GRPO Training via SkyPilot - Qwen3-8B (Step-Wise)
+# Usage: sky launch tasks/openenv-fleet-grpo-qwen3-8b-step-wise.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
 #
-# This task trains GRPO on Fleet-hosted environments using OpenEnv's FleetTaskEnv.
-# It loads tasks from the Fleet API and runs training with verifier-based rewards.
-# Checkpoints are automatically uploaded to S3 to prevent disk exhaustion.
+# Step-wise training variant: processes each turn as a separate episode.
+# Enables context management tools (manage_context, check_context).
+# ~4x slower than token-in-token-out but required for context management.
 #
 # Model: Qwen/Qwen3-8B (8B parameters, instruct-tuned)
 # GPUs: B200:4 (preferred), H200:4 (fallback - 141GB HBM3e per GPU)
 #
-# v0.3.5: Reduced train_batch_size (32→24) to fix OOM during convert_to_training_input
-# v0.3.4: Enable use_hybrid_env_sampling to ensure every env is sampled every batch
-# v0.3.3: Reduced eval_interval (40→20) for more frequent eval checkpoints
-# v0.3.2: Increased batch size (4→32) and GPUs (2→4) for hybrid env sampling
-# v0.3 OOM fix: gpu_memory_utilization reduced from 0.8 to 0.7
-# v0.3 has 3x more data including google-maps (4.7K tasks) with longer tool schemas
-# This leaves more headroom for training activations before vLLM wake_up
+# v0.3.6: Initial step-wise config with micro_batch=1 to fix CUDA OOM
 
-name: fleet-task-grpo-qwen3-8b
+name: fleet-task-grpo-qwen3-8b-step-wise
 
 resources:
-  disk_size: 200  # Needs space for: model (~16GB), optimizer (~32GB), Ray temp (~50GB), vLLM cache, checkpoints
+  disk_size: 200
   ports: 6479
   any_of:
-    # Prefer B200:4 (min 750GB RAM to avoid OOM during convert_to_training_input)
+    # Prefer B200:4 (min 750GB RAM)
     - accelerators: B200:4
       cloud: lambda
       memory: 750+
@@ -62,30 +56,21 @@ workdir:
   ref: main
 
 envs:
-  # These are passed via --env from GHA workflow
   WANDB_API_KEY: ""
   FLEET_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
-  # Task selection: env_key to filter (e.g., "github", "booking", "reddit")
   ENV_KEY: ""
-  # Modality: "tool_use" or "computer_use"
   MODALITY: "tool_use"
-  # Training parameters
   MAX_TURNS: 50
-  # Context budget: Using YaRN (factor=2.0) to extend Qwen3-8B from 32K to 65K context
-  # GitHub env needs ~26K tokens for 100 tools, so 48K allows multi-turn growth
   MAX_INPUT_LENGTH: 48000
-  MAX_GENERATE_LENGTH: 8192  # Increased from 4096 to allow thinking + tool calls
+  MAX_GENERATE_LENGTH: 8192
   NUM_EPOCHS: 20
   RUN_ID: ""
-  # Optional: limit number of tasks for testing
   MAX_TASKS: ""
-  # AWS credentials (required for S3 dataset download, optional for checkpoint upload)
   AWS_ACCESS_KEY_ID: ""
   AWS_SECRET_ACCESS_KEY: ""
   AWS_REGION: "us-east-1"
-  # S3 buckets
   S3_DATASET_BUCKET: "fleet-internal-datasets"
   S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
   S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
@@ -94,7 +79,6 @@ setup: |
   set -euo pipefail
   cd skyrl-train
 
-  # Validate required environment variables
   echo "Validating environment variables..."
   if [ -z "$FLEET_API_KEY" ]; then
     echo "ERROR: FLEET_API_KEY is required"
@@ -115,10 +99,8 @@ setup: |
   uv sync --extra vllm
   uv pip install wandb boto3 awscli
 
-  # Install OpenEnv for Fleet environment access (from branch with FleetTaskEnv)
   uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
 
-  # Download dataset from S3
   mkdir -p $HOME/data/fleet
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
   S3_PATH="s3://${S3_DATASET_BUCKET}/${DATA_VERSION}/openenv/all_${MODALITY}.json"
@@ -127,7 +109,6 @@ setup: |
   TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['tasks']))")
   echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
 
-  # Prepare dataset
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
   uv run python -m integrations.fleet.prepare_dataset \
     --tasks-json "$TASKS_FILE" \
@@ -143,23 +124,19 @@ run: |
   mkdir -p "$TMP_DIR"
   export TMPDIR="$TMP_DIR"
 
-  # Help PyTorch memory allocator handle fragmentation
   export PYTORCH_ALLOC_CONF=expandable_segments:True
 
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
 
-  # Login to Weights & Biases
   uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
 
-  # Ray cluster setup - limit object store to prevent disk exhaustion
   export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
-  export RAY_object_store_memory=10000000000  # 10GB limit for object store
+  export RAY_object_store_memory=10000000000
   if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
     ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
   fi
 
-  # Wait for Ray
   for i in $(seq 1 24); do
     if ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
       break
@@ -169,7 +146,7 @@ run: |
 
   TOTAL_GPUS=$SKYPILOT_NUM_GPUS_PER_NODE
 
-  # Run GRPO training with Fleet task integration
+  # Step-wise training with context management tools
   uv run --isolated --extra "$INFERENCE_BACKEND" \
     --with "litellm>=1.75.5" \
     --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" \
@@ -180,6 +157,9 @@ run: |
     data.val_data="['${DATA_DIR}/validation.parquet']" \
     environment.env_class=fleet_task \
     environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
+    environment.skyrl_gym.fleet_task.enable_context_tools=true \
+    generator.step_wise_trajectories=true \
+    generator.inject_context_status=true \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="Qwen/Qwen3-8B" \
     ++trainer.rope_scaling.rope_type=yarn \
@@ -200,8 +180,8 @@ run: |
     trainer.use_hybrid_env_sampling=true \
     trainer.min_samples_per_env=1 \
     trainer.policy_mini_batch_size=24 \
-    trainer.micro_forward_batch_size_per_gpu=2 \
-    trainer.micro_train_batch_size_per_gpu=2 \
+    trainer.micro_forward_batch_size_per_gpu=1 \
+    trainer.micro_train_batch_size_per_gpu=1 \
     trainer.ckpt_interval=10 \
     trainer.max_prompt_length=512 \
     generator.max_input_length=$MAX_INPUT_LENGTH \
@@ -224,7 +204,7 @@ run: |
     generator.gpu_memory_utilization=0.7 \
     trainer.logger="$LOGGER" \
     trainer.project_name="fleet-task-grpo" \
-    trainer.run_name="fleet_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
+    trainer.run_name="fleet_${MODALITY}_step_wise_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
     trainer.resume_mode=latest \
-    trainer.ckpt_path="$HOME/ckpts/fleet_${MODALITY}" \
+    trainer.ckpt_path="$HOME/ckpts/fleet_${MODALITY}_step_wise" \
     trainer.dump_data_batch=true
