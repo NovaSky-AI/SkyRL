@@ -8,7 +8,7 @@ from typing import Generator
 
 from cloudpathlib import AnyPath
 
-from tx.utils.log import logger
+from skyrl.utils.log import logger
 
 
 @contextmanager
