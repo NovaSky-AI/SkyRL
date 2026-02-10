@@ -11,7 +11,7 @@ from transformers.processing_utils import Unpack
 from tx.models.configs import Olmo3Config
 from tx.extra.torch.layers.rotary_embedding import RotaryEmbedding
 from tx.extra.torch.models.modeling_outputs import ModelOutput, CausalLMOutput
-from tx.extra.torch.layers.spda_attention import sdpa_attention_forward
+from tx.extra.torch.layers.sdpa_attention import sdpa_attention_forward
 
 
 class Olmo3RMSNorm(nn.Module):
