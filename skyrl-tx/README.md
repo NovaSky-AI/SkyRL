@@ -191,7 +191,7 @@ to download the data and set up chroma. You can then use the following commands 
 uv run --extra gpu --extra tinker -m tx.tinker.api \
     --port 8001 \
     --base-model Qwen/Qwen3-4B-Instruct-2507 \
-    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 32, "tensor_parallel_size": 8, "train_micro_batch_size": 1, "sample_max_num_sequences": 128}'
+    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 32, "tensor_parallel_size": 8, "train_micro_batch_size": 1, "sample_max_num_sequences": 128}' > out.log
 
 # Run RL loop
 export TINKER_API_KEY="tml-dummy"
