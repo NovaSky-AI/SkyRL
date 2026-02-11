@@ -28,10 +28,11 @@ from tx.tinker.db_models import (
     SessionDB,
     SamplingSessionDB,
     get_async_database_url,
+    enable_sqlite_wal,
 )
 from tx.tinker.extra import ExternalInferenceClient
 from tx.utils.storage import download_file
-from tx.utils.log import logger
+from tx.utils.log import logger, get_uvicorn_log_config
 
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
@@ -47,6 +48,7 @@ async def lifespan(app: FastAPI):
 
     db_url = get_async_database_url(app.state.engine_config.database_url)
     app.state.db_engine = create_async_engine(db_url, echo=False)
+    enable_sqlite_wal(app.state.db_engine.sync_engine)
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
@@ -60,7 +62,17 @@ async def lifespan(app: FastAPI):
         logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters
-    cmd = ["uv", "run", "--extra", "tinker", "-m", "tx.tinker.engine"]
+    cmd = [
+        "uv",
+        "run",
+        "--isolated",
+        "--extra",
+        "tinker",
+        "--extra",
+        app.state.engine_config.backend,
+        "-m",
+        "tx.tinker.engine",
+    ]
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = await asyncio.create_subprocess_exec(*cmd)
@@ -288,9 +300,14 @@ class Datum(BaseModel):
 class ForwardBackwardInput(BaseModel):
     data: list[Datum]
     loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
+    loss_fn_config: dict[str, float] | None = None
 
     def to_types(self) -> types.ForwardBackwardInput:
-        return types.ForwardBackwardInput(data=[datum.to_types() for datum in self.data], loss_fn=self.loss_fn)
+        return types.ForwardBackwardInput(
+            data=[datum.to_types() for datum in self.data],
+            loss_fn=self.loss_fn,
+            loss_fn_config=self.loss_fn_config,
+        )
 
 
 class ForwardBackwardRequest(BaseModel):
@@ -350,6 +367,8 @@ class SamplingParams(BaseModel):
     def to_types(self) -> types.SamplingParams:
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
+        if self.max_tokens <= 0:
+            raise HTTPException(status_code=400, detail="max_tokens must be a positive number")
 
         # Generate a random seed if not provided
         seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
@@ -882,7 +901,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             sampling_params=request.sampling_params.to_types(),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
-            prompt_logprobs=request.prompt_logprobs,
+            prompt_logprobs=request.prompt_logprobs if request.prompt_logprobs is not None else False,
         ),
     )
 
@@ -890,7 +909,9 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
 
     if req.app.state.external_inference_client:
         asyncio.create_task(
-            req.app.state.external_inference_client.call_and_store_result(request_id, request, model_id, checkpoint_id)
+            req.app.state.external_inference_client.call_and_store_result(
+                request_id, request, model_id, checkpoint_id, base_model=base_model
+            )
         )
 
     return FutureResponse(future_id=str(request_id), status="pending", request_id=str(request_id))
@@ -1168,4 +1189,4 @@ if __name__ == "__main__":
     # Store config in app.state so lifespan can access it
     app.state.engine_config = engine_config
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(app, host=args.host, port=args.port, log_config=get_uvicorn_log_config())

@@ -184,6 +184,13 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
                 "Please set `generator.async_engine=true` in your config."
             )
+        # Pop enable_ray_prometheus_stats - only supported for async engine
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+        if enable_ray_prometheus_stats:
+            logger.warning(
+                "enable_ray_prometheus_stats is only supported with AsyncVLLMInferenceEngine. "
+                "Set `generator.async_engine=true` to enable Ray Prometheus stats logging."
+            )
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -288,18 +295,30 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+
         # TODO (erictang000): potentially enable log requests for a debugging mode
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
             engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
         else:
             engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
-        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+
+        # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
+        stat_loggers = None
+        if enable_ray_prometheus_stats:
+            stat_loggers = self._create_ray_prometheus_stat_loggers()
+
+        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
         model_path = kwargs.get("model")
-        # TODO(Charlie): add a config similar to vllm's `served_model_name`. See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
-        model_name = model_path
+        # Use served_model_name if provided (from generator.served_model_name config),
+        # otherwise fall back to model_path. This allows using a different model name
+        # in HTTP endpoint requests than the actual model path.
+        # See: https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
+        served_model_name = kwargs.get("served_model_name", None)
+        model_name = served_model_name if served_model_name is not None else model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
 
@@ -334,6 +353,30 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             **legacy_kwargs,
         )
         return engine
+
+    def _create_ray_prometheus_stat_loggers(self):
+        """Create Ray Prometheus stat loggers for vLLM metrics.
+
+        Returns stat_loggers in the format expected by vLLM's from_engine_args().
+        For vLLM v1 (0.9.0+), this returns a list of StatLoggerFactory callables.
+        For older versions where the v1 API is not available, this returns `None`.
+
+        See: https://docs.vllm.ai/en/latest/api/vllm/v1/metrics/ray_wrappers/
+        """
+        try:
+            # Try vLLM v1 API first (0.9.0+)
+            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+            logger.info("Enabling RayPrometheusStatLogger for vLLM inference engine metrics")
+            # For v1, stat_loggers is a list of factory callables
+            return [RayPrometheusStatLogger]
+        except ImportError:
+            logger.warning(
+                "RayPrometheusStatLogger not available in this vLLM version. "
+                "For Ray-integrated metrics, upgrade to vLLM >= 0.9.0. "
+                "Stat logging will be disabled."
+            )
+            return None
 
     async def _load_lora_from_disk(self, lora_path: str):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
@@ -490,21 +533,39 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
+
+            # Determine appropriate HTTP status code based on error message to mimic vllm serve error
+            # handling. Here, we handle context length errors, which should return 400 according to
+            # vllm serve error handling, so that downstream users can handle these properly rather
+            # than seeing a 500 SkyRL INTERNAL_SERVER_ERROR. For instance, LiteLLM can wraps them as
+            # BadRequestError, enabling Harbor to detect ContextLengthExceededError.
+            # NOTE(Charlie): This is hacky. With the refactored inference stack, we
+            # should be able to directly reuse the error handling from the served vllm.
+            error_message = str(e).lower()
+            is_context_length_error = (
+                "maximum context length" in error_message or "maximum model length" in error_message
+            )
+
+            if is_context_length_error:
+                http_status = HTTPStatus.BAD_REQUEST
+            else:
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
                 from vllm.entrypoints.openai.protocol import ErrorInfo
 
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
-                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                        type=http_status.phrase,
+                        code=http_status.value,
                     ),
                 ).model_dump()
             else:
                 return ErrorResponse(
                     message=str(e),
-                    type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                    code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    type=http_status.phrase,
+                    code=http_status.value,
                 ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:

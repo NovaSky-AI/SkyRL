@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from loguru import logger
-from omegaconf import DictConfig
 from transformers import PreTrainedTokenizerBase
 
+from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
@@ -42,17 +43,27 @@ class InferenceEngineClient(InferenceEngineInterface):
     """
 
     def __init__(
-        self, engines: List[InferenceEngineInterface], tokenizer: PreTrainedTokenizerBase, full_config: DictConfig
+        self,
+        engines: List[InferenceEngineInterface],
+        tokenizer: PreTrainedTokenizerBase,
+        full_config: Union[SkyRLConfig, DictConfig],
     ):
         """
         Args:
             engines: List[InferenceEngineInterface] - The inference engines, remote or local.
             tokenizer: PreTrainedTokenizerBase - The tokenizer to use.
-            full_config: DictConfig - See ppo_base_config.yaml
+            full_config: full training configuration
         """
         self.engines = engines
         self.tokenizer = tokenizer
-        self.model_name = full_config.trainer.policy.model.path
+        # Use served_model_name if provided, otherwise fall back to model path.
+        # served_model_name allows using a different model name for HTTP endpoint validation
+        # than the actual model path. See ppo_base_config.yaml for details.
+        served_model_name = full_config.generator.served_model_name
+        if served_model_name is not None:
+            self.model_name = served_model_name
+        else:
+            self.model_name = full_config.trainer.policy.model.path
         self.backend = full_config.generator.backend
         self.enable_http_endpoint = full_config.generator.enable_http_endpoint
         self.http_endpoint_host = full_config.generator.http_endpoint_host
@@ -381,6 +392,12 @@ class InferenceEngineClient(InferenceEngineInterface):
             partial_response = await self.engines[engine_idx].chat_completion(
                 {"json": cur_request_json, "headers": headers}
             )
+
+            # 1.2.1. Check for error response from engine (e.g., context length exceeded).
+            # Error responses have "error" key instead of "choices", so return them directly
+            # for the HTTP endpoint to handle with proper status codes.
+            if "error" in partial_response or partial_response.get("object", "") == "error":
+                return partial_response
 
             # 1.3. Parse partial response and in-place update accumulators.
             (

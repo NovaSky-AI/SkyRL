@@ -77,19 +77,19 @@ def train(
     train_dataset = load_dataset(dataset, split=split)
     assert isinstance(train_dataset, Dataset)
     base_config = AutoConfig.from_pretrained(model_name)
-    config = Qwen3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
+    model_config = Qwen3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tracker = get_tracker(tracker_name, base_config, **tracker_args)
     loader = get_loader(loader_name)
 
     model_class = get_model_class(base_config)
-    mesh = jax.make_mesh((1, 1, tp_size), ("fsdp", "ep", "tp"))
+    mesh = jax.make_mesh((1, 1, tp_size), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
     with jax.set_mesh(mesh):
-        model = model_class(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
+        model = model_class(model_config, dtype=get_dtype(model_config.dtype), rngs=nnx.Rngs(0))
         optimizer = nnx.Optimizer(model, get_optimizer(optimizer_name, optimizer_args), wrt=nnx.Param)
 
         if load_checkpoint_path:
-            load_safetensors(load_checkpoint_path, base_config, model)
+            load_safetensors(load_checkpoint_path, model_config, model)
 
         num_steps = train_dataset.num_rows / batch_size
         for step, (batch, metrics) in enumerate(loader(tokenizer, train_dataset, batch_size)):
@@ -102,9 +102,9 @@ def train(
 
             if step % save_steps == 0:
                 logger.info(f"Saving checkpoint to {output_dir}")
-                save_safetensors(base_config, model, output_dir / "model.safetensors")
+                save_safetensors(model_config, model, output_dir / "model.safetensors")
 
         logger.info(f"Saving final checkpoint to {output_dir}")
         base_config.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)
-        save_safetensors(base_config, model, output_dir / "model.safetensors")
+        save_safetensors(model_config, model, output_dir / "model.safetensors")

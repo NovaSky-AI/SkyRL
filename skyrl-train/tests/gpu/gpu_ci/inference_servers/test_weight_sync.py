@@ -18,6 +18,7 @@ import httpx
 import pytest
 import ray
 import torch
+import asyncio
 import argparse
 
 from ray.util.placement_group import placement_group
@@ -27,6 +28,8 @@ from transformers import AutoModelForCausalLM
 from skyrl_train.inference_servers.common import get_node_ip, get_open_port
 from skyrl_train.inference_servers.router import InferenceRouter
 from skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+from skyrl_train.weight_sync import BroadcastInitInfo, BroadcastWeightUpdateRequest
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -137,12 +140,6 @@ class Trainer:
             torch.distributed.broadcast(param.data, src=0, group=self.pg)
         torch.cuda.synchronize()
 
-    def teardown(self):
-        """Clean up the process group."""
-        if self.pg is not None:
-            torch.distributed.destroy_process_group(self.pg)
-            self.pg = None
-
 
 @pytest.fixture(scope="class")
 def weight_update_env(ray_init_fixture):
@@ -198,17 +195,24 @@ def weight_update_env(ray_init_fixture):
     router_url = router.start()
     assert wait_for_url(router_url), "Router failed to start"
 
+    # Create RemoteInferenceClient for control plane operations
+    client = RemoteInferenceClient(
+        proxy_url=router_url,
+        server_urls=server_urls,
+        model_name=MODEL,
+    )
+
     yield {
         "group": group,
         "server_urls": server_urls,
         "router": router,
         "router_url": router_url,
         "trainer": trainer,
+        "client": client,
     }
 
+    asyncio.get_event_loop().run_until_complete(client.teardown())
     router.shutdown()
-    group.shutdown()
-    ray.get(trainer.teardown.remote())
 
 
 @pytest.mark.vllm
@@ -218,19 +222,20 @@ class TestWeightUpdateFlow:
     @pytest.mark.asyncio
     async def test_update_weights_flow(self, weight_update_env):
         """
-        Full E2E weight sync test via router (non-colocated, NCCL broadcast):
+        Full E2E weight sync test (non-colocated, NCCL broadcast):
         1. Query with dummy weights → gibberish
-        2. Init weight transfer (both sides concurrently via router)
+        2. Init weight transfer (both sides concurrently via client)
         3. Broadcast weights from trainer (concurrent with server receive)
         4. Finalize weight update
         5. Query again → correct output
         """
         router_url = weight_update_env["router_url"]
         trainer = weight_update_env["trainer"]
+        client = weight_update_env["client"]
 
         print("\n[TEST] Running non-colocated weight sync test")
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as http_client:
             # ===== Step 1: Verify dummy weights produce gibberish =====
             payload = {
                 "model": MODEL,
@@ -239,7 +244,7 @@ class TestWeightUpdateFlow:
                 "temperature": 0.0,
             }
 
-            resp = await client.post(f"{router_url}/v1/completions", json=payload)
+            resp = await http_client.post(f"{router_url}/v1/completions", json=payload)
             assert resp.status_code == 200
 
             text_before = resp.json()["choices"][0]["text"]
@@ -252,35 +257,32 @@ class TestWeightUpdateFlow:
             master_address = get_node_ip()
             master_port = get_open_port()
 
-            # Query all servers for world_size (TP * PP) via router
-            resp = await client.get(f"{router_url}/get_server_info")
-            assert resp.status_code == 200
-            server_info_map = resp.json()
-            # Sum world_size across all servers
-            inference_world_size = sum(info["world_size"] for info in server_info_map.values())
+            # Query all servers for world_size via client (fans out to all backends)
+            inference_world_size = await client.get_world_size()
             world_size = 1 + inference_world_size  # 1 trainer + all inference workers
             group_name = f"weight_sync_test_{master_port}"
 
             print(f"[Step 2] Init weight transfer: master={master_address}:{master_port}, world_size={world_size}")
 
-            init_info = {
-                "master_addr": master_address,
-                "master_port": master_port,
-                "rank_offset": 1,
-                "world_size": world_size,
-                "group_name": group_name,
-                "backend": "nccl",
-                "model_dtype_str": "bfloat16",
-                "override_existing_receiver": True,
-            }
+            init_info = BroadcastInitInfo(
+                master_addr=master_address,
+                master_port=master_port,
+                rank_offset=1,
+                world_size=world_size,
+                group_name=group_name,
+                backend="nccl",
+                model_dtype_str="bfloat16",
+                override_existing_receiver=True,
+            )
 
             # Both sides must init concurrently (NCCL blocks until all ranks join)
             # Start trainer init (returns immediately, runs in Ray actor)
             trainer_init_ref = trainer.init_weight_sync.remote(master_address, master_port, world_size, group_name)
 
-            # Await server init (triggers NCCL join on server side)
-            server_resp = await client.post(f"{router_url}/init_weight_transfer", json=init_info)
-            assert server_resp.status_code == 200, f"Server init failed: {server_resp.text}"
+            # Await server init via client (fans out to all backends)
+            result = await client.init_weight_update_communicator(init_info)
+            for server_url, resp in result.items():
+                assert resp["status"] == 200, f"Server {server_url} init failed: {resp}"
 
             # Trainer should be done now (NCCL group formed)
             ray.get(trainer_init_ref)
@@ -296,21 +298,28 @@ class TestWeightUpdateFlow:
             # Start trainer broadcast (returns immediately, runs in Ray actor)
             trainer_broadcast_ref = trainer.broadcast_weights.remote()
 
-            # Await server receive (triggers NCCL receive on server side)
-            server_resp = await client.post(f"{router_url}/update_weights", json=weight_info)
-            assert server_resp.status_code == 200, f"Update weights failed: {server_resp.text}"
+            # Await server receive via client (fans out to all backends)
+            update_request = BroadcastWeightUpdateRequest(
+                names=weight_info["names"],
+                dtypes=weight_info["dtypes"],
+                shapes=weight_info["shapes"],
+            )
+            result = await client.update_named_weights(update_request)
+            for server_url, resp in result.items():
+                assert resp["status"] == 200, f"Server {server_url} update weights failed: {resp}"
 
             # Trainer should be done now (NCCL broadcast complete)
             ray.get(trainer_broadcast_ref)
             print("[Step 3] Weight sync complete")
 
             # ===== Step 4: Finalize weight update =====
-            resp = await client.post(f"{router_url}/finalize_weight_update", json={})
-            assert resp.status_code == 200
+            result = await client.finalize_weight_update()
+            for server_url, resp in result.items():
+                assert resp["status"] == 200, f"Server {server_url} finalize failed: {resp}"
             print("[Step 4] Weight update finalized")
 
             # ===== Step 5: Query again - should produce correct output =====
-            resp = await client.post(f"{router_url}/v1/completions", json=payload)
+            resp = await http_client.post(f"{router_url}/v1/completions", json=payload)
             assert resp.status_code == 200
 
             text_after = resp.json()["choices"][0]["text"]

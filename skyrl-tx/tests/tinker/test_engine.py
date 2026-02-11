@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlmodel import Session, SQLModel
 
-from tx.tinker.engine import TinkerEngine
+from tx.tinker.engine import TinkerEngine, prepare_model_pass_batch
 from tx.tinker.config import EngineConfig
 from tx.tinker import types
 from tx.tinker.db_models import SessionDB, ModelDB, FutureDB, RequestStatus
@@ -81,6 +81,49 @@ def test_cleanup_stale_sessions():
     # Run cleanup and assert one model was unloaded
     assert engine.cleanup_stale_sessions() == 1
     assert not engine.backend.has_model(model_id)
+
+
+def test_prepare_model_pass_batch_loss_fn_config():
+    """Test that prepare_model_pass_batch extracts loss_fn_config from requests."""
+    datum = types.Datum(
+        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3])]),
+        loss_fn_inputs=types.LossFnInputs(
+            target_tokens=types.TensorData(data=[2, 3, 4]),
+            weights=types.TensorData(data=[1.0, 1.0, 1.0]),
+            advantages=types.TensorData(data=[]),
+            logprobs=types.TensorData(data=[]),
+        ),
+    )
+    config = {"clip_ratio": 0.3, "entropy_coef": 0.01}
+
+    # With loss_fn_config
+    requests_with_config = {
+        "req1": (
+            "model1",
+            types.ForwardBackwardInput(
+                data=[datum],
+                loss_fn="importance_sampling",
+                loss_fn_config=config,
+            ),
+        ),
+    }
+    batch = prepare_model_pass_batch(requests_with_config)
+    assert batch.all_loss_fns == ["importance_sampling"]
+    assert batch.all_loss_fn_configs == [config]
+
+    # Without loss_fn_config (default None)
+    requests_without_config = {
+        "req2": (
+            "model1",
+            types.ForwardBackwardInput(
+                data=[datum],
+                loss_fn="cross_entropy",
+            ),
+        ),
+    }
+    batch_no_config = prepare_model_pass_batch(requests_without_config)
+    assert batch_no_config.all_loss_fns == ["cross_entropy"]
+    assert batch_no_config.all_loss_fn_configs == [None]
 
 
 class TestMaxMicroBatches:

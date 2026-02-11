@@ -13,7 +13,7 @@ from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.utils.models import load_safetensors
 
 MODEL_PARAMS = [
-    ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("dp", "tp")),
+    ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("fsdp", "tp")),
     ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
 ]
 MODEL_IDS = ["llama3", "qwen3"]
@@ -30,7 +30,7 @@ def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_ch
         loss_chunk_size=loss_chunk_size,
         gradient_checkpointing=False,
     )
-    mesh = jax.make_mesh((1, 1), mesh_axes)
+    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=(jax.sharding.AxisType.Auto,) * 2)
     with jax.set_mesh(mesh):
         model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
     load_safetensors(tmp_dir, config, model)

@@ -19,7 +19,7 @@ SkyRL tx is an open-source library that implements a backend for the [Tinker API
 - **Multi-User LoRA Support** — Efficient GPU sharing across users with individual adapters
 - **SFT & RL Support** — Supervised fine-tuning and reinforcement learning with PPO and custom loss functions
 - **Multi-Node Training** — FSDP and tensor parallelism for distributed training
-- **Multiple Model Architectures** — Support for Qwen3 (dense & MoE) and Llama 3
+- **Multiple Model Architectures** — Support for Qwen3 (dense & MoE), Llama 3, and DeepSeek V3
 - **External Inference Engine** — Optional vLLM integration for optimized inference
 - **Production Ready** — PostgreSQL support, cloud storage checkpoints, and database migrations
 
@@ -181,6 +181,29 @@ uv run --with wandb --with tinker rl_loop.py \
     lora_rank=1 max_length=1024
 ```
 
+### Running the `search_tool` example
+
+First follow the instructions in the [the search_tool recipe](https://github.com/thinking-machines-lab/tinker-cookbook/blob/main/tinker_cookbook/recipes/search_tool/README.md)
+to download the data and set up chroma. You can then use the following commands to train the model
+
+```bash
+# Start server
+uv run --extra gpu --extra tinker -m tx.tinker.api \
+    --port 8001 \
+    --base-model Qwen/Qwen3-4B-Instruct-2507 \
+    --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 32, "tensor_parallel_size": 8, "train_micro_batch_size": 1, "sample_max_num_sequences": 128}' > out.log
+
+# Run RL loop
+export TINKER_API_KEY="tml-dummy"
+export GOOGLE_API_KEY="..." # Replace with your Google API Key
+export WANDB_API_KEY="..."  # Replace with your WandB API Key
+uv run --extra vector-search --extra wandb python -m tinker_cookbook.recipes.search_tool.train \
+    base_url=http://localhost:8001 \
+    model_name=Qwen/Qwen3-4B-Instruct-2507 \
+    behavior_if_log_dir_exists=delete \
+    wandb_project=search-r1-skyrl-tx
+```
+
 ### Multi-Node Training
 
 ```bash
@@ -229,6 +252,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api 
 | Qwen3 Dense Models | ✅ |
 | Qwen3 MoE Models | ✅ |
 | Llama 3 Models | ✅ |
+| DeepSeek V3 Models | ✅ |
 | Multi-User LoRA | ✅ |
 | LoRA (all layers) | ✅ |
 | Forward/Backward | ✅ |
@@ -237,6 +261,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api 
 | Gradient Checkpointing | ✅ |
 | JIT Compilation | ✅ |
 | Tensor Parallelism | ✅ |
+| Expert Parallelism | ✅ |
 | FSDP | ✅ |
 | Multi-Node | ✅ |
 | PostgreSQL | ✅ |
@@ -279,6 +304,7 @@ We welcome contributions! The project is early and hackable — now is a great t
 - **[SkyRL tx v0.1.0](https://novasky-ai.notion.site/skyrl-tx-v010)**
 - **[SkyRL tx v0.2.0](https://novasky-ai.notion.site/skyrl-tx-v02)**
 - **[SkyRL tx v0.2.1](https://novasky-ai.notion.site/skyrl-tx-v021)**
+- **[SkyRL tx v0.3.0](https://novasky-ai.notion.site/skyrl-tx-v030)**
 
 ## 📬 Contact
 

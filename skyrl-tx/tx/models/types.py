@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Protocol
 
 import jax
 
@@ -10,8 +9,12 @@ from tx.models.configs import ModelConfig
 from tx.utils.generator import KVCache
 
 
-class ModelForCausalLM(Protocol):
+class ModelForCausalLM:
+
     config: ModelConfig
+
+    def get_model_config(self) -> ModelConfig:
+        return self.config
 
 
 @jax.tree_util.register_dataclass

@@ -42,6 +42,7 @@ from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
 from tx.tinker.loss_fns import LOSS_FUNCTIONS
+from tx.tinker.types import LOSS_TYPES
 from tx.utils.models import (
     get_dtype,
     get_model_class,
@@ -181,6 +182,7 @@ class JaxBackendImpl(AbstractBackend):
                 config.tensor_parallel_size,
             ),
             ("fsdp", "ep", "tp"),
+            axis_types=(jax.sharding.AxisType.Auto,) * 3,
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
@@ -205,6 +207,21 @@ class JaxBackendImpl(AbstractBackend):
             f"Initialized base model {base_model} with "
             f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
         )
+
+        if config.train_micro_batch_size <= 0:
+            logger.warning(
+                '"train_micro_batch_size" is not set. This can lead to OOMs. '
+                'Consider setting "train_micro_batch_size" via --backend-config to limit memory usage during training. '
+                "In the future, we plan to add a heuristic to set this automatically: "
+                "https://github.com/NovaSky-AI/SkyRL/issues/1048"
+            )
+        if config.sample_max_num_sequences <= 0:
+            logger.warning(
+                '"sample_max_num_sequences" is not set. This can lead to OOMs. '
+                'Consider setting "sample_max_num_sequences" via --backend-config to limit memory usage during sampling. '
+                "In the future, we plan to add a heuristic to set this automatically: "
+                "https://github.com/NovaSky-AI/SkyRL/issues/1048"
+            )
 
         self._create_loss_and_grad_fn()
 
@@ -509,7 +526,7 @@ class JaxBackendImpl(AbstractBackend):
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
         all_advantages = prepared_batch.all_advantages
-        all_loss_fn_types = prepared_batch.all_loss_fn_types
+        all_loss_fn_types = [LOSS_TYPES[name] for name in prepared_batch.all_loss_fns]
         request_batch_slices = prepared_batch.request_batch_slices
 
         # Convert model_ids to adapter_indices
@@ -827,7 +844,7 @@ class JaxBackendImpl(AbstractBackend):
         self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
-    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
         lora_model = self.models[model_id]
         save_lora_checkpoint(
@@ -960,8 +977,15 @@ class JaxBackend(JaxBackendImpl):
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
         if jax.process_count() > 1:
-            clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
-            _broadcast_command(RpcPayload(method=method, kwargs=clean))
+            hints = get_type_hints(getattr(JaxBackendImpl, method))
+
+            # TODO: Remove AnyPath special case once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
+            def serialize(k, v):
+                if hints.get(k) is AnyPath:
+                    return str(v)
+                return TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
+
+            _broadcast_command(RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}))
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
@@ -985,8 +1009,11 @@ class JaxBackend(JaxBackendImpl):
     def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
 
-    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
+        # Write probe so workers can detect shared filesystem
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.with_name(output_path.name + ".probe").write_text("write_probe")
+        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id, persist=persist)
 
 
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):

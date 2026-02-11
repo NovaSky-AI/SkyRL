@@ -52,6 +52,7 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 - [Biomni-R0](https://biomni.stanford.edu/blog/biomni-r0-technical-report/): Using RL to Hill-Climb Biomedical Reasoning Agents to Expert-Level ![GitHub Repo stars](https://img.shields.io/github/stars/snap-stanford/Biomni)
 - [How to Train Your Advisor](https://github.com/az1326/advisor-models): Steering Black-Box LLMs with Advisor Models ![GitHub Repo stars](https://img.shields.io/github/stars/az1326/advisor-models)
 - [OpenThoughts-Agent](https://github.com/open-thoughts/OpenThoughts-Agent): Data recipes and robust infrastructure for training AI agents ![GitHub Repo stars](https://img.shields.io/github/stars/open-thoughts/OpenThoughts-Agent)
+- [Endless Terminals](https://arxiv.org/abs/2601.16443): A fully autonomous pipeline that procedurally generates terminal tasks for RL training with no human annotation needed ![GitHub Repo stars](https://img.shields.io/github/stars/kanishkg/endless-terminals)
 
 # Acknowledgement
 

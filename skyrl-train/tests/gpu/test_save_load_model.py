@@ -10,33 +10,29 @@ uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/test_save_load_m
 
 import ray
 import pytest
-import hydra
 import torch
 import os
 import shutil
 import tempfile
-from omegaconf import DictConfig
 import json
 from transformers import AutoTokenizer
 
+from skyrl_train.config import SkyRLConfig
 from tests.gpu.utils import (
     init_worker_with_type,
     make_dummy_training_batch,
     get_model_logits_from_actor,
     ray_init_for_tests,
-    validate_cfg,
 )
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.utils.utils import validate_cfg
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MODEL_ARCH = "Qwen3ForCausalLM"
 NUM_GPUS = 4
 
 
-def get_test_actor_config(strategy: str) -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+def get_test_actor_config(strategy: str) -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.strategy = strategy
@@ -58,13 +54,11 @@ def run_one_training_step(
     megatron_batch=None,
 ):
     """Run forward_backward + optim_step to perform one training step."""
-    if strategy == "megatron":
-        assert megatron_batch is not None, "Megatron requires a TrainingInputBatch for ppo_train"
-        return ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", megatron_batch))
-    else:
-        assert data is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
-        ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=data))
-        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+    # Unified interface for all strategies (megatron, fsdp, fsdp2)
+    batch = megatron_batch if strategy == "megatron" else data
+    assert batch is not None, f"{strategy} requires a TrainingInputBatch for forward_backward"
+    ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
 @pytest.mark.parametrize(

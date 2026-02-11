@@ -2,46 +2,45 @@ import asyncio
 import os
 import ray
 import torch
+from typing import Any, Dict
 import time
 import requests
 import importlib
 from loguru import logger
 from ray.util.placement_group import placement_group
-from omegaconf import DictConfig
-import hydra
 from typing import List, Tuple
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from functools import lru_cache
 import subprocess
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.training_batch import TensorBatch, TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.generators.base import GeneratorInput, ConversationType, TrajectoryID
-from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray, validate_cfg
+from skyrl_train.utils.utils import peer_access_supported, print_mem, initialize_ray
+from skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT, _SKYRL_USE_NEW_INFERENCE
+from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+from skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl_train.inference_servers.router import InferenceRouter
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
 
-def get_test_actor_config() -> DictConfig:
+def get_test_actor_config() -> SkyRLConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
-        cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
-        cfg.trainer.logger = "console"
-        validate_cfg(cfg)
-
-        return cfg
+    cfg = SkyRLConfig()
+    cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
+    cfg.trainer.logger = "console"
+    return cfg
 
 
 def get_rank_0_memory(actor_group, message: str):
@@ -60,10 +59,25 @@ def make_dummy_tensorbatch(seq_len=10, num_actions=4) -> TensorBatch:
     return data
 
 
-def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> TrainingInputBatch:
-    """Create a dummy TrainingInputBatch"""
+def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4, action_lengths=None) -> TrainingInputBatch:
+    """Create a dummy TrainingInputBatch.
+
+    Args:
+        action_lengths: Optional list of per-sample valid action lengths.
+            If provided, loss_mask and response_mask will be right-padded per
+            sample (1s then 0s). Length must equal batch_size. Each value must
+            be <= num_actions.
+    """
 
     torch.manual_seed(42)
+
+    loss_mask = torch.ones((batch_size, num_actions), dtype=int, device="cpu")
+    response_mask = torch.ones((batch_size, num_actions), dtype=int, device="cpu")
+    if action_lengths is not None:
+        assert len(action_lengths) == batch_size
+        for i, valid_len in enumerate(action_lengths):
+            loss_mask[i, valid_len:] = 0
+            response_mask[i, valid_len:] = 0
 
     # Add all the required fields for training
     data = TrainingInputBatch(
@@ -75,8 +89,9 @@ def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> Traini
             "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
             "returns": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
             "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
-            "loss_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
-            "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+            "loss_mask": loss_mask,
+            "response_mask": response_mask,
+            "rollout_logprobs": 0.2 * torch.ones((batch_size, num_actions), device="cpu"),
         }
     )
     data.metadata = {"response_length": num_actions}
@@ -338,72 +353,113 @@ def ray_init_for_tests():
     ray.init(runtime_env={"env_vars": env_vars})
 
 
-async def run_inference(client, prompts, sampling_params):
+async def run_inference(client, prompts, sampling_params, tokenizer=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
+    if isinstance(client, RemoteInferenceClient):
+        # convert to prompt token ids
+        assert tokenizer is not None
+        prompt_token_ids = tokenizer.apply_chat_template(prompts, add_generation_prompt=True)
+        engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     return await client.generate(engine_input)
 
 
 # TODO: this is kind of messy. All these information are inside cfg but we are passing them in
 # again. Make a global get_test_config function that is parametrized.
 def init_inference_engines(
-    cfg,
-    model,
-    use_local,
-    async_engine,
-    tp_size,
-    colocate_all,
-    backend,
-    gpu_memory_utilization=0.6,
-    num_inference_engines=1,
-    sleep_level=2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
-    enable_lora=False,
-    max_num_seqs=1024,
-    engine_init_kwargs={},
+    cfg: SkyRLConfig,
+    model: str,
+    use_local: bool,
+    async_engine: bool,
+    tp_size: int,
+    colocate_all: bool,
+    backend: str,
+    gpu_memory_utilization: float = 0.6,
+    num_inference_engines: int = 1,
+    sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
+    enable_lora: bool = False,
+    max_num_seqs: int = 1024,
+    engine_init_kwargs: Dict[str, Any] = {},
 ):
     assert use_local, "This test does not yet support remote engines."
     assert backend in ["vllm", "sglang"]
     if not ray.is_initialized():
         initialize_ray(cfg)
     if colocate_all:
-        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
+        pg = placement_group(
+            [{"GPU": 1, "CPU": 1}]
+            * tp_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+            * num_inference_engines,
+            strategy="PACK",
+        )
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         sleep = True
     else:
         pg, sleep = None, False
 
+    # Extract served_model_name from config if set
+    served_model_name = cfg.generator.served_model_name
+
     tokenizer = AutoTokenizer.from_pretrained(model)
-    eps = create_ray_wrapped_inference_engines(
-        num_inference_engines=num_inference_engines,
-        tensor_parallel_size=tp_size,
-        model_dtype="bfloat16",
-        pretrain=model,
-        seed=42,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=True,
-        enforce_eager=True,
-        shared_pg=pg,
-        gpu_memory_utilization=gpu_memory_utilization,
-        inference_engine_enable_sleep=sleep,
-        async_engine=async_engine,
-        max_num_batched_tokens=8192,
-        max_num_seqs=max_num_seqs,
-        tokenizer=tokenizer,
-        backend=backend,
-        sleep_level=sleep_level,
-        enable_lora=enable_lora,
-        engine_init_kwargs=engine_init_kwargs,
-    )
-    client = InferenceEngineClient(eps, tokenizer, cfg)
+
+    # Return both router and server group if created to keep references alive
+    router = None
+    server_group = None
+
+    if _SKYRL_USE_NEW_INFERENCE:
+        # init with internal router and servers
+        server_group = ServerGroup(
+            cli_args=build_vllm_cli_args(cfg),
+            num_servers=num_inference_engines * cfg.generator.inference_engine_data_parallel_size,
+            placement_group=pg if colocate_all else None,
+            enable_dp=cfg.generator.inference_engine_data_parallel_size > 1,
+        )
+        server_infos = server_group.start()
+        server_urls = [info.url for info in server_infos]
+
+        router = InferenceRouter(server_urls=server_urls)
+        proxy_url = router.start()
+        logger.info(
+            f"HTTP Inference: Built servers and router internally - "
+            f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={colocate_all}"
+        )
+        client = RemoteInferenceClient(proxy_url=proxy_url, server_urls=server_urls, model_name=model)
+    else:
+        eps = create_ray_wrapped_inference_engines(
+            num_inference_engines=num_inference_engines,
+            tensor_parallel_size=tp_size,
+            model_dtype="bfloat16",
+            pretrain=model,
+            seed=42,
+            vllm_v1_disable_multiproc=True,
+            enable_prefix_caching=True,
+            enforce_eager=True,
+            shared_pg=pg,
+            gpu_memory_utilization=gpu_memory_utilization,
+            inference_engine_enable_sleep=sleep,
+            async_engine=async_engine,
+            max_num_batched_tokens=8192,
+            max_num_seqs=max_num_seqs,
+            tokenizer=tokenizer,
+            backend=backend,
+            sleep_level=sleep_level,
+            enable_lora=enable_lora,
+            engine_init_kwargs=engine_init_kwargs,
+            served_model_name=served_model_name,
+        )
+        client = InferenceEngineClient(eps, tokenizer, cfg)
+
     if sleep:
         asyncio.run(client.wake_up())
-    return client, pg
+    return client, pg, router, server_group
 
 
 def init_remote_inference_servers(
     tp_size: int,
     backend: str,
     tokenizer: PreTrainedTokenizerBase,
-    config: DictConfig,
+    config: SkyRLConfig,
     model: str,
 ) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()

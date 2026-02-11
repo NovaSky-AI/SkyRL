@@ -12,7 +12,7 @@ from skyrl_train.generators.base import (
     MetricsOutput,
 )
 from skyrl_train.inference_engines.base import ConversationType
-from omegaconf import DictConfig
+from skyrl_train.config import ChatTemplateConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
 
@@ -99,7 +99,7 @@ CUSTOM_CHAT_TEMPLATES = {
 }
 
 
-def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConfig]] = None) -> Optional[str]:
+def get_custom_chat_template(chat_template_config: Optional[Union[dict, ChatTemplateConfig]] = None) -> Optional[str]:
     """
     Get custom chat template based on the new config structure.
 
@@ -112,11 +112,14 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
     if chat_template_config is None:
         return None
 
-    source = chat_template_config.get("source")
+    if isinstance(chat_template_config, dict):
+        chat_template_config = ChatTemplateConfig(**chat_template_config)
+
+    source = chat_template_config.source
     if not source:
         raise ValueError("'source' is required in chat_template_config")
 
-    name_or_path = chat_template_config.get("name_or_path")
+    name_or_path = chat_template_config.name_or_path
     if not name_or_path:
         return None  # if name_or_path is not provided, use the default chat template from the tokenizer
 
@@ -141,13 +144,22 @@ def get_custom_chat_template(chat_template_config: Optional[Union[dict, DictConf
         raise ValueError(f"Invalid source '{source}'. Must be 'name' or 'file'")
 
 
-def get_generation_prompt_ids(tokenizer) -> List[int]:
+def get_generation_prompt_ids(tokenizer, chat_template: Optional[str] = None) -> List[int]:
     """
     Helper function to get the generation prompt ids for a given tokenizer.
+
+    Args:
+        tokenizer: HuggingFace tokenizer with chat_template support.
+        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+
+    Returns:
+        List[int]: Token IDs for the generation prompt (e.g., "<|im_start|>assistant\n" for Qwen).
     """
-    empty_user = tokenizer.apply_chat_template([{"role": "user", "content": ""}], tokenize=True)
+    empty_user = tokenizer.apply_chat_template(
+        [{"role": "user", "content": ""}], tokenize=True, chat_template=chat_template
+    )
     empty_user_with_generation_prompt = tokenizer.apply_chat_template(
-        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True
+        [{"role": "user", "content": ""}], add_generation_prompt=True, tokenize=True, chat_template=chat_template
     )
 
     generation_prompt_ids = empty_user_with_generation_prompt[len(empty_user) :]
@@ -392,7 +404,7 @@ def prepare_generator_input(
     return generator_input, uids
 
 
-def encode_messages_subset(messages: ConversationType, tokenizer):
+def encode_messages_subset(messages: ConversationType, tokenizer, chat_template: Optional[str] = None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
     This function tokenizes messages as if they are part of a larger conversation, ensuring
@@ -415,10 +427,16 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
                  one message. These are assumed to be a subset from a larger conversation.
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
 
     Returns:
         List[int]: Token IDs for the given messages, with proper multi-turn context handling.
     """
+    # TODO(Charlie): what are the tokenizers that could lead to clipping issues? Namely the previous turn ending
+    # token can be combined with the tokens of the start of a turn. e.g. Qwen3 with a dummy chat template in
+    # `test_utils.py` have this issue. Try `encode_messages_subset(messages, qwen3_tokenizer, chat_template=dummy_chat_template)`
+    # But this case is not realistic.
+
     assert len(messages), "messages list cannot be empty"
     # Follows https://jybsuper.github.io/posts/multiturn_tokenization/#the-breakthrough-fixed-base-approach
     base_conversation = [
@@ -429,6 +447,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         base_conversation,
         add_generation_prompt=False,
         tokenize=True,
+        chat_template=chat_template,
     )
 
     full_conversation = base_conversation + messages
@@ -436,12 +455,15 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         full_conversation,
         add_generation_prompt=False,
         tokenize=True,
+        chat_template=chat_template,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None):
+def get_response_ids_and_loss_mask_from_messages(
+    messages: ConversationType, tokenizer, assistant_logprobs=None, chat_template: Optional[str] = None
+):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -454,6 +476,8 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
         assistant_logprobs: Optional list of logprobs for each assistant message. In the format of
                 `[[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]`.
+        chat_template: Optional custom chat template string. If None, uses the tokenizer's default.
+                       This should be the same chat template used for serving if a custom one was used.
 
     Returns:
         Tuple[List[int], List[int], Optional[List[float]]]: response ids, loss mask, and rollout logprobs
@@ -461,7 +485,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     assert len(messages), "messages list cannot be empty"
 
     # Needed to correctly mask it zero for assistant messages.
-    generation_prompt_ids = get_generation_prompt_ids(tokenizer)
+    generation_prompt_ids = get_generation_prompt_ids(tokenizer, chat_template=chat_template)
 
     # 1. Initalize the things to accumulate
     response_ids = []
@@ -472,7 +496,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer)
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer, chat_template=chat_template)
         response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.
