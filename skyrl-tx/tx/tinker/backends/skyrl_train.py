@@ -47,12 +47,11 @@ except ImportError:  # pragma: no cover - exercised only in non-ray installs
     SKYRL_TRAIN_AVAILABLE = False
 
 
-class SkyRLTrainBackendConfig(BaseModel, extra="forbid"):
+class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
     """Configuration for the SkyRL-Train backend.
 
-    Note: Currently uses SkyRL's default config for all parameters.
-    TODO: Implement proper config management to allow Tinker users to override
-    training and inference parameters via backend_config.
+    Extra keys are passed as dot-notation overrides to the SkyRL-Train config,
+    e.g. --backend-config '{"trainer.strategy": "fsdp2", "generator.num_inference_engines": 2}'
     """
 
     pass
@@ -63,19 +62,25 @@ def _build_config(
     config: SkyRLTrainBackendConfig,
     lora_config: types.LoraConfig | None = None,
 ):
-    """Build config for SkyRL-Train workers using default config.
+    """Build config for SkyRL-Train workers using default config with overrides.
 
     Args:
         base_model: HuggingFace model path
-        config: Backend configuration
+        config: Backend configuration (extra keys are applied as dot-notation overrides)
         lora_config: LoRA configuration if using LoRA
     """
+    from omegaconf import OmegaConf
+
     cfg = get_default_config()
     cfg.trainer.policy.model.path = base_model
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
     cfg.trainer.policy.optimizer_config.scheduler = "constant"
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
+
+    # Apply user overrides from backend_config
+    for key, value in config.model_extra.items():
+        OmegaConf.update(cfg, key, value)
 
     return cfg
 
