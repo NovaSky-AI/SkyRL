@@ -208,11 +208,11 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         )
         data_fwd_pass.metadata = {"response_length": student_input_ids.size(1)}
 
-        # Run forward pass on policy model
+        # Run forward_logits pass on policy model to get logits (not log probs)
         if self.colocate_all:
             self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
-        logits_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+        logits_refs = self.policy_model.async_run_ray_method("mesh", "forward_logits", data=data_fwd_pass)
         all_rank_outputs: List[TrainingOutputBatch] = ray.get(logits_refs)
 
         # Collect results
@@ -256,14 +256,15 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             teacher_labels: Teacher labels with -100 for prompt [batch, teacher_seq_len]
 
         Returns:
-            Per-token rewards [batch, student_seq_len] (negative of GOLD loss)
+            Per-token rewards [batch, loss_mask_seq_len] (negative of GOLD loss)
         """
         batch_size = student_logits.size(0)
-        student_seq_len = student_logits.size(1)
+        # Use loss_mask sequence length for rewards to ensure shape compatibility
+        loss_mask_seq_len = student_loss_mask.size(1)
         device = student_logits.device
 
-        # Initialize rewards tensor
-        rewards = torch.zeros(batch_size, student_seq_len, device=device)
+        # Initialize rewards tensor with loss_mask shape for compatibility
+        rewards = torch.zeros(batch_size, loss_mask_seq_len, device=device)
 
         for i in range(batch_size):
             # Get student response region
@@ -328,8 +329,9 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                         # Lower loss = better match = higher reward
                         if g < len(student_groups):
                             for tok_idx in student_groups[g]:
-                                if tok_idx < (student_end - student_start):
-                                    rewards[i, student_start + tok_idx] = -group_loss / len(student_groups[g])
+                                abs_idx = student_start + tok_idx
+                                if tok_idx < (student_end - student_start) and abs_idx < loss_mask_seq_len:
+                                    rewards[i, abs_idx] = -group_loss / len(student_groups[g])
                 else:
                     # Alignment failed - leave rewards as zeros for this sample
                     logger.warning(

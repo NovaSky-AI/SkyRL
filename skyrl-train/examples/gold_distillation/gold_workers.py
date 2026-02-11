@@ -44,27 +44,34 @@ def _forward_micro_batch_logits(model, micro_batch: TrainingInputBatch) -> Train
         logits = output["logits"]  # [batch, seq_len, vocab_size]
 
     logits = logits.to("cpu")
-    return TrainingOutputBatch({"output": logits}, metadata=micro_batch.metadata)
+    output_batch = TrainingOutputBatch({"output": logits})
+    output_batch.metadata = micro_batch.metadata
+    return output_batch
 
 
 class GOLDFSDPPolicyWorkerBase(FSDPPolicyWorkerBase):
     """
-    FSDP-compatible policy worker that returns full logits instead of log probabilities.
+    FSDP-compatible policy worker for GOLD distillation.
 
-    This is required for GOLD (General On-policy Logit Distillation) because
-    the ULD loss needs to compare sorted probability distributions across
-    different vocabulary sizes.
+    Uses the standard log probabilities forward pass (inherited from FSDPPolicyWorkerBase)
+    since the policy model still needs log probs for standard RL training.
 
-    Inherits FSDP functionality from FSDPPolicyWorkerBase:
-    - offload_to_cpu / backload_to_gpu for memory management
-    - init_model for FSDP-wrapped model initialization
-    - forward with resharding after forward pass
-    - ppo_train for policy gradient updates
+    Provides an additional `forward_logits` method that returns full logits for
+    GOLD reward computation.
     """
 
-    def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        """Forward pass that returns logits instead of log probs."""
-        return _forward_micro_batch_logits(self.model, micro_batch)
+    def forward_logits(self, data: TrainingInputBatch):
+        """
+        Forward pass that returns full logits instead of log probs.
+
+        This method is used by GOLD distillation to get logits for reward computation,
+        while the standard `forward` method returns log probs for RL training.
+        """
+        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+        outputs = []
+        for micro_batch in micro_batches:
+            outputs.append(_forward_micro_batch_logits(self.model, micro_batch))
+        return TrainingOutputBatch.cat(outputs)
 
 
 class GOLDFSDPRefWorkerBase(FSDPRefWorkerBase):
@@ -74,11 +81,6 @@ class GOLDFSDPRefWorkerBase(FSDPRefWorkerBase):
     This is required for GOLD (General On-policy Logit Distillation) because
     the ULD loss needs to compare sorted probability distributions across
     different vocabulary sizes.
-
-    Inherits FSDP functionality from FSDPRefWorkerBase:
-    - offload_to_cpu / backload_to_gpu for memory management
-    - init_model for FSDP-wrapped model initialization
-    - forward with resharding after forward pass
     """
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
