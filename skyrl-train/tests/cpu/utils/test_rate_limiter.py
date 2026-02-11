@@ -6,6 +6,7 @@ import asyncio
 import time
 
 import pytest
+from omegaconf import OmegaConf
 
 from skyrl_train.utils.rate_limiter import (
     AsyncRateLimiter,
@@ -388,3 +389,17 @@ class TestCreateRateLimiter:
     def test_dict_config_invalid_rate_raises_error(self):
         with pytest.raises(ValueError, match="trajectories_per_second must be >= 1.0"):
             create_rate_limiter({"enabled": True, "trajectories_per_second": 0.5})
+
+    def test_omegaconf_dictconfig_with_partial_keys(self):
+        """DictConfig (from OmegaConf) should be handled like a dict, with missing keys defaulting.
+        """
+        cfg = OmegaConf.create({"enabled": True, "trajectories_per_second": 5.0})
+        limiter = create_rate_limiter(cfg)
+        assert isinstance(limiter, AsyncRateLimiter)
+
+    def test_omegaconf_dictconfig_with_all_keys(self):
+        cfg = OmegaConf.create(
+            {"enabled": True, "trajectories_per_second": 10.0, "max_concurrency": 64}
+        )
+        limiter = create_rate_limiter(cfg)
+        assert isinstance(limiter, AsyncRateLimiter)

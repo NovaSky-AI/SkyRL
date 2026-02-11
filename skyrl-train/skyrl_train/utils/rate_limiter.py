@@ -11,6 +11,7 @@ Rates < 1.0 are not supported due to the token bucket implementation.
 import asyncio
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -176,13 +177,16 @@ class AsyncRateLimiter(RateLimiterInterface):
         self._last_refill = now
 
 
-def create_rate_limiter(config: Union[RateLimiterConfig, dict, None]) -> RateLimiterInterface:
+def create_rate_limiter(
+    config: Union[RateLimiterConfig, Mapping, None],
+) -> RateLimiterInterface:
     """Factory function to create a rate limiter from config.
 
     Args:
         config: Rate limiter configuration. Can be:
             - RateLimiterConfig dataclass
-            - dict with 'enabled', 'trajectories_per_second', and/or 'max_concurrency' keys
+            - Any Mapping (dict, OmegaConf DictConfig, etc.) with 'enabled',
+              'trajectories_per_second', and/or 'max_concurrency' keys
             - None (returns NoOpRateLimiter)
 
     Returns:
@@ -192,7 +196,7 @@ def create_rate_limiter(config: Union[RateLimiterConfig, dict, None]) -> RateLim
     if config is None:
         return NoOpRateLimiter()
 
-    if isinstance(config, dict):
+    if isinstance(config, Mapping):
         config = RateLimiterConfig(
             enabled=config.get("enabled", False),
             trajectories_per_second=config.get("trajectories_per_second"),
