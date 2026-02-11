@@ -53,6 +53,7 @@ from tx.utils.models import (
     insert_adapter_state,
     round_up_seq_len,
     resolve_model_path,
+    get_adapter_idx,
 )
 from tx.utils.log import logger
 
@@ -127,15 +128,22 @@ class AccumulatedGradients:
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
-        return jax.tree.map(
-            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
-            self.grad_sum,
-        )
+
+        def compute_mean(path, g):
+            idx = get_adapter_idx(path, adapter_index)
+            return jnp.zeros_like(g).at[idx].set(g[idx] / count.astype(g.dtype))
+
+        return jax.tree.map_with_path(compute_mean, self.grad_sum)
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
+
+        def reset_grad(path, g):
+            idx = get_adapter_idx(path, adapter_index)
+            return g.at[idx].set(0.0)
+
         return AccumulatedGradients(
-            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            grad_sum=jax.tree.map_with_path(reset_grad, self.grad_sum),
             counts=self.counts.at[adapter_index].set(0),
         )
 
