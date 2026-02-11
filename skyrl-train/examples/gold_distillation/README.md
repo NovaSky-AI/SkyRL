@@ -49,11 +49,10 @@ To get started, first set up the dataset from the DAPO example:
 bash examples/algorithms/dapo/prepare_dapo_data.sh
 ```
 
-Then, just make sure to set the path to your desired teacher model, and you're ready to kick off training!
+Then, just make sure you set `TEACHER_MODEL` to your desired teacher model, and you're ready to kick off training!
 
 ```bash
-TEACHER_MODEL=<YOUR_MODEL_HERE>
-bash examples/gold_distillation/run_gold_distill_qwen_to_llama.sh trainer.ref.model.path=$TEACHER_MODEL
+bash examples/gold_distillation/run_gold_distill_qwen_to_llama.sh
 ```
 
 ## References
