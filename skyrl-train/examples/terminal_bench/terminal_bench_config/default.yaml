@@ -44,13 +44,33 @@ agent:
     # Store all messages in the trial output (required for SkyRL training)
     store_all_messages: true
 
+    # The only sampling param that directly gets passed to Terminus
+    temperature: 1.0
+
     # Model info for token budgeting
+    # NOTE: max_input_tokens should match +generator.engine_init_kwargs.max_model_len
     model_info:
-      max_input_tokens: 24576
-      max_output_tokens: 8192
+      max_input_tokens: 32768
+      max_output_tokens: 32768
       # Set costs to 0 for local training
       input_cost_per_token: 0.0
       output_cost_per_token: 0.0
+
+    # Additional kwargs passed through to LiteLLM's acompletion() call.
+    # These are forwarded via Terminus2 -> LiteLLM -> litellm.acompletion(**kwargs).
+    # Any parameter that litellm.acompletion() accepts can be set here, including:
+    #   - timeout: LLM request timeout in seconds (default: litellm's 600s)
+    #   - max_retries: Number of retries at the OpenAI SDK level (default: 2)
+    #   - top_p, top_k, frequency_penalty, presence_penalty, etc.
+    llm_kwargs:
+      # LLM request timeout in seconds. Higher values prevent premature retries.
+      timeout: 900
+      # Set to 0 to disable OpenAI SDK retries from LiteLLM.
+      max_retries: 0
+      # Sampling params that directly get passed to LiteLLM's acompletion() call.
+      top_p: 1.0
+      top_k: -1
+      min_p: 0.0
 
 # Environment configuration
 # See: harbor.models.trial.config.EnvironmentConfig

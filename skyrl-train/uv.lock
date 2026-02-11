@@ -1395,7 +1395,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.1.43"
-source = { git = "https://github.com/laude-institute/harbor?rev=5921cc40e8f6b5b0df0a3dc6354e0e679447eb54#5921cc40e8f6b5b0df0a3dc6354e0e679447eb54" }
+source = { git = "https://github.com/laude-institute/harbor?rev=29ed63699ef16e5d7817dd4fd26d557d6a861b9a#29ed63699ef16e5d7817dd4fd26d557d6a861b9a" }
 dependencies = [
     { name = "claude-agent-sdk" },
     { name = "datasets" },
@@ -2196,7 +2196,7 @@ wheels = [
 
 [[package]]
 name = "modal"
-version = "1.3.0.post1"
+version = "1.3.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -2214,9 +2214,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "watchfiles" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/28/4a6befa42cfa62eedb572b0bbc26edb76b664bf546ee1f9fca566448da8d/modal-1.3.0.post1.tar.gz", hash = "sha256:e86b62c6cfd5c4b40fdf7bcf078d24e4ed7730d2d0b7c70dc3225a36e85067a4", size = 649508, upload-time = "2025-12-20T02:47:56.237Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/67/3913d3166326960357b43e30210c1b456ab37a117a3adc522b20e4a8cefb/modal-1.3.2.tar.gz", hash = "sha256:d80fd98ce7729405546252b7a6729baf3a9cb22b80d303779b0c0d48b9af3397", size = 661504, upload-time = "2026-01-30T19:18:51.937Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/87/3c4c9136c2d553307d8547e39bb2ed755e165b8a8272b6990af9912fef5c/modal-1.3.0.post1-py3-none-any.whl", hash = "sha256:98d338aade676bafd7c80645ef7b4302a6a7219338124ef8b210854a043ec7ed", size = 744342, upload-time = "2025-12-20T02:47:53.726Z" },
+    { url = "https://files.pythonhosted.org/packages/67/2c/8b3d26ce904a79f238c46d66159edc2cbca3910cfd85ee8c35c6985e269a/modal-1.3.2-py3-none-any.whl", hash = "sha256:7aadace311e61d16223e197efe745cdcc887ff4b8cd28288f1c6059bd227d9c3", size = 758034, upload-time = "2026-01-30T19:18:50.432Z" },
 ]
 
 [[package]]
@@ -4728,7 +4728,7 @@ requires-dist = [
     { name = "flashinfer-python", marker = "(sys_platform == 'linux' and extra == 'mcore' and extra == 'sglang') or (sys_platform == 'linux' and extra == 'sglang' and extra == 'vllm')" },
     { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'vllm'" },
     { name = "func-timeout" },
-    { name = "harbor", marker = "extra == 'harbor'", git = "https://github.com/laude-institute/harbor?rev=5921cc40e8f6b5b0df0a3dc6354e0e679447eb54" },
+    { name = "harbor", marker = "extra == 'harbor'", git = "https://github.com/laude-institute/harbor?rev=29ed63699ef16e5d7817dd4fd26d557d6a861b9a" },
     { name = "hf-transfer" },
     { name = "hydra-core", specifier = "==1.3.2" },
     { name = "jaxtyping" },
@@ -5503,6 +5503,7 @@ dependencies = [
     { name = "typing-extensions", marker = "sys_platform != 'linux' or (extra == 'extra-11-skyrl-train-flashrl' and extra == 'extra-11-skyrl-train-mcore') or (extra == 'extra-11-skyrl-train-flashrl' and extra == 'extra-11-skyrl-train-miniswe') or (extra == 'extra-11-skyrl-train-flashrl' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-flashrl' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-mcore' and extra == 'extra-11-skyrl-train-sglang') or (extra == 'extra-11-skyrl-train-mcore' and extra == 'extra-11-skyrl-train-vllm') or (extra == 'extra-11-skyrl-train-sglang' and extra == 'extra-11-skyrl-train-vllm')" },
 ]
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/d3/54/a2ba279afcca44bbd320d4e73675b282fcee3d81400ea1b53934efca6462/torch-2.10.0-2-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:13ec4add8c3faaed8d13e0574f5cd4a323c11655546f91fbe6afa77b57423574", size = 79498202, upload-time = "2026-02-10T21:44:52.603Z" },
     { url = "https://files.pythonhosted.org/packages/cc/af/758e242e9102e9988969b5e621d41f36b8f258bb4a099109b7a4b4b50ea4/torch-2.10.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:5fd4117d89ffd47e3dcc71e71a22efac24828ad781c7e46aaaf56bf7f2796acf", size = 145996088, upload-time = "2026-01-21T16:24:44.171Z" },
     { url = "https://files.pythonhosted.org/packages/23/8e/3c74db5e53bff7ed9e34c8123e6a8bfef718b2450c35eefab85bb4a7e270/torch-2.10.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:787124e7db3b379d4f1ed54dd12ae7c741c16a4d29b49c0226a89bea50923ffb", size = 915711952, upload-time = "2026-01-21T16:23:53.503Z" },
     { url = "https://files.pythonhosted.org/packages/6e/01/624c4324ca01f66ae4c7cd1b74eb16fb52596dce66dbe51eff95ef9e7a4c/torch-2.10.0-cp312-cp312-win_amd64.whl", hash = "sha256:2c66c61f44c5f903046cc696d088e21062644cbe541c7f1c4eaae88b2ad23547", size = 113757972, upload-time = "2026-01-21T16:24:39.516Z" },
