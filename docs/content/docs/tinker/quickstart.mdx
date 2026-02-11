@@ -9,7 +9,6 @@ If you run into any issues, please [open an issue](https://github.com/NovaSky-AI
 ## Prerequisites
 
 - CUDA 12.8
-- Python 3.12+
 - [uv](https://docs.astral.sh/uv/) package manager
 
 ## 1. Clone and Install SkyRL
@@ -17,6 +16,7 @@ If you run into any issues, please [open an issue](https://github.com/NovaSky-AI
 ```bash
 git clone https://github.com/NovaSky-AI/SkyRL.git
 cd SkyRL/skyrl-tx
+uv python install 3.12
 uv sync --extra tinker --extra skyrl_train
 ```
 
