@@ -297,7 +297,7 @@ class SkyRLTrainBackend(AbstractBackend):
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:
                     # Clone real data so shapes/dtypes are valid for the model
-                    padding_tensor = tensor[:pad_size].clone()
+                    padding_tensor = tensor[torch.arange(pad_size) % tensor.shape[0]].clone()
                 new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         padded = TrainingInputBatch(new_tensors)
