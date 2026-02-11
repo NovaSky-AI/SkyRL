@@ -40,6 +40,14 @@ class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
     pass
 
 
+class FSDPBackendConfig(SkyRLTrainBackendConfig):
+    strategy: str = "fsdp2"
+
+
+class MegatronBackendConfig(SkyRLTrainBackendConfig):
+    strategy: str = "megatron"
+
+
 def _build_config(
     base_model: str,
     config: SkyRLTrainBackendConfig,
@@ -58,11 +66,14 @@ def _build_config(
     cfg.trainer.policy.model.path = base_model
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
-    cfg.trainer.policy.optimizer_config.scheduler = "constant"
+    cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
 
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
+
+    assert config.strategy in ("fsdp2", "megatron"), "Only fsdp and megatron are supported for SkyRL-Train backend"
+    cfg.trainer.strategy = config.strategy
 
     # Apply user overrides from backend_config
     for key, value in config.model_extra.items():
@@ -126,7 +137,9 @@ class SkyRLTrainBackend(AbstractBackend):
             record_memory=cfg.trainer.policy.record_memory,
         )
 
-        policy_num_training_steps = None
+        # set to a large number for megatron scheduler init
+        # lr will be managed externally via set_lr()
+        policy_num_training_steps = 1e9
         ray.get(
             policy_model.async_init_model(
                 cfg.trainer.policy.model.path,
