@@ -16,9 +16,9 @@ from tx.tinker import types
 class KVCache:
     """Key-value cache for all layers, each entry in the list corresponds to one layer."""
 
-    keys: list[jax.Array]
-    values: list[jax.Array]
-    cache_position: jax.Array  # Per-sequence positions of shape [B] for left-aligned decoding
+    keys: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
+    values: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
+    cache_position: jax.Array  # Per-sequence positions of shape (batch,)
 
     @staticmethod
     def update(
@@ -84,6 +84,21 @@ class KVCache:
             values=[jnp.pad(v, pad_spec) for v in self.values],
             cache_position=self.cache_position,
         )
+
+    @property
+    def num_layers(self) -> int:
+        """Number of layers in the cache."""
+        return len(self.keys)
+
+    @property
+    def batch_size(self) -> int:
+        """Batch size."""
+        return self.keys[0].shape[0]
+
+    @property
+    def seq_len(self) -> int:
+        """Current sequence length."""
+        return self.keys[0].shape[1]
 
 
 @jax.tree_util.register_dataclass
