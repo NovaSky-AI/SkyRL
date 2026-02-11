@@ -437,6 +437,9 @@ class DeepseekV3DecoderLayer(nnx.Module):
         else:
             self.mlp = DeepseekV3MLP(config, dtype=dtype, rngs=rngs)
 
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+
         self.attn_connector = Connector(config.hidden_size, expansion_rate, dtype=dtype, rngs=rngs)
         self.mlp_connector = Connector(config.hidden_size, expansion_rate, dtype=dtype, rngs=rngs)
 
@@ -454,7 +457,7 @@ class DeepseekV3DecoderLayer(nnx.Module):
             hidden_states = jnp.repeat(hidden_states[..., None, :], n, axis=-2)
 
         residual = hidden_states
-        hidden_states = self.attn_connector.pre(hidden_states)
+        hidden_states = self.input_layernorm(self.attn_connector.pre(hidden_states))
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
@@ -465,7 +468,7 @@ class DeepseekV3DecoderLayer(nnx.Module):
         hidden_states = self.attn_connector.post(residual, hidden_states)
 
         residual = hidden_states
-        hidden_states = self.mlp_connector.pre(hidden_states)
+        hidden_states = self.post_attention_layernorm(self.mlp_connector.pre(hidden_states))
         mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
         hidden_states = self.mlp_connector.post(residual, mlp_output)
 

@@ -33,7 +33,6 @@ class Connector(nnx.Module):
         C = hidden_dim
 
         self.input_norm = RMSNorm(n * C, eps=eps, elementwise_affine=False, dtype=dtype, rngs=rngs)
-        self.output_norm = RMSNorm(hidden_dim, eps=eps, elementwise_affine=trainable, dtype=dtype, rngs=rngs)
 
         self.phi_pre = Param(n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs)
         self.phi_post = Param(n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs)
@@ -81,10 +80,10 @@ class Connector(nnx.Module):
 
         H_pre = jax.nn.sigmoid(tilde_H_pre)
         self.H_post = 2.0 * jax.nn.sigmoid(tilde_H_post)
-        self.M = sinkhorn_knopp(tilde_H_res, self.sinkhorn_iters, self.eps)
+        self.M = sinkhorn_knopp(tilde_H_res, self.sinkhorn_iters)
 
         x_agg = (H_pre[..., None] * x).sum(axis=-2)
-        return self.output_norm(x_agg)
+        return x_agg
 
     def post(self, residual: jax.Array, output: jax.Array) -> jax.Array:
         y_dist = self.H_post[..., None] * output[..., None, :]
