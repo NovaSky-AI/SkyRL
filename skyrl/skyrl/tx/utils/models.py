@@ -18,7 +18,7 @@ import peft
 
 from skyrl.tx.models.configs import ModelConfig
 from skyrl.utils.log import logger
-from skyrl.tx.utils.storage import download_and_unpack, pack_and_upload
+from skyrl.utils.storage import download_and_unpack, pack_and_upload
 from skyrl.tinker.types import LoraConfig
 
 if TYPE_CHECKING:
