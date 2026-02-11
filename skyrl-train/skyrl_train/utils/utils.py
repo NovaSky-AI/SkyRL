@@ -201,10 +201,6 @@ def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
 
 def validate_auto_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     """Validate batch sizes after auto micro-batch sizing has set the micro batch sizes.
-
-    Should be called after `determine_micro_batch_size` has populated
-    `cfg.trainer.micro_train_batch_size_per_gpu` and
-    `cfg.trainer.micro_forward_batch_size_per_gpu`.
     """
     assert cfg.trainer.micro_train_batch_size_per_gpu > 0, (
         f"Auto micro-batch sizing produced invalid micro_train_batch_size_per_gpu: "
@@ -213,13 +209,6 @@ def validate_auto_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     assert cfg.trainer.micro_forward_batch_size_per_gpu > 0, (
         f"Auto micro-batch sizing produced invalid micro_forward_batch_size_per_gpu: "
         f"{cfg.trainer.micro_forward_batch_size_per_gpu}"
-    )
-
-    # Verify divisibility with mini-batch sizes
-    policy_mini_batch_size_per_gpu = get_policy_mini_batch_size_per_gpu(cfg)
-    assert policy_mini_batch_size_per_gpu % cfg.trainer.micro_train_batch_size_per_gpu == 0, (
-        f"Auto-determined micro_train_batch_size_per_gpu {cfg.trainer.micro_train_batch_size_per_gpu} "
-        f"does not evenly divide policy_mini_batch_size_per_gpu {policy_mini_batch_size_per_gpu}"
     )
 
 

@@ -531,7 +531,7 @@ class RayPPOTrainer:
             ray.get(refs)
 
             if getattr(cfg.trainer, "auto_micro_batch_size", False):
-                self._auto_determine_micro_batch_sizes(cfg, policy_model, critic_model)
+                self._auto_determine_token_budgets(cfg, policy_model, critic_model)
 
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
         else:
@@ -547,7 +547,7 @@ class RayPPOTrainer:
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
 
             if getattr(cfg.trainer, "auto_micro_batch_size", False):
-                self._auto_determine_micro_batch_sizes(cfg, policy_model, critic_model=None)
+                self._auto_determine_token_budgets(cfg, policy_model, critic_model=None)
 
             policy_model.offload_to_cpu()
             if cfg.trainer.critic.model.path:
@@ -578,50 +578,55 @@ class RayPPOTrainer:
 
         logger.info("init policy/ref/critic models done")
 
-    def _auto_determine_micro_batch_sizes(
+    def _auto_determine_token_budgets(
         self,
         cfg,
         policy_model: PPORayActorGroup,
         critic_model: Optional[PPORayActorGroup],
     ):
-        """Profile GPU memory to auto-determine `micro_train_batch_size_per_gpu`.
+        """Profile GPU memory to determine the token budget for dynamic micro-batching.
 
-        Calls `auto_determine_micro_batch_size` on every policy worker via
-        Ray, takes the minimum across workers, and
-        writes the result back into `cfg.trainer`.
+        Each worker profiles the model at several `(batch_size, seq_len)`
+        combinations and returns a token budget C such that any micro-batch
+        with `batch_size x max_seq_len ≤ C` fits in GPU memory.
+
+        The minimum budget across all workers is taken as the global budget.
         """
-        from skyrl_train.utils.utils import (
-            get_policy_mini_batch_size_per_gpu,
-            validate_auto_batch_sizes,
-        )
-
         max_seq_len = (
             cfg.trainer.max_prompt_length + cfg.generator.sampling_params.max_generate_length
         )
 
-        policy_mini_batch_size_per_gpu = get_policy_mini_batch_size_per_gpu(cfg)
-
         logger.info(
-            f"Auto micro-batch sizing: profiling policy workers "
-            f"(max_seq_len={max_seq_len}, mini_batch_per_gpu={policy_mini_batch_size_per_gpu})"
+            f"Auto micro-batch sizing: profiling policy workers (max_seq_len={max_seq_len})"
         )
         policy_refs = policy_model.async_run_ray_method(
             "pass_through",
-            "auto_determine_micro_batch_size",
+            "auto_determine_token_budget",
             max_seq_len,
-            policy_mini_batch_size_per_gpu,
         )
-        policy_sizes = ray.get(policy_refs)
-        determined_size = min(policy_sizes)
+        policy_budgets = ray.get(policy_refs)
+        global_budget = min(policy_budgets)
 
         logger.info(
-            f"Auto micro-batch sizing: per-worker results={policy_sizes}, "
-            f"using min={determined_size}"
+            f"Auto micro-batch sizing: per-worker token budgets={policy_budgets}, "
+            f"using min={global_budget}"
         )
 
-        cfg.trainer.micro_train_batch_size_per_gpu = determined_size
-        cfg.trainer.micro_forward_batch_size_per_gpu = determined_size
-        validate_auto_batch_sizes(cfg)
+        assert global_budget > 0, (
+            f"Auto micro-batch sizing failed: token budget is {global_budget}.  "
+            "The model may be too large for the available GPU memory at the configured "
+            f"max_seq_len={max_seq_len}. Try reducing max_prompt_length or max_generate_length, "
+            "or set micro_train_batch_size_per_gpu manually."
+        )
+
+        micro_bs = max(global_budget // max_seq_len, 1)
+        cfg.trainer.micro_train_batch_size_per_gpu = micro_bs
+        cfg.trainer.micro_forward_batch_size_per_gpu = micro_bs
+        logger.info(
+            f"Auto micro-batch sizing: token_budget={global_budget}, "
+            f"fixed micro_batch_size={micro_bs} "
+            f"(at max_seq_len={max_seq_len})"
+        )
 
     def init_weight_sync_state(self):
         """
