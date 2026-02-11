@@ -29,6 +29,7 @@ from skyrl_train.entrypoints.main_base import (
     create_remote_inference_engines_from_config,
 )
 from skyrl_train.generators.base import GeneratorInterface
+
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray
@@ -38,9 +39,10 @@ from skyrl_train.utils.ppo_utils import (
     reduce_loss,
 )
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.workers.fsdp.fsdp_worker import CriticWorker
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 
-# Import GOLD utilities for cross-tokenizer distillation
+from examples.gold_distillation.gold_workers import GOLDPolicyWorker, GOLDRefWorker
 from examples.gold_distillation.gold_utils import (
     build_teacher_inputs_from_texts,
     build_alignment_groups_from_ids,
@@ -69,7 +71,6 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         self.ref_tokenizer = ref_tokenizer
         self.ref_generator = ref_generator
 
-        # GOLD/ULD configuration
         self.gold_temperature = 1.0
         self.gold_use_extended_uld = True
 
@@ -103,10 +104,11 @@ class GOLDDistillationTrainer(RayPPOTrainer):
 
         for i in range(batch_size):
             seq = sequences[i]
-            mask = loss_mask[i]
+            attn_mask = attention_mask[i].bool()
+            loss_m = loss_mask[i]
 
             # Find where the response starts (first 1 in loss_mask)
-            response_positions = mask.nonzero(as_tuple=True)[0]
+            response_positions = loss_m.nonzero(as_tuple=True)[0]
             if len(response_positions) > 0:
                 response_start = response_positions[0].item()
                 response_end = response_positions[-1].item() + 1
@@ -115,14 +117,9 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                 response_start = seq.size(0)
                 response_end = seq.size(0)
 
-            # Decode prompt and completion separately
-            prompt_ids = seq[:response_start].tolist()
-            completion_ids = seq[response_start:response_end].tolist()
-
-            # Remove padding tokens
-            if self.tokenizer.pad_token_id is not None:
-                prompt_ids = [t for t in prompt_ids if t != self.tokenizer.pad_token_id]
-                completion_ids = [t for t in completion_ids if t != self.tokenizer.pad_token_id]
+            # Use attention_mask to filter real tokens (exclude padding)
+            prompt_ids = seq[:response_start][attn_mask[:response_start]].tolist()
+            completion_ids = seq[response_start:response_end][attn_mask[response_start:response_end]].tolist()
 
             prompt_text = self.tokenizer.decode(prompt_ids, skip_special_tokens=False)
             completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
@@ -142,7 +139,6 @@ class GOLDDistillationTrainer(RayPPOTrainer):
 
         NOTE: For cross-tokenizer GOLD distillation, the ref model worker must be configured
         to return full logits (shape [batch, seq_len, vocab_size]) instead of log_probs.
-        Use GOLDRefWorkerBase from gold_ref_worker.py for this purpose.
 
         Args:
             teacher_input_ids: Teacher-tokenized input IDs [batch, seq_len]
@@ -335,45 +331,21 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                                 if tok_idx < (student_end - student_start):
                                     rewards[i, student_start + tok_idx] = -group_loss / len(student_groups[g])
                 else:
-                    # TODO: Delete? Do we need this? Can we just remove the if statement?
-                    # Fallback: simple per-token comparison
-                    self._compute_simple_gold_rewards(
-                        rewards, i, student_start, student_end, student_probs, teacher_probs
+                    # Alignment failed - leave rewards as zeros for this sample
+                    logger.warning(
+                        f"GOLD alignment failed for batch {i}: empty alignment groups. "
+                        f"Student tokens: {len(student_token_ids)}, Teacher tokens: {len(teacher_token_ids)}. "
+                        "Rewards will be zero for this sample."
                     )
             else:
-                # TODO: Delete? Do we need this? Can we just remove the if statement?
-                # Simple per-token comparison without alignment
-                self._compute_simple_gold_rewards(rewards, i, student_start, student_end, student_probs, teacher_probs)
+                # Should not happen due to earlier guards, but log if it does
+                logger.warning(
+                    f"GOLD alignment skipped for batch {i}: empty token IDs. "
+                    f"Student tokens: {len(student_token_ids)}, Teacher tokens: {len(teacher_token_ids)}. "
+                    "Rewards will be zero for this sample."
+                )
 
         return rewards
-
-    def _compute_simple_gold_rewards(
-        self,
-        rewards: torch.Tensor,
-        batch_idx: int,
-        student_start: int,
-        student_end: int,
-        student_probs: torch.Tensor,
-        teacher_probs: torch.Tensor,
-    ) -> None:
-        """
-        Compute simple per-token GOLD rewards without alignment.
-
-        Used as fallback when alignment fails or is disabled.
-        """
-        min_len = min(student_probs.size(0), teacher_probs.size(0))
-        for t in range(min_len):
-            s_sorted = student_probs[t].sort(descending=True).values
-            t_sorted = teacher_probs[t].sort(descending=True).values
-
-            max_vocab = max(s_sorted.size(0), t_sorted.size(0))
-            if s_sorted.size(0) < max_vocab:
-                s_sorted = F.pad(s_sorted, (0, max_vocab - s_sorted.size(0)))
-            if t_sorted.size(0) < max_vocab:
-                t_sorted = F.pad(t_sorted, (0, max_vocab - t_sorted.size(0)))
-
-            # Negative L1 loss as reward
-            rewards[batch_idx, student_start + t] = -F.l1_loss(s_sorted, t_sorted, reduction="sum")
 
     @torch.no_grad()
     def fwd_logprobs_values_reward(
@@ -471,20 +443,11 @@ class GOLDDistillationTrainer(RayPPOTrainer):
 
         # Check if we got full logits (required for GOLD/ULD)
         if student_logits is None or teacher_logits is None:
-            # Fallback: workers not configured to return logits
-            # Use approximate KL-based approach (less accurate for cross-tokenizer)
-            print(
-                "[GOLD] WARNING: Model workers returned log_probs instead of logits. "
-                "For proper cross-tokenizer GOLD distillation, configure workers to return logits. "
-                "Falling back to approximate KL-based rewards (may be less accurate)."
+            raise RuntimeError(
+                "GOLD distillation requires model workers to return full logits. "
+                "Ensure you're using GOLDPolicyWorker and GOLDRefWorker. "
+                "See gold_workers.py for reference."
             )
-            self.all_metrics.update({"gold/using_logits": 0.0})
-
-            # Use base log_probs (computed on student tokenization) as fallback
-            # This is the same as the broken approach, but we warn about it
-            teacher_action_log_probs: torch.Tensor = data["base_action_log_probs"]
-            action_log_probs: torch.Tensor = data["action_log_probs"]
-            rewards = -(action_log_probs - teacher_action_log_probs) * loss_masks_all
         else:
             # Proper GOLD/ULD methodology with full logits
             self.all_metrics.update({"gold/using_logits": 1.0})
@@ -568,12 +531,9 @@ class GOLDDistillationExp(BasePPOExp):
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
-        if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
-        elif self.cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
-        else:
-            raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
+        if self.cfg.trainer.strategy == "megatron":
+            # Megatron support would require another worker like GOLDRefWorker and GOLDPolicyWorker for FSDP
+            raise NotImplementedError("Megatron not supported in this implementation")
 
         # NOTE (sumanthrh): Instantiate tracker before trainer init.
         # We have custom validation before this step to give better error messages.
@@ -604,8 +564,8 @@ class GOLDDistillationExp(BasePPOExp):
             colocate_pg=self.colocate_pg,
         )
 
-        # Build the models
-        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
+        # Build the models with GOLD-specific workers that return logits
+        trainer.build_models(GOLDPolicyWorker, CriticWorker, GOLDRefWorker)
         return trainer
 
 
