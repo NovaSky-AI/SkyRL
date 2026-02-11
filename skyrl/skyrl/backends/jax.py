@@ -6,7 +6,7 @@ multiple LoRA adapters via the AccumulatedGradients dataclass.
 
 In multi-host mode, process 0 (coordinator) runs the engine with JaxBackend,
 which broadcasts commands to workers. Workers run separately using `run_worker()`
-or by running this module directly with `python -m skyrl.tinker.backends.jax`.
+or by running this module directly with `python -m skyrl.backends.jax`.
 
 Usage:
     # Coordinator (process 0) - runs the full engine:
@@ -17,7 +17,7 @@ Usage:
     }'
 
     # Workers (process 1+) - run only the worker loop (receives config from coordinator):
-    uv run -m skyrl.tinker.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
+    uv run -m skyrl.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
 import time
@@ -39,8 +39,8 @@ from transformers import AutoTokenizer, PretrainedConfig
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.layers.lora import clear_lora_adapter, init_lora_adapter
 from skyrl.tinker import types
-from skyrl.tinker.backends.backend import AbstractBackend
-from skyrl.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
+from skyrl.backends.backend import AbstractBackend
+from skyrl.backends.utils import pad, pad_batch, pad_to_fsdp
 from skyrl.tinker.loss_fns import LOSS_FUNCTIONS
 from skyrl.tinker.types import LOSS_TYPES
 from skyrl.utils.models import (

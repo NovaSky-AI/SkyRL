@@ -22,7 +22,7 @@ from skyrl.tinker.db_models import (
 )
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig, add_model
-from skyrl.tinker.backends.utils import log_timing
+from skyrl.backends.utils import log_timing
 from skyrl.utils.log import logger
 
 
@@ -148,15 +148,15 @@ def prepare_model_pass_batch(
 def get_backend_classes(backend_name: str):
     """Lazy import backends to avoid importing unused backend dependencies (e.g., JAX, Ray)."""
     if backend_name == "jax":
-        from skyrl.tinker.backends.jax import JaxBackend, JaxBackendConfig
+        from skyrl.backends.jax import JaxBackend, JaxBackendConfig
 
         return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
-        from skyrl.tinker.backends.skyrl_train import SkyRLTrainBackend, FSDPBackendConfig
+        from skyrl.backends.skyrl_train import SkyRLTrainBackend, FSDPBackendConfig
 
         return SkyRLTrainBackend, FSDPBackendConfig
     elif backend_name == "megatron":
-        from skyrl.tinker.backends.skyrl_train import SkyRLTrainBackend, MegatronBackendConfig
+        from skyrl.backends.skyrl_train import SkyRLTrainBackend, MegatronBackendConfig
 
         return SkyRLTrainBackend, MegatronBackendConfig
     else:

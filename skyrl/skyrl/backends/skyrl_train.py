@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.tinker import types
-from skyrl.tinker.backends.backend import AbstractBackend
+from skyrl.backends.backend import AbstractBackend
 from skyrl.utils.log import logger
 
 import ray
@@ -246,28 +246,44 @@ class SkyRLTrainBackend(AbstractBackend):
         max_response_len = max(len(weights) for weights in prepared_batch.all_token_weights)
 
         sequences, attention_masks, loss_masks, response_masks = [], [], [], []
+        action_log_probs_list, advantages_list = [], []
 
-        for seq, weights in zip(full_sequences, prepared_batch.all_token_weights):
+        for seq, weights, logprobs, advs in zip(
+            full_sequences,
+            prepared_batch.all_token_weights,
+            prepared_batch.all_sampling_logprobs,
+            prepared_batch.all_advantages,
+        ):
             pad_len = max_seq_len - len(seq)
             sequences.append([self._tokenizer.pad_token_id] * pad_len + list(seq))
             attention_masks.append([0] * pad_len + [1] * len(seq))
             action_pad = max_response_len - len(weights)
             loss_masks.append([0.0] * action_pad + [float(w) for w in weights])
             response_masks.append([0] * action_pad + [1] * len(weights))
+            action_log_probs_list.append([0.0] * action_pad + [float(lp) for lp in logprobs])
+            advantages_list.append([0.0] * action_pad + [float(a) for a in advs])
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
         loss_mask_tensor = torch.tensor(loss_masks, dtype=torch.float32)
         response_mask_tensor = torch.tensor(response_masks, dtype=torch.long)
 
-        batch = TrainingInputBatch(
-            {
-                "sequences": sequences_tensor,
-                "attention_mask": attention_mask_tensor,
-                "loss_mask": loss_mask_tensor,
-                "response_mask": response_mask_tensor,
-            }
-        )
+        batch_dict = {
+            "sequences": sequences_tensor,
+            "attention_mask": attention_mask_tensor,
+            "loss_mask": loss_mask_tensor,
+            "response_mask": response_mask_tensor,
+        }
+
+        # Include RL fields (action_log_probs, advantages) when data is present
+        has_logprobs = any(len(lp) > 0 for lp in prepared_batch.all_sampling_logprobs)
+        has_advantages = any(len(a) > 0 for a in prepared_batch.all_advantages)
+        if has_logprobs:
+            batch_dict["action_log_probs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
+        if has_advantages:
+            batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
+
+        batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
         return batch
 
