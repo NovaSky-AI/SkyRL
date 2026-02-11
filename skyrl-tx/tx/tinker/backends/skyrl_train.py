@@ -299,6 +299,11 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return metrics
 
+    def _sleep_inference_engines(self):
+        """Sleep inference engines to free GPU memory for training."""
+        if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
+            asyncio.run(self._inference_engine_client.sleep())
+
     def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
@@ -306,6 +311,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_input_ids:
             return {}
 
+        self._sleep_inference_engines()
         batch = self._to_training_batch(prepared_batch)
         loss_fn = prepared_batch.all_loss_fns[0]
         if len(set(prepared_batch.all_loss_fns)) > 1:
@@ -359,6 +365,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_input_ids:
             return {}
 
+        self._sleep_inference_engines()
         batch = self._to_training_batch(prepared_batch)
         data = self._dispatch.forward("policy", batch)
 
