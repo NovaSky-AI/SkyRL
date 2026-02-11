@@ -1,4 +1,5 @@
 import tempfile
+from typing import Any
 
 from flax import nnx
 import jax
@@ -7,9 +8,10 @@ import numpy as np
 import pytest
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from tx.models.configs import Llama3Config, Qwen3Config
+from tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
+from tx.models.types import ModelForCausalLM
 from tx.utils.models import load_safetensors
 
 MODEL_PARAMS = [
@@ -19,26 +21,57 @@ MODEL_PARAMS = [
 MODEL_IDS = ["llama3", "qwen3"]
 
 
-def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
-    """Load model from pre-saved weights directory."""
+def create_model(
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+    *,
+    mesh_axis_types: tuple[jax.sharding.AxisType, ...] | None = None,
+    seed: int = 0,
+    **config_kwargs: Any,
+) -> tuple[ModelForCausalLM, ModelConfig]:
+    """Create model with random weights for testing."""
     base_config = AutoConfig.from_pretrained(model_name)
-    config = config_cls(
-        base_config,
-        max_lora_adapters=1,
-        max_lora_rank=1,
-        shard_attention_heads=True,
+    config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True, **config_kwargs)
+    # Default to Auto axis types to avoid sharding resolution errors
+    if mesh_axis_types is None:
+        mesh_axis_types = (jax.sharding.AxisType.Auto,) * len(mesh_axes)
+    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=mesh_axis_types)
+    with jax.set_mesh(mesh):
+        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(seed))
+    return model, config
+
+
+def load_model(
+    tmp_dir: str,
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+    *,
+    loss_chunk_size: int = 0,
+) -> ModelForCausalLM:
+    """Load model from pre-saved weights directory."""
+    model, config = create_model(
+        model_name,
+        config_cls,
+        model_cls,
+        mesh_axes,
         loss_chunk_size=loss_chunk_size,
         gradient_checkpointing=False,
     )
-    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=(jax.sharding.AxisType.Auto,) * 2)
-    with jax.set_mesh(mesh):
-        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
     load_safetensors(tmp_dir, config, model)
     return model
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
-def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
+def test_compute_logits(
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+) -> None:
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -65,7 +98,13 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
 @pytest.mark.parametrize("chunk_size", [8, 16, 32])
-def test_chunked_logprobs(model_name, config_cls, model_cls, mesh_axes, chunk_size):
+def test_chunked_logprobs(
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+    chunk_size: int,
+) -> None:
     """Test that chunked and non-chunked compute_logprobs produce identical results."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     inputs = ["The capital of France is", "Hello world"]
