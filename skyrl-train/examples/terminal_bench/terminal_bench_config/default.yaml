@@ -96,3 +96,13 @@ verifier:
   # Override the verifier timeout (seconds)
   # override_timeout_sec: 300
 
+# Rate and concurrency limiting configuration (SkyRL-specific, not passed to Harbor)
+rate_limit:
+  # Enable rate/concurrency limiting for trajectory submissions
+  enabled: true
+  # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported)
+  # Set to null or omit to disable rate limiting
+  trajectories_per_second: 5
+  # Maximum concurrent trial.run() calls allowed (must be >= 1)
+  # Set to null or omit to disable concurrency limiting
+  max_concurrency: 512

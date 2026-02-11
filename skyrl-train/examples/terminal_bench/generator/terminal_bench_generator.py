@@ -8,6 +8,7 @@ from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, Gene
 from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.utils.rate_limiter import create_rate_limiter
 from omegaconf import DictConfig, OmegaConf
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
@@ -87,6 +88,10 @@ class TerminalBenchGenerator(GeneratorInterface):
             )
         else:
             self.custom_chat_template_content = None
+
+        # Initialize rate limiter
+        rate_limit_config = terminal_bench_cfg.get("rate_limit", None)
+        self._rate_limiter = create_rate_limiter(rate_limit_config)
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
@@ -174,7 +179,8 @@ class TerminalBenchGenerator(GeneratorInterface):
             prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             results = None
             try:
-                results = await trial.run()
+                async with self._rate_limiter:
+                    results = await trial.run()
                 if not results.verifier_result:
                     logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
