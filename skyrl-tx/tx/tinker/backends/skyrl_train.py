@@ -8,18 +8,17 @@ import asyncio
 import os
 import tarfile
 import tempfile
-from typing import Optional
 
 import torch
 from pydantic import BaseModel
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.utils.log import logger
 
 import ray
-from ray.util.placement_group import placement_group
+from ray.util.placement_group import placement_group, PlacementGroup
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -81,57 +80,6 @@ def _build_config(
     return cfg
 
 
-def create_ray_wrapped_inference_engines_from_config(cfg, colocate_pg, tokenizer):
-    engine_kwargs = {
-        "num_inference_engines": cfg.generator.num_inference_engines,
-        "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
-        "pipeline_parallel_size": cfg.generator.inference_engine_pipeline_parallel_size,
-        "model_dtype": cfg.generator.model_dtype,
-        "pretrain": cfg.trainer.policy.model.path,
-        "seed": cfg.trainer.seed,
-        "vllm_v1_disable_multiproc": cfg.generator.vllm_v1_disable_multiproc,
-        "enable_prefix_caching": cfg.generator.enable_prefix_caching,
-        "enforce_eager": cfg.generator.enforce_eager,
-        "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
-        "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
-        "shared_pg": colocate_pg,
-        "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
-        "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
-        "async_engine": cfg.generator.async_engine,
-        "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
-        "max_num_seqs": cfg.generator.max_num_seqs,
-        "tokenizer": tokenizer,
-        "backend": cfg.generator.backend,
-        "engine_init_kwargs": cfg.generator.engine_init_kwargs,
-        "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
-    }
-
-    # Conditionally add LoRA parameters if LoRA is enabled
-    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
-        engine_kwargs["enable_lora"] = True
-        engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
-        engine_kwargs["sleep_level"] = 1
-        engine_kwargs["max_loras"] = 1
-        engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
-
-        if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
-            logger.warning(
-                "LoRA is enabled but generator.enforce_eager=true. "
-                "This combination causes significant performance degradation (2-3x slower generation). "
-                "Automatically setting enforce_eager=false for better performance. "
-            )
-            engine_kwargs["enforce_eager"] = False
-
-    if cfg.generator.rope_scaling is not None:
-        engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
-    if cfg.generator.rope_theta is not None:
-        engine_kwargs["rope_theta"] = cfg.generator.rope_theta
-    if cfg.generator.served_model_name is not None:
-        engine_kwargs["served_model_name"] = cfg.generator.served_model_name
-
-    return create_ray_wrapped_inference_engines(**engine_kwargs)
-
-
 class SkyRLTrainBackend(AbstractBackend):
     """SkyRL-Train backend for supervised training."""
 
@@ -157,192 +105,57 @@ class SkyRLTrainBackend(AbstractBackend):
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
 
-    def build_models(self, PolicyWorker, CriticWorker, RefWorker):
+    def build_models(self, PolicyWorker):
         cfg = self._cfg
-        pg = None
+        pg = self._colocate_pg
+        assert cfg.trainer.placement.colocate_all, "colocate_all must be true for SkyRL-Train backend"
+        assert pg is not None, "placement group must be created for SkyRL-Train backend"
 
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        num_rollout_gpus = (
+            cfg.generator.num_inference_engines
+            * cfg.generator.inference_engine_tensor_parallel_size
+            * cfg.generator.inference_engine_pipeline_parallel_size
+            * cfg.generator.inference_engine_data_parallel_size
+        )
+        assert (
+            num_policy_gpus == num_rollout_gpus
+        ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
 
-        if cfg.trainer.placement.colocate_all:
-            num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
-            num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
-            num_ref_gpus = cfg.trainer.placement.ref_num_gpus_per_node * cfg.trainer.placement.ref_num_nodes
-            num_rollout_gpus = (
-                cfg.generator.num_inference_engines
-                * cfg.generator.inference_engine_tensor_parallel_size
-                * cfg.generator.inference_engine_pipeline_parallel_size
-                * cfg.generator.inference_engine_data_parallel_size
-            )
-            assert (
-                num_policy_gpus == num_rollout_gpus
-            ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
-            pg = self._colocate_pg
-
-            policy_model = PPORayActorGroup(
-                cfg,
-                cfg.trainer.placement.policy_num_nodes,
-                cfg.trainer.placement.policy_num_gpus_per_node,
-                PolicyWorker,
-                pg=pg,
-                num_gpus_per_actor=0.2 if pg else 1,
-                colocate_all=True,
-                sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
-                record_memory=cfg.trainer.policy.record_memory,
-            )
-            if use_ref_model:
-                assert (
-                    num_policy_gpus == num_ref_gpus
-                ), "num_policy_gpus and num_ref_gpus must be the same when colocating policy and ref model"
-                ref_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.ref_num_nodes,
-                    cfg.trainer.placement.ref_num_gpus_per_node,
-                    RefWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.2 if pg else 1,
-                    colocate_all=True,
-                    sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
-                )
-            else:
-                ref_model = None
-
-            if cfg.trainer.critic.model.path:
-                assert (
-                    num_policy_gpus == num_critic_gpus
-                ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
-                critic_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.critic_num_nodes,
-                    cfg.trainer.placement.critic_num_gpus_per_node,
-                    CriticWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.2,
-                    colocate_all=True,
-                    sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
-                )
-            else:
-                critic_model = None
-
-        else:
-            if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
-                assert (
-                    cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes
-                    and cfg.trainer.placement.policy_num_gpus_per_node == cfg.trainer.placement.ref_num_gpus_per_node
-                ), "num_nodes and num_gpus_per_node must be the same when colocate policy and ref model."
-
-                bundles = [
-                    {
-                        "GPU": cfg.trainer.placement.policy_num_gpus_per_node,
-                        "CPU": cfg.trainer.placement.policy_num_gpus_per_node,
-                    }
-                    for _ in range(cfg.trainer.placement.policy_num_nodes)
-                ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-
-            policy_model = PPORayActorGroup(
-                cfg,
-                cfg.trainer.placement.policy_num_nodes,
-                cfg.trainer.placement.policy_num_gpus_per_node,
-                PolicyWorker,
-                pg=pg,
-                num_gpus_per_actor=0.75 if pg else 1,
-                colocate_all=False,
-                sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
-            )
-            if use_ref_model:
-                ref_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.ref_num_nodes,
-                    cfg.trainer.placement.ref_num_gpus_per_node,
-                    RefWorker,
-                    pg=pg,
-                    num_gpus_per_actor=0.25 if pg else 1,
-                    colocate_all=False,
-                    sequence_parallel_size=cfg.trainer.ref.sequence_parallel_size,
-                )
-            else:
-                ref_model = None
-
-            if cfg.trainer.critic.model.path:
-                critic_model = PPORayActorGroup(
-                    cfg,
-                    cfg.trainer.placement.critic_num_nodes,
-                    cfg.trainer.placement.critic_num_gpus_per_node,
-                    CriticWorker,
-                    num_gpus_per_actor=1,
-                    colocate_all=False,
-                    sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
-                )
-            else:
-                critic_model = None
+        policy_model = PPORayActorGroup(
+            cfg,
+            cfg.trainer.placement.policy_num_nodes,
+            cfg.trainer.placement.policy_num_gpus_per_node,
+            PolicyWorker,
+            pg=pg,
+            num_gpus_per_actor=0.2,
+            colocate_all=True,
+            sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
+            record_memory=cfg.trainer.policy.record_memory,
+        )
 
         # set to a large number for megatron scheduler init
         # lr will be managed externally via set_lr()
         policy_num_training_steps = 1e9
-        critic_num_training_steps = 1e9
-        if not cfg.trainer.placement.colocate_all:
-            refs = []
-            if ref_model is not None:
-                refs.extend(ref_model.async_init_model(cfg.trainer.ref.model.path))
-            refs.extend(
-                policy_model.async_init_model(
-                    cfg.trainer.policy.model.path,
-                    num_training_steps=policy_num_training_steps,
-                )
+        ray.get(
+            policy_model.async_init_model(
+                cfg.trainer.policy.model.path,
+                num_training_steps=policy_num_training_steps,
             )
-            if cfg.trainer.critic.model.path:
-                refs.extend(
-                    critic_model.async_init_model(
-                        cfg.trainer.critic.model.path,
-                        num_training_steps=critic_num_training_steps,
-                    )
-                )
-            ray.get(refs)
-            ray.get(
-                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id)
-            )
-        else:
-            if ref_model is not None:
-                ray.get(ref_model.async_init_model(cfg.trainer.ref.model.path))
-                ref_model.offload_to_cpu()
-            ray.get(
-                policy_model.async_init_model(
-                    cfg.trainer.policy.model.path,
-                    num_training_steps=policy_num_training_steps,
-                )
-            )
-            ray.get(
-                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id)
-            )
-            policy_model.offload_to_cpu()
-            if cfg.trainer.critic.model.path:
-                ray.get(
-                    critic_model.async_init_model(
-                        cfg.trainer.critic.model.path,
-                        num_training_steps=critic_num_training_steps,
-                    )
-                )
-                critic_model.offload_to_cpu()
-
-        self.policy_model: PPORayActorGroup = policy_model
-        self.critic_model: Optional[PPORayActorGroup] = critic_model
-        self.ref_model: Optional[PPORayActorGroup] = ref_model
-
+        )
+        ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
+        policy_model.offload_to_cpu()
         # Create unified dispatch that manages all actor groups
         self._dispatch = WorkerDispatch(
             cfg=cfg,
             policy_actor_group=policy_model,
-            critic_actor_group=critic_model,
-            ref_actor_group=ref_model,
             inference_engine_client=self._inference_engine_client,
         )
 
-        # Mark all models as offloaded if colocate_all (they were offloaded above)
-        if cfg.trainer.placement.colocate_all:
-            self._dispatch.mark_all_offloaded()
+        # Mark all models as offloaded
+        self._dispatch.mark_all_offloaded()
 
-        logger.info("init policy/ref/critic models done")
+        logger.info("init policy model done")
 
     def init_weight_sync_state(self):
         """
@@ -375,14 +188,14 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Get worker types based on strategy
         if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
+            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
         elif self._cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
+            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker
         else:
             raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
         logger.info("Building models.")
-        self.build_models(PolicyWorker, CriticWorker, RefWorker)
+        self.build_models(PolicyWorker)
 
         logger.info("Initializing weight sync state.")
         self.init_weight_sync_state()
@@ -795,3 +608,56 @@ class SkyRLTrainBackend(AbstractBackend):
             with tarfile.open(output_path, "w"):
                 pass  # empty tar — marker only
             logger.info(f"Synced weights for {model_id} (disk save skipped)")
+
+
+def create_ray_wrapped_inference_engines_from_config(
+    cfg: SkyRLTrainBackendConfig, colocate_pg: PlacementGroup, tokenizer: PreTrainedTokenizerBase
+):
+    engine_kwargs = {
+        "num_inference_engines": cfg.generator.num_inference_engines,
+        "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
+        "pipeline_parallel_size": cfg.generator.inference_engine_pipeline_parallel_size,
+        "model_dtype": cfg.generator.model_dtype,
+        "pretrain": cfg.trainer.policy.model.path,
+        "seed": cfg.trainer.seed,
+        "vllm_v1_disable_multiproc": cfg.generator.vllm_v1_disable_multiproc,
+        "enable_prefix_caching": cfg.generator.enable_prefix_caching,
+        "enforce_eager": cfg.generator.enforce_eager,
+        "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
+        "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
+        "shared_pg": colocate_pg,
+        "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
+        "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
+        "async_engine": cfg.generator.async_engine,
+        "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
+        "max_num_seqs": cfg.generator.max_num_seqs,
+        "tokenizer": tokenizer,
+        "backend": cfg.generator.backend,
+        "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+        "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
+    }
+
+    # Conditionally add LoRA parameters if LoRA is enabled
+    if cfg.trainer.policy.model.lora.rank > 0 and cfg.trainer.strategy != "megatron":
+        engine_kwargs["enable_lora"] = True
+        engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
+        engine_kwargs["sleep_level"] = 1
+        engine_kwargs["max_loras"] = 1
+        engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
+
+        if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
+            logger.warning(
+                "LoRA is enabled but generator.enforce_eager=true. "
+                "This combination causes significant performance degradation (2-3x slower generation). "
+                "Automatically setting enforce_eager=false for better performance. "
+            )
+            engine_kwargs["enforce_eager"] = False
+
+    if cfg.generator.rope_scaling is not None:
+        engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
+    if cfg.generator.rope_theta is not None:
+        engine_kwargs["rope_theta"] = cfg.generator.rope_theta
+    if cfg.generator.served_model_name is not None:
+        engine_kwargs["served_model_name"] = cfg.generator.served_model_name
+
+    return create_ray_wrapped_inference_engines(**engine_kwargs)
