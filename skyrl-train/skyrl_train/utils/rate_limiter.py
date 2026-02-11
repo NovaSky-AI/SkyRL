@@ -180,9 +180,7 @@ class AsyncRateLimiter(RateLimiterInterface):
         self._last_refill = now
 
 
-def create_rate_limiter(
-    config: Union[RateLimiterConfig, dict, None]
-) -> RateLimiterInterface:
+def create_rate_limiter(config: Union[RateLimiterConfig, dict, None]) -> RateLimiterInterface:
     """Factory function to create a rate limiter from config.
 
     Args:

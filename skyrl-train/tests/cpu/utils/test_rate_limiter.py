@@ -101,7 +101,7 @@ class TestAsyncRateLimiterRateLimiting:
             return time.monotonic() - start
 
         start = time.monotonic()
-        results = await asyncio.gather(*[timed_acquire() for _ in range(3)])
+        await asyncio.gather(*[timed_acquire() for _ in range(3)])
         total_elapsed = time.monotonic() - start
 
         # With rate=5, each token takes 0.2s to refill
@@ -261,9 +261,7 @@ class TestAsyncRateLimiterCombined:
                 running_count -= 1
 
         # Run 5 tasks
-        start = time.monotonic()
         await asyncio.gather(*[task() for _ in range(5)])
-        elapsed = time.monotonic() - start
 
         # Concurrency should have been limited to 2
         assert max_running <= max_conc
@@ -298,9 +296,7 @@ class TestRateLimiterConfig:
         assert config.max_concurrency is None
 
     def test_custom_values(self):
-        config = RateLimiterConfig(
-            enabled=True, trajectories_per_second=5.0, max_concurrency=10
-        )
+        config = RateLimiterConfig(enabled=True, trajectories_per_second=5.0, max_concurrency=10)
         assert config.enabled is True
         assert config.trajectories_per_second == 5.0
         assert config.max_concurrency == 10
@@ -349,9 +345,7 @@ class TestCreateRateLimiter:
         assert isinstance(limiter, AsyncRateLimiter)
 
     def test_enabled_with_both_returns_async_limiter(self):
-        config = RateLimiterConfig(
-            enabled=True, trajectories_per_second=5.0, max_concurrency=10
-        )
+        config = RateLimiterConfig(enabled=True, trajectories_per_second=5.0, max_concurrency=10)
         limiter = create_rate_limiter(config)
         assert isinstance(limiter, AsyncRateLimiter)
 
