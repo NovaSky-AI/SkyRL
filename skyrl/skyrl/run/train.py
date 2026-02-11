@@ -11,7 +11,14 @@ import typer
 
 from skyrl.tx.loaders import get_loader
 from skyrl.tx.models.configs import Qwen3Config
-from skyrl.utils.models import OptimizerName, get_dtype, get_model_class, get_optimizer, load_safetensors, save_safetensors
+from skyrl.utils.models import (
+    OptimizerName,
+    get_dtype,
+    get_model_class,
+    get_optimizer,
+    load_safetensors,
+    save_safetensors,
+)
 from skyrl.utils.log import ExperimentTracker, add_file_handler, get_tracker, logger
 
 app = typer.Typer()

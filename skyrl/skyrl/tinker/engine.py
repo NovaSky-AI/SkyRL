@@ -23,7 +23,6 @@ from skyrl.tinker.db_models import (
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker.backends.utils import log_timing
-from skyrl.tinker.types import LOSS_TYPES
 from skyrl.utils.log import logger
 
 
@@ -109,13 +108,15 @@ def prepare_model_pass_batch(
     all_model_ids = []
     all_sampling_logprobs = []
     all_advantages = []
-    all_loss_fn_types = []
+    all_loss_fns = []
     all_loss_fn_configs = []
     request_batch_slices = []
 
     for request_id, (model_id, request_data) in requests.items():
-        loss_fn_type = LOSS_TYPES[request_data.loss_fn]
-
+        if request_data.loss_fn not in types.LOSS_TYPES:
+            raise ValueError(
+                f"Unknown loss function '{request_data.loss_fn}'. Must be one of: {list(types.LOSS_TYPES.keys())}"
+            )
         request_start = len(all_input_ids)
         for item in request_data.data:
             tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
@@ -126,7 +127,7 @@ def prepare_model_pass_batch(
             all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
             all_advantages.append(loss_fn_inputs.advantages.data)
             all_model_ids.append(model_id)
-            all_loss_fn_types.append(loss_fn_type)
+            all_loss_fns.append(request_data.loss_fn)
             all_loss_fn_configs.append(request_data.loss_fn_config)
 
         request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
@@ -138,7 +139,7 @@ def prepare_model_pass_batch(
         all_sampling_logprobs=all_sampling_logprobs,
         all_advantages=all_advantages,
         all_model_ids=all_model_ids,
-        all_loss_fn_types=all_loss_fn_types,
+        all_loss_fns=all_loss_fns,
         all_loss_fn_configs=all_loss_fn_configs,
         request_batch_slices=request_batch_slices,
     )
@@ -150,13 +151,17 @@ def get_backend_classes(backend_name: str):
         from skyrl.tinker.backends.jax import JaxBackend, JaxBackendConfig
 
         return JaxBackend, JaxBackendConfig
-    elif backend_name == "skyrl_train":
-        from skyrl.tinker.backends.skyrl_train import SkyRLTrainBackend, SkyRLTrainBackendConfig
+    elif backend_name == "fsdp":
+        from skyrl.tinker.backends.skyrl_train import SkyRLTrainBackend, FSDPBackendConfig
 
-        return SkyRLTrainBackend, SkyRLTrainBackendConfig
+        return SkyRLTrainBackend, FSDPBackendConfig
+    elif backend_name == "megatron":
+        from skyrl.tinker.backends.skyrl_train import SkyRLTrainBackend, MegatronBackendConfig
+
+        return SkyRLTrainBackend, MegatronBackendConfig
     else:
         raise ValueError(
-            f"Unknown backend: {backend_name}. Available backends: jax, skyrl_train. "
+            f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "
             f"Make sure the backend's dependencies are installed (e.g., pip install skyrl[jax])"
         )
 

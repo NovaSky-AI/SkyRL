@@ -42,6 +42,7 @@ from skyrl.tinker import types
 from skyrl.tinker.backends.backend import AbstractBackend
 from skyrl.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
 from skyrl.tinker.loss_fns import LOSS_FUNCTIONS
+from skyrl.tinker.types import LOSS_TYPES
 from skyrl.utils.models import (
     get_dtype,
     get_model_class,
@@ -525,7 +526,7 @@ class JaxBackendImpl(AbstractBackend):
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
         all_advantages = prepared_batch.all_advantages
-        all_loss_fn_types = prepared_batch.all_loss_fn_types
+        all_loss_fn_types = [LOSS_TYPES[name] for name in prepared_batch.all_loss_fns]
         request_batch_slices = prepared_batch.request_batch_slices
 
         # Convert model_ids to adapter_indices
