@@ -10,6 +10,7 @@ from tx.models.deepseekv3 import DeepseekV3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import init_lora_adapter
 from tx.tinker.types import LoraConfig
+
 from tests.models.lora_test_utils import (
     get_adapter_params,
     get_moe_out_of_rank_params,
@@ -38,7 +39,7 @@ def test_lora_training_moe_rank_normalized():
         init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16, seed=0))
         init_lora_adapter(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8, seed=1))
 
-        optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)
+        optimizer = nnx.Optimizer(model, optax.adamw(1e-3), wrt=model.is_lora_param)
 
         batch = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]], dtype=jnp.int32)
         target_ids = batch[:, 1:]
@@ -116,7 +117,7 @@ def test_lora_training_high_rank():
         init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16, seed=0))
         init_lora_adapter(model, adapter_index=1, lora_config=LoraConfig(rank=8, alpha=8, seed=1))
 
-        optimizer = nnx.Optimizer(model, optax.adamw(1e-4), wrt=model.is_lora_param)
+        optimizer = nnx.Optimizer(model, optax.adamw(1e-3), wrt=model.is_lora_param)
 
         batch = jnp.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]], dtype=jnp.int32)
         target_ids = batch[:, 1:]

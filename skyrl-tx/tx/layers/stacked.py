@@ -300,6 +300,134 @@ class StackedDecoderLayers(nnx.Module):
         return final_hs, all_hidden_states, new_kv_cache
 
 
+class MultiStackedDecoderLayers(nnx.Module):
+    """Multiple StackedDecoderLayers groups with unified interface.
+
+    This allows models like DeepSeek to have different layer types (dense/MoE)
+    while presenting a unified interface for forward passes and checkpointing.
+    """
+
+    def __init__(self, *layer_groups: StackedDecoderLayers):
+        """Create multi-stacked decoder layers.
+
+        Args:
+            *layer_groups: One or more StackedDecoderLayers to combine.
+        """
+        self.layer_groups = nnx.List(layer_groups)
+        self.num_layers = sum(group.num_layers for group in self.layer_groups)
+
+    def __len__(self) -> int:
+        """Return the total number of layers across all groups."""
+        return self.num_layers
+
+    def __getitem__(self, index: int) -> nnx.Module:
+        """Get view into layer at global index (across all groups)."""
+        if index < 0 or index >= self.num_layers:
+            raise IndexError(f"Layer index {index} out of range [0, {self.num_layers})")
+
+        # Find which group contains this index
+        offset = 0
+        for group in self.layer_groups:
+            if index < offset + group.num_layers:
+                return group[index - offset]
+            offset += group.num_layers
+
+    def __iter__(self):
+        """Iterate over all layers across all groups."""
+        for group in self.layer_groups:
+            yield from group
+
+    def unstack_paths(self, state: nnx.GraphState, base_path: tuple = ()) -> list[tuple[tuple, ArrayRef]]:
+        """Transform _stacked paths from all groups to unified per-layer paths.
+
+        Args:
+            state: GraphState containing this module's state.
+            base_path: Path prefix to this module (e.g., ("model", "layers")).
+
+        Returns:
+            List of (path, ArrayRef) tuples for unstacked parameters.
+        """
+        result = []
+        checkpoint_idx = 0
+
+        for i, group in enumerate(self.layer_groups):
+            # Path to this group: base_path + ("layer_groups", i)
+            group_path = base_path + ("layer_groups", i)
+
+            # Get unstacked paths from the group
+            for path, array_ref in group.unstack_paths(state, group_path):
+                # Extract layer index from path: group_path + (layer_idx,) + rest
+                layer_idx = int(path[len(group_path)])
+                # New path: base_path + (checkpoint_idx + layer_idx,) + rest
+                new_path = base_path + (str(checkpoint_idx + layer_idx),) + path[len(group_path) + 1 :]
+                result.append((new_path, array_ref))
+
+            checkpoint_idx += group.num_layers
+
+        return result
+
+    def __call__(
+        self,
+        hidden_states: jax.Array,
+        *,
+        attention_mask: jax.Array,
+        positions: jax.Array,
+        adapter_indices: jax.Array | None,
+        kv_cache: KVCache | None,
+        output_hidden_states: bool,
+        gradient_checkpointing: bool,
+        is_training: bool = False,
+    ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
+        """Forward pass through all layer groups.
+
+        Args:
+            hidden_states: Input hidden states of shape (batch, seq, hidden).
+            attention_mask: Attention mask of shape (batch, seq).
+            positions: Position indices of shape (batch, seq).
+            adapter_indices: Optional LoRA adapter indices of shape (batch,).
+            kv_cache: Optional KV cache for decode mode (None for prefill).
+            output_hidden_states: Whether to return intermediate hidden states.
+            gradient_checkpointing: Whether to use gradient checkpointing.
+            is_training: Whether in training mode. Skips KV cache to save memory.
+
+        Returns:
+            Tuple of (final_hidden_states, all_hidden_states, kv_cache).
+        """
+        all_hidden_states: list[jax.Array] = []
+
+        # Split KV cache for each group
+        if kv_cache is not None:
+            split_points = []
+            cumsum = 0
+            for group in self.layer_groups[:-1]:
+                cumsum += group.num_layers
+                split_points.append(cumsum)
+            kv_caches = kv_cache.split(*split_points)
+        else:
+            kv_caches = (None,) * len(self.layer_groups)
+
+        # Forward through each group
+        kv_results = []
+        for group, group_kv_cache in zip(self.layer_groups, kv_caches):
+            hidden_states, layer_hidden_states, layer_kv_cache = group(
+                hidden_states,
+                attention_mask=attention_mask,
+                positions=positions,
+                adapter_indices=adapter_indices,
+                kv_cache=group_kv_cache,
+                output_hidden_states=output_hidden_states,
+                gradient_checkpointing=gradient_checkpointing,
+                is_training=is_training,
+            )
+            all_hidden_states.extend(layer_hidden_states)
+            kv_results.append(layer_kv_cache)
+
+        # Concatenate KV caches
+        new_kv_cache = KVCache.concatenate(*kv_results) if kv_results else None
+
+        return hidden_states, all_hidden_states, new_kv_cache
+
+
 def unstack_state(module: nnx.Module) -> nnx.GraphState:
     """Transform stacked layer state to unstacked ArrayRef views.
 
@@ -320,7 +448,7 @@ def unstack_state(module: nnx.Module) -> nnx.GraphState:
     # Delegate to layers if they support unstacking
     if hasattr(module, "model") and hasattr(module.model, "layers"):
         layers = module.model.layers
-        if isinstance(layers, StackedDecoderLayers):
+        if isinstance(layers, (StackedDecoderLayers, MultiStackedDecoderLayers)):
             expanded.extend(layers.unstack_paths(state, base_path=("model", "layers")))
 
     # Keep all non-stacked paths as-is

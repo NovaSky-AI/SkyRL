@@ -7,6 +7,7 @@ from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.rotary_embedding import get_rope
 from tx.layers.util import Param, prepare_routing, shard_map_ep
 from tx.layers.layernorm import RMSNorm
+from tx.layers.stacked import MultiStackedDecoderLayers, StackedDecoderLayers
 from tx.models.configs import DeepseekV3Config
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -405,6 +406,9 @@ class DeepseekV3MoE(nnx.Module):
 
         router_logits = self.gate(hidden_states_flat)
         top_k_weights, top_k_index = self._compute_routing(router_logits)
+        # _compute_routing uses float32 for softmax stability; cast back to model dtype
+        # to maintain consistent dtypes through jax.lax.scan in forward_layers
+        top_k_weights = top_k_weights.astype(hidden_states.dtype)
 
         expert_output = self.experts(hidden_states_flat, top_k_index, top_k_weights, adapter_indices_flat)
         shared_output = self.shared_experts(
@@ -416,17 +420,20 @@ class DeepseekV3MoE(nnx.Module):
 
 
 class DeepseekV3DecoderLayer(nnx.Module):
+    """Decoder layer supporting both dense MLP and sparse MoE."""
 
-    def __init__(self, config: DeepseekV3Config, layer_idx: int, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+    def __init__(
+        self,
+        config: DeepseekV3Config,
+        *,
+        mlp_cls: type[DeepseekV3MLP] | type[DeepseekV3MoE],
+        dtype: jnp.dtype,
+        rngs: nnx.Rngs,
+    ) -> None:
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.self_attn = DeepseekV3Attention(config, dtype=dtype, rngs=rngs)
-
-        # Use dense MLP for initial layers, MoE for the rest
-        if layer_idx >= config.first_k_dense_replace:
-            self.mlp = DeepseekV3MoE(config, dtype=dtype, rngs=rngs)
-        else:
-            self.mlp = DeepseekV3MLP(config, dtype=dtype, rngs=rngs)
+        self.mlp = mlp_cls(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -460,6 +467,8 @@ class DeepseekV3Model(nnx.Module):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
+        self.num_dense_layers = config.first_k_dense_replace
+        self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
 
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
@@ -472,12 +481,18 @@ class DeepseekV3Model(nnx.Module):
             embedding_init=nnx.initializers.normal(),
             rngs=rngs,
         )
-        self.layers = nnx.List(
-            [
-                DeepseekV3DecoderLayer(config, layer_idx=i, dtype=dtype, rngs=rngs)
-                for i in range(config.num_hidden_layers)
-            ]
-        )
+
+        # Create stacked layers: dense layers followed by MoE layers
+        def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
+            return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MLP, dtype=dtype, rngs=rngs)
+
+        def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
+            return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MoE, dtype=dtype, rngs=rngs)
+
+        dense_layers = StackedDecoderLayers(create_dense_layer, self.num_dense_layers, rngs)
+        moe_layers = StackedDecoderLayers(create_moe_layer, self.num_moe_layers, rngs)
+        self.layers = MultiStackedDecoderLayers(dense_layers, moe_layers)
+
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -489,28 +504,25 @@ class DeepseekV3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
+        # Forward through all layers
+        hidden_states, all_hidden_states, kv_cache = self.layers(
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+            is_training=is_training,
+        )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -518,7 +530,7 @@ class DeepseekV3Model(nnx.Module):
 
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
+            kv_cache=kv_cache,
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
@@ -561,6 +573,7 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -572,6 +585,7 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            is_training=is_training,
         )
 
         return CausalLMOutput(
