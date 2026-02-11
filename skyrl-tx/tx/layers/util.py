@@ -103,7 +103,7 @@ def shard_map_ep(module: nnx.Module, func, *args):
         # When a layer is extracted from stacked layers via x[layer_idx], the tensor
         # loses a dimension but the PartitionSpec metadata still has the extra leading None.
         # Truncate the spec to match the actual tensor rank.
-        truncated = spec[-value.ndim:]
+        truncated = spec[-value.ndim :]
         # Extract only 'ep' dims from PartitionSpecs, replacing others with None
         return PartitionSpec(*(p if p == "ep" else None for p in truncated))
 
