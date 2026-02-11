@@ -26,6 +26,18 @@ from tx.tinker.backends.utils import log_timing
 from tx.utils.log import logger
 
 
+def _model_not_found_error(model_id: str) -> types.ErrorResponse:
+    """Log and return an ErrorResponse for a request targeting a model that isn't loaded."""
+    logger.info(
+        f"Ignoring request for model '{model_id}' — model not loaded. "
+        "This is most likely an outstanding request from a previous server."
+    )
+    return types.ErrorResponse(
+        error=f"Model {model_id} not loaded (likely stale request from previous server)",
+        status="failed",
+    )
+
+
 def prepare_sample_batch(
     requests: dict[str, tuple[str, types.SampleInput]],
     checkpoints_base: AnyPath | None = None,
@@ -451,10 +463,12 @@ class TinkerEngine:
 
         return unloaded_count
 
-    def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
+    def process_optim_step(
+        self, model_id: str, request_data: types.OptimStepInput
+    ) -> types.OptimStepOutput | types.ErrorResponse:
         """Process an optim_step request and apply accumulated gradients."""
         if not self.backend.has_model(model_id):
-            raise ValueError(f"Model {model_id} not loaded")
+            return _model_not_found_error(model_id)
 
         return self.backend.optim_step(model_id, request_data)
 
@@ -473,10 +487,12 @@ class TinkerEngine:
         prepared = prepare_sample_batch(requests, self.config.checkpoints_base)
         return self.backend.sample(prepared)
 
-    def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
+    def process_load_weights(
+        self, model_id: str, request_data: types.LoadWeightsInput
+    ) -> types.LoadWeightsOutput | types.ErrorResponse:
         """Loads a clean, trimmed training checkpoint."""
         if not self.backend.has_model(model_id):
-            raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
+            return _model_not_found_error(model_id)
 
         checkpoint_path = (
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
@@ -486,13 +502,15 @@ class TinkerEngine:
 
         return types.LoadWeightsOutput(type="load_weights")
 
-    def process_save_weights(self, model_id: str, request_data: types.SaveWeightsInput) -> types.SaveWeightsOutput:
+    def process_save_weights(
+        self, model_id: str, request_data: types.SaveWeightsInput
+    ) -> types.SaveWeightsOutput | types.ErrorResponse:
         """
         Saves a clean training checkpoint by converting the trimmed NNX graph
         to a pure dictionary before serialization, following official Flax docs.
         """
         if not self.backend.has_model(model_id):
-            raise ValueError(f"Model {model_id} not loaded")
+            return _model_not_found_error(model_id)
 
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
@@ -511,14 +529,7 @@ class TinkerEngine:
     ) -> types.SaveWeightsForSamplerOutput | types.ErrorResponse:
         """Process a save_weights_for_sampler request and save model weights."""
         if not self.backend.has_model(model_id):
-            logger.info(
-                f"Ignoring save_weights_for_sampler for model '{model_id}' — model not loaded. "
-                "This is most likely an outstanding request from a previous server."
-            )
-            return types.ErrorResponse(
-                error=f"Model {model_id} not loaded (likely stale request from previous server)",
-                status="failed",
-            )
+            return _model_not_found_error(model_id)
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
