@@ -5,7 +5,6 @@ Currently supports a single model only.
 """
 
 import asyncio
-import math
 import os
 import tarfile
 import tempfile
@@ -397,7 +396,6 @@ class SkyRLTrainBackend(AbstractBackend):
         batch = self._to_training_batch(prepared_batch)
         batch, pad_size = self._pad_batch(batch)
         data = self._dispatch.forward("policy", batch)
-
 
         # dispatch.forward() returns TrainingOutputBatch({"output": tensor[batch, max_response_len]})
         # Trim padding entries from output
