@@ -284,7 +284,7 @@ class SkyRLTrainBackend(AbstractBackend):
             (padded_batch, pad_size)
         """
         dp_size = self._dispatch.get_lcm_dp_size()
-        pad_size = math.ceil(batch.batch_size / dp_size) * dp_size - batch.batch_size
+        pad_size = (dp_size - batch.batch_size % dp_size) % dp_size
         if pad_size == 0:
             return batch, 0
 
