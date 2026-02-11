@@ -233,8 +233,7 @@ class PreparedModelPassBatch(BaseModel):
 
     # Per-example scalars
     all_model_ids: list[str]
-    all_loss_fn_types: list[int]
-
+    all_loss_fns: list[str]
     all_loss_fn_configs: list[dict[str, float] | None]
 
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
