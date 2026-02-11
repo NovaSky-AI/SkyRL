@@ -10,7 +10,7 @@ from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, RequestStatus
 from skyrl.utils.log import logger
-from skyrl.utils.storage import download_and_unpack
+from skyrl.tx.utils.storage import download_and_unpack
 
 
 def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None:

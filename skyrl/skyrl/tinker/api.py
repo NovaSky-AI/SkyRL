@@ -31,7 +31,7 @@ from skyrl.tinker.db_models import (
     enable_sqlite_wal,
 )
 from skyrl.tinker.extra import ExternalInferenceClient
-from skyrl.utils.storage import download_file
+from skyrl.tx.utils.storage import download_file
 from skyrl.utils.log import logger, get_uvicorn_log_config
 
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids

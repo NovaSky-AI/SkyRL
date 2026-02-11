@@ -43,7 +43,7 @@ from skyrl.backends.backend import AbstractBackend
 from skyrl.backends.utils import pad, pad_batch, pad_to_fsdp
 from skyrl.tinker.loss_fns import LOSS_FUNCTIONS
 from skyrl.tinker.types import LOSS_TYPES
-from skyrl.utils.models import (
+from skyrl.tx.utils.models import (
     get_dtype,
     get_model_class,
     load_safetensors,
