@@ -112,7 +112,7 @@ Triggered by `save_weights_and_get_sampling_client(name="...")`. This syncs weig
 
 #### How the server distinguishes them
 
-The Tinker SDK sends a `sampling_session_seq_id` field when using the ephemeral path. When the server sees this field (and no explicit checkpoint path or name), it skips the expensive disk write — only a lightweight empty tar marker is written for bookkeeping. This matches the behavior in both tinker-cloud and SkyRL's implementation.
+The Tinker SDK sends a `sampling_session_seq_id` field when using the ephemeral path. When the server sees this field (and no explicit checkpoint path or name), it skips the expensive disk write.
 
 #### Why it matters
 
