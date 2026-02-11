@@ -92,6 +92,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Initialize rate limiter
         rate_limit_config = terminal_bench_cfg.get("rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
+        self._harbor_config_template.pop("rate_limit", None)
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
