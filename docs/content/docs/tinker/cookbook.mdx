@@ -36,12 +36,11 @@ uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
-    batch_size=4 \
-    lora_rank=8 \
-    learning_rate=1e-4 \
-    save_every=20 \
-    log_path="/tmp/tinker-sl"
+    log_path="/tmp/tinker-sl" \
+    train_on_what=LAST_ASSISTANT_MESSAGE
 ```
+
+<!-- TODO(tyler): add a full fine-tuning example (no LoRA) -->
 
 TODO: example curve(s)
 
