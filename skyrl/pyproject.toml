@@ -94,8 +94,6 @@ include-package-data = true
 version = {attr = "skyrl.__version__"}
 
 [project.scripts]
-skyrl = "skyrl.run.main:app"
-
 # The following is for supporting the skyrl-train dependency
 
 [tool.uv]
