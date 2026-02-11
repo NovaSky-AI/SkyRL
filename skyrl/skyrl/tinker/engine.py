@@ -463,7 +463,9 @@ class TinkerEngine:
 
         return unloaded_count
 
-    def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput | types.ErrorResponse:
+    def process_optim_step(
+        self, model_id: str, request_data: types.OptimStepInput
+    ) -> types.OptimStepOutput | types.ErrorResponse:
         """Process an optim_step request and apply accumulated gradients."""
         if not self.backend.has_model(model_id):
             return _model_not_found_error(model_id)
@@ -485,7 +487,9 @@ class TinkerEngine:
         prepared = prepare_sample_batch(requests, self.config.checkpoints_base)
         return self.backend.sample(prepared)
 
-    def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput | types.ErrorResponse:
+    def process_load_weights(
+        self, model_id: str, request_data: types.LoadWeightsInput
+    ) -> types.LoadWeightsOutput | types.ErrorResponse:
         """Loads a clean, trimmed training checkpoint."""
         if not self.backend.has_model(model_id):
             return _model_not_found_error(model_id)
@@ -498,7 +502,9 @@ class TinkerEngine:
 
         return types.LoadWeightsOutput(type="load_weights")
 
-    def process_save_weights(self, model_id: str, request_data: types.SaveWeightsInput) -> types.SaveWeightsOutput | types.ErrorResponse:
+    def process_save_weights(
+        self, model_id: str, request_data: types.SaveWeightsInput
+    ) -> types.SaveWeightsOutput | types.ErrorResponse:
         """
         Saves a clean training checkpoint by converting the trimmed NNX graph
         to a pure dictionary before serialization, following official Flax docs.
