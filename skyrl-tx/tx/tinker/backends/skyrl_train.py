@@ -38,6 +38,8 @@ class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
     are applied as dot-notation overrides via --backend-config.
     """
 
+    strategy: str = "fsdp2"  # fsdp2 or megatron
+
     pass
 
 
@@ -59,11 +61,13 @@ def _build_config(
     cfg.trainer.policy.model.path = base_model
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
-    cfg.trainer.policy.optimizer_config.scheduler = "constant"
+    cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
 
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
+
+    cfg.trainer.strategy = config.strategy
 
     # Apply user overrides from backend_config
     for key, value in config.model_extra.items():

@@ -53,8 +53,8 @@ azure = [
     "cloudpathlib[azure]",
 ]
 
-# The extras "jax" and "skyrl_train" are the dependencies the
-# engine needs for --backend="jax" and --backend="skyrl_train"
+# The extras "jax", "fsdp", and "megatron" are the dependencies the
+# engine needs for --backend="jax" and --backend="fsdp"
 # respectively.
 
 jax = [
@@ -64,12 +64,16 @@ jax = [
     "optax>=0.2.5",
 ]
 
-skyrl_train = [
+fsdp = [
     # We currently need the extra pin on the python version
     # here since skyrl-train pins on python version 3.12,
     # hopefully in the future we can remove that.
     # skyrl-train[vllm] requires CUDA packages which are Linux-only.
     "skyrl-train[vllm]; python_version == '3.12' and sys_platform == 'linux'",
+]
+
+megatron = [
+    "skyrl-train[mcore]; python_version == '3.12' and sys_platform == 'linux'",
 ]
 
 dev = [
@@ -104,7 +108,30 @@ required-environments = [
 constraint-dependencies = [
     "flashinfer-jit-cache==0.5.3",
 ]
-
+conflicts = [
+    [
+        { extra = "jax" },
+        { extra = "megatron" },
+        { extra = "fsdp" }
+    ],
+    [
+        { extra = "megatron" },
+        { extra = "gpu" },
+        { extra = "tpu" },
+    ]
+]
+no-build-isolation-package = [
+    "transformer-engine-torch",
+    "transformer-engine",
+    "nv-grouped-gemm",
+]
+override-dependencies = [
+    "nvidia-resiliency-ext; sys_platform == 'never'",
+    "mamba-ssm; sys_platform == 'never'",
+    "causal-conv1d; sys_platform == 'never'",
+    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
+    "megatron-core==0.15.0; sys_platform == 'linux'",
+]
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
