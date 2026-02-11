@@ -67,7 +67,11 @@ def _build_config(
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
 
-    cfg.trainer.strategy = config.strategy
+    assert config.backend in ("fsdp", "megatron"), "Only fsdp and megatron are supported for SkyRL-Train backend"
+    if config.backend == "fsdp":
+        cfg.trainer.strategy = "fsdp2"
+    elif config.backend == "megatron":
+        cfg.trainer.strategy = "megatron"
 
     # Apply user overrides from backend_config
     for key, value in config.model_extra.items():
@@ -273,8 +277,10 @@ class SkyRLTrainBackend(AbstractBackend):
             else:
                 critic_model = None
 
-        policy_num_training_steps = None
-        critic_num_training_steps = None
+        # set to a large number for megatron scheduler init
+        # lr will be managed externally via set_lr()
+        policy_num_training_steps = 1e9
+        critic_num_training_steps = 1e9
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
