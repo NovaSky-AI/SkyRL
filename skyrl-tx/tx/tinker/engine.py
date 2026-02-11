@@ -508,10 +508,17 @@ class TinkerEngine:
 
     def process_save_weights_for_sampler(
         self, model_id: str, request_data: types.SaveWeightsForSamplerInput
-    ) -> types.SaveWeightsForSamplerOutput:
+    ) -> types.SaveWeightsForSamplerOutput | types.ErrorResponse:
         """Process a save_weights_for_sampler request and save model weights."""
         if not self.backend.has_model(model_id):
-            raise ValueError(f"Model {model_id} not loaded")
+            logger.info(
+                f"Ignoring save_weights_for_sampler for model '{model_id}' — model not loaded. "
+                "This is most likely an outstanding request from a previous server."
+            )
+            return types.ErrorResponse(
+                error=f"Model {model_id} not loaded (likely stale request from previous server)",
+                status="failed",
+            )
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
