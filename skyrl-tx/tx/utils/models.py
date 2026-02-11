@@ -261,10 +261,11 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
         key = path[-2].key
         if key not in {"lora_A", "lora_B"}:
             return p
+        assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
         idx = get_adapter_idx(path, adapter_index)
         if key == "lora_A":
-            return p[idx][..., :, :rank]
-        return p[idx][..., :rank, :]
+            return p[*idx, ..., :, :rank]
+        return p[*idx, ..., :rank, :]
 
     return jax.tree.map_with_path(extract_state, lora_params)
 
@@ -280,6 +281,7 @@ def insert_adapter_state(
         key = path[-2].key
         if key not in {"lora_A", "lora_B"}:
             return new
+        assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
         idx = get_adapter_idx(path, adapter_index)
         if key == "lora_A":
             return p.at[*idx, ..., :, :rank].set(new)
