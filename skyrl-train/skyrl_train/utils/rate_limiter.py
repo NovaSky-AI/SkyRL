@@ -157,20 +157,16 @@ class AsyncRateLimiter(RateLimiterInterface):
 
     async def _acquire_rate_token(self) -> None:
         """Acquire a rate limit token, waiting if necessary."""
-        async with self._rate_lock:
-            while True:
+        while True:
+            async with self._rate_lock:
                 self._refill()
                 if self._tokens >= 1.0:
                     self._tokens -= 1.0
                     return
                 # Calculate wait time for next token
                 wait_time = (1.0 - self._tokens) / self._rate
-                # Release lock while sleeping so _refill time stays accurate
-                self._rate_lock.release()
-                try:
-                    await asyncio.sleep(wait_time)
-                finally:
-                    await self._rate_lock.acquire()
+            # Sleep outside lock so other coroutines can check/update state
+            await asyncio.sleep(wait_time)
 
     def _refill(self) -> None:
         """Refill tokens based on elapsed time."""
