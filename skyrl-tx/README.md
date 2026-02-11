@@ -195,8 +195,8 @@ uv run --extra gpu --extra tinker -m tx.tinker.api \
 
 # Run RL loop
 export TINKER_API_KEY="tml-dummy"
-export GOOGLE_API_KEY="..."
-export WANDB_API_KEY="..."
+export GOOGLE_API_KEY="..." # Replace with your Google API Key
+export WANDB_API_KEY="..."  # Replace with your WandB API Key
 uv run --extra vector-search --extra wandb python -m tinker_cookbook.recipes.search_tool.train \
     base_url=http://localhost:8001 \
     model_name=Qwen/Qwen3-4B-Instruct-2507 \
