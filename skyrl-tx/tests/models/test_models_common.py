@@ -11,7 +11,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
-from tx.models.types import ModelForCausalLM
+from tx.models.types import CausalLMOutput, ModelForCausalLM
 from tx.utils.models import load_safetensors
 
 MODEL_PARAMS = [
@@ -63,6 +63,94 @@ def load_model(
     )
     load_safetensors(tmp_dir, config, model)
     return model
+
+
+@pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
+class TestGradientCheckpointing:
+
+    def _forward(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+        gradient_checkpointing: bool,
+        **forward_kwargs: Any,
+    ) -> tuple[ModelForCausalLM, ModelConfig, CausalLMOutput]:
+        """Create model, run forward pass, and return (model, config, out)."""
+        batch_size, seq_len = 2, 8
+        model, config = create_model(
+            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=gradient_checkpointing
+        )
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+        out = model(input_ids, attention_mask=attention_mask, **forward_kwargs)
+        return model, config, out
+
+    def test_output_matches_non_checkpointed(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+    ) -> None:
+        """Forward pass should produce identical outputs with/without checkpointing."""
+        model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False)
+        logits_no_ckpt = model.compute_logits(out.last_hidden_state)
+        del model, out
+
+        model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True)
+        logits_ckpt = model.compute_logits(out.last_hidden_state)
+        del model, out
+
+        np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-6)
+
+    def test_hidden_states_length_matches(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+    ) -> None:
+        """Both paths should return same number of hidden states."""
+        _, config, out = self._forward(
+            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False, output_hidden_states=True
+        )
+        hidden_states_no_ckpt = out.hidden_states
+        num_hidden_layers = config.num_hidden_layers
+        del out
+
+        _, _, out = self._forward(
+            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True, output_hidden_states=True
+        )
+        hidden_states_ckpt = out.hidden_states
+        del out
+
+        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == num_hidden_layers + 1
+        for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
+            np.testing.assert_allclose(
+                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
+            )
+
+    def test_kv_cache_with_checkpointing(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+    ) -> None:
+        """KV cache should be populated even with gradient checkpointing enabled."""
+        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
+        config.gradient_checkpointing = True
+
+        batch_size, seq_len = 2, 8
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+        out = model(input_ids, attention_mask=attention_mask)
+
+        # keys is a list with one entry per layer
+        assert len(out.kv_cache.keys) == config.num_hidden_layers
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)

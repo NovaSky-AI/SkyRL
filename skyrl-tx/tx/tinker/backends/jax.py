@@ -42,7 +42,6 @@ from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
 from tx.tinker.loss_fns import LOSS_FUNCTIONS
-from tx.tinker.types import LOSS_TYPES
 from tx.utils.models import (
     get_dtype,
     get_model_class,
@@ -83,7 +82,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     )
     gradient_checkpointing: bool = Field(
         default=False,
-        description="Whether to use gradient checkpointing (full recomputation strategy)",
+        description="Per-layer activation checkpointing: recompute activations during backward to save memory",
     )
     loss_chunk_size: int = Field(
         default=1024,
@@ -275,13 +274,9 @@ class JaxBackendImpl(AbstractBackend):
                 input_ids,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
+                is_training=True,
             )
             return model.compute_logprobs(output.last_hidden_state, target_ids, adapter_indices)
-
-        if self.config.gradient_checkpointing:
-            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
-            # policy=None corresponds to full activation recomputation
-            _model_forward = jax.checkpoint(_model_forward, policy=None)
 
         def loss_for_lora(
             lora_params: nnx.State,
@@ -534,7 +529,7 @@ class JaxBackendImpl(AbstractBackend):
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
         all_advantages = prepared_batch.all_advantages
-        all_loss_fn_types = [LOSS_TYPES[name] for name in prepared_batch.all_loss_fns]
+        all_loss_fn_types = prepared_batch.all_loss_fn_types
         request_batch_slices = prepared_batch.request_batch_slices
 
         # Convert model_ids to adapter_indices
