@@ -5,7 +5,6 @@ Currently supports a single model only.
 """
 
 import asyncio
-import math
 import os
 import tarfile
 import tempfile
@@ -300,7 +299,7 @@ class SkyRLTrainBackend(AbstractBackend):
             (padded_batch, pad_size)
         """
         dp_size = self._dispatch.get_lcm_dp_size()
-        pad_size = math.ceil(batch.batch_size / dp_size) * dp_size - batch.batch_size
+        pad_size = (dp_size - batch.batch_size % dp_size) % dp_size
         if pad_size == 0:
             return batch, 0
 
@@ -309,11 +308,11 @@ class SkyRLTrainBackend(AbstractBackend):
             if tensor is not None:
                 if key == "loss_mask":
                     # Padding entries must not contribute to the loss
-                    additional_dims = tuple(tensor.shape[1:]) if len(tensor.shape) > 1 else ()
+                    additional_dims = tensor.shape[1:]
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
                 else:
                     # Clone real data so shapes/dtypes are valid for the model
-                    padding_tensor = tensor[:pad_size].clone()
+                    padding_tensor = tensor[torch.arange(pad_size) % tensor.shape[0]].clone()
                 new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         padded = TrainingInputBatch(new_tensors)
@@ -411,13 +410,14 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         batch = self._to_training_batch(prepared_batch)
-        original_batch_size = batch.batch_size
         batch, pad_size = self._pad_batch(batch)
         data = self._dispatch.forward("policy", batch)
 
         # dispatch.forward() returns TrainingOutputBatch({"output": tensor[batch, max_response_len]})
         # Trim padding entries from output
-        output_logprobs = data["output"][:original_batch_size]
+        output_logprobs = data["output"]
+        if pad_size > 0:
+            output_logprobs = output_logprobs[:-pad_size]
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:
