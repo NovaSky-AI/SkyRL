@@ -36,10 +36,13 @@ class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
     Uses SkyRL-Train's default config (ppo_base_config.yaml). Any extra keys
     are applied as dot-notation overrides via --backend-config.
     """
+
     pass
+
 
 class FSDPBackendConfig(SkyRLTrainBackendConfig):
     strategy: str = "fsdp2"
+
 
 class MegatronBackendConfig(SkyRLTrainBackendConfig):
     strategy: str = "megatron"
