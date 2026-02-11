@@ -9,11 +9,12 @@
 # GPUs: B200:4 (preferred), H200:4 (fallback - 141GB HBM3e per GPU)
 #
 # v0.3.6: Initial step-wise config with micro_batch=1 to fix CUDA OOM
+# v0.3.7: Increased disk_size 200→500GB to fix OutOfDiskError
 
 name: fleet-task-grpo-qwen3-8b-step-wise
 
 resources:
-  disk_size: 200
+  disk_size: 500
   ports: 6479
   any_of:
     # Prefer B200:4 (min 750GB RAM)
