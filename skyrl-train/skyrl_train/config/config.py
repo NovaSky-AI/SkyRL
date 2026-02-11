@@ -168,11 +168,11 @@ class PlacementConfig(BaseConfig):
     colocate_all: bool = True
     colocate_policy_ref: bool = True
     policy_num_nodes: int = 1
-    policy_num_gpus_per_node: int = 4
+    policy_num_gpus_per_node: int = 1
     critic_num_nodes: int = 1
-    critic_num_gpus_per_node: int = 4
+    critic_num_gpus_per_node: int = 1
     ref_num_nodes: int = 1
-    ref_num_gpus_per_node: int = 4
+    ref_num_gpus_per_node: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +352,7 @@ class GeneratorConfig(BaseConfig):
     backend: str = "vllm"
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
-    inference_engine_tensor_parallel_size: int = 4
+    inference_engine_tensor_parallel_size: int = 1
     inference_engine_pipeline_parallel_size: int = 1
     inference_engine_expert_parallel_size: int = 1
     inference_engine_data_parallel_size: int = 1

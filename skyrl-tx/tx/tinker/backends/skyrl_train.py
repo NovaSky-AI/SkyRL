@@ -50,8 +50,8 @@ except ImportError:  # pragma: no cover - exercised only in non-ray installs
 class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
     """Configuration for the SkyRL-Train backend.
 
-    Extra keys are passed as dot-notation overrides to the SkyRL-Train config,
-    e.g. --backend-config '{"trainer.strategy": "fsdp2", "generator.num_inference_engines": 2}'
+    Uses SkyRL-Train's default config (ppo_base_config.yaml). Any extra keys
+    are applied as dot-notation overrides via --backend-config.
     """
 
     pass
@@ -66,7 +66,7 @@ def _build_config(
 
     Args:
         base_model: HuggingFace model path
-        config: Backend configuration (extra keys are applied as dot-notation overrides)
+        config: Backend configuration
         lora_config: LoRA configuration if using LoRA
     """
     from omegaconf import OmegaConf
@@ -78,10 +78,14 @@ def _build_config(
     cfg.trainer.policy.optimizer_config.scheduler = "constant"
     cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
 
+    # TODO(tyler): Support KL Loss
+    cfg.trainer.algorithm.use_kl_loss = False
+
     # Apply user overrides from backend_config
     for key, value in config.model_extra.items():
         OmegaConf.update(cfg, key, value)
 
+    logger.info("SkyRL-Train config:\n%s", OmegaConf.to_yaml(cfg))
     return cfg
 
 
