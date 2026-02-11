@@ -46,6 +46,7 @@ from tx.tinker.types import LOSS_TYPES
 from tx.utils.models import (
     get_dtype,
     get_model_class,
+    get_adapter_idx,
     load_safetensors,
     load_lora_checkpoint,
     save_lora_checkpoint,
@@ -127,15 +128,19 @@ class AccumulatedGradients:
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
-        return jax.tree.map(
-            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
-            self.grad_sum,
-        )
+
+        def _select_mean(path, g):
+            idx = get_adapter_idx(path, adapter_index)
+            return jnp.zeros_like(g).at[idx].set(g[idx] / count.astype(g.dtype))
+
+        return jax.tree.map_with_path(_select_mean, self.grad_sum)
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
         return AccumulatedGradients(
-            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            grad_sum=jax.tree.map_with_path(
+                lambda path, g: g.at[get_adapter_idx(path, adapter_index)].set(0.0), self.grad_sum
+            ),
             counts=self.counts.at[adapter_index].set(0),
         )
 
@@ -267,6 +272,7 @@ class JaxBackendImpl(AbstractBackend):
                 input_ids,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
+                is_training=True,
             )
             return model.compute_logprobs(output.last_hidden_state, target_ids, adapter_indices)
 
@@ -474,7 +480,11 @@ class JaxBackendImpl(AbstractBackend):
 
         # Create optimizer
         with jax.set_mesh(self.mesh):
-            tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
+            # Keep Adam hyperparams/moments in fp32 for bf16 models.
+            # Otherwise b2=0.999 rounds to 1.0 in bf16, which destabilizes updates.
+            tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
+                learning_rate=0.0,
+            )
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Configure adapter

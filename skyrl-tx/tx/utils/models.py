@@ -91,6 +91,16 @@ def get_expert_key(path: tuple, expert_idx: int) -> str:
     return ".".join(map(str, path))
 
 
+def is_stacked_path(path: tuple) -> bool:
+    """Check if a parameter is for stacked layer weights."""
+    return "_stacked" in {p.key if hasattr(p, "key") else str(p) for p in path}
+
+
+def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
+    """Return index tuple for accessing an adapter. Stacked: [:, idx], non-stacked: [idx]."""
+    return (slice(None), adapter_index) if is_stacked_path(path) else (adapter_index,)
+
+
 def load_safetensors(
     checkpoint_dir: str | os.PathLike,
     config: ModelConfig,
@@ -99,32 +109,30 @@ def load_safetensors(
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
+    from tx.layers.stacked import unstack_state
+
     tensors = {}
     for file in Path(checkpoint_dir).glob("*.safetensors"):
         tensors.update(safetensors.numpy.load_file(file))
     tensors = {k.removeprefix(prefix): v for k, v in tensors.items()}
 
-    model_params = nnx.to_flat_state(nnx.state(model))
-    updates = []
-    for path, param in model_params:
+    # unstack_state converts stacked paths (layers._stacked.xxx) to per-layer paths
+    # (layers.0.xxx) with ArrayRef write-through, matching checkpoint key format
+    for path, param in nnx.to_flat_state(unstack_state(model)):
         if filter_fn is not None and not filter_fn(path):
             continue
         key = get_param_key(path)
-        # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         if "experts" in path:
-            tensors[key] = np.stack(
-                [tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0
-            )
+            tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0)
         else:
-            tensors[key] = tensors[key] if "embed_tokens" in path else tensors[key].T
+            tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
         if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
-            tensors[key] = tensors[key].reshape(param.shape)
-        assert param.shape == tensors[key].shape, f"shape mismatch for {key}"
-        sharded_tensor = jax.device_put(tensors[key].astype(param.dtype), param.sharding)
-        updates.append((path, sharded_tensor))
-    nnx.update(model, nnx.from_flat_state(updates))
+            tensor = tensor.reshape(param.shape)
+        assert param.shape == tensor.shape, f"shape mismatch for {key}"
+        # ArrayRef.set_raw_value writes through to the stacked parent variable
+        param.set_raw_value(jax.device_put(tensor.astype(param.dtype), param.sharding))
 
 
 def save_safetensors(
@@ -134,7 +142,11 @@ def save_safetensors(
     prefix: str = "",
     filter_fn: Callable[[tuple], bool] | None = None,
 ) -> None:
-    model_params = nnx.to_flat_state(nnx.state(model))
+    from tx.layers.stacked import unstack_state
+
+    # unstack_state converts stacked paths (layers._stacked.xxx) to per-layer paths
+    # (layers.0.xxx) matching the checkpoint key format used by HuggingFace
+    model_params = nnx.to_flat_state(unstack_state(model))
     tensors = {}
     for path, param in model_params:
         if "rngs" in path:
@@ -251,13 +263,14 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
     "Helper function to extract the adapter parameters for a specific adapter index."
 
     def extract_state(path: tuple, p: jnp.ndarray):
-        if path[-2].key not in {"lora_A", "lora_B"}:
+        key = path[-2].key
+        if key not in {"lora_A", "lora_B"}:
             return p
-        assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-        if path[-2].key == "lora_A":
-            return p[adapter_index, ..., :, :rank]
-        if path[-2].key == "lora_B":
-            return p[adapter_index, ..., :rank, :]
+        assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
+        idx = get_adapter_idx(path, adapter_index)
+        if key == "lora_A":
+            return p[*idx, ..., :, :rank]
+        return p[*idx, ..., :rank, :]
 
     return jax.tree.map_with_path(extract_state, lora_params)
 
@@ -270,13 +283,14 @@ def insert_adapter_state(
     "Helper function to insert the adapter parameters for a specific adapter index (inverse of extract_adapter_state)."
 
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
-        if path[-2].key not in {"lora_A", "lora_B"}:
+        key = path[-2].key
+        if key not in {"lora_A", "lora_B"}:
             return new
-        assert p.ndim in {3, 4}, f"LoRA parameters must have 3 or 4 dimensions, got shape {p.shape}"
-        if path[-2].key == "lora_A":
-            return p.at[adapter_index, ..., :, :rank].set(new)
-        elif path[-2].key == "lora_B":
-            return p.at[adapter_index, ..., :rank, :].set(new)
+        assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
+        idx = get_adapter_idx(path, adapter_index)
+        if key == "lora_A":
+            return p.at[*idx, ..., :, :rank].set(new)
+        return p.at[*idx, ..., :rank, :].set(new)
 
     updated = jax.tree.map_with_path(insert_state, lora_params, new_params)
     nnx.update(lora_params, updated)

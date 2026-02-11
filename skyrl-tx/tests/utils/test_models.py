@@ -11,11 +11,14 @@ from flax import nnx
 from peft import PeftModel
 from transformers import AutoConfig, AutoModelForCausalLM
 
+from jax.tree_util import DictKey
+
 from tx.layers.lora import init_lora_adapter
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.tinker.types import LoraConfig
 from tx.utils import models
+from tx.utils.models import extract_adapter_state, insert_adapter_state, is_stacked_path
 from tx.utils.storage import download_and_unpack
 
 
@@ -82,3 +85,90 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
 
         assert torch.allclose(lora_A, torch.from_numpy(expected_lora_A), atol=1e-6)
         assert torch.allclose(lora_B, torch.from_numpy(expected_lora_B), atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        # Stacked paths (DictKey) — real NNX paths include _stacked
+        (
+            (
+                DictKey(key="model"),
+                DictKey(key="layers"),
+                DictKey(key="_stacked"),
+                DictKey(key="self_attn"),
+                DictKey(key="lora_A"),
+            ),
+            True,
+        ),
+        # Non-stacked paths (DictKey)
+        ((DictKey(key="model"), DictKey(key="embed_tokens"), DictKey(key="lora_A")), False),
+        ((DictKey(key="lm_head"), DictKey(key="lora_A")), False),
+        # String paths
+        (("model", "layers", "_stacked", "self_attn", "lora_A"), True),
+        (("model", "embed_tokens", "lora_A"), False),
+    ],
+    ids=["stacked_layers", "embed_tokens", "lm_head", "str_stacked", "str_embed"],
+)
+def test_is_stacked_path(path, expected):
+    """Test is_stacked_path correctly identifies stacked vs non-stacked paths."""
+    assert is_stacked_path(path) is expected
+
+
+def test_extract_insert_adapter_state_roundtrip():
+    """Test that extract_adapter_state and insert_adapter_state are inverses."""
+    base_model_name = "Qwen/Qwen3-0.6B"
+    rank, alpha, adapter_index = 8, 16, 2
+    _, _, model = create_test_model(base_model_name, rank, alpha, adapter_index)
+
+    # Set LoRA weights to random values
+    q_proj = model.model.layers[0].self_attn.q_proj
+    rng1, rng2 = jax.random.split(jax.random.PRNGKey(123))
+    q_proj.lora_A[...] = jax.random.normal(rng1, q_proj.lora_A[...].shape)
+    q_proj.lora_B[...] = jax.random.normal(rng2, q_proj.lora_B[...].shape)
+
+    # Split model to get lora_params
+    _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
+
+    # Store original values for comparison
+    original_lora_A = np.array(q_proj.lora_A[...][adapter_index, :, :rank])
+    original_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :])
+
+    # Extract adapter state
+    extracted = extract_adapter_state(adapter_index, lora_params, rank)
+
+    # Verify extracted shape is correct (no adapter dimension)
+    for path, leaf in jax.tree.leaves_with_path(extracted):
+        key = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
+        if key in {"lora_A", "lora_B"}:
+            # Stacked: should have (num_layers, ...) not (num_layers, num_adapters, ...)
+            if is_stacked_path(path):
+                assert leaf.shape[0] == 1  # num_layers
+                assert leaf.ndim == 3  # (layers, in_dim, rank) or (layers, rank, out_dim)
+
+    # Zero out the adapter's weights
+    q_proj.lora_A[...] = q_proj.lora_A[...].at[adapter_index].set(0)
+    q_proj.lora_B[...] = q_proj.lora_B[...].at[adapter_index].set(0)
+
+    # Verify weights are zeroed
+    assert np.allclose(q_proj.lora_A[...][adapter_index], 0)
+    assert np.allclose(q_proj.lora_B[...][adapter_index], 0)
+
+    # Re-split to get updated lora_params
+    _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
+
+    # Insert extracted state back (modifies lora_params in-place via nnx.update)
+    insert_adapter_state(adapter_index, lora_params, extracted, rank)
+
+    # Verify weights are restored by checking lora_params directly
+    for path, leaf in jax.tree.leaves_with_path(lora_params):
+        key = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
+        # leaf is a state wrapper with .value, or can be an array directly
+        arr = leaf.value if hasattr(leaf, "value") else leaf
+        if "q_proj" in str(path) and key == "lora_A":
+            restored_lora_A = np.array(arr[0, adapter_index, :, :rank])
+        elif "q_proj" in str(path) and key == "lora_B":
+            restored_lora_B = np.array(arr[0, adapter_index, :rank, :])
+
+    assert np.allclose(original_lora_A, restored_lora_A), "lora_A not restored correctly"
+    assert np.allclose(original_lora_B, restored_lora_B), "lora_B not restored correctly"

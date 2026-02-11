@@ -3,15 +3,16 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
-from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
-from tx.layers.util import prepare_routing, shard_map_ep
-from tx.layers.rotary_embedding import apply_rope
-from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
-from tx.layers.layernorm import RMSNorm
 from tx.layers.attention import dot_product_attention
+from tx.layers.layernorm import RMSNorm
+from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
+from tx.layers.rotary_embedding import apply_rope
+from tx.layers.stacked import StackedDecoderLayers
+from tx.layers.util import prepare_routing, shard_map_ep
 from tx.models.configs import Qwen3Config
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
+from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
 
 class Qwen3Attention(nnx.Module):
@@ -329,9 +330,11 @@ class Qwen3Model(nnx.Module):
             embedding_init=nnx.initializers.normal(),
             rngs=rngs,
         )
-        self.layers = nnx.List(
-            [Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
-        )
+
+        def create_layer(rngs: nnx.Rngs) -> Qwen3DecoderLayer:
+            return Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs)
+
+        self.layers = StackedDecoderLayers(create_layer, config.num_hidden_layers, rngs)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -343,28 +346,24 @@ class Qwen3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
+        hidden_states, all_hidden_states, new_kv_cache = self.layers(
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+            is_training=is_training,
+        )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -372,7 +371,7 @@ class Qwen3Model(nnx.Module):
 
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
+            kv_cache=new_kv_cache,
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
@@ -417,6 +416,7 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -428,6 +428,7 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            is_training=is_training,
         )
 
         return CausalLMOutput(
