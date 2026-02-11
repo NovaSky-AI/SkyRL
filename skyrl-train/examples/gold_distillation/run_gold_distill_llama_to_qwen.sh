@@ -88,6 +88,5 @@ uv run --isolated --extra vllm -m examples.gold_distillation.main_gold_distill \
   trainer.export_path="$HOME/exports/gold_llama_to_qwen" \
   trainer.hf_save_interval=10 \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_interval=10 \
   trainer.ckpt_path="$HOME/ckpts/gold_llama_to_qwen" \
   $@
