@@ -479,7 +479,11 @@ class JaxBackendImpl(AbstractBackend):
 
         # Create optimizer
         with jax.set_mesh(self.mesh):
-            tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
+            # Keep Adam hyperparams/moments in fp32 for bf16 models.
+            # Otherwise b2=0.999 rounds to 1.0 in bf16, which destabilizes updates.
+            tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
+                learning_rate=0.0,
+            )
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
 
         # Configure adapter
