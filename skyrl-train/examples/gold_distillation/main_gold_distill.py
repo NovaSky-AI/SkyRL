@@ -63,16 +63,12 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         self,
         cfg,
         ref_tokenizer,
-        ref_generator,
         **kwargs,
     ):
         super().__init__(cfg, **kwargs)
 
         self.ref_tokenizer = ref_tokenizer
-        self.ref_generator = ref_generator
-
         self.gold_temperature = 1.0
-        self.gold_use_extended_uld = True
 
     def update_ref_with_policy(self):
         """
@@ -386,16 +382,13 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             completion_texts,
         )
 
-        # Store in metadata for use in apply_reward_kl_penalty
+        # Store teacher tokenization in metadata for use in apply_reward_kl_penalty
         if training_input.metadata is None:
             training_input.metadata = {}
 
-        training_input.metadata["gold_prompt_texts"] = prompt_texts
-        training_input.metadata["gold_completion_texts"] = completion_texts
         training_input.metadata["gold_teacher_input_ids"] = teacher_input_ids
         training_input.metadata["gold_teacher_labels"] = teacher_labels
         training_input.metadata["gold_teacher_attention_mask"] = teacher_attention_mask
-        training_input.metadata["gold_teacher_prompt_length"] = teacher_prompt_length
 
         return training_input
 
@@ -526,8 +519,8 @@ class GOLDDistillationExp(BasePPOExp):
 
     def _setup_trainer(self):
         """
-        Largely a copy of _setup_trainer in BasePPOExp, but creates a separate tokenizer and
-        generator for the ref mdoel
+        Largely a copy of _setup_trainer in BasePPOExp, but creates a separate tokenizer
+        for the ref model (teacher) to support cross-tokenizer distillation.
         """
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
@@ -551,7 +544,6 @@ class GOLDDistillationExp(BasePPOExp):
         inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
-        ref_generator: GeneratorInterface = self.get_generator(self.cfg, ref_tokenizer, inference_engine_client)
 
         trainer = self.get_trainer(
             cfg=self.cfg,
@@ -562,7 +554,6 @@ class GOLDDistillationExp(BasePPOExp):
             eval_dataset=self.eval_dataset,
             inference_engine_client=inference_engine_client,
             generator=generator,
-            ref_generator=ref_generator,
             colocate_pg=self.colocate_pg,
         )
 
