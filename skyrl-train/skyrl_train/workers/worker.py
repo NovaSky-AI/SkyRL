@@ -346,8 +346,7 @@ class Worker(DistributedTorchRayActor):
         self,
         data: TrainingInputBatch,
     ) -> TrainingOutputBatch:
-        """Run forward pass on the input batch in inference mode.
-        """
+        """Run forward pass on the input batch in inference mode."""
         token_budget = getattr(self, "_token_budget", None)
         if token_budget is not None and token_budget > 0:
             padded_seq_len = data["sequences"].shape[1]

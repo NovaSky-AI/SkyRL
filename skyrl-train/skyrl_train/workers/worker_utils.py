@@ -37,10 +37,8 @@ def all_reduce_metrics(metrics: Dict[str, List[float]], strategy: DistributedStr
     return status_mean
 
 
-
 def batch_to_experience(batch: TrainingInputBatch) -> Experience:
-    """Convert a :class:`TrainingInputBatch` slice into an :class:`Experience`.
-    """
+    """Convert a :class:`TrainingInputBatch` slice into an :class:`Experience`."""
     return Experience(
         sequences=batch["sequences"],
         action_log_probs=batch.get("action_log_probs"),
@@ -124,9 +122,7 @@ class MemoryAwareBatchIterator:
         if attention_mask is not None:
             seq_lengths = attention_mask.sum(dim=1)
         else:
-            seq_lengths = torch.full(
-                (data.batch_size,), data["sequences"].shape[1], dtype=torch.long
-            )
+            seq_lengths = torch.full((data.batch_size,), data["sequences"].shape[1], dtype=torch.long)
 
         # sort by descending sequence length
         sorted_indices = torch.argsort(seq_lengths, descending=True)

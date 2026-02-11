@@ -200,8 +200,7 @@ def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
 
 
 def validate_auto_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
-    """Validate batch sizes after auto micro-batch sizing has set the micro batch sizes.
-    """
+    """Validate batch sizes after auto micro-batch sizing has set the micro batch sizes."""
     assert cfg.trainer.micro_train_batch_size_per_gpu > 0, (
         f"Auto micro-batch sizing produced invalid micro_train_batch_size_per_gpu: "
         f"{cfg.trainer.micro_train_batch_size_per_gpu}"

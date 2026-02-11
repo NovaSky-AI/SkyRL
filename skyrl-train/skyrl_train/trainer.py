@@ -592,13 +592,9 @@ class RayPPOTrainer:
 
         The minimum budget across all workers is taken as the global budget.
         """
-        max_seq_len = (
-            cfg.trainer.max_prompt_length + cfg.generator.sampling_params.max_generate_length
-        )
+        max_seq_len = cfg.trainer.max_prompt_length + cfg.generator.sampling_params.max_generate_length
 
-        logger.info(
-            f"Auto micro-batch sizing: profiling policy workers (max_seq_len={max_seq_len})"
-        )
+        logger.info(f"Auto micro-batch sizing: profiling policy workers (max_seq_len={max_seq_len})")
         policy_refs = policy_model.async_run_ray_method(
             "pass_through",
             "auto_determine_token_budget",
@@ -608,8 +604,7 @@ class RayPPOTrainer:
         global_budget = min(policy_budgets)
 
         logger.info(
-            f"Auto micro-batch sizing: per-worker token budgets={policy_budgets}, "
-            f"using min={global_budget}"
+            f"Auto micro-batch sizing: per-worker token budgets={policy_budgets}, " f"using min={global_budget}"
         )
 
         assert global_budget > 0, (

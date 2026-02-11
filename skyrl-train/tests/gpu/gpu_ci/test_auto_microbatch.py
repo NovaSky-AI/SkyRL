@@ -69,9 +69,7 @@ async def test_auto_token_budget_full_shard(ray_init_fixture, strategy):
         assert results[0] > 0, f"Token budget must be positive, got {results[0]}"
 
         # token budget should be at least max_seq_len (can fit 1 sample)
-        assert results[0] >= max_seq_len, (
-            f"Token budget {results[0]} is less than max_seq_len {max_seq_len}"
-        )
+        assert results[0] >= max_seq_len, f"Token budget {results[0]} is less than max_seq_len {max_seq_len}"
 
         print(f"[{strategy}] Token budget: {results[0]}")
     finally:
@@ -112,7 +110,6 @@ async def test_auto_token_budget_hybrid_shard(ray_init_fixture):
         ray.shutdown()
 
 
-
 def test_memory_aware_iterator_packing():
     """MemoryAwareBatchIterator should pack short sequences more densely."""
     from skyrl_train.workers.worker_utils import MemoryAwareBatchIterator
@@ -127,10 +124,12 @@ def test_memory_aware_iterator_packing():
     for i, length in enumerate(actual_lens):
         attention_mask[i, :length] = 1
 
-    data = TrainingInputBatch({
-        "sequences": sequences,
-        "attention_mask": attention_mask,
-    })
+    data = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": attention_mask,
+        }
+    )
     data.metadata = {"response_length": padded_len}
 
     iterator = MemoryAwareBatchIterator(data, token_budget=200)
@@ -153,10 +152,12 @@ def test_memory_aware_iterator_all_same_length():
     batch_size = 8
     seq_len = 50
 
-    data = TrainingInputBatch({
-        "sequences": torch.randint(0, 100, (batch_size, seq_len)),
-        "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
-    })
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.randint(0, 100, (batch_size, seq_len)),
+            "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+        }
+    )
     data.metadata = {"response_length": seq_len}
 
     iterator = MemoryAwareBatchIterator(data, token_budget=200)
@@ -171,10 +172,12 @@ def test_memory_aware_iterator_single_sequence():
     from skyrl_train.workers.worker_utils import MemoryAwareBatchIterator
     from skyrl_train.training_batch import TrainingInputBatch
 
-    data = TrainingInputBatch({
-        "sequences": torch.randint(0, 100, (1, 500)),
-        "attention_mask": torch.ones(1, 500, dtype=torch.long),
-    })
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.randint(0, 100, (1, 500)),
+            "attention_mask": torch.ones(1, 500, dtype=torch.long),
+        }
+    )
     data.metadata = {"response_length": 500}
 
     iterator = MemoryAwareBatchIterator(data, token_budget=1000)
@@ -191,10 +194,12 @@ def test_memory_aware_iterator_budget_too_small():
     batch_size = 3
     seq_len = 100
 
-    data = TrainingInputBatch({
-        "sequences": torch.randint(0, 100, (batch_size, seq_len)),
-        "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
-    })
+    data = TrainingInputBatch(
+        {
+            "sequences": torch.randint(0, 100, (batch_size, seq_len)),
+            "attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+        }
+    )
     data.metadata = {"response_length": seq_len}
 
     iterator = MemoryAwareBatchIterator(data, token_budget=50)

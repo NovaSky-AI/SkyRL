@@ -59,9 +59,7 @@ def determine_token_budget(
     )
 
     seq_lens = (torch.linspace(1, 0.25, 4) * max_seq_len).to(dtype=torch.long)
-    logger.info(
-        f"Profiling sequence lengths of: {list(seq_lens)}"
-    )
+    logger.info(f"Profiling sequence lengths of: {list(seq_lens)}")
     boundary_products: List[int] = []
 
     for seq_len in seq_lens:
@@ -75,10 +73,7 @@ def determine_token_budget(
         )
 
         if max_bs <= 0:
-            logger.warning(
-                f"Token-budget profiling: even batch_size=1 at seq_len={seq_len} "
-                "exceeds memory budget."
-            )
+            logger.warning(f"Token-budget profiling: even batch_size=1 at seq_len={seq_len} " "exceeds memory budget.")
             if seq_len == seq_lens[0]:
                 # can't even fit 1 sample at the longest seq_len
                 # return 0 so the caller falls back to fixed micro-batch size.
@@ -89,9 +84,7 @@ def determine_token_budget(
 
         product = max_bs * seq_len
         boundary_products.append(product)
-        logger.info(
-            f"Token-budget profiling: seq_len={seq_len} | max_bs={max_bs} -> product={product}"
-        )
+        logger.info(f"Token-budget profiling: seq_len={seq_len} | max_bs={max_bs} -> product={product}")
 
     if not boundary_products:
         logger.warning("Token-budget profiling: no valid boundary found.  Returning 0.")
@@ -106,10 +99,7 @@ def determine_token_budget(
         token_budget = budget_tensor.item()
 
     _cleanup_memory()
-    logger.info(
-        f"Token-budget profiling complete: C={token_budget} "
-        f"(boundary products={boundary_products})"
-    )
+    logger.info(f"Token-budget profiling complete: C={token_budget} " f"(boundary products={boundary_products})")
     return token_budget
 
 
@@ -148,8 +138,7 @@ def _would_oom(
 
     if would_skip:
         logger.debug(
-            f"  skipping bs={candidate_bs} (estimated "
-            f"{estimated / 1e9:.2f} GB > free {free_now / 1e9:.2f} GB)"
+            f"  skipping bs={candidate_bs} (estimated " f"{estimated / 1e9:.2f} GB > free {free_now / 1e9:.2f} GB)"
         )
     return would_skip
 
@@ -175,12 +164,14 @@ def _find_max_batch_size(
             break
 
         consumed = _profile_and_sync(
-            model, strategy, bs, seq_len, device, **profile_kwargs,
+            model,
+            strategy,
+            bs,
+            seq_len,
+            device,
+            **profile_kwargs,
         )
-        logstr = (
-            f"exp-search: bs={bs}, seq_len={seq_len} "
-            f"({consumed / 1e9:.2f} GB / {memory_budget / 1e9:.2f} GB)"
-        )
+        logstr = f"exp-search: bs={bs}, seq_len={seq_len} " f"({consumed / 1e9:.2f} GB / {memory_budget / 1e9:.2f} GB)"
         if consumed <= memory_budget:
             last_good = bs
             last_consumed = consumed
@@ -203,11 +194,15 @@ def _find_max_batch_size(
             continue
 
         consumed = _profile_and_sync(
-            model, strategy, mid, seq_len, device, **profile_kwargs,
+            model,
+            strategy,
+            mid,
+            seq_len,
+            device,
+            **profile_kwargs,
         )
         logstr = (
-            f"  bin-search: bs={mid}, seq_len={seq_len} "
-            f"({consumed / 1e9:.2f} GB / {memory_budget / 1e9:.2f} GB)"
+            f"  bin-search: bs={mid}, seq_len={seq_len} " f"({consumed / 1e9:.2f} GB / {memory_budget / 1e9:.2f} GB)"
         )
         if consumed <= memory_budget:
             low = mid
@@ -262,8 +257,7 @@ def _profile_candidate(
     compute_entropy: bool = True,
     entropy_requires_grad: bool = False,
 ) -> int:
-    """Run a dummy forward + backward pass and return memory consumed in bytes.
-    """
+    """Run a dummy forward + backward pass and return memory consumed in bytes."""
     torch.cuda.synchronize(device)
     free_before, _total = torch.cuda.mem_get_info(device)
 
