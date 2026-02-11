@@ -151,10 +151,14 @@ def get_backend_classes(backend_name: str):
         from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
 
         return JaxBackend, JaxBackendConfig
-    elif backend_name == "fsdp" or backend_name == "megatron":
-        from tx.tinker.backends.skyrl_train import SkyRLTrainBackend, SkyRLTrainBackendConfig
+    elif backend_name == "fsdp":
+        from tx.tinker.backends.skyrl_train import SkyRLTrainBackend, FSDPBackendConfig
 
-        return SkyRLTrainBackend, SkyRLTrainBackendConfig
+        return SkyRLTrainBackend, FSDPBackendConfig
+    elif backend_name == "megatron":
+        from tx.tinker.backends.skyrl_train import SkyRLTrainBackend, MegatronBackendConfig
+
+        return SkyRLTrainBackend, MegatronBackendConfig
     else:
         raise ValueError(
             f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "

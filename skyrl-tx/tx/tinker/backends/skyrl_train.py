@@ -37,10 +37,13 @@ class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
     Uses SkyRL-Train's default config (ppo_base_config.yaml). Any extra keys
     are applied as dot-notation overrides via --backend-config.
     """
-
-    strategy: str = "fsdp2"  # fsdp2 or megatron
-
     pass
+
+class FSDPBackendConfig(SkyRLTrainBackendConfig):
+    strategy: str = "fsdp2"
+
+class MegatronBackendConfig(SkyRLTrainBackendConfig):
+    strategy: str = "megatron"
 
 
 def _build_config(
@@ -67,11 +70,8 @@ def _build_config(
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
 
-    assert config.backend in ("fsdp", "megatron"), "Only fsdp and megatron are supported for SkyRL-Train backend"
-    if config.backend == "fsdp":
-        cfg.trainer.strategy = "fsdp2"
-    elif config.backend == "megatron":
-        cfg.trainer.strategy = "megatron"
+    assert config.strategy in ("fsdp2", "megatron"), "Only fsdp and megatron are supported for SkyRL-Train backend"
+    cfg.trainer.strategy = config.strategy
 
     # Apply user overrides from backend_config
     for key, value in config.model_extra.items():
