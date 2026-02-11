@@ -25,7 +25,7 @@ def get_auto_test_config(
     fsdp_size: int = -1,
     strategy: str = "fsdp2",
 ) -> SkyRLConfig:
-    """Build a SkyRLConfig with ``auto_micro_batch_size`` enabled."""
+    """Build a SkyRLConfig with `auto_micro_batch_size` enabled."""
     cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = num_gpus

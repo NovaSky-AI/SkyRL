@@ -94,7 +94,7 @@ class BatchIterator:
 
 
 def _select_indices(data: TrainingInputBatch, indices: torch.Tensor) -> TrainingInputBatch:
-    """Index a :class:`TrainingInputBatch` with a 1-D int tensor of row indices."""
+    """Index a `TrainingInputBatch` with a 1d int tensor of row indices."""
     selected = {}
     for key, value in data.items():
         if value is not None:

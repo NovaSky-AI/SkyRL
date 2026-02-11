@@ -1067,9 +1067,9 @@ class CriticWorkerBase(Worker):
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
-        When a token budget is set, uses :class:`MemoryAwareBatchIterator` for
+        When a token budget is set, uses `MemoryAwareBatchIterator` for
         dynamic packing.  Otherwise falls back to fixed
-        ``micro_train_batch_size_per_gpu``.
+        `micro_train_batch_size_per_gpu`.
 
         Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
 
