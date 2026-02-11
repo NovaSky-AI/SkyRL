@@ -69,12 +69,16 @@ aws --version
 
 # 2. Install SkyPilot
 log "Installing SkyPilot..."
-pip3 install --user "skypilot-nightly[lambda,runpod,vast,nebius]"
+pip3 install --user "skypilot-nightly[lambda,runpod,vast,nebius,aws]"
+# Also install cloud-specific dependencies
+pip3 install --user runpod 2>/dev/null || true
+pip3 install --user prime 2>/dev/null || true
 export PATH="$HOME/.local/bin:$PATH"
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
-# Create symlink so GHA runner service can find sky
+# Create symlinks so GHA runner service can find sky and runpod
 sudo ln -sf "$HOME/.local/bin/sky" /usr/local/bin/sky
+sudo ln -sf "$HOME/.local/bin/runpod" /usr/local/bin/runpod
 sky --version
 
 # 3. Configure cloud credentials
@@ -149,8 +153,46 @@ log "Installing runner as service..."
 sudo ./svc.sh install
 sudo ./svc.sh start
 
+# 6. Configure systemd watchdog for auto-restart
+log "Configuring systemd watchdog..."
+SERVICE_NAME=$(systemctl list-units --type=service --all | grep "actions.runner" | awk '{print $1}' | head -1)
+if [ -n "$SERVICE_NAME" ]; then
+    OVERRIDE_DIR="/etc/systemd/system/${SERVICE_NAME}.d"
+    sudo mkdir -p "$OVERRIDE_DIR"
+    sudo tee "$OVERRIDE_DIR/override.conf" > /dev/null << 'WATCHDOG_EOF'
+[Service]
+Restart=always
+RestartSec=10
+WatchdogSec=300
+StartLimitIntervalSec=600
+StartLimitBurst=5
+TimeoutStopSec=90
+WATCHDOG_EOF
+    sudo systemctl daemon-reload
+    log "Watchdog configured: auto-restart enabled"
+fi
+
+# 7. Install health check cron job
+log "Installing health check cron job..."
+HEALTH_SCRIPT="/opt/runner-health-check.sh"
+sudo curl -sf -o "$HEALTH_SCRIPT" \
+    "https://raw.githubusercontent.com/fleet-ai/SkyRL/main/scripts/runner-health-check.sh"
+sudo chmod +x "$HEALTH_SCRIPT"
+
+# Add cron job (runs every 5 minutes)
+CRON_LINE="*/5 * * * * RUNNER_NAME=$RUNNER_NAME RUNNER_DIR=$RUNNER_DIR $HEALTH_SCRIPT"
+(crontab -l 2>/dev/null | grep -v "runner-health-check"; echo "$CRON_LINE") | crontab -
+log "Health check cron installed"
+
+# Create log file
+sudo touch /var/log/runner-health-check.log
+sudo chmod 644 /var/log/runner-health-check.log
+
+# Restart service to apply watchdog
+sudo systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+sleep 3
+
 # Verify runner is running
-sleep 2
 if sudo ./svc.sh status | grep -q "active (running)"; then
     log "Runner installed and running successfully!"
 else

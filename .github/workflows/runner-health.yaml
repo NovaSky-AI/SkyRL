@@ -1,0 +1,138 @@
+name: Runner Health Check
+
+on:
+  schedule:
+    # Run every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-runners:
+    name: Check Runner Status
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check all self-hosted runners
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "## Runner Status" >> $GITHUB_STEP_SUMMARY
+
+          # Get all runners
+          RUNNERS=$(gh api repos/${{ github.repository }}/actions/runners --jq '.runners')
+
+          # Count statuses
+          TOTAL=$(echo "$RUNNERS" | jq 'length')
+          ONLINE=$(echo "$RUNNERS" | jq '[.[] | select(.status == "online")] | length')
+          OFFLINE=$(echo "$RUNNERS" | jq '[.[] | select(.status == "offline")] | length')
+          BUSY=$(echo "$RUNNERS" | jq '[.[] | select(.busy == true)] | length')
+
+          echo "| Runner | Status | Busy |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|------|" >> $GITHUB_STEP_SUMMARY
+
+          echo "$RUNNERS" | jq -r '.[] | "| \(.name) | \(.status) | \(.busy) |"' >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Summary:** $ONLINE/$TOTAL online, $BUSY busy, $OFFLINE offline" >> $GITHUB_STEP_SUMMARY
+
+          # Export for next steps
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "online=$ONLINE" >> $GITHUB_OUTPUT
+          echo "offline=$OFFLINE" >> $GITHUB_OUTPUT
+          echo "busy=$BUSY" >> $GITHUB_OUTPUT
+
+          # Get offline runner names
+          OFFLINE_NAMES=$(echo "$RUNNERS" | jq -r '[.[] | select(.status == "offline") | .name] | join(", ")')
+          echo "offline_names=$OFFLINE_NAMES" >> $GITHUB_OUTPUT
+
+      - name: Check queued jobs
+        id: queue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          QUEUED=$(gh run list --repo ${{ github.repository }} --status queued --json databaseId --jq 'length')
+          IN_PROGRESS=$(gh run list --repo ${{ github.repository }} --status in_progress --json databaseId --jq 'length')
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Jobs:** $QUEUED queued, $IN_PROGRESS in progress" >> $GITHUB_STEP_SUMMARY
+
+          echo "queued=$QUEUED" >> $GITHUB_OUTPUT
+          echo "in_progress=$IN_PROGRESS" >> $GITHUB_OUTPUT
+
+      - name: Check EC2 instance health
+        id: ec2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          # Runner instance IDs (from docs/gha-runner-setup.md)
+          INSTANCES="i-04a15158610df980f i-0f80c703294413a4c i-09321b67952c1a208 i-0f2ccaa840ef29450 i-05ecd98e74949dc87"
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### EC2 Instance Health" >> $GITHUB_STEP_SUMMARY
+          echo "| Instance | State | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          IMPAIRED=""
+          for id in $INSTANCES; do
+            STATUS=$(aws ec2 describe-instance-status --instance-ids $id --query 'InstanceStatuses[0].[InstanceState.Name,InstanceStatus.Status]' --output text 2>/dev/null || echo "unknown unknown")
+            STATE=$(echo $STATUS | awk '{print $1}')
+            HEALTH=$(echo $STATUS | awk '{print $2}')
+            echo "| $id | $STATE | $HEALTH |" >> $GITHUB_STEP_SUMMARY
+
+            if [ "$HEALTH" = "impaired" ]; then
+              IMPAIRED="$IMPAIRED $id"
+            fi
+          done
+
+          echo "impaired=$(echo $IMPAIRED | xargs)" >> $GITHUB_OUTPUT
+
+      - name: Alert on issues
+        if: steps.check.outputs.offline != '0' || steps.queue.outputs.queued > 2 || steps.ec2.outputs.impaired != ''
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "text": "Runner Health Alert",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "${{ steps.check.outputs.offline != '0' && '🚨 Runner(s) Offline' || '⚠️ Job Queue Building Up' }}" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Runners Online:*\n${{ steps.check.outputs.online }}/${{ steps.check.outputs.total }}" },
+                    { "type": "mrkdwn", "text": "*Runners Busy:*\n${{ steps.check.outputs.busy }}" },
+                    { "type": "mrkdwn", "text": "*Jobs Queued:*\n${{ steps.queue.outputs.queued }}" },
+                    { "type": "mrkdwn", "text": "*Jobs In Progress:*\n${{ steps.queue.outputs.in_progress }}" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ steps.check.outputs.offline != '0' && format('*Offline:* {0}', steps.check.outputs.offline_names) || steps.ec2.outputs.impaired != '' && format('*EC2 Impaired:* {0}', steps.ec2.outputs.impaired) || 'Consider adding more runners if queue persists' }}"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    { "type": "mrkdwn", "text": "<https://github.com/${{ github.repository }}/settings/actions/runners|Manage Runners> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Check>" }
+                  ]
+                }
+              ]
+            }
+
+      - name: Fail if runners offline
+        if: steps.check.outputs.offline != '0'
+        run: |
+          echo "::error::${{ steps.check.outputs.offline }} runner(s) offline: ${{ steps.check.outputs.offline_names }}"
+          exit 1
