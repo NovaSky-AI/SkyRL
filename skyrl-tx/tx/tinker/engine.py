@@ -12,6 +12,7 @@ from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
+from tx.tinker.backends.jax import JaxBackend
 from tx.tinker.db_models import (
     FutureDB,
     RequestStatus,
