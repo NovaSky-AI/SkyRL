@@ -1,7 +1,6 @@
 """Background engine for processing training requests."""
 
 import argparse
-import math
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -12,7 +11,6 @@ from cloudpathlib import AnyPath
 from pydantic import BaseModel
 from sqlmodel import create_engine, Session, select, update, func
 
-from tx.tinker.backends.jax import JaxBackend
 from tx.tinker.db_models import (
     FutureDB,
     RequestStatus,
@@ -264,7 +262,7 @@ class TinkerEngine:
                 session.commit()
 
     def find_batchable_model_passes(
-        self, session: Session, request_type: types.RequestType
+        self, session: Session, request_type: types.RequestType, max_requests: int = 0
     ) -> dict[str, tuple[str, types.ForwardBackwardInput]]:
         """Find all requests of the given type that come before any destructive update for their model.
 
@@ -274,6 +272,7 @@ class TinkerEngine:
         Args:
             session: Database session
             request_type: The type of request to find (e.g., FORWARD or FORWARD_BACKWARD)
+            max_requests: Maximum number of requests to return. 0 means no limit.
 
         Returns:
             Dict mapping request_id to (model_id, request_data) tuples
@@ -302,25 +301,8 @@ class TinkerEngine:
         # Filter: only include ops that come before their model's barrier
         batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
 
-        # Limit total micro batches if configured
-        if self.config.max_micro_batches > 0 and isinstance(self.backend, JaxBackend):
-            micro_batch_size = self.backend.config.train_micro_batch_size
-            limited = []
-            total_micro_batches = 0
-            for op in batchable:
-                num_sequences = len(op.request_data.get("data", []))
-                if micro_batch_size > 0:
-                    # Gradient accumulation enabled: count actual micro batches
-                    num_micro_batches = math.ceil(num_sequences / micro_batch_size)
-                else:
-                    # Full batch mode: each request is processed as one unit
-                    num_micro_batches = 1
-                # Always include at least one request to avoid starvation
-                if limited and total_micro_batches + num_micro_batches > self.config.max_micro_batches:
-                    break
-                limited.append(op)
-                total_micro_batches += num_micro_batches
-            batchable = limited
+        if max_requests > 0:
+            batchable = batchable[:max_requests]
 
         return {
             str(f.request_id): (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
@@ -652,11 +634,14 @@ class TinkerEngine:
         while True:
             # Query for pending requests and extract data within session context
             with Session(self.db_engine) as session:
-                # Use look-ahead scheduling to find batchable forward_backward and forward model passes
+                # Process one request at a time to avoid large batches that cause long
+                # wait times and retrieve_future requests piling up.
                 forward_backward_requests = self.find_batchable_model_passes(
-                    session, types.RequestType.FORWARD_BACKWARD
+                    session, types.RequestType.FORWARD_BACKWARD, max_requests=1
                 )
-                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD)
+                forward_requests = self.find_batchable_model_passes(
+                    session, types.RequestType.FORWARD, max_requests=1
+                )
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non forward_backward and non sampling)

@@ -51,10 +51,6 @@ class EngineConfig(BaseModel):
         default=300,
         description="Seconds without heartbeat before session is considered stale. Set to -1 to disable cleanup.",
     )
-    max_micro_batches: int = Field(
-        default=64,
-        description="Maximum number of micro batches per forward/forward_backward batch. Limits how many are processed before returning results to clients. Set to 0 to disable.",
-    )
 
 
 def convert_env_var(env_name: str, env_value: str, expected_type: type):
