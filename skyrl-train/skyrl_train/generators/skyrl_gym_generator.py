@@ -175,6 +175,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             if not self.use_conversation_multi_turn:
                 raise ValueError("`step_wise_trajectories` doesn't support `use_conversation_multi_turn=False`")
 
+        if self.generator_cfg.previous_observation_only and not self.generator_cfg.step_wise_trajectories:
+            raise ValueError("`previous_observation_only` doesn't support `step_wise_trajectories=False`")
+
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
             loop = asyncio.get_running_loop()
