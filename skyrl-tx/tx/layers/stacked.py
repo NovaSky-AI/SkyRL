@@ -120,18 +120,11 @@ class StackedDecoderLayers(nnx.Module):
         # Sync NNX sharding metadata with actual array sharding.
         # The arrays have correct stacked sharding from device_put, but NNX APIs
         # (nnx.get_partition_spec, nnx.Optimizer) read from 'sharding_names' metadata.
-        def update_sharding_metadata(var):
+        for _, var in nnx.to_flat_state(stacked_state):
             if isinstance(var, nnx.Variable) and hasattr(var.value, "sharding"):
                 array_sharding = var.value.sharding
                 if hasattr(array_sharding, "spec"):
                     var.set_metadata("sharding_names", tuple(array_sharding.spec))
-            return var
-
-        jax.tree.map(
-            update_sharding_metadata,
-            stacked_state,
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
 
         self._stacked = nnx.merge(graphdef, stacked_state)
 
