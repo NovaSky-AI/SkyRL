@@ -18,7 +18,9 @@ jobs:
       - name: Check all self-hosted runners
         id: check
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Requires PAT with 'repo' scope to list self-hosted runners
+          # GITHUB_TOKEN doesn't have permission to access /actions/runners
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
           echo "## Runner Status" >> $GITHUB_STEP_SUMMARY
 
