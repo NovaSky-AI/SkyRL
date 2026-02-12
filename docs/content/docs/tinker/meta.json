@@ -1,10 +1,11 @@
 {
-  "title": "Tinker Integration",
+  "title": "Tinker API",
   "pages": [
     "overview",
     "quickstart",
     "architecture",
     "cookbook",
+    "configuration",
     "limitations"
   ]
 }

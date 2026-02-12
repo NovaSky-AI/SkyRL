@@ -2,14 +2,14 @@
 title: "Cookbook Scripts"
 ---
 
-The [tinker-cookbook](https://github.com/ThinkingMachinesLab/tinker-cookbook) is a library provided by Thinking Machines with ready-to-run training recipes. This page describes how to run a few example recipes on SkyRL, and provides example curves from our experiments.
+The [tinker-cookbook](https://github.com/thinking-machines-lab/tinker-cookbook) is a library provided by Thinking Machines with ready-to-run training recipes. This page describes how to run a few example recipes on SkyRL, and provides example curves from our experiments.
 
 ## Setup
 
 Follow the [Quickstart](./quickstart) to install SkyRL and start the Tinker server. Then clone the cookbook:
 
 ```bash
-git clone https://github.com/ThinkingMachinesLab/tinker-cookbook.git
+git clone https://github.com/thinking-machines-lab/tinker-cookbook.git
 cd tinker-cookbook
 ```
 
@@ -24,7 +24,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
-    log_path="/tmp/tinker-sl" \
     train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
@@ -35,7 +34,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
-    log_path="/tmp/tinker-sl" \
     train_on_what=LAST_ASSISTANT_MESSAGE \
     lora_rank=0
 ```
@@ -53,7 +51,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     python -m tinker_cookbook.recipes.rl_loop \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
-    log_path="/tmp/tinker-rl" \
     lora_rank=0
 ```
 
