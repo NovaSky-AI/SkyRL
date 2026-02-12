@@ -440,8 +440,13 @@ class DeepseekV3DecoderLayer(nnx.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
-        self.attn_connector = Connector(config.hidden_size, expansion_rate, dtype=dtype, rngs=rngs)
-        self.mlp_connector = Connector(config.hidden_size, expansion_rate, dtype=dtype, rngs=rngs)
+        connector_trainable = getattr(config, "train_connectors", False)
+        self.attn_connector = Connector(
+            config.hidden_size, expansion_rate, trainable=connector_trainable, dtype=dtype, rngs=rngs
+        )
+        self.mlp_connector = Connector(
+            config.hidden_size, expansion_rate, trainable=connector_trainable, dtype=dtype, rngs=rngs
+        )
 
     def __call__(
         self,
@@ -573,6 +578,11 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
     def is_lora_param(path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to LoRA weights."""
         return any(name in path for name in ("lora_A", "lora_B"))
+
+    @staticmethod
+    def is_global_trainable_param(path: tuple, _value) -> bool:
+        """Return True if a parameter path corresponds to globally-trainable weights."""
+        return any(name in path for name in ("attn_connector", "mlp_connector"))
 
     def __call__(
         self,

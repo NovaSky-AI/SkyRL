@@ -71,21 +71,25 @@ class Connector(nnx.Module):
 
         x_norm = self.input_norm(x.reshape(*batch_dims, n * C))
 
-        (alpha_pre, alpha_post, alpha_res, phi_pre, phi_post, phi_res,
-         b_pre, b_post, b_res) = self._get_params()
+        (alpha_pre, _, _, phi_pre, _, _, b_pre, _, _) = self._get_params()
 
         tilde_H_pre = alpha_pre * (x_norm @ phi_pre) + b_pre
-        tilde_H_post = alpha_post * (x_norm @ phi_post) + b_post
-        tilde_H_res = alpha_res * (x_norm @ phi_res).reshape(*batch_dims, n, n) + b_res
 
         H_pre = jax.nn.sigmoid(tilde_H_pre)
-        self.H_post = 2.0 * jax.nn.sigmoid(tilde_H_post)
-        self.M = sinkhorn_knopp(tilde_H_res, self.sinkhorn_iters)
-
         x_agg = (H_pre[..., None] * x).sum(axis=-2)
         return x_agg
 
     def post(self, residual: jax.Array, output: jax.Array) -> jax.Array:
-        y_dist = self.H_post[..., None] * output[..., None, :]
-        x_mixed = self.M @ residual
+        *batch_dims, n, C = residual.shape
+        residual_norm = self.input_norm(residual.reshape(*batch_dims, n * C))
+
+        (_, alpha_post, alpha_res, _, phi_post, phi_res, _, b_post, b_res) = self._get_params()
+        tilde_H_post = alpha_post * (residual_norm @ phi_post) + b_post
+        tilde_H_res = alpha_res * (residual_norm @ phi_res).reshape(*batch_dims, n, n) + b_res
+
+        H_post = 2.0 * jax.nn.sigmoid(tilde_H_post)
+        M = sinkhorn_knopp(tilde_H_res, self.sinkhorn_iters)
+
+        y_dist = H_post[..., None] * output[..., None, :]
+        x_mixed = M @ residual
         return x_mixed + y_dist
