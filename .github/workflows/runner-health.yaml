@@ -21,7 +21,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
         run: |
-          set -x  # Debug mode
+          set +e  # Don't exit on errors
           aws --version
 
           # Runner instance IDs and names (from docs/gha-runner-setup.md)
@@ -43,7 +43,7 @@ jobs:
 
             # Get instance state and status
             RESULT=$(aws ec2 describe-instance-status --instance-ids $id --include-all-instances \
-              --query 'InstanceStatuses[0].[InstanceState.Name,InstanceStatus.Status]' --output text 2>/dev/null)
+              --query 'InstanceStatuses[0].[InstanceState.Name,InstanceStatus.Status]' --output text) || true
 
             if [ -z "$RESULT" ] || [ "$RESULT" = "None" ]; then
               STATE="unknown"
