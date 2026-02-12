@@ -32,7 +32,7 @@ class Connector(nnx.Module):
         n = expansion_rate
         C = hidden_dim
 
-        self.input_norm = RMSNorm(n * C, eps=eps, elementwise_affine=False, dtype=dtype, rngs=rngs)
+        self.input_norm = RMSNorm(n * C, eps=eps, dtype=dtype, rngs=rngs)
 
         self.phi_pre = Param(n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs)
         self.phi_post = Param(n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs)
