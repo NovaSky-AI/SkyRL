@@ -31,7 +31,7 @@ set -x
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
-RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-useTIS_${USE_TIS}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
+RUN_NAME=gsm8k-fully-async-qwen2.5_1.5B-useTIS_${TIS_TYPE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen
 
 uv run --isolated --extra fsdp -m examples.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -76,6 +76,5 @@ uv run --isolated --extra fsdp -m examples.fully_async.main_fully_async \
   trainer.run_name=${RUN_NAME} \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
-  trainer.resume_mode=latest \
   generator.enforce_eager=true \
   $@

@@ -63,10 +63,8 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
-      - name: Install skyrl
-        run:  uv sync --frozen --extra skyrl-train --extra dev
       - name: Run cpu tests
-        run:  uv run --frozen pytest tests/train/cpu/ tests/backends/skyrl_train/cpu/
+        run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu
   
   skyrl_gym_tests:
     needs: check_code_quality
@@ -79,17 +77,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
-        # This is the version of the action for setting up Python, not the Python version.
         uses: actions/setup-python@v5
         with:
-          # Semantic version range syntax or exact version of a Python version
           python-version: '3.12'
           cache: 'pip'
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
-      - name: Install skyrl-gym
-        run:  uv sync --frozen --extra dev # installs from lock file
       - name: Run cpu tests
-        run:  uv run --frozen pytest tests/
+        run:  uv run --isolated --extra skyrl-gym --extra dev pytest tests/

@@ -179,7 +179,6 @@ conflicts = [
         { extra = "megatron" },
         { extra = "fsdp" },
         { extra = "flashrl" },
-        { extra = "fsdp" }
     ],
     [
         { extra = "megatron" },
