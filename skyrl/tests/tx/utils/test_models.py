@@ -15,8 +15,8 @@ from skyrl.tx.layers.lora import init_lora_adapter
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
 from skyrl.tinker.types import LoraConfig
-from skyrl.utils import models
-from skyrl.tx.utils.storage import download_and_unpack
+from skyrl.tx.utils import models
+from skyrl.utils.storage import download_and_unpack
 
 
 def create_test_model(base_model_name: str, rank: int, alpha: int, adapter_index: int):

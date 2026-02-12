@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from skyrl.tx.utils.storage import pack_and_upload
+from skyrl.utils.storage import pack_and_upload
 
 
 def test_pack_and_upload_skips_write_for_non_rank_0_on_shared_fs(tmp_path: Path):
