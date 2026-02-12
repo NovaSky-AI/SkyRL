@@ -22,7 +22,7 @@ from skyrl_train.config.config import SkyRLConfig
 from skyrl_train.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_LOG_DIR,
-    SKYRL_LOG_LEVEL,
+    SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     _SKYRL_USE_NEW_INFERENCE,
@@ -730,8 +730,8 @@ def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
     """
     from .ppo_utils import sync_registries
 
-    # Determine if we should show all logs on stdout (DEBUG mode)
-    verbose_logging = SKYRL_LOG_LEVEL == "DEBUG"
+    # When SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1, show all logs on stdout (no file redirect)
+    verbose_logging = SKYRL_DUMP_INFRA_LOG_TO_STDOUT
 
     # Suppress Ray backend logs unless in verbose mode
     if not verbose_logging:
@@ -739,7 +739,7 @@ def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
 
     env_vars = prepare_runtime_environment(cfg)
 
-    # Set up log file for infrastructure logs (skip in DEBUG mode, which shows everything on stdout)
+    # Set up log file for infrastructure logs (skip when dumping to stdout)
     if not verbose_logging:
         log_dir = (Path(SKYRL_LOG_DIR) / cfg.trainer.run_name).resolve()
         base_dir = Path(SKYRL_LOG_DIR).resolve()
