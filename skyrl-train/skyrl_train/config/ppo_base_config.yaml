@@ -34,6 +34,9 @@ trainer:
         # For FSDP, this corresponds to `init_lora_weights` in PEFT. See: https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.init_lora_weights
         # For Megatron, this is used for `lora_A_init_method`, and "xavier", "normal", "kaiming", and "zero" are supported.
         init_method: "kaiming"
+        # Path to pre-trained LoRA adapter to continue training from (e.g., from SFT)
+        # If set, loads existing adapter weights instead of initializing new ones
+        pretrained_lora_path: null
     optimizer_config:
       lr: 1.0e-6
       adam_betas: [0.9, 0.999]
@@ -365,6 +368,35 @@ generator:
   rope_theta: ${trainer.rope_theta}
 
   step_wise_trajectories: false
+
+# =============================================================================
+# Reward Model Inference (LLM-as-Judge, Verifiers, Frozen Reward Models)
+# =============================================================================
+# Configure dedicated inference engines for reward model scoring.
+# These engines use frozen_model=True (no weight sync, always active).
+# This enables scalable LLM-as-Judge patterns with load balancing.
+reward_inference:
+  # Enable dedicated reward inference engines
+  # If false, reward computation uses environment's default method (API, local, etc.)
+  enabled: false
+  
+  # Model configuration
+  model_path: "Qwen/Qwen2.5-3B-Instruct"  # Reward model path
+  model_dtype: "bfloat16"
+  
+  # Scaling configuration
+  num_engines: 2                # Number of parallel inference engines
+  tensor_parallel_size: 1       # GPUs per engine
+  
+  # Engine settings
+  gpu_memory_utilization: 0.85
+  max_num_batched_tokens: 4096
+  max_num_seqs: 256
+  enable_prefix_caching: true
+  enforce_eager: true           # Disable CUDA graphs for reliability
+  
+  # Async batching settings (used by reward model API)
+  max_concurrent_requests: 32
 
 environment:
   env_class: "gsm8k"
