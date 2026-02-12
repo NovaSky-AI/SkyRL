@@ -102,17 +102,17 @@ class StackedDecoderLayers(nnx.Module):
         def copy_to_slice(stacked, arr, idx):
             return stacked.at[idx].set(arr)
 
-        # Copy first layer's params to slot 0
-        for i, arr in enumerate(flat_first):
-            stacked_flat[i] = copy_to_slice(stacked_flat[i], flat_first[i], 0)
-
-        # Create remaining layers one at a time and copy params
-        for layer_idx in range(1, num_layers):
-            layer = create_layer_fn(nnx.Rngs(layer_keys[layer_idx]))
-            _, state = nnx.split(layer)
-            flat, _ = jax.tree_util.tree_flatten(state)
+        # Create layers one at a time and copy params into stacked slots
+        for layer_idx in range(num_layers):
+            if layer_idx == 0:
+                flat = flat_first
+            else:
+                layer = create_layer_fn(nnx.Rngs(layer_keys[layer_idx]))
+                _, state = nnx.split(layer)
+                flat, layer_treedef = jax.tree_util.tree_flatten(state)
+                assert layer_treedef == treedef, "Layer state structure mismatch while stacking decoder layers."
             for i, arr in enumerate(flat):
-                stacked_flat[i] = copy_to_slice(stacked_flat[i], flat[i], layer_idx)
+                stacked_flat[i] = copy_to_slice(stacked_flat[i], arr, layer_idx)
 
         # Reconstruct state from stacked arrays
         stacked_state = jax.tree_util.tree_unflatten(treedef, stacked_flat)
