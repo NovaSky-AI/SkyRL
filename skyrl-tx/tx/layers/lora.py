@@ -346,6 +346,30 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
             effective_rank = 0
 
         key_name = path[-2].key
+        if "connector" in normalized_path:
+            n = value.shape[1] if value.ndim >= 2 else None
+            if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
+                return value.at[adapter_index].set(0.0)
+            if key_name == "input_norm_weight":
+                return value.at[adapter_index].set(1.0)
+            if key_name in {"phi_pre", "phi_post", "phi_res"}:
+                shape = value[adapter_index].shape
+                new_phi = nnx.initializers.normal(stddev=0.02)(rngs.params(), shape, value.dtype)
+                return value.at[adapter_index].set(new_phi)
+                if key_name == "b_pre":
+                    assert n is not None
+                    target_h_pre = jnp.array(1.0 / n, dtype=value.dtype)
+                    clamped = jnp.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
+                    inv_sigmoid = jnp.log(clamped) - jnp.log(1.0 - clamped)
+                    return value.at[adapter_index].set(jnp.full((n,), inv_sigmoid, dtype=value.dtype))
+            if key_name == "b_post":
+                assert n is not None
+                return value.at[adapter_index].set(jnp.zeros((n,), dtype=value.dtype))
+            if key_name == "b_res":
+                assert n is not None
+                return value.at[adapter_index].set(10.0 * jnp.eye(n, dtype=value.dtype))
+            return value
+
         if key_name == "lora_ranks":
             return value.at[adapter_index].set(effective_rank)
         if key_name == "lora_scaling":
@@ -376,6 +400,9 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
 
     def clear_adapter(path, value):
         key = path[-2].key
+        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+        if "connector" in normalized_path:
+            return value.at[adapter_index].set(0.0)
         if key == "lora_ranks":
             return value.at[adapter_index].set(0)
         if key in ("lora_scaling", "lora_A", "lora_B"):

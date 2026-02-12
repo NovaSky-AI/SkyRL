@@ -290,11 +290,6 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         """Return True if a parameter path corresponds to LoRA weights."""
         return any(name in path for name in ("lora_A", "lora_B"))
 
-    @staticmethod
-    def is_global_trainable_param(path: tuple, _value) -> bool:
-        """Return True if a parameter path corresponds to globally-trainable weights."""
-        return False
-
     def __call__(
         self,
         input_ids: jax.Array,

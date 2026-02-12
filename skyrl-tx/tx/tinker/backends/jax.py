@@ -139,40 +139,6 @@ class AccumulatedGradients:
         )
 
 
-@jax.tree_util.register_dataclass
-@dataclass
-class GlobalAccumulatedGradients:
-    """Stores accumulated gradients for globally-trainable weights."""
-
-    grad_sum: nnx.State
-    count: jax.Array
-
-    @classmethod
-    def create(cls, global_params: nnx.State) -> "GlobalAccumulatedGradients":
-        return cls(
-            grad_sum=jax.tree.map(jnp.zeros_like, global_params),
-            count=jnp.array(0, dtype=jnp.int32),
-        )
-
-    def add(self, global_grads: nnx.State, batch_size: jax.Array, enabled: bool) -> "GlobalAccumulatedGradients":
-        if not enabled:
-            return self
-        return GlobalAccumulatedGradients(
-            grad_sum=jax.tree.map(lambda a, b: a + b, self.grad_sum, global_grads),
-            count=self.count + batch_size,
-        )
-
-    def get_mean(self) -> nnx.State:
-        denom = jnp.maximum(self.count, 1)
-        return jax.tree.map(lambda g: g / denom.astype(g.dtype), self.grad_sum)
-
-    def reset(self) -> "GlobalAccumulatedGradients":
-        return GlobalAccumulatedGradients(
-            grad_sum=jax.tree.map(jnp.zeros_like, self.grad_sum),
-            count=jnp.array(0, dtype=jnp.int32),
-        )
-
-
 class JaxBackendImpl(AbstractBackend):
     """JAX backend implementation for models with LoRA adapters.
 
@@ -221,31 +187,16 @@ class JaxBackendImpl(AbstractBackend):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
-            # Split model into adapter, global-trainable, and frozen parameters
-            enable_global_trainables = bool(getattr(self.model_config, "train_connectors", False))
-            global_trainable_pred = (
-                getattr(self.model, "is_global_trainable_param", lambda _path, _value: False)
-                if enable_global_trainables
-                else (lambda _path, _value: False)
-            )
-            self.graphdef, self.lora_params, self.global_params, self.non_lora_params = nnx.split(
-                self.model,
-                self.model.is_lora_param,
-                global_trainable_pred,
-                ...,
-            )
-            self.has_global_trainables = len(jax.tree.leaves(self.global_params)) > 0
+            # Split model into LoRA and non-LoRA parameters
+            self.graphdef, self.lora_params, self.non_lora_params = nnx.split(self.model, self.model.is_lora_param, ...)
 
             # Initialize adapter 0 with minimal config (required for base model sampling path)
             init_lora_adapter(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0, seed=0))
 
-            # Initialize global accumulated gradients
             self.accumulated_grads = AccumulatedGradients.create(self.lora_params, config.max_lora_adapters)
-            self.global_accumulated_grads = GlobalAccumulatedGradients.create(self.global_params)
 
         # Per-model optimizer storage (managed internally)
         self.optimizers: dict[str, nnx.Optimizer] = {}
-        self.global_optimizer: nnx.Optimizer | None = None
 
         # Store LoRA model metadata (model_id -> metadata)
         self.models: dict[str, types.ModelMetadata] = {}
@@ -302,7 +253,6 @@ class JaxBackendImpl(AbstractBackend):
         def _model_forward(
             graphdef: nnx.GraphDef,
             lora_params: nnx.State,
-            global_params: nnx.State,
             non_lora_params: nnx.State,
             input_ids: jax.Array,
             attention_mask: jax.Array,
@@ -310,7 +260,7 @@ class JaxBackendImpl(AbstractBackend):
             target_ids: jax.Array,
         ) -> jax.Array:
             """Forward pass and logprobs computation."""
-            model = nnx.merge(graphdef, lora_params, global_params, non_lora_params)
+            model = nnx.merge(graphdef, lora_params, non_lora_params)
             output = model(
                 input_ids,
                 attention_mask=attention_mask,
@@ -325,7 +275,6 @@ class JaxBackendImpl(AbstractBackend):
 
         def loss_for_lora(
             lora_params: nnx.State,
-            global_params: nnx.State,
             non_lora_params: nnx.State,
             input_ids: jax.Array,
             attention_mask: jax.Array,
@@ -339,7 +288,6 @@ class JaxBackendImpl(AbstractBackend):
             target_logprobs = _model_forward(
                 self.graphdef,
                 lora_params,
-                global_params,
                 non_lora_params,
                 input_ids,
                 attention_mask,
@@ -369,14 +317,12 @@ class JaxBackendImpl(AbstractBackend):
             # Return sum of losses (we'll divide gradients by per-adapter batch size later)
             return per_seq_loss.sum(), (target_logprobs, per_token_losses)
 
-        # Differentiate with respect to adapter params and globally-trainable params
-        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=(0, 1), has_aux=True)
+        # Only differentiate with respect to lora_params (argnums=0)
+        loss_and_grad_fn = jax.value_and_grad(loss_for_lora, argnums=0, has_aux=True)
 
         def forward_only(
             accumulated_grads: AccumulatedGradients,
-            global_accumulated_grads: GlobalAccumulatedGradients,
             lora_params: nnx.State,
-            global_params: nnx.State,
             non_lora_params: nnx.State,
             input_ids: jax.Array,
             attention_mask: jax.Array,
@@ -386,10 +332,9 @@ class JaxBackendImpl(AbstractBackend):
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
-        ) -> tuple[AccumulatedGradients, GlobalAccumulatedGradients, jax.Array, jax.Array]:
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             _, (target_logprobs, per_token_losses) = loss_for_lora(
                 lora_params,
-                global_params,
                 non_lora_params,
                 input_ids,
                 attention_mask,
@@ -400,13 +345,11 @@ class JaxBackendImpl(AbstractBackend):
                 sampling_logprobs,
                 advantages,
             )
-            return accumulated_grads, global_accumulated_grads, per_token_losses, target_logprobs
+            return accumulated_grads, per_token_losses, target_logprobs
 
         def forward_backward_and_accumulate(
             accumulated_grads: AccumulatedGradients,
-            global_accumulated_grads: GlobalAccumulatedGradients,
             lora_params: nnx.State,
-            global_params: nnx.State,
             non_lora_params: nnx.State,
             input_ids: jax.Array,
             attention_mask: jax.Array,
@@ -416,12 +359,11 @@ class JaxBackendImpl(AbstractBackend):
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
-        ) -> tuple[AccumulatedGradients, GlobalAccumulatedGradients, jax.Array, jax.Array]:
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             """Fused forward-backward-accumulate operation."""
             # Forward-backward
-            (_, (target_logprobs, per_token_losses)), (lora_grads, global_grads) = loss_and_grad_fn(
+            (_, (target_logprobs, per_token_losses)), lora_grads = loss_and_grad_fn(
                 lora_params,
-                global_params,
                 non_lora_params,
                 input_ids,
                 attention_mask,
@@ -434,11 +376,7 @@ class JaxBackendImpl(AbstractBackend):
             )
             # Accumulate gradients
             new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
-            global_batch_count = jnp.sum(jnp.any(loss_mask > 0, axis=-1).astype(jnp.int32))
-            new_global_accumulated_grads = global_accumulated_grads.add(
-                global_grads, global_batch_count, self.has_global_trainables
-            )
-            return new_accumulated_grads, new_global_accumulated_grads, per_token_losses, target_logprobs
+            return new_accumulated_grads, per_token_losses, target_logprobs
 
         if self.config.enforce_eager:
             # Disable JIT compilation for debugging
@@ -450,18 +388,12 @@ class JaxBackendImpl(AbstractBackend):
             lora_shardings = jax.tree.map(
                 lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
             )
-            global_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.global_params)
-            )
             non_lora_shardings = jax.tree.map(
                 lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
             )
             # Get sharding for AccumulatedGradients
             accumulated_grads_shardings = jax.tree.map(
                 lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.accumulated_grads)
-            )
-            global_accumulated_grads_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.global_accumulated_grads)
             )
 
             # Shard batch inputs along the FSDP axis (batch, seq_len)
@@ -484,56 +416,26 @@ class JaxBackendImpl(AbstractBackend):
             )
             self._forward_backward_and_accumulate = jax.jit(
                 forward_backward_and_accumulate,
-                in_shardings=(
-                    accumulated_grads_shardings,
-                    global_accumulated_grads_shardings,
-                    lora_shardings,
-                    global_shardings,
-                    non_lora_shardings,
-                )
-                + input_shardings,
-                out_shardings=(
-                    accumulated_grads_shardings,
-                    global_accumulated_grads_shardings,
-                    batch_sharded_2d,
-                    batch_sharded_2d,
-                ),
-                donate_argnames=("accumulated_grads", "global_accumulated_grads"),
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
+                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
+                donate_argnames=("accumulated_grads",),
             )
             self._forward = jax.jit(
                 forward_only,
-                in_shardings=(
-                    accumulated_grads_shardings,
-                    global_accumulated_grads_shardings,
-                    lora_shardings,
-                    global_shardings,
-                    non_lora_shardings,
-                )
-                + input_shardings,
-                out_shardings=(
-                    accumulated_grads_shardings,
-                    global_accumulated_grads_shardings,
-                    batch_sharded_2d,
-                    batch_sharded_2d,
-                ),
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
+                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
             )
 
         # JIT-compiled function to compute full gradients and apply optimizer update
         def compute_grads_and_update(
             accumulated_grads: AccumulatedGradients,
-            global_accumulated_grads: GlobalAccumulatedGradients,
             lora_params: nnx.State,
-            global_params: nnx.State,
             optimizer: nnx.Optimizer,
-            global_optimizer: nnx.Optimizer | None,
             adapter_index: jax.Array,
-        ) -> tuple[AccumulatedGradients, GlobalAccumulatedGradients]:
+        ) -> AccumulatedGradients:
             """Compute full gradients, apply optimizer update, and reset accumulated grads."""
             optimizer.update(lora_params, accumulated_grads.get_mean(adapter_index))
-            if global_optimizer is not None and self.has_global_trainables:
-                global_optimizer.update(global_params, global_accumulated_grads.get_mean())
-                global_accumulated_grads = global_accumulated_grads.reset()
-            return accumulated_grads.reset_adapter(adapter_index), global_accumulated_grads
+            return accumulated_grads.reset_adapter(adapter_index)
 
         if self.config.enforce_eager:
             self._compute_grads_and_update = compute_grads_and_update
@@ -572,10 +474,6 @@ class JaxBackendImpl(AbstractBackend):
         with jax.set_mesh(self.mesh):
             tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
             self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
-            if self.global_optimizer is None and self.has_global_trainables:
-                self.global_optimizer = nnx.Optimizer(
-                    self.model, optax.inject_hyperparams(optax.adamw)(learning_rate=0.0), wrt=self.model.is_global_trainable_param
-                )
 
         # Configure adapter
         init_lora_adapter(self.model, adapter_index, lora_config)
@@ -688,11 +586,9 @@ class JaxBackendImpl(AbstractBackend):
                     (sharding_2d,) * 6 + (sharding_1d,) * 2,
                 )
 
-                self.accumulated_grads, self.global_accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
+                self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
                     self.accumulated_grads,
-                    self.global_accumulated_grads,
                     self.lora_params,
-                    self.global_params,
                     self.non_lora_params,
                     mb_input_ids,
                     mb_attention_mask,
@@ -788,23 +684,12 @@ class JaxBackendImpl(AbstractBackend):
         hp["eps"][...] = request_data.adam_params.eps
         hp["weight_decay"][...] = request_data.adam_params.weight_decay
 
-        if self.global_optimizer is not None:
-            ghp = self.global_optimizer.opt_state.hyperparams
-            ghp["learning_rate"][...] = request_data.adam_params.learning_rate
-            ghp["b1"][...] = request_data.adam_params.beta1
-            ghp["b2"][...] = request_data.adam_params.beta2
-            ghp["eps"][...] = request_data.adam_params.eps
-            ghp["weight_decay"][...] = request_data.adam_params.weight_decay
-
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
         with jax.set_mesh(self.mesh):
-            self.accumulated_grads, self.global_accumulated_grads = self._compute_grads_and_update(
+            self.accumulated_grads = self._compute_grads_and_update(
                 self.accumulated_grads,
-                self.global_accumulated_grads,
                 self.lora_params,
-                self.global_params,
                 optimizer,
-                self.global_optimizer,
                 jnp.int32(adapter_index),
             )
 
@@ -850,7 +735,7 @@ class JaxBackendImpl(AbstractBackend):
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
 
         with jax.set_mesh(self.mesh):
-            model = nnx.merge(self.graphdef, self.lora_params, self.global_params, self.non_lora_params)
+            model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
             for batch_start in range(0, total_batch_size, max_batch_size):
                 batch_end = min(batch_start + max_batch_size, total_batch_size)
                 batch_prompts = pad(all_prompts[batch_start:batch_end], max_batch_size, fill=[])

@@ -24,6 +24,8 @@ class ModelConfig(PretrainedConfig):
     shard_attention_heads: bool
     loss_chunk_size: int
     gradient_checkpointing: bool
+    train_connectors: bool
+    expansion_rate: int
 
     def __init__(
         self,
@@ -34,6 +36,8 @@ class ModelConfig(PretrainedConfig):
         shard_attention_heads: bool,
         loss_chunk_size: int = 0,
         gradient_checkpointing: bool = False,
+        train_connectors: bool = False,
+        expansion_rate: int = 1,
     ):
         # Copy all attributes from the base config
         super().__init__(**config.to_dict())
@@ -44,6 +48,8 @@ class ModelConfig(PretrainedConfig):
         self.shard_attention_heads = shard_attention_heads
         self.loss_chunk_size = loss_chunk_size
         self.gradient_checkpointing = gradient_checkpointing
+        self.train_connectors = train_connectors
+        self.expansion_rate = expansion_rate
 
     def get_num_experts(self):
         return getattr(self, "num_experts", None) or getattr(self, "n_routed_experts", None)
