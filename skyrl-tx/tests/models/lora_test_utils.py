@@ -21,9 +21,9 @@ def get_out_of_rank_params(params, adapter_idx, rank):
         path_str = str(path)
         idx = get_adapter_idx(path, adapter_idx)
         if "lora_A" in path_str:
-            return p[idx + (..., slice(rank, None))].copy()
+            return p[*idx, ..., rank:].copy()
         elif "lora_B" in path_str:
-            return p[idx + (..., slice(rank, None), slice(None))].copy()
+            return p[*idx, ..., rank:, :].copy()
         return p
 
     return jax.tree.map_with_path(slice_param, params)
@@ -66,10 +66,10 @@ def get_moe_out_of_rank_params(params, adapter_idx: int, rank: int, num_experts:
         idx = get_adapter_idx(path, adapter_idx)
         if "lora_A" in path_str:
             # lora_A shape: [adapters, ..., max_rank] - slice last dim
-            return p[idx + (..., slice(effective_rank, None))].copy()
+            return p[*idx, ..., effective_rank:].copy()
         elif "lora_B" in path_str:
             # lora_B shape: [adapters, ..., max_rank, out] - slice second-to-last dim
-            return p[idx + (..., slice(effective_rank, None), slice(None))].copy()
+            return p[*idx, ..., effective_rank:, :].copy()
         return p
 
     return jax.tree.map_with_path(slice_param, params)
