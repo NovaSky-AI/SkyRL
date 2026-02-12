@@ -356,12 +356,12 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
                 shape = value[adapter_index].shape
                 new_phi = nnx.initializers.normal(stddev=0.02)(rngs.params(), shape, value.dtype)
                 return value.at[adapter_index].set(new_phi)
-                if key_name == "b_pre":
-                    assert n is not None
-                    target_h_pre = jnp.array(1.0 / n, dtype=value.dtype)
-                    clamped = jnp.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
-                    inv_sigmoid = jnp.log(clamped) - jnp.log(1.0 - clamped)
-                    return value.at[adapter_index].set(jnp.full((n,), inv_sigmoid, dtype=value.dtype))
+            if key_name == "b_pre":
+                assert n is not None
+                target_h_pre = jnp.array(1.0 / n, dtype=value.dtype)
+                clamped = jnp.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
+                inv_sigmoid = jnp.log(clamped) - jnp.log(1.0 - clamped)
+                return value.at[adapter_index].set(jnp.full((n,), inv_sigmoid, dtype=value.dtype))
             if key_name == "b_post":
                 assert n is not None
                 return value.at[adapter_index].set(jnp.zeros((n,), dtype=value.dtype))
