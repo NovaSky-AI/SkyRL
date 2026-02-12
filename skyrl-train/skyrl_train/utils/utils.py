@@ -737,21 +737,29 @@ def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
     if not verbose_logging:
         os.environ["RAY_BACKEND_LOG_LEVEL"] = "fatal"
 
-    # Set up log file for infrastructure logs
-    log_dir = Path(SKYRL_LOG_DIR) / cfg.trainer.run_name
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = str(log_dir / "infra.log")
-    os.environ["SKYRL_LOG_FILE"] = log_file
-
     env_vars = prepare_runtime_environment(cfg)
-    # Pass log file path to workers so they can redirect their output
-    env_vars["SKYRL_LOG_FILE"] = log_file
+
+    # Set up log file for infrastructure logs (skip in DEBUG mode, which shows everything on stdout)
+    if not verbose_logging:
+        log_dir = (Path(SKYRL_LOG_DIR) / cfg.trainer.run_name).resolve()
+        base_dir = Path(SKYRL_LOG_DIR).resolve()
+        if not str(log_dir).startswith(str(base_dir) + os.sep) and log_dir != base_dir:
+            raise ValueError(
+                f"run_name would escape log directory: {cfg.trainer.run_name!r}. "
+                f"Resolved path {log_dir} is outside {base_dir}."
+            )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = str(log_dir / "infra.log")
+        os.environ["SKYRL_LOG_FILE"] = log_file
+        # Pass log file path to workers so they can redirect their output
+        env_vars["SKYRL_LOG_FILE"] = log_file
 
     # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
     # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
     ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
 
-    logger.info(f"Infrastructure logs will be written to: {log_file}")
+    if not verbose_logging:
+        logger.info(f"Infrastructure logs will be written to: {log_file}")
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()
