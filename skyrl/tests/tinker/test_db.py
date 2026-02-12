@@ -21,7 +21,7 @@ def test_alembic_migration_generation():
             cwd=tinker_dir,
             capture_output=True,
             text=True,
-            env={**os.environ, "TX_DATABASE_URL": test_db_url},
+            env={**os.environ, "SKYRL_DATABASE_URL": test_db_url},
         )
 
         # Should succeed (even if no migrations exist, it shouldn't error)
@@ -33,7 +33,7 @@ def test_alembic_migration_generation():
             cwd=tinker_dir,
             capture_output=True,
             text=True,
-            env={**os.environ, "TX_DATABASE_URL": test_db_url},
+            env={**os.environ, "SKYRL_DATABASE_URL": test_db_url},
         )
 
         assert result.returncode == 0, f"Alembic current failed: {result.stderr}"
