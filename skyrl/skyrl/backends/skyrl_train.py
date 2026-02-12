@@ -75,6 +75,11 @@ def _build_config(
     assert config.strategy in ("fsdp2", "megatron"), "Only fsdp and megatron are supported for SkyRL-Train backend"
     cfg.trainer.strategy = config.strategy
 
+    # Apply LoRA configuration
+    if lora_config is not None and lora_config.rank > 0:
+        cfg.trainer.policy.model.lora.rank = lora_config.rank
+        cfg.trainer.policy.model.lora.alpha = int(lora_config.alpha)
+
     # Apply user overrides from backend_config
     for key, value in config.model_extra.items():
         OmegaConf.update(cfg, key, value)
