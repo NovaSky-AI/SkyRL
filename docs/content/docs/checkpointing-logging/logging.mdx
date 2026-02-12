@@ -14,10 +14,10 @@ This keeps your terminal clean while preserving full diagnostic detail for debug
 Infrastructure logs are written to:
 
 ```
-{cfg.trainer.log_path}/infra.log
+{cfg.trainer.log_path}/infra-YYMMDD_HHMMSS.log
 ```
 
-With default settings this is `/tmp/skyrl-logs/infra.log`.
+With default settings this is e.g. `/tmp/skyrl-logs/infra-260212_143052.log`. Each run creates a new timestamped file so previous logs are preserved.
 
 ## Configuration
 
@@ -34,7 +34,7 @@ With default settings this is `/tmp/skyrl-logs/infra.log`.
 
 ## Usage
 
-**Normal run** — clean stdout, infrastructure logs to `/tmp/skyrl-logs/infra.log`:
+**Normal run** — clean stdout, infrastructure logs to `/tmp/skyrl-logs/infra-YYMMDD_HHMMSS.log`:
 
 ```bash
 bash examples/gsm8k/run_gsm8k.sh
@@ -68,13 +68,11 @@ The redirect logic lives in `skyrl_train/utils/ray_logging.py` and is called fro
 
 ## Log File Lifecycle
 
-The log file is **truncated at the start of each run**. If you restart a run with the same `trainer.log_path`, the previous `infra.log` is overwritten. This ensures you always see logs from the current run without stale output mixed in.
-
-If you need to preserve logs from a previous run, change `trainer.log_path` or copy the log file before restarting.
+Each run generates a new log file with a unique timestamp in its filename (e.g., `infra-260212_143052.log`). Existing log files are automatically preserved, which is especially helpful for retried runs, as each run's logs remain separate and are not overwritten by subsequent runs.
 
 ## Multi-Node
 
-By default, `trainer.log_path` is `/tmp/skyrl-logs`, which is a **node-local** path. In multi-node training, each node writes its own `infra.log` at the same local path. The log directory is created automatically on each node when the first actor starts.
+By default, `trainer.log_path` is `/tmp/skyrl-logs`, which is a **node-local** path. In multi-node training, each node writes its own timestamped log file at the same local path. The log directory is created automatically on each node when the first actor starts.
 
 To consolidate all nodes' infrastructure logs into a **single file**, point `trainer.log_path` at a shared filesystem that is mounted on all nodes, e.g.:
 
@@ -82,7 +80,7 @@ To consolidate all nodes' infrastructure logs into a **single file**, point `tra
 bash examples/gsm8k/run_gsm8k.sh trainer.log_path=/mnt/shared_storage/skyrl-logs
 ```
 
-With a shared filesystem, all actors across all nodes append to the same `infra.log`. Individual log lines remain intact (POSIX atomic append), but lines from different actors will be interleaved.
+With a shared filesystem, all actors across all nodes append to the same timestamped log file. Individual log lines remain intact (POSIX atomic append), but lines from different actors will be interleaved.
 
 This is consistent with how `trainer.ckpt_path` and `trainer.export_path` work — they also default to local paths and should be pointed at shared storage for multi-node runs.
 
@@ -90,5 +88,5 @@ This is consistent with how `trainer.ckpt_path` and `trainer.export_path` work �
 
 - **Ray system messages still appear on stdout.** A small number of `(raylet)` log lines are emitted by Ray itself before any actors start. These are not captured by actor-level redirection.
 
-- **All actors share one log file.** vLLM engines and workers on the same node (or across node if using a shared storage) all append to the same `infra.log`. Under heavy logging, lines from different actors may interleave.
-- **No deduplication** `infra.log` would lose Ray's deduplication functionality "repeated Nx across cluster" messages, making the log more bloated than Ray's.
+- **All actors share one log file.** vLLM engines and workers on the same node (or across nodes if using shared storage) all append to the same timestamped log file. Under heavy logging, lines from different actors may interleave.
+- **No deduplication.** Infrastructure logs lose Ray's deduplication functionality ("repeated Nx across cluster" messages), making the log more bloated than Ray's.

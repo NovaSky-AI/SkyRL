@@ -208,7 +208,7 @@ trainer:
   seed: 42
   resume_mode: latest # null/"none", "latest", "from_path"
   resume_path: null
-  # Path for infrastructure log files ({log_path}/infra.log).
+  # Path for infrastructure log files ({log_path}/infra-YYMMDD_HHMMSS.log).
   # For multi-node, use a shared filesystem path to consolidate logs into a single file. Otherwise,
   # each node writes to its own local path.
   log_path: "/tmp/skyrl-logs"
