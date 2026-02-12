@@ -32,18 +32,16 @@ KL penalty (`kl_penalty_coef > 0`) is not yet supported. This requires prompt lo
 
 ### RL Loss Functions
 
-Only `cross_entropy` and `importance_sampling` are currently wired through the Tinker data conversion path. SkyRL's `PolicyLossRegistry` contains implementations for PPO (`regular`), `cispo`, and others, but the Tinker backend's `_to_training_batch()` does not yet populate the `advantages` and `action_log_probs` fields these loss functions require.
+Only `cross_entropy` and `importance_sampling` are currently wired through the Tinker data conversion path. SkyRL's `PolicyLossRegistry` contains implementations for PPO (`regular`), `cispo`, and others, but these are not yet validated through the Tinker API.
 
 ## Roadmap
 
 ### Near-Term
 
-- **RL loss data conversion**: Populate `advantages` and `action_log_probs` in `_to_training_batch()` so that PPO, CISPO, and other RL losses work through the Tinker API
 - **PPO loss alias**: Register `ppo` as an alias for `regular` in `PolicyLossRegistry`
 - **DRO loss**: Implement and register `dro` (Distributionally Robust Optimization) loss function
 - **`forward_backward_custom` support**: Validate end-to-end once `forward()` is implemented, enabling DPO and other custom loss recipes
 - **Prompt logprobs** in `sample()` responses
-- **Backend config passthrough** for overriding SkyRL training parameters (learning rate schedule, optimizer config, parallelism strategy)
 - **Automatic database cleanup** on server startup
 - **Multi-model support** for serving multiple LoRA adapters concurrently
 
@@ -52,7 +50,6 @@ Only `cross_entropy` and `importance_sampling` are currently wired through the T
 - **Full tinker-cookbook validation** across all recipe categories (distillation, preference, multi-player RL)
 - **Training curves** demonstrating convergence parity with other Tinker backends
 - **Megatron strategy** testing and stabilization for large-scale models
-- **Full fine-tuning** support (in addition to LoRA)
 
 ### Long-Term
 

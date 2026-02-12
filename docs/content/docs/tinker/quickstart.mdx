@@ -15,9 +15,9 @@ If you run into any issues, please [open an issue](https://github.com/NovaSky-AI
 
 ```bash
 git clone https://github.com/NovaSky-AI/SkyRL.git
-cd SkyRL/skyrl-tx
-uv python install 3.12
-uv sync --extra tinker --extra skyrl_train
+cd SkyRL/skyrl
+uv venv --python 3.12
+uv sync --extra tinker --extra fsdp
 ```
 
 ## 2. Start the Tinker Server
@@ -25,11 +25,9 @@ uv sync --extra tinker --extra skyrl_train
 The server hosts the Tinker API and manages a background engine that processes training requests.
 
 ```bash
-cd SkyRL/skyrl-tx
-
-uv run --extra tinker --extra skyrl_train -m tx.tinker.api \
+uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
     --base-model "Qwen/Qwen3-0.6B" \
-    --backend skyrl_train
+    --backend fsdp
 ```
 
 This will:
@@ -44,61 +42,32 @@ The server is ready when you see `Uvicorn running on http://0.0.0.0:8000`.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--base-model` | (required) | HuggingFace model name or path |
-| `--backend` | (required) | Backend type (`skyrl_train`) |
+| `--backend` | (required) | Backend type (`fsdp` or `megatron`) |
 | `--port` | 8000 | API server port |
 | `--checkpoints-base` | `/tmp/tx_checkpoints` | Directory for checkpoint storage |
 | `--database-url` | `sqlite:///tinker.db` | Database URL for request tracking |
 
-## 3. Install the Tinker Client
+## 3. Run a Training Script
 
-In a separate terminal, install the Tinker Python client:
+In a separate terminal, run the supervised learning loop from the [tinker-cookbook](https://github.com/ThinkingMachinesLab/tinker-cookbook):
 
 ```bash
-pip install tinker
+git clone https://github.com/ThinkingMachinesLab/tinker-cookbook.git
+cd tinker-cookbook
+
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
+    python -m tinker_cookbook.recipes.sl_loop \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B" \
+    log_path="/tmp/tinker-sl" \
+    train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
-## 4. Run a Supervised Fine-Tuning Script
-
-Here's a minimal SFT training loop using the Tinker API:
-
-```python
-import tinker
-
-# Connect to the SkyRL server
-service = tinker.ServiceClient(base_url="http://localhost:8000", api_key="tml-dummy-key")
-
-# Create a LoRA training client
-training = service.create_lora_training_client(
-    base_model="Qwen/Qwen3-0.6B",
-    rank=8,
-)
-
-# Prepare a training datum
-datum = tinker.types.Datum(
-    model_input=tinker.types.ModelInput(
-        chunks=[tinker.types.EncodedTextChunk(tokens=[1, 2, 3, 4, 5])]
-    ),
-    loss_fn_inputs={
-        "target_tokens": tinker.types.TensorData(data=[2, 3, 4, 5, 0]),
-        "weights": tinker.types.TensorData(data=[1.0, 1.0, 1.0, 1.0, 1.0]),
-    },
-)
-
-# Training step
-fwd_bwd = training.forward_backward([datum], loss_fn="cross_entropy")
-result = fwd_bwd.result()
-print(f"Loss fn outputs: {len(result.loss_fn_outputs)}")
-print(f"Metrics: {result.metrics}")
-
-# Optimizer step
-adam = tinker.AdamParams(learning_rate=1e-4, beta1=0.9, beta2=0.95, eps=1e-8)
-optim_result = training.optim_step(adam).result()
-print(f"Grad norm: {optim_result.metrics.get('grad_norm')}")
-```
+You should see training metrics (loss, grad_norm) printed after each batch.
 
 Congratulations! You've run your first Tinker training script on SkyRL.
 
-## 5. Run a Cookbook Recipe
+## 4. More Recipes
 
 In general, **zero** code changes are required to execute [tinker-cookbook](https://github.com/ThinkingMachinesLab/tinker-cookbook) scripts on SkyRL. Simply update the `base_url` of the `ServiceClient` to point to the address and port of the local Tinker API server (e.g., `http://localhost:8000` above).
 
