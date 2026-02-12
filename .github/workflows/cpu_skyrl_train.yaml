@@ -85,5 +85,7 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
+      - name: Install skyrl-gym
+        run:  uv sync --frozen --extra dev # installs from lock file
       - name: Run cpu tests
-        run:  uv run --isolated --extra skyrl-gym --extra dev pytest tests/
+        run:  uv run --frozen pytest tests/
