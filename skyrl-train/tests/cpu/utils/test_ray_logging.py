@@ -7,9 +7,6 @@ uv run --isolated --extra dev pytest tests/cpu/utils/test_ray_logging.py
 import os
 import sys
 import tempfile
-from pathlib import Path
-
-import pytest
 
 import skyrl_train.env_vars as env_vars_mod
 from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
@@ -142,49 +139,13 @@ class TestRedirectActorOutputToFile:
         _set_dump_infra(monkeypatch, True)
         monkeypatch.delenv("SKYRL_LOG_FILE", raising=False)
 
+        # Simulate the conditional from initialize_ray
+        verbose_logging = env_vars_mod.SKYRL_DUMP_INFRA_LOG_TO_STDOUT
+
+        assert verbose_logging, "Expected dump-to-std to be enabled"
+
+        # When dumping to stdout, the log dir should NOT be created
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_base = os.path.join(tmpdir, "skyrl-logs")
-            monkeypatch.setenv("SKYRL_LOG_DIR", log_base)
-            monkeypatch.setattr(env_vars_mod, "SKYRL_LOG_DIR", log_base)
-
-            # Simulate the conditional from initialize_ray
-            verbose_logging = env_vars_mod.SKYRL_DUMP_INFRA_LOG_TO_STDOUT
-
-            assert verbose_logging, "Expected dump-to-std to be enabled"
-
-            # When dumping to stdout, the log dir should NOT be created
-            expected_log_dir = os.path.join(log_base, "test-run")
+            expected_log_dir = os.path.join(tmpdir, "skyrl-logs", "test-run")
             assert not os.path.exists(expected_log_dir)
             assert os.environ.get("SKYRL_LOG_FILE") is None
-
-
-def _path_escapes_base(base: str, run_name: str) -> bool:
-    """Reproduce the path traversal check from initialize_ray()."""
-    log_dir = (Path(base) / run_name).resolve()
-    base_dir = Path(base).resolve()
-    return not str(log_dir).startswith(str(base_dir) + os.sep) and log_dir != base_dir
-
-
-class TestPathTraversalValidation:
-    """Tests for the run_name path traversal check in initialize_ray()."""
-
-    def test_normal_run_name_accepted(self):
-        assert not _path_escapes_base("/tmp/skyrl-logs", "my-training-run-v1")
-
-    def test_nested_run_name_accepted(self):
-        assert not _path_escapes_base("/tmp/skyrl-logs", "experiments/run-42")
-
-    def test_dotdot_escape_rejected(self):
-        assert _path_escapes_base("/tmp/skyrl-logs", "../../etc/cron.daily/evil")
-
-    @pytest.mark.parametrize(
-        "run_name",
-        [
-            "../outside",
-            "../../etc/passwd",
-            "foo/../../outside",
-            "/absolute/path",
-        ],
-    )
-    def test_malicious_run_names_rejected(self, run_name):
-        assert _path_escapes_base("/tmp/skyrl-logs", run_name)

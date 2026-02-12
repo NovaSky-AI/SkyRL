@@ -104,9 +104,3 @@ Default: False (infrastructure logs go to file only, stdout shows training progr
 Set ``SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`` to show all logs on stdout.
 """
 
-SKYRL_LOG_DIR = os.environ.get("SKYRL_LOG_DIR", "/tmp/skyrl-logs")
-"""
-Base directory for SkyRL log files (default: /tmp/skyrl-logs).
-
-Infrastructure logs are written to: {SKYRL_LOG_DIR}/{run_name}/infra.log
-"""

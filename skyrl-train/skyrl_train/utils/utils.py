@@ -21,7 +21,6 @@ from ray.util.placement_group import (
 from skyrl_train.config.config import SkyRLConfig
 from skyrl_train.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
-    SKYRL_LOG_DIR,
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
@@ -741,15 +740,9 @@ def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
 
     # Set up log file for infrastructure logs (skip when dumping to stdout)
     if not verbose_logging:
-        log_dir = (Path(SKYRL_LOG_DIR) / cfg.trainer.run_name).resolve()
-        base_dir = Path(SKYRL_LOG_DIR).resolve()
-        if not str(log_dir).startswith(str(base_dir) + os.sep) and log_dir != base_dir:
-            raise ValueError(
-                f"run_name would escape log directory: {cfg.trainer.run_name!r}. "
-                f"Resolved path {log_dir} is outside {base_dir}."
-            )
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = str(log_dir / "infra.log")
+        log_path = Path(cfg.trainer.log_path).resolve()
+        log_path.mkdir(parents=True, exist_ok=True)
+        log_file = str(log_path / "infra.log")
         # Truncate any existing log file so each run starts fresh
         open(log_file, "w").close()
         os.environ["SKYRL_LOG_FILE"] = log_file
