@@ -7,17 +7,8 @@ from tx.utils.models import get_adapter_idx
 
 
 def get_adapter_params(params, adapter_idx: int):
-    """Extract adapter params at a specific index.
-
-    Decoder layer LoRA params have shape (num_layers, num_adapters, ...).
-    Embed tokens LoRA params have shape (num_adapters, ...).
-    """
-
-    def extract(path, p):
-        idx = get_adapter_idx(path, adapter_idx)
-        return p[idx].copy()
-
-    return jax.tree.map_with_path(extract, params)
+    """Extract adapter params at a specific index."""
+    return jax.tree.map_with_path(lambda path, p: p[get_adapter_idx(path, adapter_idx)].copy(), params)
 
 
 def _slice_out_of_rank(params, adapter_idx: int, get_rank):
