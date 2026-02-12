@@ -33,6 +33,7 @@ on:
         type: choice
         options:
           - openenv-fleet-grpo-qwen3-8b
+          - openenv-fleet-grpo-qwen3-32b
           - openenv-fleet-grpo-qwen3-8b-step-wise
           - openenv-fleet-grpo-qwen3-vl-8b
         default: "openenv-fleet-grpo-qwen3-8b"

@@ -43,7 +43,14 @@ from datasets import Dataset
 # Held-out environments for eval only (not used in train)
 HELD_OUT_ENVS = {
     "tool_use": [],  # v0.3: all envs split normally (outlook now included in train)
-    "computer_use": ["instacart"],
+    "computer_use": [],
+}
+
+# Excluded environments (removed from both train and eval)
+# v0.3.6: google-maps excluded due to broken MCP server (502 errors, "database is locked")
+EXCLUDED_ENVS = {
+    "tool_use": [],
+    "computer_use": [],
 }
 
 # Minimum number of samples required to create an eval split for an env
@@ -216,6 +223,14 @@ def prepare_fleet_dataset(
 
     tasks = unique_tasks
     print(f"After deduplication: {len(tasks)} unique tasks")
+
+    # Get excluded envs for this modality (removed entirely)
+    excluded_envs = set(EXCLUDED_ENVS.get(modality, []))
+    if excluded_envs:
+        before_count = len(tasks)
+        tasks = [t for t in tasks if t.get("env_key") not in excluded_envs]
+        print(f"Excluded environments: {excluded_envs}")
+        print(f"After excluding: {len(tasks)} tasks (removed {before_count - len(tasks)})")
 
     # Get held-out envs for this modality
     held_out_envs = set(HELD_OUT_ENVS.get(modality, []))
