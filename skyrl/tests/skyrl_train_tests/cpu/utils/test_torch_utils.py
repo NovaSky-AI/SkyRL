@@ -1,4 +1,7 @@
-from skyrl.backends.skyrl_train.utils.torch_utils import chunked_cross_entropy_from_log_probs, chunked_entropy_from_logits
+from skyrl.backends.skyrl_train.utils.torch_utils import (
+    chunked_cross_entropy_from_log_probs,
+    chunked_entropy_from_logits,
+)
 import torch
 import pytest
 import math

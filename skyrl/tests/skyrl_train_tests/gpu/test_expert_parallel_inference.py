@@ -25,7 +25,9 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl.train.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+    create_ray_wrapped_inference_engines,
+)
 from ray.util.placement_group import placement_group
 
 

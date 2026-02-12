@@ -7,7 +7,12 @@ import pytest
 import asyncio
 import ray
 
-from tests.skyrl_train_tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
+from tests.skyrl_train_tests.gpu.utils import (
+    init_worker_with_type,
+    get_test_prompts,
+    init_inference_engines,
+    run_inference,
+)
 from skyrl.train.config import SkyRLConfig, SkyRLLoraConfig
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 

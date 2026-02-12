@@ -23,7 +23,9 @@ from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_
 from skyrl.train.generators.base import GeneratorInput, ConversationType, TrajectoryID
 from skyrl.train.utils.utils import peer_access_supported, print_mem, initialize_ray
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
-from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+    create_ray_wrapped_inference_engines,
+)
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines

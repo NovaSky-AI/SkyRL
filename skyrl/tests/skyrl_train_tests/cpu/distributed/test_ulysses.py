@@ -22,7 +22,8 @@ def test_basic_forward_no_parallel():
 
         # Mock sequence parallel size to be 1
         with patch(
-            "skyrl.backends.skyrl_train.distributed.ulysses.monkey_patch.get_ulysses_sequence_parallel_world_size", return_value=1
+            "skyrl.backends.skyrl_train.distributed.ulysses.monkey_patch.get_ulysses_sequence_parallel_world_size",
+            return_value=1,
         ):
             _ulysses_flash_attention_forward(query_states, key_states, value_states, position_ids=position_ids)
 

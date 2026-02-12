@@ -7,7 +7,12 @@ import pytest
 import os
 import shutil
 
-from tests.skyrl_train_tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, make_dummy_tensorbatch, get_rank_0_memory
+from tests.skyrl_train_tests.gpu.utils import (
+    init_worker_with_type,
+    make_dummy_training_batch,
+    make_dummy_tensorbatch,
+    get_rank_0_memory,
+)
 from skyrl.train.config import SkyRLConfig
 from skyrl.train.utils.utils import validate_cfg
 from skyrl.backends.skyrl_train.training_batch import TrainingOutputBatch

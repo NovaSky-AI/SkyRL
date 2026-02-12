@@ -16,7 +16,11 @@ from transformers import AutoTokenizer
 
 from skyrl.train.config import SkyRLConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
-from tests.skyrl_train_tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, get_model_logits_from_actor
+from tests.skyrl_train_tests.gpu.utils import (
+    init_worker_with_type,
+    make_dummy_training_batch,
+    get_model_logits_from_actor,
+)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 CKPT_PATH = "$HOME/ckpts/test/"
