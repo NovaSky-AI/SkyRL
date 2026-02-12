@@ -22,7 +22,6 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
         run: |
           set +e  # Don't exit on errors
-          aws --version
 
           # Runner instance IDs and names (from docs/gha-runner-setup.md)
           RUNNERS="i-04a15158610df980f:fleet-runner-1 i-0f80c703294413a4c:fleet-runner-2 i-09321b67952c1a208:fleet-runner-3 i-0f2ccaa840ef29450:fleet-runner-4 i-05ecd98e74949dc87:fleet-runner-5"
@@ -43,7 +42,7 @@ jobs:
 
             # Get instance state and status
             RESULT=$(aws ec2 describe-instance-status --instance-ids $id --include-all-instances \
-              --query 'InstanceStatuses[0].[InstanceState.Name,InstanceStatus.Status]' --output text) || true
+              --query 'InstanceStatuses[0].[InstanceState.Name,InstanceStatus.Status]' --output text 2>/dev/null)
 
             if [ -z "$RESULT" ] || [ "$RESULT" = "None" ]; then
               STATE="unknown"
