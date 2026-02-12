@@ -299,10 +299,13 @@ class TinkerEngine:
         ops = session.exec(query).all()
 
         # Filter: only include ops that come before their model's barrier
-        batchable = [op for op in ops if op.model_id not in barriers or op.request_id < barriers[op.model_id]]
-
-        if max_requests > 0:
-            batchable = batchable[:max_requests]
+        batchable = []
+        for op in ops:
+            if op.model_id in barriers and op.request_id >= barriers[op.model_id]:
+                continue
+            batchable.append(op)
+            if max_requests > 0 and len(batchable) >= max_requests:
+                break
 
         return {
             str(f.request_id): (f.model_id, types.ForwardBackwardInput.model_validate(f.request_data))
