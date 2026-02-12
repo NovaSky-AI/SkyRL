@@ -8,6 +8,7 @@ from tx.layers.util import prepare_routing, shard_map_ep
 from tx.layers.rotary_embedding import apply_rope
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.layers.layernorm import RMSNorm
+from tx.layers.connectors import LoRAConnector
 from tx.layers.attention import dot_product_attention
 from tx.models.configs import Qwen3Config
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
@@ -276,14 +277,35 @@ class Qwen3MoeSparseMoeBlock(nnx.Module):
 
 class Qwen3DecoderLayer(nnx.Module):
 
-    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+    def __init__(self, config: Qwen3Config, layer_idx: int, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.layer_idx = layer_idx
+        self.num_layers = config.num_hidden_layers
+        self.expansion_rate = config.expansion_rate
         self.self_attn = Qwen3Attention(config, dtype=dtype, rngs=rngs)
         if getattr(config, "num_experts", None):
             self.mlp = Qwen3MoeSparseMoeBlock(config, dtype=dtype, rngs=rngs)
         else:
             self.mlp = Qwen3MLP(config, dtype=dtype, rngs=rngs)
+
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+
+        self.attn_connector = LoRAConnector(
+            config.hidden_size,
+            config.expansion_rate,
+            max_lora_adapters=config.max_lora_adapters,
+            trainable=config.train_connectors,
+            dtype=dtype,
+            rngs=rngs,
+        )
+        self.mlp_connector = LoRAConnector(
+            config.hidden_size,
+            config.expansion_rate,
+            max_lora_adapters=config.max_lora_adapters,
+            trainable=config.train_connectors,
+            dtype=dtype,
+            rngs=rngs,
+        )
 
     def __call__(
         self,
@@ -294,8 +316,12 @@ class Qwen3DecoderLayer(nnx.Module):
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        n = self.expansion_rate
+        if self.layer_idx == 0:
+            hidden_states = jnp.repeat(hidden_states[..., None, :], n, axis=-2)
+
         residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(self.attn_connector.pre(hidden_states, adapter_indices))
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
@@ -303,12 +329,15 @@ class Qwen3DecoderLayer(nnx.Module):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = residual + hidden_states
+        hidden_states = self.attn_connector.post(residual, hidden_states, adapter_indices)
 
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.post_attention_layernorm(self.mlp_connector.pre(hidden_states, adapter_indices))
         mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
-        hidden_states = residual + mlp_output
+        hidden_states = self.mlp_connector.post(residual, mlp_output, adapter_indices)
+
+        if self.layer_idx == self.num_layers - 1:
+            hidden_states = hidden_states.sum(axis=-2)
 
         return hidden_states, updated_cache
 
@@ -330,7 +359,10 @@ class Qwen3Model(nnx.Module):
             rngs=rngs,
         )
         self.layers = nnx.List(
-            [Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
+            [
+                Qwen3DecoderLayer(config, layer_idx=i, dtype=dtype, rngs=rngs)
+                for i in range(config.num_hidden_layers)
+            ]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
@@ -354,7 +386,7 @@ class Qwen3Model(nnx.Module):
 
         for layer_idx, layer in enumerate(self.layers):
             if output_hidden_states:
-                all_hidden_states.append(hidden_states)
+                all_hidden_states.append(hidden_states.squeeze())
 
             hidden_states, (k, v) = layer(
                 hidden_states,
@@ -403,10 +435,12 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
         """Return the lm_head callable for logits computation."""
         return self.lm_head
 
-    @staticmethod
-    def is_lora_param(path: tuple, _value) -> bool:
+    def is_lora_param(self, path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to LoRA weights."""
-        return any(name in path for name in ("lora_A", "lora_B"))
+        is_lora = any(name in path for name in ("lora_A", "lora_B"))
+        if self.config.train_connectors:
+            return is_lora or any(name in path for name in ("attn_connector", "mlp_connector"))
+        return is_lora
 
     def __call__(
         self,
