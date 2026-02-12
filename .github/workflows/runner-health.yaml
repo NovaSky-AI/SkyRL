@@ -22,13 +22,7 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
         run: |
           # Runner instance IDs and names (from docs/gha-runner-setup.md)
-          declare -A RUNNER_NAMES=(
-            ["i-04a15158610df980f"]="fleet-runner-1"
-            ["i-0f80c703294413a4c"]="fleet-runner-2"
-            ["i-09321b67952c1a208"]="fleet-runner-3"
-            ["i-0f2ccaa840ef29450"]="fleet-runner-4"
-            ["i-05ecd98e74949dc87"]="fleet-runner-5"
-          )
+          RUNNERS="i-04a15158610df980f:fleet-runner-1 i-0f80c703294413a4c:fleet-runner-2 i-09321b67952c1a208:fleet-runner-3 i-0f2ccaa840ef29450:fleet-runner-4 i-05ecd98e74949dc87:fleet-runner-5"
 
           echo "## EC2 Runner Health" >> $GITHUB_STEP_SUMMARY
           echo "| Runner | Instance | State | Health |" >> $GITHUB_STEP_SUMMARY
@@ -39,9 +33,10 @@ jobs:
           TOTAL=0
           HEALTHY=0
 
-          for id in "${!RUNNER_NAMES[@]}"; do
+          for entry in $RUNNERS; do
+            id=$(echo $entry | cut -d: -f1)
+            NAME=$(echo $entry | cut -d: -f2)
             TOTAL=$((TOTAL + 1))
-            NAME="${RUNNER_NAMES[$id]}"
 
             # Get instance state and status
             RESULT=$(aws ec2 describe-instance-status --instance-ids $id --include-all-instances \
