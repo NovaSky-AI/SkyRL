@@ -103,4 +103,3 @@ instead of being redirected to the log file. Useful for debugging startup issues
 Default: False (infrastructure logs go to file only, stdout shows training progress).
 Set ``SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`` to show all logs on stdout.
 """
-
