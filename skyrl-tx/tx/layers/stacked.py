@@ -121,8 +121,11 @@ class StackedDecoderLayers(nnx.Module):
         # The arrays have correct stacked sharding from device_put, but NNX APIs
         # (nnx.get_partition_spec, nnx.Optimizer) read from 'sharding_names' metadata.
         for _, var in nnx.to_flat_state(stacked_state):
-            if isinstance(var, nnx.Variable) and hasattr(var.value, "sharding"):
-                array_sharding = var.value.sharding
+            if not isinstance(var, nnx.Variable):
+                continue
+            array = var[...]
+            if hasattr(array, "sharding"):
+                array_sharding = array.sharding
                 if hasattr(array_sharding, "spec"):
                     var.set_metadata("sharding_names", tuple(array_sharding.spec))
 
