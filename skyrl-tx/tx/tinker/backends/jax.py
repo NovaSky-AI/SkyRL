@@ -193,6 +193,7 @@ class JaxBackendImpl(AbstractBackend):
             # Initialize adapter 0 with minimal config (required for base model sampling path)
             init_lora_adapter(self.model, adapter_index=0, lora_config=types.LoraConfig(rank=1, alpha=1.0, seed=0))
 
+            # Initialize global accumulated gradients
             self.accumulated_grads = AccumulatedGradients.create(self.lora_params, config.max_lora_adapters)
 
         # Per-model optimizer storage (managed internally)
