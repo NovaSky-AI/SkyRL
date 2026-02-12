@@ -208,6 +208,10 @@ trainer:
   seed: 42
   resume_mode: latest # null/"none", "latest", "from_path"
   resume_path: null
+  # Path for infrastructure log files ({log_path}/infra.log).
+  # For multi-node, use a shared filesystem path to consolidate logs into a single file. Otherwise,
+  # each node writes to its own local path.
+  log_path: "/tmp/skyrl-logs"
   ckpt_path: "${oc.env:HOME}/ckpts/" # Path for resumable training checkpoints (model state, optimizer state, etc.)
   max_ckpts_to_keep: -1 # -1 to keep all checkpoints, N to keep the last N checkpoints
   ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
