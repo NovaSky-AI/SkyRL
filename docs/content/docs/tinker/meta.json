@@ -3,6 +3,7 @@
   "pages": [
     "overview",
     "quickstart",
+    "configuration",
     "architecture",
     "cookbook",
     "limitations"
