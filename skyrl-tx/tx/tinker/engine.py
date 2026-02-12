@@ -642,9 +642,7 @@ class TinkerEngine:
                 forward_backward_requests = self.find_batchable_model_passes(
                     session, types.RequestType.FORWARD_BACKWARD, max_requests=1
                 )
-                forward_requests = self.find_batchable_model_passes(
-                    session, types.RequestType.FORWARD, max_requests=1
-                )
+                forward_requests = self.find_batchable_model_passes(session, types.RequestType.FORWARD, max_requests=1)
                 # Find pending sample requests that can be batched
                 sample_requests = self.find_batchable_sample(session)
                 # Get other pending requests (non forward_backward and non sampling)
