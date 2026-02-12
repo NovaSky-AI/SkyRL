@@ -103,7 +103,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._cfg = None
         self._dispatch: WorkerDispatch | None = None
         self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
-        self._inference_engine_client = None  # InferenceEngineClient for sampling
+        self._inference_engine_client = None
+        self._inference_engines_initialized = False
 
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
@@ -167,6 +168,21 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.init_weight_sync_state(self._inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
+    def _ensure_inference_engines(self):
+        """Lazily create inference engines and init weight sync on first sampling-related call."""
+        if self._inference_engines_initialized:
+            return
+
+        logger.info(f"Creating {self._cfg.generator.num_inference_engines} inference engines")
+        self._inference_engine_client = InferenceEngineClient(
+            create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
+            self._tokenizer,
+            self._cfg,
+        )
+        self._dispatch.set_inference_engine_client(self._inference_engine_client)
+        self.init_weight_sync_state()
+        self._inference_engines_initialized = True
+
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
         if self._model_id is not None:
             raise ValueError(f"Model '{self._model_id}' already exists. Only one model supported.")
@@ -181,14 +197,6 @@ class SkyRLTrainBackend(AbstractBackend):
         # Create placement group
         self._colocate_pg = self._create_colocate_pg()
 
-        # Create inference engine client
-        logger.info(f"Creating {self._cfg.generator.num_inference_engines} inference engines")
-        self._inference_engine_client = InferenceEngineClient(
-            create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
-            self._tokenizer,
-            self._cfg,
-        )
-
         # Get worker types based on strategy
         if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
             from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
@@ -199,9 +207,6 @@ class SkyRLTrainBackend(AbstractBackend):
 
         logger.info("Building models.")
         self.build_models(PolicyWorker)
-
-        logger.info("Initializing weight sync state.")
-        self.init_weight_sync_state()
 
         self._model_id = model_id
         self._model_metadata = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
@@ -343,6 +348,11 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return metrics
 
+    def _sleep_inference_engines(self):
+        """Sleep inference engines to free GPU memory for training."""
+        if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
+            asyncio.run(self._inference_engine_client.sleep())
+
     def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
@@ -350,6 +360,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_input_ids:
             return {}
 
+        self._sleep_inference_engines()
         batch = self._to_training_batch(prepared_batch)
         batch, pad_size = self._pad_batch(batch)
 
@@ -409,6 +420,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_input_ids:
             return {}
 
+        self._sleep_inference_engines()
         batch = self._to_training_batch(prepared_batch)
         batch, pad_size = self._pad_batch(batch)
         data = self._dispatch.forward("policy", batch)
@@ -471,13 +483,8 @@ class SkyRLTrainBackend(AbstractBackend):
         save_weights_for_sampler() explicitly before calling sample() if weights
         have been updated.
         """
-        # 1. Validate inference is enabled
-        if self._inference_engine_client is None:
-            error = types.ErrorResponse(
-                error="Sampling not enabled. Inference engines were not initialized (num_inference_engines=0 in SkyRL config).",
-                status="error",
-            )
-            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+        # 1. Ensure inference engines are initialized
+        self._ensure_inference_engines()
 
         # 2. Validate single model
         unique_models = set(prepared_batch.all_model_ids)
@@ -651,13 +658,14 @@ class SkyRLTrainBackend(AbstractBackend):
         """
         self._validate_model_state(model_id)
 
-        # Always sync weights to inference engines (in-memory NCCL broadcast)
-        if self._inference_engine_client is not None:
-            asyncio.run(self._dispatch.save_weights_for_sampler())
-            logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
+        # Lazily create inference engines on first sampling-related call
+        self._ensure_inference_engines()
+
+        asyncio.run(self._dispatch.save_weights_for_sampler())
+        logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
-            # Full HuggingFace model export to disk
+            # TODO(tyler): For LoRA, only save the adapters instead of the full merged model
             with tempfile.TemporaryDirectory() as temp_dir:
                 hf_dir = os.path.join(temp_dir, "model")
                 self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
