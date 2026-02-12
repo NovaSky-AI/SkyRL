@@ -14,6 +14,26 @@ jobs:
     name: Check Runner Status
     runs-on: ubuntu-latest
     steps:
+      - name: Restore previous state
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/runner-health-state
+          key: runner-health-state-${{ github.repository }}
+          restore-keys: runner-health-state-
+
+      - name: Load previous state
+        id: prev
+        run: |
+          if [ -f /tmp/runner-health-state/last_unhealthy_count ]; then
+            PREV=$(cat /tmp/runner-health-state/last_unhealthy_count)
+            echo "unhealthy_count=$PREV" >> $GITHUB_OUTPUT
+            echo "Previous unhealthy count: $PREV"
+          else
+            echo "unhealthy_count=0" >> $GITHUB_OUTPUT
+            echo "No previous state found"
+          fi
+
       - name: Check EC2 instance health
         id: ec2
         env:
@@ -25,6 +45,23 @@ jobs:
 
           # Runner instance IDs and names (from docs/gha-runner-setup.md)
           RUNNERS="i-04a15158610df980f:fleet-runner-1 i-0f80c703294413a4c:fleet-runner-2 i-09321b67952c1a208:fleet-runner-3 i-0f2ccaa840ef29450:fleet-runner-4 i-05ecd98e74949dc87:fleet-runner-5"
+
+          # Function to check instance with retries
+          check_instance() {
+            local id=$1
+            local retries=3
+            local delay=5
+            for i in $(seq 1 $retries); do
+              RESULT=$(timeout 10 aws ec2 describe-instance-status --instance-ids "$id" --include-all-instances --query 'InstanceStatuses[0].[InstanceState.Name,InstanceStatus.Status]' --output text 2>/dev/null)
+              if [ -n "$RESULT" ] && [ "$RESULT" != "None" ]; then
+                echo "$RESULT"
+                return 0
+              fi
+              [ $i -lt $retries ] && sleep $delay
+            done
+            echo "unknown unknown"
+            return 1
+          }
 
           echo "## EC2 Runner Health" >> $GITHUB_STEP_SUMMARY
           echo "| Runner | Instance | State | Health |" >> $GITHUB_STEP_SUMMARY
@@ -40,17 +77,10 @@ jobs:
             NAME=$(echo $entry | cut -d: -f2)
             TOTAL=$((TOTAL + 1))
 
-            # Get instance state and status
-            RESULT=$(aws ec2 describe-instance-status --instance-ids $id --include-all-instances \
-              --query 'InstanceStatuses[0].[InstanceState.Name,InstanceStatus.Status]' --output text 2>/dev/null)
-
-            if [ -z "$RESULT" ] || [ "$RESULT" = "None" ]; then
-              STATE="unknown"
-              HEALTH="unknown"
-            else
-              STATE=$(echo $RESULT | awk '{print $1}')
-              HEALTH=$(echo $RESULT | awk '{print $2}')
-            fi
+            # Get instance state and status with retries
+            RESULT=$(check_instance "$id")
+            STATE=$(echo $RESULT | awk '{print $1}')
+            HEALTH=$(echo $RESULT | awk '{print $2}')
 
             # Check if healthy (running + ok)
             if [ "$STATE" = "running" ] && [ "$HEALTH" = "ok" ]; then
@@ -66,12 +96,52 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Summary:** $HEALTHY/$TOTAL healthy" >> $GITHUB_STEP_SUMMARY
 
+          # If unhealthy, wait 30s and recheck to avoid transient false positives
+          UNHEALTHY_COUNT=$((TOTAL - HEALTHY))
+          if [ "$UNHEALTHY_COUNT" -gt 0 ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Confirmation check in 30s...**" >> $GITHUB_STEP_SUMMARY
+            sleep 30
+
+            # Recheck only the unhealthy instances
+            CONFIRMED_UNHEALTHY=""
+            CONFIRMED_NAMES=""
+            for id in $UNHEALTHY; do
+              RESULT=$(check_instance "$id")
+              STATE=$(echo $RESULT | awk '{print $1}')
+              HEALTH=$(echo $RESULT | awk '{print $2}')
+              if [ "$STATE" != "running" ] || [ "$HEALTH" != "ok" ]; then
+                # Find the name for this id
+                for entry in $RUNNERS; do
+                  eid=$(echo $entry | cut -d: -f1)
+                  ename=$(echo $entry | cut -d: -f2)
+                  if [ "$eid" = "$id" ]; then
+                    CONFIRMED_UNHEALTHY="$CONFIRMED_UNHEALTHY $id"
+                    CONFIRMED_NAMES="$CONFIRMED_NAMES $ename"
+                    break
+                  fi
+                done
+              fi
+            done
+
+            UNHEALTHY=$(echo $CONFIRMED_UNHEALTHY | xargs)
+            UNHEALTHY_NAMES=$(echo $CONFIRMED_NAMES | xargs)
+            UNHEALTHY_COUNT=$(echo $UNHEALTHY | wc -w | tr -d ' ')
+            HEALTHY=$((TOTAL - UNHEALTHY_COUNT))
+
+            if [ "$UNHEALTHY_COUNT" -eq 0 ]; then
+              echo "✅ **Confirmation: All runners recovered (transient issue)**" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ **Confirmed unhealthy:** $UNHEALTHY_NAMES" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
           # Export for alert step
           echo "total=$TOTAL" >> $GITHUB_OUTPUT
           echo "healthy=$HEALTHY" >> $GITHUB_OUTPUT
-          echo "unhealthy_count=$((TOTAL - HEALTHY))" >> $GITHUB_OUTPUT
-          echo "unhealthy_ids=$(echo $UNHEALTHY | xargs)" >> $GITHUB_OUTPUT
-          echo "unhealthy_names=$(echo $UNHEALTHY_NAMES | xargs)" >> $GITHUB_OUTPUT
+          echo "unhealthy_count=$UNHEALTHY_COUNT" >> $GITHUB_OUTPUT
+          echo "unhealthy_ids=$UNHEALTHY" >> $GITHUB_OUTPUT
+          echo "unhealthy_names=$UNHEALTHY_NAMES" >> $GITHUB_OUTPUT
 
       - name: Check queued jobs
         id: queue
@@ -88,8 +158,23 @@ jobs:
           echo "queued=$QUEUED" >> $GITHUB_OUTPUT
           echo "in_progress=$IN_PROGRESS" >> $GITHUB_OUTPUT
 
+      - name: Save current state
+        if: always()
+        run: |
+          mkdir -p /tmp/runner-health-state
+          echo "${{ steps.ec2.outputs.unhealthy_count }}" > /tmp/runner-health-state/last_unhealthy_count
+
+      - name: Update cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/runner-health-state
+          key: runner-health-state-${{ github.repository }}-${{ github.run_id }}
+
       - name: Alert on issues
-        if: steps.ec2.outputs.unhealthy_count != '0'
+        # Only alert if: (1) runners are unhealthy AND (2) this is a new problem (prev was healthy)
+        # This prevents alert spam when runners are down for extended periods
+        if: steps.ec2.outputs.unhealthy_count != '0' && steps.prev.outputs.unhealthy_count == '0'
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -121,6 +206,35 @@ jobs:
                   "type": "context",
                   "elements": [
                     { "type": "mrkdwn", "text": "<https://github.com/${{ github.repository }}/settings/actions/runners|Manage Runners> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Check>" }
+                  ]
+                }
+              ]
+            }
+
+      - name: Alert on recovery
+        # Notify when runners recover (prev was unhealthy, now healthy)
+        if: steps.ec2.outputs.unhealthy_count == '0' && steps.prev.outputs.unhealthy_count != '0'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "#fleet-training-runs",
+              "text": "✅ Runners Recovered",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "✅ All Runners Healthy" }
+                },
+                {
+                  "type": "section",
+                  "text": { "type": "mrkdwn", "text": "*Status:* ${{ steps.ec2.outputs.healthy }}/${{ steps.ec2.outputs.total }} runners online" }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    { "type": "mrkdwn", "text": "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Check>" }
                   ]
                 }
               ]
