@@ -85,6 +85,7 @@ class KVCache:
             cache_position=self.cache_position,
         )
 
+
 @jax.tree_util.register_dataclass
 @dataclass
 class DecodeState:
