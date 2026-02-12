@@ -48,8 +48,8 @@ class StackedDecoderLayers(nnx.Module):
     """Decoder layers with stacked weights for efficient scan-based forward pass.
 
     Parameters are stored in stacked format (num_layers, ...). The forward pass
-    uses jax.lax.scan for all modes (training/prefill/decode) with KV cache as
-    scan carry for efficient buffer donation.
+    uses jax.lax.scan for training/prefill, and uses a Python loop for decode
+    to update per-layer KV cache entries without stacked-cache copy overhead.
 
     This class encapsulates both layer creation and forward pass logic.
     """
