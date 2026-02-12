@@ -90,4 +90,5 @@ This is consistent with how `trainer.ckpt_path` and `trainer.export_path` work â
 
 - **Ray system messages still appear on stdout.** A small number of `(raylet)` log lines are emitted by Ray itself before any actors start. These are not captured by actor-level redirection.
 
-- **All actors share one log file per node.** vLLM engines and workers on the same node all append to the same `infra.log`. Under heavy logging, lines from different actors may interleave.
+- **All actors share one log file.** vLLM engines and workers on the same node (or across node if using a shared storage) all append to the same `infra.log`. Under heavy logging, lines from different actors may interleave.
+- **No deduplication** `infra.log` would lose Ray's deduplication functionality "repeated Nx across cluster" messages, making the log more bloated than Ray's.
