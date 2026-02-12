@@ -1,5 +1,4 @@
 import tempfile
-from typing import Any
 
 from flax import nnx
 import jax
@@ -21,28 +20,6 @@ MODEL_PARAMS = [
 MODEL_IDS = ["llama3", "qwen3"]
 
 
-def create_model(
-    model_name: str,
-    config_cls: type[ModelConfig],
-    model_cls: type[ModelForCausalLM],
-    mesh_axes: tuple[str, str],
-    *,
-    mesh_axis_types: tuple[jax.sharding.AxisType, ...] | None = None,
-    seed: int = 0,
-    **config_kwargs: Any,
-) -> tuple[ModelForCausalLM, ModelConfig]:
-    """Create model with random weights for testing."""
-    base_config = AutoConfig.from_pretrained(model_name)
-    config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True, **config_kwargs)
-    # Default to Auto axis types to avoid sharding resolution errors
-    if mesh_axis_types is None:
-        mesh_axis_types = (jax.sharding.AxisType.Auto,) * len(mesh_axes)
-    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=mesh_axis_types)
-    with jax.set_mesh(mesh):
-        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(seed))
-    return model, config
-
-
 def load_model(
     tmp_dir: str,
     model_name: str,
@@ -53,14 +30,18 @@ def load_model(
     loss_chunk_size: int = 0,
 ) -> ModelForCausalLM:
     """Load model from pre-saved weights directory."""
-    model, config = create_model(
-        model_name,
-        config_cls,
-        model_cls,
-        mesh_axes,
+    base_config = AutoConfig.from_pretrained(model_name)
+    config = config_cls(
+        base_config,
+        max_lora_adapters=1,
+        max_lora_rank=1,
+        shard_attention_heads=True,
         loss_chunk_size=loss_chunk_size,
         gradient_checkpointing=False,
     )
+    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=(jax.sharding.AxisType.Auto,) * 2)
+    with jax.set_mesh(mesh):
+        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
     load_safetensors(tmp_dir, config, model)
     return model
 
