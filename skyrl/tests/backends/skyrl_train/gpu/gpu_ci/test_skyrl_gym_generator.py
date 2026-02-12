@@ -85,7 +85,7 @@ class TestEnv(BaseTextEnv):
 
 register(
     id="test_env",
-    entry_point="tests.gpu.gpu_ci.test_skyrl_gym_generator:TestEnv",
+    entry_point="tests.backends.skyrl_train.gpu.gpu_ci.test_skyrl_gym_generator:TestEnv",
 )
 
 MODEL_TO_GENERATION_PROMPT = {
