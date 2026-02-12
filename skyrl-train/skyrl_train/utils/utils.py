@@ -750,6 +750,8 @@ def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
             )
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = str(log_dir / "infra.log")
+        # Truncate any existing log file so each run starts fresh
+        open(log_file, "w").close()
         os.environ["SKYRL_LOG_FILE"] = log_file
         # Pass log file path to workers so they can redirect their output
         env_vars["SKYRL_LOG_FILE"] = log_file

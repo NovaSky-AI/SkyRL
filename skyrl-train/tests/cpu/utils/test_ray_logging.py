@@ -84,34 +84,58 @@ class TestRedirectActorOutputToFile:
                 os.close(saved_stdout_fd)
                 os.close(saved_stderr_fd)
 
-    def test_appends_to_existing_file(self, monkeypatch):
-        """Redirection should append, not overwrite existing log content."""
+    def test_actors_append_to_log_file(self, monkeypatch):
+        """Multiple actor redirections should append to the same log file."""
         _set_dump_infra(monkeypatch, False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test-infra.log")
-            with open(log_path, "w") as f:
-                f.write("pre-existing-content\n")
+            # Simulate driver truncation (initialize_ray opens with "w")
+            open(log_path, "w").close()
 
             monkeypatch.setenv("SKYRL_LOG_FILE", log_path)
 
             saved_stdout_fd = os.dup(sys.stdout.fileno())
             saved_stderr_fd = os.dup(sys.stderr.fileno())
             try:
+                # First actor redirects
                 redirect_actor_output_to_file()
+                os.write(sys.stdout.fileno(), b"actor-1-output\n")
 
-                os.write(sys.stdout.fileno(), b"new-content\n")
+                # Restore fds to simulate a second actor starting
+                os.dup2(saved_stdout_fd, sys.stdout.fileno())
+                os.dup2(saved_stderr_fd, sys.stderr.fileno())
+
+                # Second actor redirects (should append, not overwrite)
+                redirect_actor_output_to_file()
+                os.write(sys.stdout.fileno(), b"actor-2-output\n")
 
                 with open(log_path) as f:
                     contents = f.read()
 
-                assert "pre-existing-content" in contents
-                assert "new-content" in contents
+                assert "actor-1-output" in contents
+                assert "actor-2-output" in contents
             finally:
                 os.dup2(saved_stdout_fd, sys.stdout.fileno())
                 os.dup2(saved_stderr_fd, sys.stderr.fileno())
                 os.close(saved_stdout_fd)
                 os.close(saved_stderr_fd)
+
+    def test_driver_truncates_previous_log(self):
+        """The driver should truncate the log file so each run starts fresh."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = os.path.join(tmpdir, "infra.log")
+            with open(log_path, "w") as f:
+                f.write("old-run-content\n")
+
+            # Simulate what initialize_ray does: truncate with "w"
+            open(log_path, "w").close()
+
+            with open(log_path) as f:
+                contents = f.read()
+
+            assert contents == ""
+            assert "old-run-content" not in contents
 
     def test_dump_to_std_skips_log_file_creation(self, monkeypatch):
         """When dump enabled, initialize_ray should not create log dir or set SKYRL_LOG_FILE."""

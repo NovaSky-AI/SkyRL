@@ -68,6 +68,12 @@ The redirect logic lives in `skyrl_train/utils/ray_logging.py` and is called fro
 - `BaseVLLMInferenceEngine.__init__()` — covers both sync and async vLLM engines
 - `DistributedTorchRayActor.__init__()` — covers policy and reference model workers
 
+## Log File Lifecycle
+
+The log file is **truncated at the start of each run**. If you restart a run with the same `run_name`, the previous `infra.log` is overwritten. This ensures you always see logs from the current run without stale output mixed in.
+
+If you need to preserve logs from a previous run, use a different `run_name` or copy the log file before restarting.
+
 ## Multi-Node
 
 In multi-node training, each node writes its own `infra.log` at the same local path. The log directory is created automatically on each node when the first actor starts. This is consistent with how Ray's own per-node logs work (`/tmp/ray/session_*/logs/`).
