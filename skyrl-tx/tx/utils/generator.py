@@ -16,9 +16,9 @@ from tx.tinker import types
 class KVCache:
     """Key-value cache for all layers, each entry in the list corresponds to one layer."""
 
-    keys: list[jax.Array]
-    values: list[jax.Array]
-    cache_position: jax.Array  # Per-sequence positions of shape [B] for left-aligned decoding
+    keys: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
+    values: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
+    cache_position: jax.Array  # Per-sequence positions of shape (batch,)
 
     @staticmethod
     def update(

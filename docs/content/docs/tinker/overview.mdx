@@ -1,5 +1,5 @@
 ---
-title: "Tinker Integration Overview"
+title: "Tinker API"
 ---
 
 SkyRL implements the [Tinker API](https://tinker-docs.thinkingmachines.ai/), a simple training and sampling API introduced by Thinking Machines Lab that cleanly separates algorithm logic from infrastructure logic. This means any training script written against the Tinker API can run locally on your own hardware using SkyRL's backends (FSDP2, Megatron, vLLM) with zero code changes.
@@ -40,8 +40,6 @@ SkyRL brings the Tinker API to your own hardware. By utilizing the fully Tinker 
 | FSDP2 strategy | Supported |
 | Megatron strategy | Experimental |
 | Multi-tenant LoRA | Not yet supported |
-| KL penalty | Not yet supported |
-| Prompt logprobs in `sample()` | Not yet supported |
 | Multi-model sampling | Not yet supported |
 | Multi-model training | Not yet supported |
 | Vision models | Not yet supported |
