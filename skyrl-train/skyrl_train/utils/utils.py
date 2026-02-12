@@ -659,6 +659,11 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
 
+    # Propagate log separation env vars to Ray workers
+    for var_name in ["VLLM_LOG_FILE", "SKYRL_LOG_FILE", "LOG_LEVEL"]:
+        if value := os.environ.get(var_name):
+            env_vars[var_name] = value
+
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
@@ -675,38 +680,88 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
     return env_vars
 
 
+def _is_vllm_log(record: dict) -> bool:
+    """Filter: returns True for logs originating from vLLM."""
+    stdlib_name = record["extra"].get("stdlib_logger", "")
+    module_name = record["name"]
+    return stdlib_name.startswith("vllm") or module_name.startswith("vllm")
+
+
+def _is_skyrl_log(record: dict) -> bool:
+    """Filter: returns True for logs NOT originating from vLLM (i.e. SkyRL client-side)."""
+    return not _is_vllm_log(record)
+
+
 def configure_ray_worker_logging() -> None:
     """
     In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
     This method forces color and formatting (e.g., bold) and routes stdlib `logging`
-    through Loguru so third-party logs match formatting
+    through Loguru so third-party logs match formatting.
+
+    Log separation (optional):
+        Set VLLM_LOG_FILE to write vLLM server-side logs to a dedicated file.
+        Set SKYRL_LOG_FILE to write SkyRL client-side logs to a dedicated file.
+        When either is set, the corresponding logs are *also* still printed to stderr.
     """
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 
-    # 1) Loguru formatting (force colors)
-    logger.remove()
-    logger.level("INFO", color="<bold><green>")
-    logger.add(
-        sys.stderr,
-        colorize=True,  # keep ANSI even without a TTY
-        level=level_name,  # ensure Loguru filters below this level
+    plain_format = (
+        "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
+        "{level: <8} | "
+        "{name}:{function}:{line} - "
+        "{message}"
+    )
+    colored_format = (
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+        "<level>{message}</level>"
+    )
+    sink_kwargs = dict(
+        level=level_name,
         enqueue=True,
         backtrace=False,
         diagnose=False,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-        "<level>{level: <8}</level> | "
-        "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
-        "<level>{message}</level>",
     )
 
-    # 2) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted)
+    # 1) Loguru formatting (force colors on stderr)
+    logger.remove()
+    logger.level("INFO", color="<bold><green>")
+    logger.add(sys.stderr, colorize=True, format=colored_format, **sink_kwargs)
+
+    # 2) Optional file sinks for log separation
+    vllm_log_file = os.getenv("VLLM_LOG_FILE")
+    skyrl_log_file = os.getenv("SKYRL_LOG_FILE")
+
+    if vllm_log_file:
+        logger.add(
+            vllm_log_file,
+            filter=_is_vllm_log,
+            format=plain_format,
+            rotation="500 MB",
+            **sink_kwargs,
+        )
+
+    if skyrl_log_file:
+        logger.add(
+            skyrl_log_file,
+            filter=_is_skyrl_log,
+            format=plain_format,
+            rotation="500 MB",
+            **sink_kwargs,
+        )
+
+    # 3) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted).
+    #    We bind the original stdlib logger name so file sinks can filter on it.
     class _InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             try:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
-            logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+            logger.bind(stdlib_logger=record.name).opt(depth=6, exception=record.exc_info).log(
+                level, record.getMessage()
+            )
 
     logging.root.handlers = [_InterceptHandler()]
     level = getattr(logging, level_name, logging.INFO)

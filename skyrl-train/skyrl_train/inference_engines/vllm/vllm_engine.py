@@ -74,6 +74,9 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
+        from skyrl_train.utils.utils import configure_ray_worker_logging
+
+        configure_ray_worker_logging()
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
@@ -88,6 +91,16 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
+
+        # After vLLM init, reroute its loggers through our Loguru intercept so that
+        # VLLM_LOG_FILE / SKYRL_LOG_FILE separation works.  vLLM sets propagate=False
+        # and adds its own handlers; undo that so logs reach logging.root → Loguru.
+        import logging as _logging
+
+        for name, lgr in _logging.Logger.manager.loggerDict.items():
+            if isinstance(lgr, _logging.Logger) and name.startswith("vllm"):
+                lgr.handlers.clear()
+                lgr.propagate = True
 
         # Weight loader is created by subclass after engine initialization
         self._weight_loader = None

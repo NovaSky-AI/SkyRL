@@ -16,6 +16,14 @@ CHAT_TEMPLATE_PATH="/home/ray/default/SkyRLHarbor3/skyrl-train/skyrl_train/utils
 
 NUM_GPUS=4
 
+# Log separation: vLLM server-side vs SkyRL client-side
+# Set these env vars to split logs into separate files.
+# If unset, all logs go to stderr only (original behavior).
+LOG_DIR="/home/ray/logs"
+mkdir -p "$LOG_DIR"
+export VLLM_LOG_FILE="$LOG_DIR/vllm.log"
+export SKYRL_LOG_FILE="$LOG_DIR/skyrl.log"
+
 # Run SkyRL command
 uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypoints.main_tbench \
   data.train_data=$TRAIN_DATA \
