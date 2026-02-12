@@ -1,5 +1,3 @@
-import tempfile
-
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -52,6 +50,7 @@ def test_compute_logits(
     config_cls: type[ModelConfig],
     model_cls: type[ModelForCausalLM],
     mesh_axes: tuple[str, str],
+    hf_weights_dir,
 ) -> None:
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -59,22 +58,21 @@ def test_compute_logits(
     inputs = ["The capital of France is", "Hello world"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        # Load HF model, get logits, save weights, then delete to free memory
-        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-        hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
-        hf_logits = hf_outputs.logits.detach().numpy()
-        hf_model.save_pretrained(tmp, safe_serialization=True)
-        del hf_model, hf_outputs
+    # Load HF model, get logits, then delete to free memory
+    hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+    hf_outputs = hf_model(batch.input_ids, attention_mask=batch.attention_mask)
+    hf_logits = hf_outputs.logits.detach().numpy()
+    del hf_model, hf_outputs
 
-        # Load our model from saved weights
-        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes)
+    # Load our model from shared weights cache
+    weights_dir = hf_weights_dir(model_name)
+    model = load_model(weights_dir, model_name, config_cls, model_cls, mesh_axes)
 
-        # Get our logits via compute_logits
-        outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
-        our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
+    # Get our logits via compute_logits
+    outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
+    our_logits = np.asarray(model.compute_logits(outputs.last_hidden_state))
 
-        np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
+    np.testing.assert_allclose(our_logits, hf_logits, rtol=3e-2, atol=3e-2)
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
@@ -85,6 +83,7 @@ def test_chunked_logprobs(
     model_cls: type[ModelForCausalLM],
     mesh_axes: tuple[str, str],
     chunk_size: int,
+    hf_weights_dir,
 ) -> None:
     """Test that chunked and non-chunked compute_logprobs produce identical results."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -94,22 +93,18 @@ def test_chunked_logprobs(
     attention_mask = jnp.array(batch.attention_mask.numpy())
     target_ids = jnp.roll(input_ids, -1, axis=1)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        # Save HF weights once
-        hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
-        hf_model.save_pretrained(tmp, safe_serialization=True)
-        del hf_model
+    weights_dir = hf_weights_dir(model_name)
 
-        # Load non-chunked model, compute logprobs, then delete
-        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0)
-        outputs = model(input_ids, attention_mask=attention_mask)
-        logprobs_nonchunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
-        del model, outputs
+    # Load non-chunked model, compute logprobs, then delete
+    model = load_model(weights_dir, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0)
+    outputs = model(input_ids, attention_mask=attention_mask)
+    logprobs_nonchunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
+    del model, outputs
 
-        # Load chunked model, compute logprobs
-        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size)
-        outputs = model(input_ids, attention_mask=attention_mask)
-        logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
+    # Load chunked model, compute logprobs
+    model = load_model(weights_dir, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size)
+    outputs = model(input_ids, attention_mask=attention_mask)
+    logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
 
     np.testing.assert_allclose(
         logprobs_chunked,
