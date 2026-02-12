@@ -91,13 +91,17 @@ inference layer is validated and made the default.
 # Logging
 # ─────────────────────────────────────────────────────────────────────────────
 
-SKYRL_LOG_LEVEL = os.environ.get("SKYRL_LOG_LEVEL", "INFO").upper()
+SKYRL_DUMP_INFRA_LOG_TO_STDOUT = str(os.environ.get("SKYRL_DUMP_INFRA_LOG_TO_STDOUT", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
 """
-Log level for SkyRL. Controls log filtering and stdout verbosity.
+When enabled, infrastructure logs (vLLM, Ray, workers) are shown on stdout
+instead of being redirected to the log file. Useful for debugging startup issues.
 
-- INFO (default): Training progress on stdout, infrastructure logs to file only
-- DEBUG: All logs (including vLLM, Ray, workers) shown on stdout
-- Also used by loguru for log level filtering (ERROR, WARNING, etc.)
+Default: False (infrastructure logs go to file only, stdout shows training progress).
+Set ``SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`` to show all logs on stdout.
 """
 
 SKYRL_LOG_DIR = os.environ.get("SKYRL_LOG_DIR", "/tmp/skyrl-logs")

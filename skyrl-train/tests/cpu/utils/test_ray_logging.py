@@ -15,18 +15,18 @@ import skyrl_train.env_vars as env_vars_mod
 from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
 
 
-def _set_log_level(monkeypatch, level):
+def _set_dump_infra(monkeypatch, enabled: bool):
     """Patch both the env var and the cached module-level constant."""
-    monkeypatch.setenv("SKYRL_LOG_LEVEL", level)
-    monkeypatch.setattr(env_vars_mod, "SKYRL_LOG_LEVEL", level)
+    monkeypatch.setenv("SKYRL_DUMP_INFRA_LOG_TO_STDOUT", "1" if enabled else "0")
+    monkeypatch.setattr(env_vars_mod, "SKYRL_DUMP_INFRA_LOG_TO_STDOUT", enabled)
 
 
 class TestRedirectActorOutputToFile:
     """Tests for redirect_actor_output_to_file()."""
 
-    def test_debug_mode_skips_redirection(self, monkeypatch):
-        """When SKYRL_LOG_LEVEL=DEBUG, no redirection should happen."""
-        _set_log_level(monkeypatch, "DEBUG")
+    def test_dump_to_std_skips_redirection(self, monkeypatch):
+        """When SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1, no redirection should happen."""
+        _set_dump_infra(monkeypatch, True)
         monkeypatch.setenv("SKYRL_LOG_FILE", "/tmp/should-not-be-opened.log")
 
         original_stdout_fd = os.dup(sys.stdout.fileno())
@@ -43,7 +43,7 @@ class TestRedirectActorOutputToFile:
 
     def test_no_log_file_set_is_noop(self, monkeypatch):
         """When SKYRL_LOG_FILE is not set, no redirection should happen."""
-        _set_log_level(monkeypatch, "INFO")
+        _set_dump_infra(monkeypatch, False)
         monkeypatch.delenv("SKYRL_LOG_FILE", raising=False)
 
         original_stdout_fd = os.dup(sys.stdout.fileno())
@@ -55,8 +55,8 @@ class TestRedirectActorOutputToFile:
             os.close(original_stdout_fd)
 
     def test_redirects_stdout_and_stderr_to_file(self, monkeypatch):
-        """In INFO mode with SKYRL_LOG_FILE set, stdout/stderr should write to the log file."""
-        _set_log_level(monkeypatch, "INFO")
+        """With dump disabled and SKYRL_LOG_FILE set, stdout/stderr should write to the log file."""
+        _set_dump_infra(monkeypatch, False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test-infra.log")
@@ -86,7 +86,7 @@ class TestRedirectActorOutputToFile:
 
     def test_appends_to_existing_file(self, monkeypatch):
         """Redirection should append, not overwrite existing log content."""
-        _set_log_level(monkeypatch, "INFO")
+        _set_dump_infra(monkeypatch, False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "test-infra.log")
@@ -113,9 +113,9 @@ class TestRedirectActorOutputToFile:
                 os.close(saved_stdout_fd)
                 os.close(saved_stderr_fd)
 
-    def test_debug_mode_skips_log_file_creation(self, monkeypatch):
-        """In DEBUG mode, initialize_ray should not create log dir or set SKYRL_LOG_FILE."""
-        _set_log_level(monkeypatch, "DEBUG")
+    def test_dump_to_std_skips_log_file_creation(self, monkeypatch):
+        """When dump enabled, initialize_ray should not create log dir or set SKYRL_LOG_FILE."""
+        _set_dump_infra(monkeypatch, True)
         monkeypatch.delenv("SKYRL_LOG_FILE", raising=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -124,11 +124,11 @@ class TestRedirectActorOutputToFile:
             monkeypatch.setattr(env_vars_mod, "SKYRL_LOG_DIR", log_base)
 
             # Simulate the conditional from initialize_ray
-            verbose_logging = env_vars_mod.SKYRL_LOG_LEVEL == "DEBUG"
+            verbose_logging = env_vars_mod.SKYRL_DUMP_INFRA_LOG_TO_STDOUT
 
-            assert verbose_logging, "Expected DEBUG mode to be detected"
+            assert verbose_logging, "Expected dump-to-std to be enabled"
 
-            # In DEBUG mode, the log dir should NOT be created
+            # When dumping to stdout, the log dir should NOT be created
             expected_log_dir = os.path.join(log_base, "test-run")
             assert not os.path.exists(expected_log_dir)
             assert os.environ.get("SKYRL_LOG_FILE") is None

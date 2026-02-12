@@ -17,14 +17,15 @@ def redirect_actor_output_to_file():
     to suppress output from appearing on the driver's stdout. The output will
     instead be written to the log file specified by SKYRL_LOG_FILE.
 
-    In DEBUG mode, redirection is skipped so all logs appear on stdout.
+    When SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1, redirection is skipped so all logs
+    appear on stdout.
 
     Note: Do NOT call this in skyrl_entrypoint() - training progress should
     go to stdout.
     """
-    from skyrl_train.env_vars import SKYRL_LOG_LEVEL
+    from skyrl_train.env_vars import SKYRL_DUMP_INFRA_LOG_TO_STDOUT
 
-    if SKYRL_LOG_LEVEL == "DEBUG":
+    if SKYRL_DUMP_INFRA_LOG_TO_STDOUT:
         return
 
     log_file = os.getenv("SKYRL_LOG_FILE")
