@@ -160,21 +160,20 @@ class StackedDecoderLayers(nnx.Module):
             List of (path, ArrayRef) tuples for unstacked parameters.
         """
         result = []
+        prefix_len = len(base_path)
         for path, param in nnx.to_flat_state(state):
             # Only process paths belonging to this module
-            if not path[: len(base_path)] == base_path:
+            if path[:prefix_len] != base_path:
                 continue
+
+            rel_path = path[prefix_len:]
             # Only process _stacked paths
-            if "_stacked" not in path[len(base_path) :]:
+            if "_stacked" not in rel_path:
                 continue
 
-            # Find _stacked in the relative path
-            rel_path = path[len(base_path) :]
-            stacked_idx = rel_path.index("_stacked")
-
-            # Create per-layer paths: base_path + (layer_idx,) + rest
+            suffix = rel_path[rel_path.index("_stacked") + 1 :]
             for layer_idx in range(self.num_layers):
-                new_path = base_path + (str(layer_idx),) + rel_path[stacked_idx + 1 :]
+                new_path = base_path + (str(layer_idx),) + suffix
                 result.append((new_path, ArrayRef(param, layer_idx)))
 
         return result
