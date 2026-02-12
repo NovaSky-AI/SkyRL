@@ -25,7 +25,8 @@ Logging behavior is controlled by two environment variables:
 
 `SKYRL_LOG_DIR`
   - **Default**: `/tmp/skyrl-logs`
-  - **Purpose**: Base directory for log files
+  - **Purpose**: Base directory for infrastructure log files
+  - Unlike `trainer.ckpt_path` / `trainer.export_path`, this is an env var because it's a local-only path (cannot use cloud storage) and may need to differ per node in multi-node setups
 
 `SKYRL_LOG_LEVEL`
   - **Default**: `INFO`
@@ -38,28 +39,23 @@ Logging behavior is controlled by two environment variables:
 
 ## Usage
 
-**Normal run** — clean stdout, infrastructure logs to file:
+**Normal run** — clean stdout, infrastructure logs to file `/tmp/skyrl-logs/my-run/infra.log`:
 
 ```bash
 bash examples/gsm8k/run_gsm8k.sh
 ```
 
-**Follow infrastructure logs in real time:**
+
+**Custom log directory:**
 
 ```bash
-tail -f /tmp/skyrl-logs/my-run/infra.log
+SKYRL_LOG_DIR=/home/user/logs bash examples/gsm8k/run_gsm8k.sh
 ```
 
 **Debug mode** — see everything on stdout (no file redirection):
 
 ```bash
 SKYRL_LOG_LEVEL=DEBUG bash examples/gsm8k/run_gsm8k.sh
-```
-
-**Custom log directory:**
-
-```bash
-SKYRL_LOG_DIR=/home/user/logs bash examples/gsm8k/run_gsm8k.sh
 ```
 
 ## How It Works
@@ -76,8 +72,12 @@ The redirect logic lives in `skyrl_train/utils/ray_logging.py` and is called fro
 - `BaseVLLMInferenceEngine.__init__()` — covers both sync and async vLLM engines
 - `DistributedTorchRayActor.__init__()` — covers policy and reference model workers
 
+## Multi-Node
+
+In multi-node training, each node writes its own `infra.log` at the same local path. The log directory is created automatically on each node when the first actor starts. This is consistent with how Ray's own per-node logs work (`/tmp/ray/session_*/logs/`).
+
 ## Known Limitations
 
 - **Ray system messages still appear on stdout.** A small number of `(raylet)` log lines are emitted by Ray itself before any actors start. These are not captured by actor-level redirection.
 
-- **All actors share one log file.** vLLM engines and workers all append to the same `infra.log`. Under heavy logging, lines from different actors may interleave.
+- **All actors share one log file per node.** vLLM engines and workers on the same node all append to the same `infra.log`. Under heavy logging, lines from different actors may interleave.

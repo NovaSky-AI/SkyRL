@@ -29,7 +29,8 @@ def redirect_actor_output_to_file():
 
     log_file = os.getenv("SKYRL_LOG_FILE")
     if log_file:
-        log_fd = open(log_file, "a", buffering=1)  # noqa: SIM115
-        os.dup2(log_fd.fileno(), sys.stdout.fileno())
-        os.dup2(log_fd.fileno(), sys.stderr.fileno())
-        log_fd.close()  # original fd no longer needed; stdout/stderr hold copies
+        # Ensure the directory exists on this node (may differ from driver in multi-node)
+        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        with open(log_file, "a", buffering=1) as log_f:
+            os.dup2(log_f.fileno(), sys.stdout.fileno())
+            os.dup2(log_f.fileno(), sys.stderr.fileno())
