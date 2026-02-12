@@ -118,22 +118,6 @@ class TestRedirectActorOutputToFile:
                 os.close(saved_stdout_fd)
                 os.close(saved_stderr_fd)
 
-    def test_driver_truncates_previous_log(self):
-        """The driver should truncate the log file so each run starts fresh."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            log_path = os.path.join(tmpdir, "infra.log")
-            with open(log_path, "w") as f:
-                f.write("old-run-content\n")
-
-            # Simulate what initialize_ray does: truncate with "w"
-            open(log_path, "w").close()
-
-            with open(log_path) as f:
-                contents = f.read()
-
-            assert contents == ""
-            assert "old-run-content" not in contents
-
     def test_dump_to_std_skips_log_file_creation(self, monkeypatch):
         """When dump enabled, initialize_ray should not create log dir or set SKYRL_LOG_FILE."""
         _set_dump_infra(monkeypatch, True)

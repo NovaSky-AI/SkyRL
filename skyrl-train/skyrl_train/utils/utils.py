@@ -5,6 +5,7 @@ import sys
 import logging
 import math
 import socket
+from datetime import datetime
 from omegaconf import DictConfig, OmegaConf
 from typing import Union
 
@@ -742,9 +743,8 @@ def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
     if not verbose_logging:
         log_path = Path(cfg.trainer.log_path).resolve()
         log_path.mkdir(parents=True, exist_ok=True)
-        log_file = str(log_path / "infra.log")
-        # Truncate any existing log file so each run starts fresh
-        open(log_file, "w").close()
+        timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+        log_file = str(log_path / f"infra-{timestamp}.log")
         os.environ["SKYRL_LOG_FILE"] = log_file
         # Pass log file path to workers so they can redirect their output
         env_vars["SKYRL_LOG_FILE"] = log_file
