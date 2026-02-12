@@ -107,17 +107,35 @@ fsdp = [
 ]
 
 megatron = [
+    "skyrl[skyrl-train]; python_version == '3.12'",
+    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
+    "flash-attn==2.8.1; sys_platform == 'linux' and python_version == '3.12'",
+    "vllm==0.13.0; sys_platform == 'linux' and python_version == '3.12'",
+    "torch==2.9.0; sys_platform == 'linux' and python_version == '3.12'",
+    "flashinfer-python==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+    "torchvision; sys_platform == 'linux' and python_version == '3.12'",
+    "megatron-bridge; sys_platform == 'linux' and python_version == '3.12'",
+    "megatron-core==0.15.0; sys_platform == 'linux' and python_version == '3.12'",
+    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+    "nvidia-modelopt; sys_platform == 'linux' and python_version == '3.12'",
+]
+
+# for skyrl-train only
+
+flashrl = [
     "skyrl[skyrl-train]",
-    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
-    "flash-attn==2.8.1; sys_platform == 'linux'",
-    "vllm==0.13.0; sys_platform == 'linux'",
-    "torch==2.9.0; sys_platform == 'linux'",
-    "flashinfer-python==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # NOTE: Custom vLLM wheel must be installed separately.
+    # See examples/flash_rl/README.md for installation instructions.
+    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "torch==2.7.0; sys_platform == 'linux'",
+    "flashinfer-python; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
-    "megatron-bridge; sys_platform == 'linux'",
-    "megatron-core==0.15.0; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "nvidia-modelopt; sys_platform == 'linux'",
+]
+miniswe = [
+    "skyrl[skyrl-train]",
+    # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
+    "mini-swe-agent>=1.12.0",
+    "litellm",
 ]
 
 dev = [
@@ -125,6 +143,9 @@ dev = [
     "mkdocs-material",
     "pytest",
     "pytest-forked",
+    "pytest-asyncio",
+    "pre-commit",
+    "litellm",
     "torch",
     "ty",
     "cloudpathlib[s3]",
@@ -156,12 +177,16 @@ conflicts = [
     [
         { extra = "jax" },
         { extra = "megatron" },
+        { extra = "fsdp" },
+        { extra = "flashrl" },
         { extra = "fsdp" }
     ],
     [
         { extra = "megatron" },
         { extra = "gpu" },
         { extra = "tpu" },
+        { extra = "flashrl" },
+        { extra = "miniswe" },
     ]
 ]
 # disable build isolation for megatron related dependencies
