@@ -4,4 +4,4 @@ set -xeuo pipefail
 export CI=true
 
 # Run GPU-specific tests
-uv run --extra gpu --extra tinker --extra dev pytest tests/gpu
+uv run --extra gpu --extra tinker --extra dev pytest tests/tx/gpu
