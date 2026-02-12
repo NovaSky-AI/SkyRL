@@ -1,0 +1,83 @@
+---
+title: "Logging"
+---
+
+By default, SkyRL separates **training progress** from **infrastructure logs**:
+
+- **stdout** shows only what you care about during a run: configuration, dataset loading, training steps, rewards, and metrics.
+- **Infrastructure logs** (vLLM engine startup, model loading, KV cache allocation, weight syncing, worker initialization) are written to a log file on disk.
+
+This keeps your terminal clean while preserving full diagnostic detail for debugging.
+
+## Log File Location
+
+Infrastructure logs are written to:
+
+```
+{SKYRL_LOG_DIR}/{run_name}/infra.log
+```
+
+With default settings this is `/tmp/skyrl-logs/{run_name}/infra.log`, where `run_name` comes from `trainer.run_name` in your config.
+
+## Configuration
+
+Logging behavior is controlled by two environment variables:
+
+`SKYRL_LOG_DIR`
+  - **Default**: `/tmp/skyrl-logs`
+  - **Purpose**: Base directory for log files
+
+`SKYRL_LOG_LEVEL`
+  - **Default**: `INFO`
+  - **Purpose**: Controls log verbosity and routing
+  - **Options**:
+    - `INFO` (default): Training progress on stdout, infrastructure logs to file only
+    - `DEBUG`: All logs shown on stdout (no file redirection). Useful for diagnosing startup issues.
+
+> `SKYRL_LOG_FILE` is set automatically by `initialize_ray()` — you do not need to set it yourself.
+
+## Usage
+
+**Normal run** — clean stdout, infrastructure logs to file:
+
+```bash
+bash examples/gsm8k/run_gsm8k.sh
+```
+
+**Follow infrastructure logs in real time:**
+
+```bash
+tail -f /tmp/skyrl-logs/my-run/infra.log
+```
+
+**Debug mode** — see everything on stdout (no file redirection):
+
+```bash
+SKYRL_LOG_LEVEL=DEBUG bash examples/gsm8k/run_gsm8k.sh
+```
+
+**Custom log directory:**
+
+```bash
+SKYRL_LOG_DIR=/home/user/logs bash examples/gsm8k/run_gsm8k.sh
+```
+
+## How It Works
+
+SkyRL uses OS-level file descriptor redirection (`os.dup2`) to route each Ray actor's stdout/stderr to a shared log file. The key design principle is selective redirection:
+
+- **vLLM inference engines** and **training workers** redirect their output to the log file at actor initialization time.
+- The **training entrypoint** (`skyrl_entrypoint`) does *not* redirect, so training progress flows to your terminal as usual.
+
+Because redirection happens at the file descriptor level, it captures all output — including logs from vLLM's `EngineCore` subprocess (model loading, KV cache setup) that would bypass Python-level logging intercepts.
+
+The redirect logic lives in `skyrl_train/utils/ray_logging.py` and is called from:
+
+- `BaseVLLMInferenceEngine.__init__()` — covers both sync and async vLLM engines
+- `DistributedTorchRayActor.__init__()` — covers policy and reference model workers
+
+## Known Limitations
+
+- **Ray system messages still appear on stdout.** A small number of `(raylet)` log lines are emitted by Ray itself before any actors start. These are not captured by actor-level redirection.
+
+- **All actors share one log file.** vLLM engines and workers all append to the same `infra.log`. Under heavy logging, lines from different actors may interleave.
