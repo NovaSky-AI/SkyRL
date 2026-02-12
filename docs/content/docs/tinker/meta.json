@@ -3,9 +3,9 @@
   "pages": [
     "overview",
     "quickstart",
-    "configuration",
     "architecture",
     "cookbook",
+    "configuration",
     "limitations"
   ]
 }
