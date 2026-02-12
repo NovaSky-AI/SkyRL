@@ -26,6 +26,9 @@ Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/configuration/c
 | `trainer.placement.policy_num_nodes` | `1` | Number of nodes for training |
 | `generator.num_inference_engines` | `1` | Number of vLLM inference engines for sampling |
 | `generator.inference_engine_tensor_parallel_size` | `1` | Tensor parallel size per inference engine |
+| `trainer.micro_forward_batch_size_per_gpu` | `1` | Micro-batch size per GPU (for forward pass) |
+| `trainer.micro_train_batch_size_per_gpu` | `1` | Micro-batch size per GPU (for gradient accumulation) |
+| `generator.gpu_memory_utilization` | `0.8` | Fraction of GPU memory for vLLM KV cache |
 
 When running a small model on multiple GPUs, you typically want to set `policy_num_gpus_per_node` and `num_inference_engines` to the same value. For example, on a 4-GPU node:
 
@@ -38,22 +41,6 @@ For large models that don't fit on a single GPU for inference, increase `inferen
 ```bash
 --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.num_inference_engines": 2, "generator.inference_engine_tensor_parallel_size": 2}'
 ```
-
-### Training and Inference
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `trainer.micro_forward_batch_size_per_gpu` | `1` | Micro-batch size per GPU (for forward pass) |
-| `trainer.micro_train_batch_size_per_gpu` | `1` | Micro-batch size per GPU (for gradient accumulation) |
-| `generator.gpu_memory_utilization` | `0.8` | Fraction of GPU memory for vLLM KV cache |
-| `generator.max_num_batched_tokens` | `8192` | Maximum tokens per vLLM batch |
-
-### Checkpoints
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `trainer.ckpt_path` | `~/ckpts/` | Directory for full training checkpoints |
-| `trainer.ckpt_interval` | `10` | Save a full checkpoint every N steps |
 
 ## LoRA
 
