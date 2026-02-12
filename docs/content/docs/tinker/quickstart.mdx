@@ -44,8 +44,8 @@ The server is ready when you see `Uvicorn running on http://0.0.0.0:8000`.
 | `--base-model` | (required) | HuggingFace model name or path |
 | `--backend` | (required) | Backend type (`fsdp` or `megatron`) |
 | `--port` | 8000 | API server port |
-| `--checkpoints-base` | `/tmp/tx_checkpoints` | Directory for checkpoint storage |
-| `--database-url` | `sqlite:///tinker.db` | Database URL for request tracking |
+| `--checkpoints-base` | `/tmp/skyrl_checkpoints` | Directory for checkpoint storage |
+| `--database-url` | `sqlite:///...tinker.db` | Database URL for request tracking |
 
 ## 3. Run a Training Script
 
@@ -59,7 +59,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
-    log_path="/tmp/tinker-sl" \
     train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
@@ -69,6 +68,6 @@ Congratulations! You've run your first Tinker training script on SkyRL.
 
 ## 4. More Recipes
 
-In general, **zero** code changes are required to execute [tinker-cookbook](https://github.com/ThinkingMachinesLab/tinker-cookbook) scripts on SkyRL. Simply update the `base_url` of the `ServiceClient` to point to the address and port of the local Tinker API server (e.g., `http://localhost:8000` above).
+In general, **zero** code changes are required to execute [tinker-cookbook](https://github.com/ThinkingMachinesLab/tinker-cookbook) scripts on SkyRL. Simply update the `base_url` to point to your local Tinker server (e.g., `http://localhost:8000` above).
 
-See [Cookbook Scripts](./cookbook) for example commands and recipes that have been validated on SkyRL.
+See [Cookbook Scripts](./cookbook) for a few example commands and recipes that have been validated on SkyRL.

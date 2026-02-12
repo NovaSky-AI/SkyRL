@@ -24,7 +24,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
-    log_path="/tmp/tinker-sl" \
     train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
@@ -35,7 +34,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     python -m tinker_cookbook.recipes.sl_loop \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
-    log_path="/tmp/tinker-sl" \
     train_on_what=LAST_ASSISTANT_MESSAGE \
     lora_rank=0
 ```
@@ -53,7 +51,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     python -m tinker_cookbook.recipes.rl_loop \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
-    log_path="/tmp/tinker-rl" \
     lora_rank=0
 ```
 

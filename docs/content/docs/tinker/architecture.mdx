@@ -10,7 +10,7 @@ The integration is organized in three high-level layers:
 
 1. **API Layer** (`skyrl.tinker.api`) - FastAPI HTTP server that accepts Tinker API requests, stores them in a database, and returns future IDs for async polling
 2. **Engine Layer** (`skyrl.tinker.engine`) - Background subprocess that polls the database, batches pending requests, and dispatches them to the backend
-3. **Backend Layer** (`skyrl.tinker.backends` and `skyrl-train`) - Translates Tinker operations into SkyRL-Train calls, managing Ray workers, training, and inference
+3. **Backend Layer** (`skyrl.backends`) - Translates Tinker operations into training and inference calls, managing Ray workers, FSDP2/Megatron training, and vLLM inference
 
 ## Model Creation
 
