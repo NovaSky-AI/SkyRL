@@ -34,6 +34,7 @@ on:
         options:
           - openenv-fleet-grpo-qwen3-8b
           - openenv-fleet-grpo-qwen3-8b-step-wise
+          - openenv-fleet-grpo-qwen3-vl-8b
         default: "openenv-fleet-grpo-qwen3-8b"
       data_version:
         description: "Dataset version in S3 (e.g., v0.1, v0.2, v0.3)"
