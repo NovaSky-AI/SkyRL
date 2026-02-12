@@ -7,7 +7,7 @@ import functools
 import jax
 import jax.numpy as jnp
 from tokenizers.decoders import DecodeStream
-from skyrl.tx.utils.models import round_up_seq_len
+import skyrl.tx.utils.models
 from skyrl.tinker import types
 
 
@@ -303,7 +303,7 @@ class GeneratorMixin:
         batch_size, prompt_length = input_ids.shape
         assert len(sampling_params) == batch_size
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
-        max_length = round_up_seq_len(prompt_length + max_new_tokens)
+        max_length = skyrl.tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
         temperatures = jnp.array([sampling_param.temperature for sampling_param in sampling_params])
         top_k_values = jnp.array([sampling_param.top_k for sampling_param in sampling_params], dtype=jnp.int32)
         top_p_values = jnp.array([sampling_param.top_p for sampling_param in sampling_params], dtype=jnp.float32)
