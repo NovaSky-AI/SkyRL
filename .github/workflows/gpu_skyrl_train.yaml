@@ -7,7 +7,7 @@ on:
     paths:
       - 'skyrl/skyrl/backends/skyrl_train/**'
       - 'skyrl/skyrl/train/**'
-      - 'skyrl/tests/skyrl_train_tests/**'
+      - 'skyrl/tests/backends/skyrl_train/**'
       - 'skyrl/pyproject.toml'
       - '!skyrl/docs/**'
       - '!skyrl/examples/**'

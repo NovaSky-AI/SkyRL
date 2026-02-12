@@ -9,7 +9,7 @@ on:
       - 'skyrl/skyrl/backends/skyrl_train/distributed/megatron/**'
       - 'skyrl/skyrl/train/config/**'
       - 'skyrl/skyrl/train/trainer.py'
-      - 'skyrl/tests/skyrl_train_tests/gpu/gpu_ci/**'
+      - 'skyrl/tests/backends/skyrl_train/gpu/gpu_ci/**'
       - 'skyrl/pyproject.toml'
       - '!skyrl/docs/**'
       - '!skyrl/examples/**'

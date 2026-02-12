@@ -1,11 +1,19 @@
-name: SkyRL
+name: SkyRL-Train-CPU
 
 on: 
   push: 
     branches: 
       - main 
       - rc/**
+    paths:
+      - 'skyrl/**'
+      - 'skyrl-gym/**'
+      - '.github/workflows/cpu_skyrl_train.yaml'
   pull_request:
+    paths:
+      - 'skyrl/**'
+      - 'skyrl-gym/**'
+      - '.github/workflows/cpu_skyrl_train.yaml'
 
 permissions:
   checks: write   # for status checks to appear
@@ -58,7 +66,7 @@ jobs:
       - name: Install skyrl
         run:  uv sync --frozen --extra skyrl-train --extra dev
       - name: Run cpu tests
-        run:  uv run --frozen pytest tests/skyrl_train_tests/cpu/
+        run:  uv run --frozen pytest tests/train/cpu/ tests/backends/skyrl_train/cpu/
   
   skyrl_gym_tests:
     needs: check_code_quality

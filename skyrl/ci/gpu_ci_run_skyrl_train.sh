@@ -5,5 +5,5 @@ export CI=true
 # Prepare datasets used in tests.
 uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # Run all non-megatron tests
-uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/skyrl_train_tests/gpu/gpu_ci -m "not megatron"
+uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "not megatron"
 
