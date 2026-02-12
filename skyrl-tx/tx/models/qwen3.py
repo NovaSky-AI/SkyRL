@@ -421,7 +421,7 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
     @staticmethod
     def is_lora_param(path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to LoRA weights."""
-        return any(name in path for name in ("lora_A", "lora_B"))
+        return any(name in path for name in ("lora_A", "lora_B", "attn_connector", "mlp_connector"))
 
     def __call__(
         self,
