@@ -9,6 +9,7 @@ from sqlalchemy.engine import url as sqlalchemy_url
 
 from skyrl.tinker import types
 
+
 def enable_sqlite_wal(engine) -> None:
     """Enable WAL mode and busy timeout for SQLite engines.
 
