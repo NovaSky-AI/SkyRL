@@ -6,7 +6,7 @@ from typing import Callable
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from jax.sharding import NamedSharding, PartitionSpec
+from jax.sharding import PartitionSpec
 
 from tx.utils.generator import KVCache
 
@@ -92,12 +92,8 @@ class StackedDecoderLayers(nnx.Module):
             original_sharding = arr.sharding
             if hasattr(original_sharding, "spec"):
                 new_spec = PartitionSpec(None, *original_sharding.spec)
-
-                def init_fn(_key, shape, dtype):
-                    return jax.device_put(jnp.zeros(shape, dtype), NamedSharding(mesh, new_spec))
-
-                stacked = nnx.with_partitioning(init_fn, new_spec, mesh=mesh)(
-                    layer_keys[0], stacked_shape, arr.dtype
+                stacked = nnx.with_partitioning(nnx.initializers.zeros_init(), new_spec, mesh=mesh)(
+                    rngs.params(), stacked_shape, arr.dtype
                 )
             else:
                 stacked = jnp.zeros(stacked_shape, arr.dtype)
