@@ -26,7 +26,7 @@ The same server can be reused across all recipes below. For more detail on confi
 
 ## Recipes
 
-Cookbook recipes default to LoRA training (`lora_rank=32`). When switching to full fine-tuning (`lora_rank=0`), use a ~10x lower learning rate. See [Thinking Machines' SL hyperparams guide](https://tinker-docs.thinkingmachines.ai/supervised-learning/sl-hyperparams) for more detail.
+All of the cookbook recipes default to LoRA training (e.g., with `lora_rank=32`), but full fine-tuning (FFT) is supported on SkyRL by setting `lora_rank=0`. Per [Thinking Machines' learning rate guide](https://tinker-docs.thinkingmachines.ai/supervised-learning/sl-hyperparams), use a ~10x lower learning rate when switching to FFT. 
 
 ### Supervised Learning Loop (`sl_loop`)
 
