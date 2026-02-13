@@ -26,7 +26,7 @@ The same server can be reused across all recipes below. For more detail on confi
 
 ## Recipes
 
-All of the cookbook recipes default to LoRA training (e.g., with `lora_rank=32`), but full fine-tuning (FFT) is supported on SkyRL by setting `lora_rank=0`. Per [Thinking Machines' learning rate guide](https://tinker-docs.thinkingmachines.ai/supervised-learning/sl-hyperparams), use a ~10x lower learning rate when switching to FFT. 
+All of the cookbook recipes default to LoRA training (e.g., with `lora_rank=32`), but full-parameter fine-tuning (FFT) is supported on SkyRL by setting `lora_rank=0`. Per [Thinking Machines' learning rate guide](https://tinker-docs.thinkingmachines.ai/supervised-learning/sl-hyperparams), use a ~10x lower learning rate when switching to FFT. 
 
 ### Supervised Learning Loop (`sl_loop`)
 
@@ -44,7 +44,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
 ![SL NLL over steps](/images/tinker/nll_over_steps.png)
 </div>
 
-For full fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
+For full-parameter fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
 
 ```bash
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
@@ -70,7 +70,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
 ![RL reward over steps](/images/tinker/reward_over_steps.png)
 </div>
 
-For full fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
+For full-parameter fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
 
 ```bash
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
