@@ -85,21 +85,6 @@ class KVCache:
             cache_position=self.cache_position,
         )
 
-    @property
-    def num_layers(self) -> int:
-        """Number of layers in the cache."""
-        return len(self.keys)
-
-    @property
-    def batch_size(self) -> int:
-        """Batch size."""
-        return self.keys[0].shape[0]
-
-    @property
-    def seq_len(self) -> int:
-        """Current sequence length."""
-        return self.keys[0].shape[1]
-
 
 @jax.tree_util.register_dataclass
 @dataclass
