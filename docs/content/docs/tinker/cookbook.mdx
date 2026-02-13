@@ -15,14 +15,14 @@ cd tinker-cookbook
 
 ## Start the Server
 
-Start the Tinker server from the `SkyRL/skyrl` directory:
+Before launching a training script, start the Tinker server from the `SkyRL/skyrl` directory:
 
 ```bash
 uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
     --base-model "Qwen/Qwen3-0.6B" --backend fsdp
 ```
 
-The same server can be reused across all recipes below. For more detail on configuring the training backend, see [Configuration](./configuration).
+The same server can be reused across all recipes below. For more detail on configuration options for the training backend, see [Configuration](./configuration).
 
 ## Recipes
 
