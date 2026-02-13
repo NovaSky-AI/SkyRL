@@ -260,6 +260,8 @@ class TinkerEngine:
                     f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}', type '{checkpoint_type}'"
                 )
 
+        status = CheckpointStatus.FAILED
+        error_message = "checkpoint operation interrupted"
         try:
             # Run potentially slow checkpoint I/O without an open DB transaction.
             yield
