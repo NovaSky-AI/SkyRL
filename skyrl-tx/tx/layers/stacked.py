@@ -87,8 +87,8 @@ class StackedDecoderLayers(nnx.Module):
 
         # Build a treedef with stacked partition metadata so tree_unflatten
         # reconstructs Variables with the correct leading-layer sharding axis.
-        first_state = nnx.spmd.add_axis(first_state, 0, {nnx.PARTITION_NAME: None})
-        _, stacked_treedef = jax.tree_util.tree_flatten(first_state)
+        stacked_first_state = nnx.spmd.add_axis(first_state, 0, {nnx.PARTITION_NAME: None})
+        _, stacked_treedef = jax.tree_util.tree_flatten(stacked_first_state)
 
         # Pre-allocate stacked arrays with correct sharding
         stacked_flat = []
