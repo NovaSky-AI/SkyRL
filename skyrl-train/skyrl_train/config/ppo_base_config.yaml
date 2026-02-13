@@ -275,6 +275,7 @@ generator:
   vllm_v1_disable_multiproc: true
   enable_prefix_caching: true
   enable_chunked_prefill: true
+  enable_return_routed_experts: false
   max_num_batched_tokens: 8192
   # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true

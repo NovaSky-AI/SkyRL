@@ -29,6 +29,7 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
+    rollout_inference_indices: Optional[List[List[List[List[int]]]]]
 
 
 class InferenceEngineInterface(ABC):
@@ -63,6 +64,7 @@ class InferenceEngineInterface(ABC):
         all_responses = []
         all_stop_reasons = []
         all_response_logprobs = []
+        all_rollout_inference_indices = []
 
         for _ in range(num_samples):
             input_batch: InferenceEngineInput = {
@@ -70,6 +72,7 @@ class InferenceEngineInterface(ABC):
                 "prompt_token_ids": [prompt_token_ids],  # Wrap in list for batch of 1
                 "sampling_params": sampling_params,
                 "session_ids": None,
+                "rollout_inference_indices": None,
             }
             output = await self.generate(input_batch)
 
@@ -79,12 +82,15 @@ class InferenceEngineInterface(ABC):
             all_stop_reasons.append(output["stop_reasons"][0])
             if output.get("response_logprobs") is not None:
                 all_response_logprobs.append(output["response_logprobs"][0])
+            if output.get("rollout_inference_indices") is not None:
+                all_rollout_inference_indices.append(output["rollout_inference_indices"][0])
 
         return {
             "response_ids": all_response_ids,
             "responses": all_responses,
             "stop_reasons": all_stop_reasons,
             "response_logprobs": all_response_logprobs if all_response_logprobs else None,
+            "rollout_inference_indices": all_rollout_inference_indices if all_rollout_inference_indices else None,
         }
 
     @abstractmethod

@@ -97,6 +97,10 @@ torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
+# Custom vLLM wheel with enable_return_routed_experts support
+vllm = [
+    { url = "https://wheels.vllm.ai/49e6b86c91cddc4a4b2152c6d8834780bbd50deb/vllm-0.14.0rc1.dev505%2Bg49e6b86c9-cp38-abi3-manylinux_2_31_x86_64.whl", marker = "sys_platform == 'linux'" }
+]
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "5921cc40e8f6b5b0df0a3dc6354e0e679447eb54" }
 torchvision = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
@@ -132,9 +136,9 @@ harbor = [
     "harbor",
 ]
 vllm = [
-    "vllm==0.13.0; sys_platform == 'linux'",
+    "vllm; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.9.0; sys_platform == 'linux'",
+    "torch==2.9.1; sys_platform == 'linux'",
     "flashinfer-python; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.5.3; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
@@ -149,8 +153,8 @@ sglang = [
 mcore = [
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "flash-attn==2.8.1; sys_platform == 'linux'",
-    "vllm==0.13.0; sys_platform == 'linux'",
-    "torch==2.9.0; sys_platform == 'linux'",
+    "vllm; sys_platform == 'linux'",
+    "torch==2.9.1; sys_platform == 'linux'",
     "flashinfer-python==0.5.3; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",

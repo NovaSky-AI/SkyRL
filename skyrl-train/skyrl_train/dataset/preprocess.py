@@ -1,7 +1,7 @@
 from typing import List, Tuple, Optional
 import torch
 from transformers import AutoTokenizer
-from jaxtyping import Float
+from jaxtyping import Float, Integer
 
 
 def _verify_inputs(
@@ -32,6 +32,7 @@ def convert_prompts_responses_to_batch_tensors(
     rewards: List[List[float]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
+    rollout_inference_indices: Optional[List[List[List[List[int]]]]] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -39,6 +40,7 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
+    Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]],
 ]:
     """
     Convert prompts and responses to batch tensors for training.
@@ -89,6 +91,7 @@ def convert_prompts_responses_to_batch_tensors(
     sequences = []
     attention_masks = []
     action_masks = []
+
     for i, prompt in enumerate(prompts):
         # left padding input
         input_len = prompt_token_lens[i]
@@ -129,4 +132,8 @@ def convert_prompts_responses_to_batch_tensors(
         ]
         logprobs_tensor = torch.tensor(padded_logprobs, dtype=torch.float)
 
-    return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor
+    rollout_inference_indices_tensor = None
+    if rollout_inference_indices:
+        rollout_inference_indices_tensor = torch.tensor(rollout_inference_indices, dtype=torch.int32)
+
+    return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor, rollout_inference_indices_tensor

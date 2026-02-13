@@ -127,6 +127,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
         response_logprobs: Optional[List[List[float]]] = []
+        rollout_inference_indices: Optional[List[List[List[List[int]]]]] = []
 
         for output in outputs:
             # TODO(tgriggs): Support n>1 sampling.
@@ -147,16 +148,29 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     _logprobs.append(logprob)
                     del token_logprobs
             response_logprobs.append(_logprobs)
+            
+            if resp.routed_experts is not None:
+                if hasattr(resp.routed_experts, "tolist"):
+                    routed_experts_list = resp.routed_experts.tolist()
+                else:
+                    routed_experts_list = resp.routed_experts
+                rollout_inference_indices.append(routed_experts_list)
 
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
 
+        if len(rollout_inference_indices) == 0:
+            rollout_inference_indices = None
+            
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
+            rollout_inference_indices=rollout_inference_indices,
         )
+
+        
 
     def _get_engine(self):
         """Get the underlying engine for RPC calls."""
@@ -296,6 +310,12 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
         enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+        
+        # Log if enable_return_routed_experts is being passed
+        if "enable_return_routed_experts" in kwargs:
+            logger.info(f"DEBUG: enable_return_routed_experts={kwargs['enable_return_routed_experts']} is being passed to AsyncEngineArgs")
+        else:
+            logger.warning("DEBUG: enable_return_routed_experts is NOT in kwargs")
 
         # TODO (erictang000): potentially enable log requests for a debugging mode
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):

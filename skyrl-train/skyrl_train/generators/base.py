@@ -39,6 +39,7 @@ class GeneratorOutput(TypedDict):
     rollout_metrics: Optional[Dict[str, Any]]
     rollout_logprobs: Optional[List[List[float]]]
     trajectory_ids: Optional[List[TrajectoryID]]
+    rollout_inference_indices: Optional[List[List[List[List[int]]]]] # [batch_size, seq_len, layer_num, topk]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
 

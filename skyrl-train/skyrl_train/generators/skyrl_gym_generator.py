@@ -67,6 +67,7 @@ class TurnOutput:
     output_logprobs: Optional[List[float]]
     new_obs: ConversationType
     obs_ids: List[int]
+    output_rollout_inference_indices: Optional[List[List[List[List[int]]]]]
     reward: Optional[float]
     added_eos: bool = False
 
@@ -308,11 +309,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             output_ids = engine_output["response_ids"][0]
             stop_reason = engine_output["stop_reasons"][0]
             response_logprobs = engine_output.get("response_logprobs", None)
+            rollout_inference_indices = engine_output.get("rollout_inference_indices", None)
             if response_logprobs is not None:
                 response_logprobs = response_logprobs[0]
                 if self.custom_chat_template is not None:
                     raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
-
+            if rollout_inference_indices is not None:
+                rollout_inference_indices = rollout_inference_indices[0]
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
             stop_strs = current_sampling_params.get("stop", None)
@@ -356,6 +359,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 reward=step_reward,
                 obs_ids=obs_ids,
                 added_eos=added_eos,
+                output_rollout_inference_indices=rollout_inference_indices,
             )
 
             if is_step_wise:

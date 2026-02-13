@@ -363,6 +363,7 @@ class GeneratorConfig(BaseConfig):
     vllm_v1_disable_multiproc: bool = True
     enable_prefix_caching: bool = True
     enable_chunked_prefill: bool = True
+    enable_return_routed_experts: bool = False
     max_num_batched_tokens: int = 8192
     enforce_eager: bool = True
     fully_sharded_loras: bool = False

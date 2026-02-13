@@ -44,6 +44,10 @@ def create_ray_wrapped_inference_engines_from_config(
 ):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
+    engine_init_kwargs = dict(cfg.generator.engine_init_kwargs)
+    if cfg.generator.enable_return_routed_experts:
+        engine_init_kwargs["enable_return_routed_experts"] = True
+
     engine_kwargs = {
         "num_inference_engines": cfg.generator.num_inference_engines,
         "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
@@ -64,7 +68,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "max_num_seqs": cfg.generator.max_num_seqs,
         "tokenizer": tokenizer,
         "backend": cfg.generator.backend,
-        "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+        "engine_init_kwargs": engine_init_kwargs,
         "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
     }
 

@@ -369,6 +369,7 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    rollout_inference_indices: Optional[Integer[torch.Tensor, "batch_size seq_len layer_num topk"]] # [batch_size, seq_len, layer_num, topk]
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):
