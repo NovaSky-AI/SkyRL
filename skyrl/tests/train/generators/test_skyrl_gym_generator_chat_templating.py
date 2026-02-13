@@ -331,8 +331,8 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
     Test the behavior of `append_eos_token_after_stop_str_in_multi_turn`, which is applicable
     when `sampling_params.stop` is not `null` and `use_conversation_multi_turn` is `true` in
     the ``agent_loop()`` function.
-    It is used in scripts `examples/search/run_search_conversation_format.sh` and
-    `examples/text_to_sql/run_skyrl_sql_conversation_format.sh`.
+    It is used in scripts `examples/train/search/run_search_conversation_format.sh` and
+    `examples/train/text_to_sql/run_skyrl_sql_conversation_format.sh`.
     `tokenization_codepath` being `tito` means token-in-token-out, which is codepath 1 described in
     `skyrl_gym_generator.rst`. For Qwen3, we also test `generator.chat_template` being defined.
     """

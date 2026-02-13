@@ -1,22 +1,15 @@
 set -x
 
-# The exact same script as `run_search.sh` but with `use_conversation_multi_turn=true`
-# and hence `append_eos_token_after_stop_str_in_multi_turn=true`
-# See https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator on the
-# difference between the two options. You might want to change the data generation prompt
-# to let the model know that we are doing multi-turn conversations (i.e. user will provide
-# the search result for each turn).
-
 # Colocated GRPO training+generation for Qwen2.5-Coder-3B-Instruct on SearchR1 data.
 # follow the instructions in examples/search/README.md for setting up the dataset
 # and for starting the local search server
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/search/run_search_conversation_format.sh
+# bash examples/train/search/run_search.sh
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
 
-RUN_NAME="skyrl-search_4turns_maxgeneratelen_500"
+RUN_NAME="skyrl-search_4turns_maxgeneratelen_500-multiturn-sync-TIS_2.0"
 
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
@@ -56,13 +49,12 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.max_generate_length=500 \
   generator.async_engine=true \
   generator.batched=false \
-  generator.use_conversation_multi_turn=true \
+  generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=5 \
   generator.max_turns=4 \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
   generator.sampling_params.stop='["</search>", "</answer>"]' \
-  generator.append_eos_token_after_stop_str_in_multi_turn=true \
   environment.env_class="search" \
   environment.skyrl_gym.max_env_workers=16 \
   environment.skyrl_gym.search.log_requests=false \
@@ -83,4 +75,3 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.export_path="$HOME/${RUN_NAME}/exports" \
   trainer.eval_interval=50 \
   $@
-  

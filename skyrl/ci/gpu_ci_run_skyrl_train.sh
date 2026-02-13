@@ -3,8 +3,8 @@ set -xeuo pipefail
 
 export CI=true
 # Prepare datasets used in tests.
-uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-uv run examples/search/searchr1_dataset.py --local_dir $HOME/data/searchR1 --split test
+uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+uv run examples/train/search/searchr1_dataset.py --local_dir $HOME/data/searchR1 --split test
 
 # Run all non-megatron and non-sglang tests
 uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "not (sglang or integrations or megatron)"

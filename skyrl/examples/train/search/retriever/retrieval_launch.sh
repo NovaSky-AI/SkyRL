@@ -5,7 +5,7 @@ corpus_file=$save_path/wiki-18.jsonl
 retriever_name=e5
 retriever_path=intfloat/e5-base-v2
 
-python examples/search/retriever/retrieval_server.py \
+python examples/train/search/retriever/retrieval_server.py \
   --index_path $index_file \
   --corpus_path $corpus_file \
   --topk 3 \
