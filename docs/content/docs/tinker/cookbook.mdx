@@ -82,18 +82,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
 
 Note: `rl_loop` uses ephemeral weight sync by default, syncing weights to the inference engine without writing to disk. See [Weight Sync](./architecture#weight-sync) for details on ephemeral vs persistent modes.
 
-### Code RL (`code_rl`)
-
-RL training for code generation tasks. Uses the same `importance_sampling` loss with code execution-based rewards.
-
-```bash
-TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
-    python -m tinker_cookbook.recipes.code_rl.train \
-    base_url=http://localhost:8000 \
-    model_name="Qwen/Qwen3-0.6B" \
-    lora_rank=0 learning_rate=1e-6
-```
-
 ### Math RL (`math_rl`)
 
 RL training specifically for mathematical reasoning.
@@ -101,6 +89,31 @@ RL training specifically for mathematical reasoning.
 ```bash
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     python -m tinker_cookbook.recipes.math_rl.train \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B"
+```
+
+<div style={{width: "75%", margin: "0 auto"}}>
+![Math RL correct over steps](/images/tinker/correct_over_steps.png)
+</div>
+
+For full-parameter fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
+    python -m tinker_cookbook.recipes.math_rl.train \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B" \
+    lora_rank=0 learning_rate=1e-6
+```
+
+### Code RL (`code_rl`)
+
+RL training for code generation tasks. Uses the same `importance_sampling` loss with code execution-based rewards.
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
+    python -m tinker_cookbook.recipes.code_rl.train \
     base_url=http://localhost:8000 \
     model_name="Qwen/Qwen3-0.6B" \
     lora_rank=0 learning_rate=1e-6
