@@ -273,11 +273,22 @@ class TinkerEngine:
         finally:
             # Persist final status in a short write transaction.
             with Session(self.db_engine) as session:
-                checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type))
-                checkpoint_db.status = status
-                checkpoint_db.error_message = error_message
-                checkpoint_db.completed_at = datetime.now(timezone.utc)
-                session.add(checkpoint_db)
+                result = session.exec(
+                    update(CheckpointDB)
+                    .where(CheckpointDB.model_id == model_id)
+                    .where(CheckpointDB.checkpoint_id == checkpoint_id)
+                    .where(CheckpointDB.checkpoint_type == checkpoint_type)
+                    .values(
+                        status=status,
+                        error_message=error_message,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                )
+                if not result.rowcount:
+                    logger.warning(
+                        f"Checkpoint row disappeared before status update: "
+                        f"model_id={model_id}, checkpoint_id={checkpoint_id}, checkpoint_type={checkpoint_type}"
+                    )
                 session.commit()
 
     def find_batchable_model_passes(
