@@ -39,8 +39,14 @@ def test_compute_logits(
     # Load our model from shared weights cache
     weights_dir = hf_weights_dir(model_name)
     _, model = load_model(
-        weights_dir, model_name, config_cls, model_cls, mesh_axes,
-        max_lora_adapters=1, max_lora_rank=1, gradient_checkpointing=False,
+        weights_dir,
+        model_name,
+        config_cls,
+        model_cls,
+        mesh_axes,
+        max_lora_adapters=1,
+        max_lora_rank=1,
+        gradient_checkpointing=False,
     )
 
     # Get our logits via compute_logits

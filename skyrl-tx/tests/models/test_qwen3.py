@@ -35,8 +35,14 @@ def test_qwen3(tp: int, hf_weights_dir, load_model):
 
     weights_dir = hf_weights_dir("Qwen/Qwen3-0.6B")
     _, model = load_model(
-        weights_dir, "Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp"),
-        mesh_shape=(1, tp), max_lora_adapters=32, max_lora_rank=32,
+        weights_dir,
+        "Qwen/Qwen3-0.6B",
+        Qwen3Config,
+        Qwen3ForCausalLM,
+        ("fsdp", "tp"),
+        mesh_shape=(1, tp),
+        max_lora_adapters=32,
+        max_lora_rank=32,
     )
 
     outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
@@ -188,9 +194,7 @@ def test_qwen3_lora(hf_weights_dir, load_model):
         lora_configs.append(lora_config)
 
         hf_model = get_peft_model(
-            AutoModelForCausalLM.from_pretrained(
-                base_model_name, attn_implementation="eager", use_safetensors=True
-            ),
+            AutoModelForCausalLM.from_pretrained(base_model_name, attn_implementation="eager", use_safetensors=True),
             lora_config,
         )
         hf_model.eval()
@@ -198,8 +202,13 @@ def test_qwen3_lora(hf_weights_dir, load_model):
         hf_lora_models.append(hf_model)
 
     config, model = load_model(
-        weights_dir, base_model_name, Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp"),
-        max_lora_adapters=len(lora_adapters), max_lora_rank=max(cfg.r for cfg in lora_configs),
+        weights_dir,
+        base_model_name,
+        Qwen3Config,
+        Qwen3ForCausalLM,
+        ("fsdp", "tp"),
+        max_lora_adapters=len(lora_adapters),
+        max_lora_rank=max(cfg.r for cfg in lora_configs),
     )
 
     # Get outputs from all HF models
