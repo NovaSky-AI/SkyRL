@@ -1,0 +1,61 @@
+---
+title: "Configuration"
+---
+
+<Callout type="warn">
+The backend configuration organization is undergoing a migration to simplify and reorganize these options. The keys and structure described below may change in a future release.
+</Callout>
+
+This page describes how to configure the SkyRL Tinker backend, including GPU allocation, training parameters, and inference settings.
+
+When spinning up the Tinker server, the `--backend-config` flag accepts a JSON dictionary of dot-notation overrides that are applied to the underlying SkyRL-Train configuration. For example:
+
+```bash
+uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
+    --base-model "Qwen/Qwen3-0.6B" --backend fsdp \
+    --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.num_inference_engines": 4}'
+```
+
+Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/configuration/config) can be overridden this way (see the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/skyrl/train/config/ppo_base_config.yaml) for all available keys and defaults). The most commonly used options are listed below.
+
+### GPU and Parallelism
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `trainer.placement.policy_num_gpus_per_node` | `1` | Number of GPUs for training |
+| `trainer.placement.policy_num_nodes` | `1` | Number of nodes for training |
+| `generator.num_inference_engines` | `1` | Number of vLLM inference engines for sampling |
+| `generator.inference_engine_tensor_parallel_size` | `1` | Tensor parallel size per inference engine |
+| `trainer.micro_forward_batch_size_per_gpu` | `1` | Micro-batch size per GPU (for forward pass) |
+| `trainer.micro_train_batch_size_per_gpu` | `1` | Micro-batch size per GPU (for gradient accumulation) |
+| `generator.gpu_memory_utilization` | `0.8` | Fraction of GPU memory for vLLM KV cache |
+
+When running a small model on multiple GPUs, you typically want to set `policy_num_gpus_per_node` and `num_inference_engines` to the same value. For example, on a 4-GPU node:
+
+```bash
+--backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.num_inference_engines": 4}'
+```
+
+For large models that don't fit on a single GPU for inference, increase `inference_engine_tensor_parallel_size` and decrease `num_inference_engines` accordingly. For example, on 4 GPUs with TP=2:
+
+```bash
+--backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.num_inference_engines": 2, "generator.inference_engine_tensor_parallel_size": 2}'
+```
+
+## LoRA
+
+LoRA is configured from the **client side**, not the server. When creating a model via the Tinker SDK, pass a `lora_config` with the desired rank. For example, in tinker-cookbook recipes:
+
+```bash
+# LoRA training (default in most recipes)
+python -m tinker_cookbook.recipes.sl_loop ... lora_rank=32
+
+# Full-parameter fine-tuning
+python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
+```
+
+No server-side configuration is needed to switch between LoRA and full-parameter fine-tuning.
+
+## Full Config Reference
+
+For the complete list of configuration options, see the [SkyRL-Train configuration docs](https://docs.skyrl.ai/docs/configuration/config) and the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/skyrl/train/config/ppo_base_config.yaml).

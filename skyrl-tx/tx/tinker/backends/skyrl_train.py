@@ -246,30 +246,79 @@ class SkyRLTrainBackend(AbstractBackend):
         max_response_len = max(len(weights) for weights in prepared_batch.all_token_weights)
 
         sequences, attention_masks, loss_masks, response_masks = [], [], [], []
+        action_log_probs_list, advantages_list = [], []
 
-        for seq, weights in zip(full_sequences, prepared_batch.all_token_weights):
+        for seq, weights, logprobs, advs in zip(
+            full_sequences,
+            prepared_batch.all_token_weights,
+            prepared_batch.all_sampling_logprobs,
+            prepared_batch.all_advantages,
+        ):
             pad_len = max_seq_len - len(seq)
             sequences.append([self._tokenizer.pad_token_id] * pad_len + list(seq))
             attention_masks.append([0] * pad_len + [1] * len(seq))
             action_pad = max_response_len - len(weights)
             loss_masks.append([0.0] * action_pad + [float(w) for w in weights])
             response_masks.append([0] * action_pad + [1] * len(weights))
+            action_log_probs_list.append([0.0] * action_pad + [float(lp) for lp in logprobs])
+            advantages_list.append([0.0] * action_pad + [float(a) for a in advs])
 
         sequences_tensor = torch.tensor(sequences, dtype=torch.long)
         attention_mask_tensor = torch.tensor(attention_masks, dtype=torch.long)
         loss_mask_tensor = torch.tensor(loss_masks, dtype=torch.float32)
         response_mask_tensor = torch.tensor(response_masks, dtype=torch.long)
 
-        batch = TrainingInputBatch(
-            {
-                "sequences": sequences_tensor,
-                "attention_mask": attention_mask_tensor,
-                "loss_mask": loss_mask_tensor,
-                "response_mask": response_mask_tensor,
-            }
-        )
+        batch_dict = {
+            "sequences": sequences_tensor,
+            "attention_mask": attention_mask_tensor,
+            "loss_mask": loss_mask_tensor,
+            "response_mask": response_mask_tensor,
+        }
+
+        # Include RL fields (action_log_probs, advantages) when data is present
+        has_logprobs = any(len(lp) > 0 for lp in prepared_batch.all_sampling_logprobs)
+        has_advantages = any(len(a) > 0 for a in prepared_batch.all_advantages)
+        if has_logprobs:
+            batch_dict["action_log_probs"] = torch.tensor(action_log_probs_list, dtype=torch.float32)
+        if has_advantages:
+            batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
+
+        batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
         return batch
+
+    def _pad_batch(self, batch: TrainingInputBatch) -> tuple[TrainingInputBatch, int]:
+        """Pad the batch so its size is divisible by dp_size.
+
+        The dispatch layer splits the batch evenly across DP workers, so the
+        batch size must be a multiple of dp_size.  We pad by cloning the first
+        N entries (with loss_mask zeroed) and record the pad count so callers
+        can trim the results.
+
+        Returns:
+            (padded_batch, pad_size)
+        """
+        dp_size = self._dispatch.get_lcm_dp_size()
+        pad_size = (dp_size - batch.batch_size % dp_size) % dp_size
+        if pad_size == 0:
+            return batch, 0
+
+        new_tensors = {}
+        for key, tensor in batch.items():
+            if tensor is not None:
+                if key == "loss_mask":
+                    # Padding entries must not contribute to the loss
+                    additional_dims = tensor.shape[1:]
+                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                else:
+                    # Clone real data so shapes/dtypes are valid for the model
+                    padding_tensor = tensor[torch.arange(pad_size) % tensor.shape[0]].clone()
+                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+
+        padded = TrainingInputBatch(new_tensors)
+        padded.metadata = batch.metadata
+        logger.info(f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (dp_size={dp_size})")
+        return padded, pad_size
 
     def _extract_metrics(self, data: dict) -> dict[str, float]:
         """Extract training metrics from dispatch return dict.
@@ -302,6 +351,8 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         batch = self._to_training_batch(prepared_batch)
+        batch, pad_size = self._pad_batch(batch)
+
         loss_fn = prepared_batch.all_loss_fns[0]
         if len(set(prepared_batch.all_loss_fns)) > 1:
             logger.warning(
@@ -316,6 +367,10 @@ class SkyRLTrainBackend(AbstractBackend):
             loss_fn=loss_fn,
             loss_fn_config=loss_fn_config,
         )
+
+        # Trim padding entries from loss_fn_outputs
+        if pad_size > 0 and "loss_fn_outputs" in data:
+            data["loss_fn_outputs"] = data["loss_fn_outputs"][:-pad_size]
 
         metrics = self._extract_metrics(data)
 
@@ -355,10 +410,14 @@ class SkyRLTrainBackend(AbstractBackend):
             return {}
 
         batch = self._to_training_batch(prepared_batch)
+        batch, pad_size = self._pad_batch(batch)
         data = self._dispatch.forward("policy", batch)
 
         # dispatch.forward() returns TrainingOutputBatch({"output": tensor[batch, max_response_len]})
+        # Trim padding entries from output
         output_logprobs = data["output"]
+        if pad_size > 0:
+            output_logprobs = output_logprobs[:-pad_size]
 
         results = {}
         for request_id, _, start_idx, end_idx in prepared_batch.request_batch_slices:

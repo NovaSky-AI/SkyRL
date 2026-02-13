@@ -96,12 +96,20 @@ def shard_map_ep(module: nnx.Module, func, *args):
         *args: Arguments to pass to func (replicated across shards).
     """
     graphdef, state = nnx.split(module)
-    # Extract only 'ep' dims from PartitionSpecs, replacing others with None
-    state_specs = jax.tree.map(
-        lambda s: PartitionSpec(*(p if p == "ep" else None for p in s)) if isinstance(s, PartitionSpec) else s,
-        nnx.get_partition_spec(state),
-        is_leaf=lambda x: isinstance(x, PartitionSpec),
-    )
+
+    def make_ep_spec(spec, value):
+        """Create a PartitionSpec with only 'ep' dims, truncated to match tensor rank."""
+        if not isinstance(spec, PartitionSpec):
+            return spec
+        arr = value[...] if isinstance(value, nnx.Variable) else value
+        # Stacked-layer extraction (e.g. x[layer_idx]) can drop a leading tensor dim,
+        # while PartitionSpec metadata still includes it. Trim from the left to match.
+        truncated = spec[-arr.ndim :] if arr.ndim else ()
+        # Extract only 'ep' dims from PartitionSpecs, replacing others with None.
+        return PartitionSpec(*(p if p == "ep" else None for p in truncated))
+
+    partition_specs = nnx.get_partition_spec(state)
+    state_specs = jax.tree.map(make_ep_spec, partition_specs, state, is_leaf=lambda x: isinstance(x, PartitionSpec))
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
     @jax.shard_map(mesh=get_abstract_mesh(), in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"})

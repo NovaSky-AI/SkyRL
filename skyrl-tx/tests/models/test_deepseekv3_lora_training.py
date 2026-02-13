@@ -10,43 +10,11 @@ from tx.models.deepseekv3 import DeepseekV3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import init_lora_adapter
 from tx.tinker.types import LoraConfig
-
-
-def _is_routed_expert_path(path) -> bool:
-    """Disambiguate shared_experts and experts"""
-    keys = []
-    for p in path:
-        if hasattr(p, "key"):
-            keys.append(str(p.key))
-        elif hasattr(p, "name"):
-            keys.append(str(p.name))
-
-    for i, key in enumerate(keys):
-        if key == "experts" and i > 0 and keys[i - 1] == "mlp":
-            return True
-    return False
-
-
-def _get_out_of_rank_params(params, adapter_idx: int, rank: int, num_experts: int):
-    """Extract out-of-rank params, using effective rank for routed expert layers."""
-
-    def slice_param(path, p):
-        path_str = str(path)
-
-        if _is_routed_expert_path(path):
-            effective_rank = max(1, rank // num_experts)
-        else:
-            effective_rank = rank
-
-        if "lora_A" in path_str:
-            # lora_A shape: [adapters, ..., max_rank] - slice last dim
-            return p[adapter_idx, ..., effective_rank:].copy()
-        elif "lora_B" in path_str:
-            # lora_B shape: [adapters, ..., max_rank, out] - slice second-to-last dim
-            return p[adapter_idx, ..., effective_rank:, :].copy()
-        return p
-
-    return jax.tree.map_with_path(slice_param, params)
+from tests.models.lora_test_utils import (
+    get_adapter_params,
+    get_moe_out_of_rank_params,
+    verify_params_unchanged,
+)
 
 
 def test_lora_training_moe_rank_normalized():
@@ -85,15 +53,12 @@ def test_lora_training_moe_rank_normalized():
 
         graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-        def get_adapter_params(params, adapter_idx):
-            return jax.tree.map(lambda p: p[adapter_idx].copy(), params)
-
         num_experts = config.n_routed_experts
 
         # Save initial states
         initial_adapter_2_params = get_adapter_params(lora_params, 2)
-        initial_adapter_0_out_of_rank = _get_out_of_rank_params(lora_params, 0, 16, num_experts)
-        initial_adapter_1_out_of_rank = _get_out_of_rank_params(lora_params, 1, 8, num_experts)
+        initial_adapter_0_out_of_rank = get_moe_out_of_rank_params(lora_params, 0, 16, num_experts)
+        initial_adapter_1_out_of_rank = get_moe_out_of_rank_params(lora_params, 1, 8, num_experts)
 
         initial_loss = None
 
@@ -116,12 +81,6 @@ def test_lora_training_moe_rank_normalized():
 
         final_loss = float(loss)
 
-        def verify_params_unchanged(initial_params, final_params, error_msg_prefix):
-            for (path, initial), (_, final) in zip(
-                jax.tree.leaves_with_path(initial_params), jax.tree.leaves_with_path(final_params)
-            ):
-                assert jnp.allclose(initial, final), f"{error_msg_prefix} for {path}"
-
         assert final_loss < initial_loss, f"Loss did not decrease: {initial_loss} -> {final_loss}"
 
         # Verify unused adapter was not modified
@@ -129,11 +88,11 @@ def test_lora_training_moe_rank_normalized():
         verify_params_unchanged(initial_adapter_2_params, final_adapter_2_params, "Adapter 2 was modified")
 
         # Verify out-of-rank params were not modified
-        final_adapter_0_out_of_rank = _get_out_of_rank_params(lora_params, 0, 16, num_experts)
+        final_adapter_0_out_of_rank = get_moe_out_of_rank_params(lora_params, 0, 16, num_experts)
         verify_params_unchanged(
             initial_adapter_0_out_of_rank, final_adapter_0_out_of_rank, "Adapter 0 out-of-rank params modified"
         )
-        final_adapter_1_out_of_rank = _get_out_of_rank_params(lora_params, 1, 8, num_experts)
+        final_adapter_1_out_of_rank = get_moe_out_of_rank_params(lora_params, 1, 8, num_experts)
         verify_params_unchanged(
             initial_adapter_1_out_of_rank, final_adapter_1_out_of_rank, "Adapter 1 out-of-rank params modified"
         )
@@ -172,9 +131,6 @@ def test_lora_training_high_rank():
 
         graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-        def get_adapter_params(params, adapter_idx):
-            return jax.tree.map(lambda p: p[adapter_idx].copy(), params)
-
         num_experts = config.n_routed_experts
 
         # Save initial states for all unused adapters
@@ -183,8 +139,8 @@ def test_lora_training_high_rank():
         initial_adapter_4_params = get_adapter_params(lora_params, 4)
 
         # Save out-of-rank params for adapters 0 and 1
-        initial_adapter_0_out_of_rank = _get_out_of_rank_params(lora_params, 0, 16, num_experts)
-        initial_adapter_1_out_of_rank = _get_out_of_rank_params(lora_params, 1, 8, num_experts)
+        initial_adapter_0_out_of_rank = get_moe_out_of_rank_params(lora_params, 0, 16, num_experts)
+        initial_adapter_1_out_of_rank = get_moe_out_of_rank_params(lora_params, 1, 8, num_experts)
 
         # Training loop
         for step in range(10):
@@ -200,12 +156,6 @@ def test_lora_training_high_rank():
 
             print(f"Step {step}: loss = {float(loss):.4f}")
 
-        def verify_params_unchanged(initial_params, final_params, error_msg_prefix):
-            for (path, initial), (_, final) in zip(
-                jax.tree.leaves_with_path(initial_params), jax.tree.leaves_with_path(final_params)
-            ):
-                assert jnp.allclose(initial, final), f"{error_msg_prefix} for {path}"
-
         # Verify unused adapters (2, 3, 4) were not modified
         final_adapter_2_params = get_adapter_params(lora_params, 2)
         verify_params_unchanged(initial_adapter_2_params, final_adapter_2_params, "Adapter 2 was modified")
@@ -217,11 +167,11 @@ def test_lora_training_high_rank():
         verify_params_unchanged(initial_adapter_4_params, final_adapter_4_params, "Adapter 4 was modified")
 
         # Verify out-of-rank params were not modified
-        final_adapter_0_out_of_rank = _get_out_of_rank_params(lora_params, 0, 16, num_experts)
+        final_adapter_0_out_of_rank = get_moe_out_of_rank_params(lora_params, 0, 16, num_experts)
         verify_params_unchanged(
             initial_adapter_0_out_of_rank, final_adapter_0_out_of_rank, "Adapter 0 out-of-rank params modified"
         )
-        final_adapter_1_out_of_rank = _get_out_of_rank_params(lora_params, 1, 8, num_experts)
+        final_adapter_1_out_of_rank = get_moe_out_of_rank_params(lora_params, 1, 8, num_experts)
         verify_params_unchanged(
             initial_adapter_1_out_of_rank, final_adapter_1_out_of_rank, "Adapter 1 out-of-rank params modified"
         )
