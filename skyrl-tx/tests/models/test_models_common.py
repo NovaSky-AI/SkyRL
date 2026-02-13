@@ -8,6 +8,8 @@ from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.models.types import ModelForCausalLM
 
+from .conftest import load_model
+
 MODEL_PARAMS = [
     ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("fsdp", "tp")),
     ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
@@ -21,8 +23,6 @@ def test_compute_logits(
     config_cls: type[ModelConfig],
     model_cls: type[ModelForCausalLM],
     mesh_axes: tuple[str, str],
-    hf_weights_dir,
-    load_model,
 ) -> None:
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -36,17 +36,9 @@ def test_compute_logits(
     hf_logits = hf_outputs.logits.detach().numpy()
     del hf_model, hf_outputs
 
-    # Load our model from shared weights cache
-    weights_dir = hf_weights_dir(model_name)
     _, model = load_model(
-        weights_dir,
-        model_name,
-        config_cls,
-        model_cls,
-        mesh_axes,
-        max_lora_adapters=1,
-        max_lora_rank=1,
-        gradient_checkpointing=False,
+        model_name, config_cls, model_cls, mesh_axes,
+        max_lora_adapters=1, max_lora_rank=1, gradient_checkpointing=False,
     )
 
     # Get our logits via compute_logits
@@ -64,8 +56,6 @@ def test_chunked_logprobs(
     model_cls: type[ModelForCausalLM],
     mesh_axes: tuple[str, str],
     chunk_size: int,
-    hf_weights_dir,
-    load_model,
 ) -> None:
     """Test that chunked and non-chunked compute_logprobs produce identical results."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -75,18 +65,17 @@ def test_chunked_logprobs(
     attention_mask = jnp.array(batch.attention_mask.numpy())
     target_ids = jnp.roll(input_ids, -1, axis=1)
 
-    weights_dir = hf_weights_dir(model_name)
     common_kwargs = dict(max_lora_adapters=1, max_lora_rank=1, gradient_checkpointing=False)
 
     # Load non-chunked model, compute logprobs, then delete
-    _, model = load_model(weights_dir, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0, **common_kwargs)
+    _, model = load_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0, **common_kwargs)
     outputs = model(input_ids, attention_mask=attention_mask)
     logprobs_nonchunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
     del model, outputs
 
     # Load chunked model, compute logprobs
     _, model = load_model(
-        weights_dir, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size, **common_kwargs
+        model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size, **common_kwargs
     )
     outputs = model(input_ids, attention_mask=attention_mask)
     logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))

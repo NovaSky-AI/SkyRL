@@ -14,9 +14,11 @@ from tx.layers.lora import LoRAMixin
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
 
+from .conftest import load_model
+
 
 @pytest.mark.parametrize("tp", [1, 2])
-def test_qwen3(tp: int, hf_weights_dir, load_model):
+def test_qwen3(tp: int):
     if tp > 1 and os.getenv("CI"):
         pytest.skip("TP > 1 currently runs out of memory in the CI")
 
@@ -33,9 +35,7 @@ def test_qwen3(tp: int, hf_weights_dir, load_model):
         )
     del hf_model
 
-    weights_dir = hf_weights_dir("Qwen/Qwen3-0.6B")
     _, model = load_model(
-        weights_dir,
         "Qwen/Qwen3-0.6B",
         Qwen3Config,
         Qwen3ForCausalLM,
@@ -164,7 +164,7 @@ def test_qwen3_moe_layer_lora(ep: int, tp: int):
             assert np.allclose(output_with_lora[sample_idx : sample_idx + 1], output_merged, rtol=1e-3, atol=1e-3)
 
 
-def test_qwen3_lora(hf_weights_dir, load_model):
+def test_qwen3_lora():
     """Test multi-LoRA implementation by comparing with HuggingFace PEFT model using two different adapters."""
     base_model_name = "Qwen/Qwen3-0.6B"
     lora_adapters = ["pcmoritz/qwen3-0.6b-lora-random", "pcmoritz/qwen3-0.6b-lora-random2"]
@@ -173,8 +173,6 @@ def test_qwen3_lora(hf_weights_dir, load_model):
     # Use two different inputs to test with different adapters
     inputs = ["The capital of France is", "My name is"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
-
-    weights_dir = hf_weights_dir(base_model_name)
 
     # Create HF models with different adapters
     hf_lora_models = []
@@ -202,7 +200,6 @@ def test_qwen3_lora(hf_weights_dir, load_model):
         hf_lora_models.append(hf_model)
 
     config, model = load_model(
-        weights_dir,
         base_model_name,
         Qwen3Config,
         Qwen3ForCausalLM,
