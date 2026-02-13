@@ -1,4 +1,3 @@
-import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional
@@ -9,6 +8,7 @@ from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_a
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.utils.rate_limiter import create_rate_limiter
+from tqdm.asyncio import tqdm
 from omegaconf import DictConfig, OmegaConf
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
@@ -36,6 +36,7 @@ class TerminalBenchAgentOutput:
     prompt_ids: List[int]
     trajectory_id: TrajectoryID
     summarization_count: Optional[int] = None
+    num_turns: Optional[int] = None
 
 
 class TerminalBenchGenerator(GeneratorInterface):
@@ -104,44 +105,13 @@ class TerminalBenchGenerator(GeneratorInterface):
                 )
             )
 
-        all_outputs: List[TerminalBenchAgentOutput] = await asyncio.gather(*tasks)
-
-        # For a group of trajectories (n_samples_per_prompt trajectories for the same prompt), if one
-        # of the trajectories fails, we skip the entire group. We also skip the group for rollout metric aggregation
-        failed_instance_ids = set()
-        num_failed_trajectories = 0  # per-trajectory, rather than per-instance
-        successful_outputs: List[TerminalBenchAgentOutput] = []  # only for metrics purpose
-        for output in all_outputs:
-            if output.stop_reason == "error":
-                failed_instance_ids.add(output.trajectory_id.instance_id)
-                num_failed_trajectories += 1
-
-        for output in all_outputs:
-            if output.trajectory_id.instance_id in failed_instance_ids:
-                output.response_ids = [0]
-                output.stop_reason = "error"
-                output.loss_mask = [0]
-                output.prompt_ids = [0]
-                output.reward = 0
-            else:
-                successful_outputs.append(output)
-
-        # Calculate rollout metrics for successful outputs
-        if len(successful_outputs) > 0:
-            rollout_metrics = get_rollout_metrics(
-                [output.response_ids for output in successful_outputs],
-                [output.reward for output in successful_outputs],
-            )
-            rollout_metrics["generate/trajectories_summarized"] = sum(
-                1 for output in successful_outputs if output.summarization_count > 0
-            )
-            rollout_metrics["generate/trajectories_truncated"] = sum(
-                1 for output in successful_outputs if output.stop_reason == "length"
-            )
-        else:
-            rollout_metrics = {}
-        rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
-        rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
+        all_outputs: List[TerminalBenchAgentOutput] = await tqdm.gather(
+            *tasks,
+            desc="Generating Trajectories",
+            miniters=max(1, len(tasks) // 10),
+            mininterval=5,
+        )
+        all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(all_outputs)
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
@@ -155,6 +125,83 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         return generator_output
 
+    @staticmethod
+    def _mask_failed_instances_and_compute_metrics(
+        all_outputs: List[TerminalBenchAgentOutput],
+    ) -> tuple[List[TerminalBenchAgentOutput], dict]:
+        """Mutates all_outputs in-place: zeros out every output belonging to a failed instance.
+
+        For a group of trajectories (n_samples_per_prompt for the same prompt),
+        if one trajectory fails we skip training the entire group.
+
+        Returns:
+            all_outputs: The same list, with failed-instance outputs zeroed out.
+            rollout_metrics: Dict of rollout metrics for logging.
+        """
+        # Count failures by type before grouping overwrites stop_reason.
+        num_timeout_trajectories = 0
+        num_error_trajectories = 0
+        timeout_instance_ids = set()
+        error_instance_ids = set()
+        all_instance_ids = set()
+        for output in all_outputs:
+            cur_instance_id = output.trajectory_id.instance_id
+            all_instance_ids.add(cur_instance_id)
+            if output.stop_reason == "agent_timeout":
+                num_timeout_trajectories += 1
+                timeout_instance_ids.add(cur_instance_id)
+            elif output.stop_reason == "error":
+                num_error_trajectories += 1
+                error_instance_ids.add(cur_instance_id)
+
+        masked_instance_ids = timeout_instance_ids | error_instance_ids
+
+        # Zero-out all outputs belonging to any timeout or error instance so we skip training on them.
+        successful_outputs: List[TerminalBenchAgentOutput] = []
+        for output in all_outputs:
+            if output.trajectory_id.instance_id in masked_instance_ids:
+                output.response_ids = [0]
+                output.stop_reason = "error"
+                output.loss_mask = [0]
+                output.prompt_ids = [0]
+                output.reward = 0
+            else:
+                successful_outputs.append(output)
+
+        # Rollout metrics for successful outputs.
+        if len(successful_outputs) > 0:
+            rollout_metrics = get_rollout_metrics(
+                [output.response_ids for output in successful_outputs],
+                [output.reward for output in successful_outputs],
+            )
+            rollout_metrics["generate/trajectories_summarized"] = sum(
+                1 for output in successful_outputs if output.summarization_count > 0
+            )
+            rollout_metrics["generate/trajectories_truncated"] = sum(
+                1 for output in successful_outputs if output.stop_reason == "length"
+            )
+            rollout_metrics["generate/trajectories_context_length_exceeded"] = sum(
+                1 for output in successful_outputs if output.stop_reason == "context_length"
+            )
+            rollout_metrics["generate/avg_num_turns"] = sum(output.num_turns for output in successful_outputs) / len(
+                successful_outputs
+            )
+        else:
+            rollout_metrics = {}
+
+        # Failure metrics: timeout vs unknown error trajectories, and masked instances.
+        rollout_metrics["generate/num_timeout_trajectories"] = num_timeout_trajectories
+        rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
+        rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
+
+        logger.info(
+            f"\n# of masked instances: {len(masked_instance_ids)} / {len(all_instance_ids)}\n"
+            f"# of timeout trajectories: {num_timeout_trajectories}\n"
+            f"# of error trajectories: {num_error_trajectories}"
+        )
+
+        return all_outputs, rollout_metrics
+
     async def terminal_bench_agent_loop(
         self,
         prompt: ConversationType,
@@ -163,39 +210,62 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         Run a single terminal_bench agent.
         """
-        # Build TrialConfig from template, only override task.path and session_id per trial
-        config = deepcopy(self._harbor_config_template)
-        config["task"] = {"path": prompt}
-        config["agent"]["kwargs"]["session_id"] = uuid4().hex
-        trial_config = TrialConfig.model_validate(config)
-
-        trial = Trial(trial_config)
-
-        # Run the trial to get `rewards`, `chat_history`, and `summarization_count`
-        successful = False
+        # Run the trial to get `reward`, `chat_history`, `summarization_count`, and `num_turns`
         reward = None
         chat_history = None
         summarization_count = None
+        num_turns = None
+        successful = False
+        is_context_length_error = False
+        is_agent_timeout_error = False
         for i in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             results = None
             try:
+                # Create a fresh Trial each attempt so agent state is clean on retry.
+                config = deepcopy(self._harbor_config_template)
+                config["task"] = {"path": prompt}
+                config["agent"]["kwargs"]["session_id"] = uuid4().hex
+                trial_config = TrialConfig.model_validate(config)
+                trial = Trial(trial_config)
+
                 async with self._rate_limiter:
                     results = await trial.run()
-                if not results.verifier_result:
+
+                # Parse exception type
+                exc_type = results.exception_info.exception_type if results.exception_info else None
+                is_context_length_error = exc_type == "ContextLengthExceededError"
+                is_agent_timeout_error = exc_type == "AgentTimeoutError"
+
+                # --- Determine reward ---
+                if is_agent_timeout_error:
+                    # AgentTimeoutError: not successful, no retry, loss-masked
+                    logger.debug(f"{prefix} hit AgentTimeoutError (no retry). Results: {results}")
+                    break
+                elif is_context_length_error:
+                    # ContextLengthExceededError: always train with reward=0.
+                    logger.debug(
+                        f"{prefix} hit ContextLengthExceededError, will train with reward=0. Results: {results}"
+                    )
+                    reward = 0
+                elif not results.verifier_result:
+                    # Does not have a verifier result, so it's not successful, will retry
                     logger.warning(f"{prefix} failed: Exception info: {results.exception_info}. Results: {results}")
                     continue
+                else:
+                    reward = results.verifier_result.rewards["reward"]
 
-                reward = results.verifier_result.rewards["reward"]
+                # --- Extract chat history and check for success ---
                 chat_history = results.agent_result.metadata["all_messages"]
                 summarization_count = results.agent_result.metadata["summarization_count"]
+                num_turns = results.agent_result.metadata["n_episodes"]
                 if len(chat_history) > 1 and chat_history[0]["role"] == "user":
                     successful = True
-                    logger.info(f"{prefix} successful: Results: {results.agent_result.metadata}")
+                    logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
                     break
                 else:
                     logger.warning(
-                        f"{prefix} failed: Agent did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}"
+                        f"{prefix} failed: Did not return a chat history with a user message. chat_history: {chat_history}\nResults: {results}"
                     )
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
@@ -203,13 +273,15 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         if not successful:
             # We make loss mask 0 so it does not contribute to model updates
-            logger.warning(
-                f"Trajectory {trajectory_id} failed after {MAX_NUM_RETRIES_PER_TRIAL} attempts, will set loss mask to [0]."
-            )
+            stop_reason = "agent_timeout" if is_agent_timeout_error else "error"
+            error_message = f"Trajectory {trajectory_id} failed (stop_reason={stop_reason}), will set loss mask to [0]."
+            if stop_reason == "error":
+                error_message += f" Results: {results}"
+            logger.warning(error_message)
             return TerminalBenchAgentOutput(
                 response_ids=[0],
                 reward=0,
-                stop_reason="error",
+                stop_reason=stop_reason,
                 loss_mask=[0],
                 prompt_ids=[0],
                 trajectory_id=trajectory_id,
@@ -239,13 +311,17 @@ class TerminalBenchGenerator(GeneratorInterface):
             + self.generator_cfg.max_input_length
             - initial_prompt_length
         )
-        stop_reason = "complete"  # Default for trial completion
-        if len(response_ids) > max_response_tokens:
+        if is_context_length_error:
+            stop_reason = "context_length"
+        elif len(response_ids) > max_response_tokens:
             stop_reason = "length"
+        else:
+            stop_reason = "complete"
 
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
+
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
             reward=reward,
@@ -254,4 +330,5 @@ class TerminalBenchGenerator(GeneratorInterface):
             prompt_ids=prompt_ids,
             trajectory_id=trajectory_id,
             summarization_count=summarization_count,
+            num_turns=num_turns,
         )

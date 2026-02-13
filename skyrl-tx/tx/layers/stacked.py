@@ -48,8 +48,8 @@ class StackedDecoderLayers(nnx.Module):
     """Decoder layers with stacked weights for efficient scan-based forward pass.
 
     Parameters are stored in stacked format (num_layers, ...). The forward pass
-    uses jax.lax.scan for all modes (training/prefill/decode) with KV cache as
-    scan carry for efficient buffer donation.
+    uses jax.lax.scan for training/prefill, and uses a Python loop for decode
+    to update per-layer KV cache entries without stacked-cache copy overhead.
 
     This class encapsulates both layer creation and forward pass logic.
     """
@@ -102,17 +102,17 @@ class StackedDecoderLayers(nnx.Module):
         def copy_to_slice(stacked, arr, idx):
             return stacked.at[idx].set(arr)
 
-        # Copy first layer's params to slot 0
-        for i, arr in enumerate(flat_first):
-            stacked_flat[i] = copy_to_slice(stacked_flat[i], flat_first[i], 0)
-
-        # Create remaining layers one at a time and copy params
-        for layer_idx in range(1, num_layers):
-            layer = create_layer_fn(nnx.Rngs(layer_keys[layer_idx]))
-            _, state = nnx.split(layer)
-            flat, _ = jax.tree_util.tree_flatten(state)
+        # Create layers one at a time and copy params into stacked slots
+        for layer_idx in range(num_layers):
+            if layer_idx == 0:
+                flat = flat_first
+            else:
+                layer = create_layer_fn(nnx.Rngs(layer_keys[layer_idx]))
+                _, state = nnx.split(layer)
+                flat, layer_treedef = jax.tree_util.tree_flatten(state)
+                assert layer_treedef == treedef, "Layer state structure mismatch while stacking decoder layers."
             for i, arr in enumerate(flat):
-                stacked_flat[i] = copy_to_slice(stacked_flat[i], flat[i], layer_idx)
+                stacked_flat[i] = copy_to_slice(stacked_flat[i], arr, layer_idx)
 
         # Reconstruct state from stacked arrays
         stacked_state = jax.tree_util.tree_unflatten(treedef, stacked_flat)
@@ -120,18 +120,14 @@ class StackedDecoderLayers(nnx.Module):
         # Sync NNX sharding metadata with actual array sharding.
         # The arrays have correct stacked sharding from device_put, but NNX APIs
         # (nnx.get_partition_spec, nnx.Optimizer) read from 'sharding_names' metadata.
-        def update_sharding_metadata(var):
-            if isinstance(var, nnx.Variable) and hasattr(var.value, "sharding"):
-                array_sharding = var.value.sharding
+        for _, var in nnx.to_flat_state(stacked_state):
+            if not isinstance(var, nnx.Variable):
+                continue
+            array = var[...]
+            if hasattr(array, "sharding"):
+                array_sharding = array.sharding
                 if hasattr(array_sharding, "spec"):
                     var.set_metadata("sharding_names", tuple(array_sharding.spec))
-            return var
-
-        jax.tree.map(
-            update_sharding_metadata,
-            stacked_state,
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
 
         self._stacked = nnx.merge(graphdef, stacked_state)
 
@@ -167,21 +163,20 @@ class StackedDecoderLayers(nnx.Module):
             List of (path, ArrayRef) tuples for unstacked parameters.
         """
         result = []
+        prefix_len = len(base_path)
         for path, param in nnx.to_flat_state(state):
             # Only process paths belonging to this module
-            if not path[: len(base_path)] == base_path:
+            if path[:prefix_len] != base_path:
                 continue
+
+            rel_path = path[prefix_len:]
             # Only process _stacked paths
-            if "_stacked" not in path[len(base_path) :]:
+            if "_stacked" not in rel_path:
                 continue
 
-            # Find _stacked in the relative path
-            rel_path = path[len(base_path) :]
-            stacked_idx = rel_path.index("_stacked")
-
-            # Create per-layer paths: base_path + (layer_idx,) + rest
+            suffix = rel_path[rel_path.index("_stacked") + 1 :]
             for layer_idx in range(self.num_layers):
-                new_path = base_path + (str(layer_idx),) + rel_path[stacked_idx + 1 :]
+                new_path = base_path + (str(layer_idx),) + suffix
                 result.append((new_path, ArrayRef(param, layer_idx)))
 
         return result

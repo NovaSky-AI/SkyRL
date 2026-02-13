@@ -73,6 +73,9 @@ site/
 .DS_Store
 Thumbs.db
 
+# Hydra outputs
+outputs/
+
 # Local artifacts
 tinker.db
 uv.lock

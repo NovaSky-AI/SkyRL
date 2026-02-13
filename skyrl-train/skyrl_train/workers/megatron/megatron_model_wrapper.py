@@ -269,11 +269,10 @@ class MegatronModelWrapper:
                     else:
                         valid_len = action_log_probs.shape[1]
 
-                    start = max(action_log_probs.shape[1] - valid_len, 0)
                     loss_fn_outputs.append(
                         {
-                            "logprobs": action_log_probs[i, start:].detach().cpu().tolist(),
-                            "elementwise_loss": elementwise_loss[i, start:].detach().cpu().tolist(),
+                            "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
+                            "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
                         }
                     )
 
@@ -310,11 +309,32 @@ class MegatronModelWrapper:
 
             loss = policy_loss + kl_loss_term - entropy_loss_term
 
+            # Build per-sequence loss_fn_outputs with logprobs.
+            batch_size = action_log_probs.shape[0]
+            seq_len = action_log_probs.shape[1]
+
+            if action_mask is not None:
+                valid_lens = action_mask.sum(dim=1).int().tolist()
+            elif loss_mask is not None:
+                valid_lens = loss_mask.sum(dim=1).int().tolist()
+            else:
+                valid_lens = [seq_len] * batch_size
+
+            detached_log_probs = action_log_probs.detach().cpu()
+            loss_fn_outputs = []
+            for i, valid_len in enumerate(valid_lens):
+                loss_fn_outputs.append(
+                    {
+                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                    }
+                )
+
             metrics = {
                 "final_loss": loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
                 "policy_kl": kl_loss.detach().item(),
+                "loss_fn_outputs": loss_fn_outputs,
             }
             for k, v in loss_metrics.items():
                 metrics["loss_metrics/" + k] = v
