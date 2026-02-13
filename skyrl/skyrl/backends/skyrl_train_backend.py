@@ -117,20 +117,21 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def build_models(self, PolicyWorker):
         cfg = self._cfg
+        colocate_all = cfg.trainer.placement.colocate_all
         pg = self._colocate_pg
-        assert cfg.trainer.placement.colocate_all, "colocate_all must be true for SkyRL-Train backend"
-        assert pg is not None, "placement group must be created for SkyRL-Train backend"
 
-        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
-        num_rollout_gpus = (
-            cfg.generator.num_inference_engines
-            * cfg.generator.inference_engine_tensor_parallel_size
-            * cfg.generator.inference_engine_pipeline_parallel_size
-            * cfg.generator.inference_engine_data_parallel_size
-        )
-        assert (
-            num_policy_gpus == num_rollout_gpus
-        ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
+        if colocate_all:
+            assert pg is not None, "placement group must be created when colocate_all=True"
+            num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+            num_rollout_gpus = (
+                cfg.generator.num_inference_engines
+                * cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_pipeline_parallel_size
+                * cfg.generator.inference_engine_data_parallel_size
+            )
+            assert (
+                num_policy_gpus == num_rollout_gpus
+            ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
 
         policy_model = PPORayActorGroup(
             cfg,
@@ -138,8 +139,8 @@ class SkyRLTrainBackend(AbstractBackend):
             cfg.trainer.placement.policy_num_gpus_per_node,
             PolicyWorker,
             pg=pg,
-            num_gpus_per_actor=0.2,
-            colocate_all=True,
+            num_gpus_per_actor=0.2 if colocate_all else 1,
+            colocate_all=colocate_all,
             sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
             record_memory=cfg.trainer.policy.record_memory,
         )
@@ -154,7 +155,10 @@ class SkyRLTrainBackend(AbstractBackend):
             )
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
-        policy_model.offload_to_cpu()
+
+        if colocate_all:
+            policy_model.offload_to_cpu()
+
         # Create unified dispatch that manages all actor groups
         self._dispatch = WorkerDispatch(
             cfg=cfg,
@@ -163,7 +167,8 @@ class SkyRLTrainBackend(AbstractBackend):
         )
 
         # Mark all models as offloaded
-        self._dispatch.mark_all_offloaded()
+        if colocate_all:
+            self._dispatch.mark_all_offloaded()
 
         logger.info("init policy model done")
 
@@ -200,8 +205,11 @@ class SkyRLTrainBackend(AbstractBackend):
             logger.info("Initializing Ray with runtime environment")
             initialize_ray(self._cfg)
 
-        # Create placement group
-        self._colocate_pg = self._create_colocate_pg()
+        # Create shared placement group only when colocating training + inference
+        if self._cfg.trainer.placement.colocate_all:
+            self._colocate_pg = self._create_colocate_pg()
+        else:
+            self._colocate_pg = None
 
         # Get worker types based on strategy
         if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
@@ -687,7 +695,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainBackendConfig, colocate_pg: PlacementGroup, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainBackendConfig, colocate_pg: PlacementGroup | None, tokenizer: PreTrainedTokenizerBase
 ):
     engine_kwargs = {
         "num_inference_engines": cfg.generator.num_inference_engines,
