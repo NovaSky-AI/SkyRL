@@ -40,7 +40,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
-<div style={{width: "60%", margin: "0 auto"}}>
+<div style={{width: "75%", margin: "0 auto"}}>
 ![SL NLL over steps](/images/tinker/nll_over_steps.png)
 </div>
 
@@ -66,7 +66,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     model_name="Qwen/Qwen3-0.6B"
 ```
 
-<div style={{width: "60%", margin: "0 auto"}}>
+<div style={{width: "75%", margin: "0 auto"}}>
 ![RL reward over steps](/images/tinker/reward_over_steps.png)
 </div>
 
@@ -80,7 +80,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
     lora_rank=0 learning_rate=4e-6
 ```
 
-Note: `rl_loop` uses ephemeral weight sync by default, syncing weights to the inference engine without writing to disk. For long training runs, periodic checkpoints are handled separately via `save_every`. See [Weight Sync](./architecture#weight-sync) for details on ephemeral vs persistent modes.
+Note: `rl_loop` uses ephemeral weight sync by default, syncing weights to the inference engine without writing to disk. See [Weight Sync](./architecture#weight-sync) for details on ephemeral vs persistent modes.
 
 ### Code RL (`code_rl`)
 
