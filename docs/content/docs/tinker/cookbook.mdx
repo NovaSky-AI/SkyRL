@@ -40,6 +40,10 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
+<div style={{width: "60%", margin: "0 auto"}}>
+![SL NLL over steps](/images/tinker/nll_over_steps.png)
+</div>
+
 For full fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
 
 ```bash
@@ -51,13 +55,22 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     lora_rank=0 learning_rate=1e-5
 ```
 
-<div style={{width: "60%", margin: "0 auto"}}>
-![SL NLL over steps](/images/tinker/nll_over_steps.png)
-</div>
-
 ### RL Training Loop (`rl_loop`)
 
 Trains a model on [GSM8K](https://huggingface.co/datasets/openai/gsm8k) math problems using GRPO-style reward centering with importance sampling.
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
+    python -m tinker_cookbook.recipes.rl_loop \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B"
+```
+
+<div style={{width: "60%", margin: "0 auto"}}>
+![RL reward over steps](/images/tinker/reward_over_steps.png)
+</div>
+
+For full fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
 
 ```bash
 TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
@@ -68,10 +81,6 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
 ```
 
 Note: `rl_loop` uses ephemeral weight sync by default, syncing weights to the inference engine without writing to disk. For long training runs, periodic checkpoints are handled separately via `save_every`. See [Weight Sync](./architecture#weight-sync) for details on ephemeral vs persistent modes.
-
-<div style={{width: "60%", margin: "0 auto"}}>
-![RL reward over steps](/images/tinker/reward_over_steps.png)
-</div>
 
 ### Code RL (`code_rl`)
 
