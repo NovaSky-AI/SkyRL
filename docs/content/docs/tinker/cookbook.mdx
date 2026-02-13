@@ -51,7 +51,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
     lora_rank=0 learning_rate=1e-5
 ```
 
-TODO: example curve(s)
+![SL NLL over steps](/images/tinker/nll_over_steps.png)
 
 ### RL Training Loop (`rl_loop`)
 
@@ -67,7 +67,7 @@ TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
 
 Note: `rl_loop` uses ephemeral weight sync by default, syncing weights to the inference engine without writing to disk. For long training runs, periodic checkpoints are handled separately via `save_every`. See [Weight Sync](./architecture#weight-sync) for details on ephemeral vs persistent modes.
 
-TODO: example curve(s)
+![RL reward over steps](/images/tinker/reward_over_steps.png)
 
 ### Code RL (`code_rl`)
 
