@@ -240,14 +240,12 @@ class TerminalBenchGenerator(GeneratorInterface):
                 # --- Determine reward ---
                 if is_agent_timeout_error:
                     # AgentTimeoutError: not successful, no retry, loss-masked
-                    # logger.debug(f"{prefix} hit AgentTimeoutError (no retry). Results: {results}")
-                    logger.info(f"{prefix} hit AgentTimeoutError (no retry). Results: {results}")
+                    logger.debug(f"{prefix} hit AgentTimeoutError (no retry). Results: {results}")
                     break
                 elif is_context_length_error:
                     # ContextLengthExceededError: always train with reward=0.
-                    # logger.debug(f"{prefix} hit ContextLengthExceededError, setting reward to 0 (will train). Results: {results}")
-                    logger.info(
-                        f"{prefix} hit ContextLengthExceededError, setting reward to 0 (will train). Results: {results}"
+                    logger.debug(
+                        f"{prefix} hit ContextLengthExceededError, will train with reward=0. Results: {results}"
                     )
                     reward = 0
                 elif not results.verifier_result:
@@ -263,12 +261,11 @@ class TerminalBenchGenerator(GeneratorInterface):
                 num_turns = results.agent_result.metadata["n_episodes"]
                 if len(chat_history) > 1 and chat_history[0]["role"] == "user":
                     successful = True
-                    # logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
-                    logger.info(f"{prefix} successful: reward={reward}. Results: {results}")
+                    logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
                     break
                 else:
                     logger.warning(
-                        f"{prefix} failed: Agent did not return a chat history with a user message. chat_history: {chat_history}\n\nResults: {results}"
+                        f"{prefix} failed: Did not return a chat history with a user message. chat_history: {chat_history}\nResults: {results}"
                     )
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
