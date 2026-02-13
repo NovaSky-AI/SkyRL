@@ -12,7 +12,7 @@ from tx.models.configs import ModelConfig
 from tx.models.types import ModelForCausalLM
 from tx.utils.models import load_safetensors
 
-_WEIGHTS_CACHE = os.path.join(tempfile.gettempdir(), "skyrl-test-weights")
+_WEIGHTS_CACHE = os.path.join(tempfile.gettempdir(), "skyrl-tx-test-weights")
 
 
 def _get_or_save_hf_weights(model_name: str) -> str:
