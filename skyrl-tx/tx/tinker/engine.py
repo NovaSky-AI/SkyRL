@@ -269,7 +269,6 @@ class TinkerEngine:
             error_message = None
         except Exception as e:
             logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
-            status = CheckpointStatus.FAILED
             error_message = str(e)
             raise
         finally:
