@@ -1,47 +1,18 @@
-from flax import nnx
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.models.types import ModelForCausalLM
-from tx.utils.models import load_safetensors
 
 MODEL_PARAMS = [
     ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("fsdp", "tp")),
     ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
 ]
 MODEL_IDS = ["llama3", "qwen3"]
-
-
-def load_model(
-    tmp_dir: str,
-    model_name: str,
-    config_cls: type[ModelConfig],
-    model_cls: type[ModelForCausalLM],
-    mesh_axes: tuple[str, str],
-    *,
-    loss_chunk_size: int = 0,
-) -> ModelForCausalLM:
-    """Load model from pre-saved weights directory."""
-    base_config = AutoConfig.from_pretrained(model_name)
-    config = config_cls(
-        base_config,
-        max_lora_adapters=1,
-        max_lora_rank=1,
-        shard_attention_heads=True,
-        loss_chunk_size=loss_chunk_size,
-        gradient_checkpointing=False,
-    )
-    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=(jax.sharding.AxisType.Auto,) * 2)
-    with jax.set_mesh(mesh):
-        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-    load_safetensors(tmp_dir, config, model)
-    return model
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
@@ -51,6 +22,7 @@ def test_compute_logits(
     model_cls: type[ModelForCausalLM],
     mesh_axes: tuple[str, str],
     hf_weights_dir,
+    load_model,
 ) -> None:
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -66,7 +38,10 @@ def test_compute_logits(
 
     # Load our model from shared weights cache
     weights_dir = hf_weights_dir(model_name)
-    model = load_model(weights_dir, model_name, config_cls, model_cls, mesh_axes)
+    _, model = load_model(
+        weights_dir, model_name, config_cls, model_cls, mesh_axes,
+        max_lora_adapters=1, max_lora_rank=1, gradient_checkpointing=False,
+    )
 
     # Get our logits via compute_logits
     outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
@@ -84,6 +59,7 @@ def test_chunked_logprobs(
     mesh_axes: tuple[str, str],
     chunk_size: int,
     hf_weights_dir,
+    load_model,
 ) -> None:
     """Test that chunked and non-chunked compute_logprobs produce identical results."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -94,15 +70,18 @@ def test_chunked_logprobs(
     target_ids = jnp.roll(input_ids, -1, axis=1)
 
     weights_dir = hf_weights_dir(model_name)
+    common_kwargs = dict(max_lora_adapters=1, max_lora_rank=1, gradient_checkpointing=False)
 
     # Load non-chunked model, compute logprobs, then delete
-    model = load_model(weights_dir, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0)
+    _, model = load_model(weights_dir, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0, **common_kwargs)
     outputs = model(input_ids, attention_mask=attention_mask)
     logprobs_nonchunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
     del model, outputs
 
     # Load chunked model, compute logprobs
-    model = load_model(weights_dir, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size)
+    _, model = load_model(
+        weights_dir, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size, **common_kwargs
+    )
     outputs = model(input_ids, attention_mask=attention_mask)
     logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
 

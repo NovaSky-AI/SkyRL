@@ -13,11 +13,10 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBl
 from tx.layers.lora import LoRAMixin
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
-from tx.utils.models import load_safetensors
 
 
 @pytest.mark.parametrize("tp", [1, 2])
-def test_qwen3(tp: int, hf_weights_dir):
+def test_qwen3(tp: int, hf_weights_dir, load_model):
     if tp > 1 and os.getenv("CI"):
         pytest.skip("TP > 1 currently runs out of memory in the CI")
 
@@ -35,12 +34,10 @@ def test_qwen3(tp: int, hf_weights_dir):
     del hf_model
 
     weights_dir = hf_weights_dir("Qwen/Qwen3-0.6B")
-    base_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
-    config = Qwen3Config(base_config, max_lora_adapters=32, max_lora_rank=32, shard_attention_heads=True)
-    mesh = jax.make_mesh((1, tp), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
-    with jax.set_mesh(mesh):
-        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-    load_safetensors(weights_dir, config, model)
+    _, model = load_model(
+        weights_dir, "Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp"),
+        mesh_shape=(1, tp), max_lora_adapters=32, max_lora_rank=32,
+    )
 
     outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy(), output_hidden_states=True)
     assert outputs.hidden_states is not None
@@ -161,7 +158,7 @@ def test_qwen3_moe_layer_lora(ep: int, tp: int):
             assert np.allclose(output_with_lora[sample_idx : sample_idx + 1], output_merged, rtol=1e-3, atol=1e-3)
 
 
-def test_qwen3_lora(hf_weights_dir):
+def test_qwen3_lora(hf_weights_dir, load_model):
     """Test multi-LoRA implementation by comparing with HuggingFace PEFT model using two different adapters."""
     base_model_name = "Qwen/Qwen3-0.6B"
     lora_adapters = ["pcmoritz/qwen3-0.6b-lora-random", "pcmoritz/qwen3-0.6b-lora-random2"]
@@ -200,18 +197,10 @@ def test_qwen3_lora(hf_weights_dir):
         hf_model.load_adapter(adapter_name, adapter_name="default")
         hf_lora_models.append(hf_model)
 
-    base_config = PretrainedConfig.from_pretrained(base_model_name)
-    config = Qwen3Config(
-        base_config,
-        max_lora_adapters=len(lora_adapters),
-        max_lora_rank=max(cfg.r for cfg in lora_configs),
-        shard_attention_heads=True,
+    config, model = load_model(
+        weights_dir, base_model_name, Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp"),
+        max_lora_adapters=len(lora_adapters), max_lora_rank=max(cfg.r for cfg in lora_configs),
     )
-
-    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
-    with jax.set_mesh(mesh):
-        model = Qwen3ForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        load_safetensors(weights_dir, config, model)
 
     # Get outputs from all HF models
     hf_outputs_list = []
