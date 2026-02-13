@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling", "jaxlib"]
+build-backend = "hatchling.build"
 
 [project]
 name = "skyrl-tx"
@@ -87,11 +87,14 @@ dev = [
     "alembic",
 ]
 
-[tool.setuptools]
-include-package-data = true
+[tool.hatch.version]
+path = "tx/__init__.py"
 
-[tool.setuptools.dynamic]
-version = {attr = "tx.__version__"}
+[tool.hatch.build.targets.wheel]
+packages = ["tx"]
+
+[tool.hatch.build.hooks.custom]
+path = "tx/ffi/build.py"
 
 [project.scripts]
 tx = "tx.run.main:app"
