@@ -276,7 +276,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             stop_reason = "agent_timeout" if is_agent_timeout_error else "error"
             error_message = f"Trajectory {trajectory_id} failed (stop_reason={stop_reason}), will set loss mask to [0]."
             if stop_reason == "error":
-                error_message += f"Results: {results}"
+                error_message += f" Results: {results}"
             logger.warning(error_message)
             return TerminalBenchAgentOutput(
                 response_ids=[0],
