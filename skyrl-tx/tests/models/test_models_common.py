@@ -37,8 +37,13 @@ def test_compute_logits(
     del hf_model, hf_outputs
 
     _, model = load_model(
-        model_name, config_cls, model_cls, mesh_axes,
-        max_lora_adapters=1, max_lora_rank=1, gradient_checkpointing=False,
+        model_name,
+        config_cls,
+        model_cls,
+        mesh_axes,
+        max_lora_adapters=1,
+        max_lora_rank=1,
+        gradient_checkpointing=False,
     )
 
     # Get our logits via compute_logits
@@ -74,9 +79,7 @@ def test_chunked_logprobs(
     del model, outputs
 
     # Load chunked model, compute logprobs
-    _, model = load_model(
-        model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size, **common_kwargs
-    )
+    _, model = load_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size, **common_kwargs)
     outputs = model(input_ids, attention_mask=attention_mask)
     logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
 
