@@ -309,7 +309,7 @@ class MegatronModelWrapper:
             kl_loss_term = kl_loss * loss_config.kl_loss_coef
 
             loss = policy_loss + kl_loss_term - entropy_loss_term
-            
+
             # Build per-sequence loss_fn_outputs with logprobs.
             batch_size = action_log_probs.shape[0]
             seq_len = action_log_probs.shape[1]
@@ -329,7 +329,7 @@ class MegatronModelWrapper:
                         "logprobs": detached_log_probs[i, :valid_len].tolist(),
                     }
                 )
-            
+
             metrics = {
                 "final_loss": loss.detach().item(),
                 "policy_loss": policy_loss.detach().item(),
