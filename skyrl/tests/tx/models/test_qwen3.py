@@ -246,16 +246,18 @@ def test_qwen3_lora():
             )
 
             # Load layer LoRA weights
-            for i, layer in enumerate(model.model.layers):
+            for i in range(config.num_hidden_layers):
                 hf_layer = hf_model.base_model.model.model.layers[i]
-                for module, projections in [
+                jax_layer = model.model.layers[i]
+                for module_name, projections in [
                     ("mlp", ["gate_proj", "up_proj", "down_proj"]),
                     ("self_attn", ["q_proj", "k_proj", "v_proj", "o_proj"]),
                 ]:
                     for proj_name in projections:
-                        hf_proj = getattr(getattr(hf_layer, module), proj_name)
+                        hf_proj = getattr(getattr(hf_layer, module_name), proj_name)
+                        jax_proj = getattr(getattr(jax_layer, module_name), proj_name)
                         load_lora_weights(
-                            getattr(getattr(layer, module), proj_name),
+                            jax_proj,
                             adapter_idx=adapter_idx,
                             lora_A_weights=hf_proj.lora_A["default"].weight.detach().numpy().T,
                             lora_B_weights=hf_proj.lora_B["default"].weight.detach().numpy().T,

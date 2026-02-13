@@ -7,9 +7,10 @@ import numpy as np
 import pytest
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from skyrl.tx.models.configs import Llama3Config, Qwen3Config
+from skyrl.tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from skyrl.tx.models.llama3 import Llama3ForCausalLM
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
+from skyrl.tx.models.types import ModelForCausalLM
 from skyrl.tx.utils.models import load_safetensors
 
 MODEL_PARAMS = [
@@ -19,7 +20,15 @@ MODEL_PARAMS = [
 MODEL_IDS = ["llama3", "qwen3"]
 
 
-def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_chunk_size=0):
+def load_model(
+    tmp_dir: str,
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+    *,
+    loss_chunk_size: int = 0,
+) -> ModelForCausalLM:
     """Load model from pre-saved weights directory."""
     base_config = AutoConfig.from_pretrained(model_name)
     config = config_cls(
@@ -38,7 +47,12 @@ def load_model(tmp_dir, model_name, config_cls, model_cls, mesh_axes, *, loss_ch
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
-def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
+def test_compute_logits(
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+) -> None:
     """Test that model.compute_logits matches HuggingFace logits."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
@@ -65,7 +79,13 @@ def test_compute_logits(model_name, config_cls, model_cls, mesh_axes):
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
 @pytest.mark.parametrize("chunk_size", [8, 16, 32])
-def test_chunked_logprobs(model_name, config_cls, model_cls, mesh_axes, chunk_size):
+def test_chunked_logprobs(
+    model_name: str,
+    config_cls: type[ModelConfig],
+    model_cls: type[ModelForCausalLM],
+    mesh_axes: tuple[str, str],
+    chunk_size: int,
+) -> None:
     """Test that chunked and non-chunked compute_logprobs produce identical results."""
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     inputs = ["The capital of France is", "Hello world"]
