@@ -1,6 +1,7 @@
 import os
 import tempfile
 
+from filelock import FileLock
 import pytest
 from transformers import AutoModelForCausalLM
 
@@ -11,20 +12,23 @@ def _get_or_save_hf_weights(model_name: str) -> str:
     """Return path to saved HF weights, downloading and saving only on first call.
 
     Uses a filesystem-based cache so that multiple tests (including across
-    pytest --forked subprocesses) share the same saved weights instead of each
-    calling save_pretrained() separately.
+    pytest --forked or pytest-xdist subprocesses) share the same saved weights
+    instead of each calling save_pretrained() separately. A file lock ensures
+    only one process performs the download at a time.
     """
     safe_name = model_name.replace("/", "--")
     weights_dir = os.path.join(_WEIGHTS_CACHE, safe_name)
     marker = os.path.join(weights_dir, ".done")
-    if not os.path.exists(marker):
-        os.makedirs(weights_dir, exist_ok=True)
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            model_name, attn_implementation="eager", use_safetensors=True
-        )
-        hf_model.save_pretrained(weights_dir, safe_serialization=True)
-        del hf_model
-        open(marker, "w").close()
+    lock = FileLock(weights_dir + ".lock")
+    with lock:
+        if not os.path.exists(marker):
+            os.makedirs(weights_dir, exist_ok=True)
+            hf_model = AutoModelForCausalLM.from_pretrained(
+                model_name, attn_implementation="eager", use_safetensors=True
+            )
+            hf_model.save_pretrained(weights_dir, safe_serialization=True)
+            del hf_model
+            open(marker, "w").close()
     return weights_dir
 
 
