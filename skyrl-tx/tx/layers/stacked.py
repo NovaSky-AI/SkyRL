@@ -79,6 +79,7 @@ class StackedDecoderLayers(nnx.Module):
 
         layer_keys = jax.random.split(rngs.params(), num_layers)
         mesh = jax.sharding.get_mesh()
+
         # Create first layer to get structure and shapes
         first_layer = create_layer_fn(nnx.Rngs(layer_keys[0]))
         graphdef, first_state = nnx.split(first_layer)
