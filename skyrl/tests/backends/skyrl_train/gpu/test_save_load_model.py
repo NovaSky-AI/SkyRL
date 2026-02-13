@@ -93,7 +93,7 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
         # Prepare training input and run one training step
         dp_size = actor_group_1.actor_infos[0].rank.dp_size
         if "megatron" in strategy:
-            from tests.backends.skyrl_train.gpu.test_megatron_worker import get_test_training_batch
+            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import get_test_training_batch
 
             train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
             run_one_training_step(
