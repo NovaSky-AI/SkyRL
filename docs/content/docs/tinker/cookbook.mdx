@@ -6,12 +6,23 @@ The [tinker-cookbook](https://github.com/thinking-machines-lab/tinker-cookbook) 
 
 ## Setup
 
-Follow the [Quickstart](./quickstart) to install SkyRL and start the Tinker server. Then clone the cookbook:
+Follow the [Quickstart](./quickstart) to install SkyRL, then clone the cookbook:
 
 ```bash
 git clone https://github.com/thinking-machines-lab/tinker-cookbook.git
 cd tinker-cookbook
 ```
+
+## Start the Server
+
+Start the Tinker server from the `SkyRL/skyrl` directory:
+
+```bash
+uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
+    --base-model "Qwen/Qwen3-0.6B" --backend fsdp
+```
+
+The same server can be reused across all recipes below — no restart needed between scripts. For multi-GPU setups and other backend options, see [Configuration](./configuration).
 
 ## Recipes
 
