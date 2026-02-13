@@ -12,6 +12,10 @@ The integration is organized in three high-level layers:
 2. **Engine Layer** (`skyrl.tinker.engine`) - Background subprocess that polls the database, batches pending requests, and dispatches them to the backend
 3. **Backend Layer** (`skyrl.backends`) - Translates Tinker operations into training and inference calls, managing Ray workers, FSDP2/Megatron training, and vLLM inference
 
+<div style={{width: "75%", margin: "0 auto"}}>
+![SkyRL + Tinker Architecture](/images/tinker/skyrl_tinker_arch_big.png)
+</div>
+
 ## Model Creation
 
 The Tinker call `create_lora_training_client()` triggers the full initialization of the SkyRL backend, spinning up training and inference workers, loading the base model (optionally with LoRA adaptors), and initializing weight sync state like NCCL transfer channels
