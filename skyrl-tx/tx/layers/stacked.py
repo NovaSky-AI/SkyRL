@@ -79,7 +79,6 @@ class StackedDecoderLayers(nnx.Module):
 
         layer_keys = jax.random.split(rngs.params(), num_layers)
         mesh = jax.sharding.get_mesh()
-
         # Create first layer to get structure and shapes
         first_layer = create_layer_fn(nnx.Rngs(layer_keys[0]))
         graphdef, first_state = nnx.split(first_layer)
@@ -92,7 +91,13 @@ class StackedDecoderLayers(nnx.Module):
             original_sharding = arr.sharding
             if hasattr(original_sharding, "spec"):
                 new_spec = PartitionSpec(None, *original_sharding.spec)
-                stacked = jax.device_put(jnp.zeros(stacked_shape, arr.dtype), NamedSharding(mesh, new_spec))
+
+                def init_fn(_key, shape, dtype):
+                    return jax.device_put(jnp.zeros(shape, dtype), NamedSharding(mesh, new_spec))
+
+                stacked = nnx.with_partitioning(init_fn, new_spec, mesh=mesh)(
+                    layer_keys[0], stacked_shape, arr.dtype
+                )
             else:
                 stacked = jnp.zeros(stacked_shape, arr.dtype)
             stacked_flat.append(stacked)
@@ -116,18 +121,6 @@ class StackedDecoderLayers(nnx.Module):
 
         # Reconstruct state from stacked arrays
         stacked_state = jax.tree_util.tree_unflatten(treedef, stacked_flat)
-
-        # Sync NNX sharding metadata with actual array sharding.
-        # The arrays have correct stacked sharding from device_put, but NNX APIs
-        # (nnx.get_partition_spec, nnx.Optimizer) read from 'sharding_names' metadata.
-        for _, var in nnx.to_flat_state(stacked_state):
-            if not isinstance(var, nnx.Variable):
-                continue
-            array = var[...]
-            if hasattr(array, "sharding"):
-                array_sharding = array.sharding
-                if hasattr(array_sharding, "spec"):
-                    var.set_metadata("sharding_names", tuple(array_sharding.spec))
 
         self._stacked = nnx.merge(graphdef, stacked_state)
 
