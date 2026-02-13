@@ -248,7 +248,10 @@ class TinkerEngine:
 
     @contextmanager
     def _checkpoint_status_context(self, model_id: str, checkpoint_id: str, checkpoint_type: types.CheckpointType):
-        """Run checkpoint work outside DB transactions, then update status."""
+        """Context manager to handle checkpoint DB status updates.
+        Fetches the checkpoint entry, yields it, and updates its status to COMPLETED
+        or FAILED based on whether an exception occurred.
+        """
         with Session(self.db_engine) as session:
             # Fail fast if API didn't create the checkpoint row first.
             if session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type)) is None:
@@ -420,8 +423,8 @@ class TinkerEngine:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.config.session_timeout_sec)
         unloaded_count = 0
 
-        # Query stale sessions and their non-unloaded models in one read pass.
         with Session(self.db_engine) as session:
+            # Find stale sessions (active sessions with heartbeat older than cutoff)
             stale_sessions = session.exec(
                 select(SessionDB).where(
                     SessionDB.status == "active",
