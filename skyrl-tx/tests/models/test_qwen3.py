@@ -14,7 +14,7 @@ from tx.layers.lora import LoRAMixin
 from tx.models.configs import Qwen3Config
 from tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
 
-from .conftest import load_model
+from tests.models.conftest import load_model
 
 
 @pytest.mark.parametrize("tp", [1, 2])

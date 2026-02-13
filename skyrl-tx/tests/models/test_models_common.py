@@ -8,7 +8,7 @@ from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.models.types import ModelForCausalLM
 
-from .conftest import load_model
+from tests.models.conftest import load_model
 
 MODEL_PARAMS = [
     ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("fsdp", "tp")),
