@@ -92,9 +92,11 @@ class StackedDecoderLayers(nnx.Module):
             original_sharding = arr.sharding
             if hasattr(original_sharding, "spec"):
                 new_spec = PartitionSpec(None, *original_sharding.spec)
-                stacked = nnx.with_partitioning(nnx.initializers.zeros_init(), new_spec, mesh=mesh)(
-                    rngs.params(), stacked_shape, arr.dtype
-                )
+                stacked = nnx.Param(
+                    nnx.with_partitioning(nnx.initializers.zeros_init(), new_spec, mesh=mesh)(
+                        rngs.params(), stacked_shape, arr.dtype
+                    )
+                )[...]
             else:
                 stacked = jnp.zeros(stacked_shape, arr.dtype)
             stacked_flat.append(stacked)
