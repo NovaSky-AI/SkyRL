@@ -9,11 +9,12 @@
 #
 # v0.4.0: Initial 32B config with google-maps excluded from dataset
 # v0.4.1: B200:8 to fix OOM during backward pass
+# v0.4.2: disk_size 300→750, max_ckpts_to_keep=1 to fix disk full during checkpoint save
 
 name: fleet-task-grpo-qwen3-32b
 
 resources:
-  disk_size: 300  # Larger model needs more disk
+  disk_size: 750  # 32B needs: model (~64GB) + optimizer (~192GB) + checkpoint (~256GB) + headroom
   ports: 6479
   any_of:
     # B200:8 required for 32B model (OOM on B200:4 during backward pass)
@@ -167,6 +168,7 @@ run: |
     trainer.micro_forward_batch_size_per_gpu=1 \
     trainer.micro_train_batch_size_per_gpu=1 \
     trainer.ckpt_interval=10 \
+    trainer.max_ckpts_to_keep=1 \
     trainer.max_prompt_length=512 \
     generator.max_input_length=$MAX_INPUT_LENGTH \
     generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
