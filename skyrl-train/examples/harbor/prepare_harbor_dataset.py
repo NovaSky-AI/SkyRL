@@ -97,7 +97,8 @@ def _find_task_parquets(snapshot_dir: str) -> list:
             schema = pq.read_schema(f)
             if "path" in schema.names and "task_binary" in schema.names:
                 parquets.append(f)
-        except Exception:
+        except Exception as e:
+            print(f"  Warning: Could not read schema from {f}: {e}")
             continue
     return parquets
 
