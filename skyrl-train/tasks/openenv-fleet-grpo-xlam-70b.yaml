@@ -1,0 +1,193 @@
+# Fleet Task GRPO Training via SkyPilot - xLAM-2-70b-fc-r
+# Usage: sky launch tasks/openenv-fleet-grpo-xlam-70b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#
+# Salesforce xLAM-2-70b-fc-r: Purpose-built for function calling
+# - #1 on Berkeley Function Calling Leaderboard (BFCL)
+# - 56.2% on τ-bench (multi-turn agent benchmark)
+# - Based on Llama 3.1 70B with native 128K context
+#
+# Model: Salesforce/Llama-xLAM-2-70b-fc-r (70B parameters)
+# GPUs: B200:8 (192GB HBM3e per GPU = 1.5TB total)
+#
+# v0.1.0: Initial xLAM-70b config
+
+name: fleet-task-grpo-xlam-70b
+
+resources:
+  disk_size: 750
+  ports: 6479
+  any_of:
+    - accelerators: B200:8
+      cloud: lambda
+      memory: 1500+
+    - accelerators: B200:8
+      cloud: runpod
+      memory: 1500+
+    - accelerators: B200:8
+      cloud: vast
+      memory: 1500+
+    - accelerators: B200:8
+      cloud: primeintellect
+      memory: 1500+
+    - accelerators: B200:8
+      cloud: nebius
+      memory: 1500+
+
+num_nodes: 1
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL.git
+  ref: main
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  ENV_KEY: ""
+  MODALITY: "tool_use"
+  MAX_TURNS: 50
+  # xLAM uses Llama 3.1 with native 128K context - no YaRN needed
+  MAX_INPUT_LENGTH: 48000
+  MAX_GENERATE_LENGTH: 8192
+  NUM_EPOCHS: 20
+  RUN_ID: ""
+  MAX_TASKS: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  DATA_VERSION: "v0.3"
+
+setup: |
+  set -euo pipefail
+  cd skyrl-train
+
+  echo "Validating environment variables..."
+  if [ -z "$FLEET_API_KEY" ]; then
+    echo "ERROR: FLEET_API_KEY is required"
+    exit 1
+  fi
+  if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+    echo "ERROR: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required for S3 dataset download"
+    exit 1
+  fi
+  if [ "$MODALITY" != "tool_use" ] && [ "$MODALITY" != "computer_use" ]; then
+    echo "ERROR: MODALITY must be 'tool_use' or 'computer_use', got: $MODALITY"
+    exit 1
+  fi
+  echo "Environment validation passed"
+
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+  uv sync --extra vllm
+  uv pip install wandb boto3 awscli
+
+  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
+
+  mkdir -p $HOME/data/fleet
+  TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
+  S3_PATH="s3://${S3_DATASET_BUCKET}/${DATA_VERSION}/openenv/all_${MODALITY}.json"
+  echo "Downloading dataset from $S3_PATH..."
+  aws s3 cp "$S3_PATH" "$TASKS_FILE"
+  TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['tasks']))")
+  echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
+
+  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+  uv run python -m integrations.fleet.prepare_dataset \
+    --tasks-json "$TASKS_FILE" \
+    --output-dir "$DATA_DIR" \
+    --modality "$MODALITY"
+
+run: |
+  set -euo pipefail
+  cd skyrl-train
+  source .venv/bin/activate
+
+  TMP_DIR="$HOME/skyrl-tmp"
+  mkdir -p "$TMP_DIR"
+  export TMPDIR="$TMP_DIR"
+
+  export PYTORCH_ALLOC_CONF=expandable_segments:True
+
+  TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
+  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+
+  uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
+
+  export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+  export RAY_object_store_memory=10000000000
+  if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+    ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
+  fi
+
+  for i in $(seq 1 24); do
+    if ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
+
+  TOTAL_GPUS=$SKYPILOT_NUM_GPUS_PER_NODE
+
+  # Run GRPO training with xLAM-2-70b-fc-r
+  # Using 8 GPUs: 4 inference engines (TP=2 each) + FSDP training across all 8
+  # No YaRN needed - Llama 3.1 has native 128K context
+  uv run --isolated --extra "$INFERENCE_BACKEND" \
+    --with "litellm>=1.75.5" \
+    --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" \
+    --with "fleet-python" \
+    --with "boto3" \
+    -m integrations.fleet.entrypoints.main_fleet \
+    data.train_data="['${DATA_DIR}/train.parquet']" \
+    data.val_data="['${DATA_DIR}/validation.parquet']" \
+    environment.env_class=fleet_task \
+    environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
+    trainer.algorithm.advantage_estimator="grpo" \
+    trainer.policy.model.path="Salesforce/Llama-xLAM-2-70b-fc-r" \
+    trainer.placement.colocate_all=true \
+    trainer.strategy=fsdp2 \
+    trainer.placement.policy_num_gpus_per_node=$TOTAL_GPUS \
+    trainer.placement.ref_num_gpus_per_node=$TOTAL_GPUS \
+    generator.num_inference_engines=4 \
+    generator.inference_engine_tensor_parallel_size=2 \
+    trainer.epochs=${NUM_EPOCHS} \
+    trainer.eval_batch_size=16 \
+    trainer.eval_before_train=true \
+    trainer.eval_interval=20 \
+    trainer.update_epochs_per_batch=1 \
+    trainer.train_batch_size=16 \
+    trainer.use_hybrid_env_sampling=true \
+    trainer.min_samples_per_env=1 \
+    trainer.policy_mini_batch_size=16 \
+    trainer.micro_forward_batch_size_per_gpu=1 \
+    trainer.micro_train_batch_size_per_gpu=1 \
+    trainer.ckpt_interval=10 \
+    trainer.max_ckpts_to_keep=1 \
+    trainer.max_prompt_length=512 \
+    generator.max_input_length=$MAX_INPUT_LENGTH \
+    generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+    generator.sampling_params.temperature=0.9 \
+    generator.sampling_params.top_p=0.95 \
+    generator.sampling_params.stop='["</tool_call>"]' \
+    generator.eval_sampling_params.stop='["</tool_call>"]' \
+    trainer.policy.optimizer_config.lr=5.0e-7 \
+    trainer.algorithm.use_kl_loss=true \
+    generator.max_turns=$MAX_TURNS \
+    generator.backend=$INFERENCE_BACKEND \
+    generator.run_engines_locally=true \
+    generator.weight_sync_backend=nccl \
+    generator.async_engine=true \
+    generator.batched=false \
+    generator.use_conversation_multi_turn=true \
+    generator.n_samples_per_prompt=4 \
+    generator.eval_n_samples_per_prompt=3 \
+    generator.gpu_memory_utilization=0.65 \
+    trainer.logger="$LOGGER" \
+    trainer.project_name="fleet-task-grpo" \
+    trainer.run_name="fleet_${MODALITY}_xlam70b_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
+    trainer.resume_mode=latest \
+    trainer.ckpt_path="$HOME/ckpts/fleet_${MODALITY}_xlam70b" \
+    trainer.dump_data_batch=true
