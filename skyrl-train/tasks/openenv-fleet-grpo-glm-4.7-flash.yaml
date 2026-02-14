@@ -14,7 +14,8 @@
 # v0.1.1: Install transformers from source for glm4_moe_lite architecture support
 # v0.1.2: Use vLLM nightly (required for GLM-4.7-Flash MoE support)
 # v0.1.3: Add vLLM + transformers to uv run --with (--isolated doesn't see setup packages)
-#         Use stable vLLM (0.13.0+ supports glm4_moe_lite), only transformers needs source
+# v0.1.4: Use vLLM nightly - stable vLLM requires transformers<5 but
+#         glm4_moe_lite architecture needs transformers 5.x from source
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -103,9 +104,10 @@ setup: |
   uv venv --python 3.12 --seed
   source .venv/bin/activate
 
-  # GLM-4.7-Flash: vLLM 0.13.0+ supports glm4_moe_lite, but transformers needs source
+  # GLM-4.7-Flash: glm4_moe_lite requires transformers 5.x (from source)
+  # vLLM stable requires transformers<5 - use nightly which supports transformers 5.x
   uv sync  # Base deps only, no vllm extra
-  uv pip install "vllm>=0.13.0"
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
   uv pip install git+https://github.com/huggingface/transformers.git
   uv pip install wandb boto3 awscli
 
@@ -157,9 +159,11 @@ run: |
 
   # Run GRPO training with GLM-4.7-Flash
   # MoE model: 30B total, 3B active - efficient training
-  # glm4_moe_lite requires: vLLM 0.13.0+ (stable works) + transformers from source
+  # glm4_moe_lite requires: vLLM nightly + transformers 5.x from source
   uv run --isolated \
-    --with "vllm>=0.13.0" \
+    --index-url https://wheels.vllm.ai/nightly \
+    --extra-index-url https://pypi.org/simple \
+    --with vllm \
     --with "git+https://github.com/huggingface/transformers.git" \
     --with "litellm>=1.75.5" \
     --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" \
