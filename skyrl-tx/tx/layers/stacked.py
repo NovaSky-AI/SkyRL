@@ -331,16 +331,14 @@ class MultiStackedDecoderLayers(nnx.Module):
     @staticmethod
     def _split_kv_cache(kv_cache: KVCache, split_points: list[int]) -> tuple[KVCache, ...]:
         boundaries = [0, *split_points, len(kv_cache.keys)]
-        caches: list[KVCache] = []
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            caches.append(
-                KVCache(
-                    keys=kv_cache.keys[start:end],
-                    values=kv_cache.values[start:end],
-                    cache_position=kv_cache.cache_position,
-                )
+        return tuple(
+            KVCache(
+                keys=kv_cache.keys[start:end],
+                values=kv_cache.values[start:end],
+                cache_position=kv_cache.cache_position,
             )
-        return tuple(caches)
+            for start, end in zip(boundaries[:-1], boundaries[1:])
+        )
 
     @staticmethod
     def _concat_kv_caches(caches: list[KVCache]) -> KVCache:
