@@ -1,5 +1,5 @@
 """
-Main entrypoint for training on terminal bench tasks.
+Main entrypoint for training on Harbor tasks.
 """
 
 import ray
@@ -8,18 +8,18 @@ from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
-from examples.terminal_bench.generator.terminal_bench_generator import TerminalBenchGenerator
-from examples.terminal_bench.dataset import TerminalBenchTaskDataset
+from examples.harbor.harbor_generator import HarborGenerator
+from examples.harbor.dataset import HarborTaskDataset
 
 
-class TerminalBenchExp(BasePPOExp):
+class HarborExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         """
-        Initializes the TerminalBenchGenerator.
+        Initializes the HarborGenerator.
         """
-        return TerminalBenchGenerator(
+        return HarborGenerator(
             generator_cfg=cfg.generator,
-            terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
+            harbor_cfg=cfg.harbor_config,  # Pass harbor config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
         )
@@ -28,9 +28,9 @@ class TerminalBenchExp(BasePPOExp):
         """Initializes the training dataset.
 
         Returns:
-            TerminalBenchTaskDataset: The training dataset.
+            HarborTaskDataset: The training dataset.
         """
-        prompts_dataset = TerminalBenchTaskDataset(
+        prompts_dataset = HarborTaskDataset(
             data_files=self.cfg.data.train_data,
         )
         # make sure the dataset is large enough to train on
@@ -43,10 +43,10 @@ class TerminalBenchExp(BasePPOExp):
         """Initializes the evaluation dataset.
 
         Returns:
-            TerminalBenchTaskDataset: The evaluation dataset.
+            HarborTaskDataset: The evaluation dataset.
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
-            prompts_dataset = TerminalBenchTaskDataset(
+            prompts_dataset = HarborTaskDataset(
                 data_files=self.cfg.data.val_data,
             )
             return prompts_dataset
@@ -56,7 +56,7 @@ class TerminalBenchExp(BasePPOExp):
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
-    exp = TerminalBenchExp(cfg)
+    exp = HarborExp(cfg)
     exp.run()
 
 

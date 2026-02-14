@@ -1,5 +1,5 @@
 """
-Main entrypoint for generating rollouts on terminal bench tasks. For debugging purposes.
+Main entrypoint for generating rollouts on Harbor tasks. For debugging purposes.
 """
 
 import ray
@@ -15,22 +15,22 @@ from skyrl_train.entrypoints.main_base import (
     config_dir,
 )
 from skyrl_train.generators.base import GeneratorInput, TrajectoryID
-from examples.terminal_bench.generator.terminal_bench_generator import TerminalBenchGenerator
-from examples.terminal_bench.dataset import TerminalBenchTaskDataset
+from examples.harbor.harbor_generator import HarborGenerator
+from examples.harbor.dataset import HarborTaskDataset
 
 
 # For debugging purposes, we only generate a few samples.
 NUM_SAMPLES_TO_TEST = 10
 
 
-class TerminalBenchGenerateExp(BasePPOExp):
+class HarborGenerateExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         """
-        Initializes the TerminalBenchGenerator.
+        Initializes the HarborGenerator.
         """
-        return TerminalBenchGenerator(
+        return HarborGenerator(
             generator_cfg=cfg.generator,
-            terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
+            harbor_cfg=cfg.harbor_config,  # Pass harbor config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
         )
@@ -47,9 +47,9 @@ class TerminalBenchGenerateExp(BasePPOExp):
         """Initializes the training dataset.
 
         Returns:
-            TerminalBenchTaskDataset: The training dataset.
+            HarborTaskDataset: The training dataset.
         """
-        prompts_dataset = TerminalBenchTaskDataset(
+        prompts_dataset = HarborTaskDataset(
             data_files=self.cfg.data.train_data,
         )
         assert (
@@ -82,7 +82,7 @@ class TerminalBenchGenerateExp(BasePPOExp):
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
-    exp = TerminalBenchGenerateExp(cfg)
+    exp = HarborGenerateExp(cfg)
     exp.run()
 
 

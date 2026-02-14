@@ -3,9 +3,9 @@ from typing import List
 from pathlib import Path
 
 
-class TerminalBenchTaskDataset:
+class HarborTaskDataset:
     """
-    A dataset that loads terminal bench task data from direct file/directory paths.
+    A dataset that loads Harbor task data from direct file/directory paths.
     Each dataset item is a path to a task directory.
     """
 
@@ -14,17 +14,17 @@ class TerminalBenchTaskDataset:
         data_files: List[str],
     ):
         """
-        Initialize the TerminalBenchTaskDataset.
+        Initialize the HarborTaskDataset.
 
         Args:
-            data_files: List of direct file/directory paths pointing to terminal bench task data
+            data_files: List of direct file/directory paths pointing to Harbor task data
         """
         self.data_files = data_files
 
         # Load all data files
         self.task_paths = self._load_data_files()
 
-        logger.info(f"TerminalBenchTaskDataset initialized with {len(self.task_paths)} task paths")
+        logger.info(f"HarborTaskDataset initialized with {len(self.task_paths)} task paths")
 
     def _load_data_files(self) -> List[Path]:
         """Load all data files from direct paths and return list of task paths."""

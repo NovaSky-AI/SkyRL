@@ -28,7 +28,7 @@ MAX_NUM_RETRIES_PER_TRIAL = 2
 
 
 @dataclass
-class TerminalBenchAgentOutput:
+class HarborAgentOutput:
     response_ids: List[int]
     reward: float
     stop_reason: str
@@ -39,18 +39,18 @@ class TerminalBenchAgentOutput:
     num_turns: Optional[int] = None
 
 
-class TerminalBenchGenerator(GeneratorInterface):
+class HarborGenerator(GeneratorInterface):
     def __init__(
         self,
         generator_cfg: DictConfig,
-        terminal_bench_cfg: DictConfig,
+        harbor_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
     ):
         """
         Args:
             generator_cfg: DictConfig object containing the generator configuration
-            terminal_bench_cfg: DictConfig object containing the terminal bench configuration
+            harbor_cfg: DictConfig object containing the Harbor configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
         """
@@ -61,7 +61,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
         # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
-        self._harbor_config_template = OmegaConf.to_container(terminal_bench_cfg, resolve=True)
+        self._harbor_config_template = OmegaConf.to_container(harbor_cfg, resolve=True)
 
         # Set model_name and api_base once (constant across all trials)
         assert generator_cfg.served_model_name is not None, "served_model_name must be set"
@@ -74,7 +74,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         self._harbor_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
         logger.info(
-            f"TerminalBenchGenerator initialized with Harbor config. "
+            f"HarborGenerator initialized with Harbor config. "
             f"Agent: {self._harbor_config_template.get('agent', {}).get('name')}, "
             f"Trials dir: {self._harbor_config_template.get('trials_dir', 'trials')}"
         )
@@ -85,13 +85,13 @@ class TerminalBenchGenerator(GeneratorInterface):
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()
             logger.info(
-                f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}"
+                f"HarborGenerator initialized with custom chat template read from: {custom_chat_template_path}"
             )
         else:
             self.custom_chat_template_content = None
 
         # Initialize rate limiter
-        rate_limit_config = terminal_bench_cfg.get("rate_limit", None)
+        rate_limit_config = harbor_cfg.get("rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
         self._harbor_config_template.pop("rate_limit", None)
 
@@ -99,13 +99,13 @@ class TerminalBenchGenerator(GeneratorInterface):
         tasks = []
         for i in range(len(input_batch["prompts"])):
             tasks.append(
-                self.terminal_bench_agent_loop(
+                self.harbor_agent_loop(
                     prompt=input_batch["prompts"][i],
                     trajectory_id=input_batch["trajectory_ids"][i],
                 )
             )
 
-        all_outputs: List[TerminalBenchAgentOutput] = await tqdm.gather(
+        all_outputs: List[HarborAgentOutput] = await tqdm.gather(
             *tasks,
             desc="Generating Trajectories",
             miniters=max(1, len(tasks) // 10),
@@ -127,8 +127,8 @@ class TerminalBenchGenerator(GeneratorInterface):
 
     @staticmethod
     def _mask_failed_instances_and_compute_metrics(
-        all_outputs: List[TerminalBenchAgentOutput],
-    ) -> tuple[List[TerminalBenchAgentOutput], dict]:
+        all_outputs: List[HarborAgentOutput],
+    ) -> tuple[List[HarborAgentOutput], dict]:
         """Mutates all_outputs in-place: zeros out every output belonging to a failed instance.
 
         For a group of trajectories (n_samples_per_prompt for the same prompt),
@@ -157,7 +157,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         masked_instance_ids = timeout_instance_ids | error_instance_ids
 
         # Zero-out all outputs belonging to any timeout or error instance so we skip training on them.
-        successful_outputs: List[TerminalBenchAgentOutput] = []
+        successful_outputs: List[HarborAgentOutput] = []
         for output in all_outputs:
             if output.trajectory_id.instance_id in masked_instance_ids:
                 output.response_ids = [0]
@@ -202,13 +202,13 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         return all_outputs, rollout_metrics
 
-    async def terminal_bench_agent_loop(
+    async def harbor_agent_loop(
         self,
         prompt: ConversationType,
         trajectory_id: TrajectoryID,
-    ) -> TerminalBenchAgentOutput:
+    ) -> HarborAgentOutput:
         """
-        Run a single terminal_bench agent.
+        Run a single harbor agent.
         """
         # Run the trial to get `reward`, `chat_history`, `summarization_count`, and `num_turns`
         reward = None
@@ -278,7 +278,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             if stop_reason == "error":
                 error_message += f" Results: {results}"
             logger.warning(error_message)
-            return TerminalBenchAgentOutput(
+            return HarborAgentOutput(
                 response_ids=[0],
                 reward=0,
                 stop_reason=stop_reason,
@@ -322,7 +322,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
 
-        return TerminalBenchAgentOutput(
+        return HarborAgentOutput(
             response_ids=response_ids,
             reward=reward,
             stop_reason=stop_reason,

@@ -9,20 +9,20 @@ TRAIN_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--Ope
 # Got after hf download open-thoughts/OpenThoughts-TB-dev --repo-type=dataset
 EVAL_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-TB-dev/snapshots/c1df0436e2d58c89f67d552c36cab9172280c5ae']"
 
-CHAT_TEMPLATE_PATH="/home/ec2-user/SkyRL/skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2"
+CHAT_TEMPLATE_PATH="/home/ec2-user/SkyRL/skyrl-train/examples/harbor/qwen3_thinking_acc.jinja2"
 TRIALS_DIR="/home/ec2-user/trials_run"
 CKPTS_DIR="/home/ec2-user/otagent/ckpts"
 EXPORTS_DIR="/home/ec2-user/otagent/exports"
 
 # Run SkyRL command
-uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=open-thoughts/OpenThinker-Agent-v1-SFT \
   generator.served_model_name=OpenThinker-Agent-v1-SFT \
-  hydra.searchpath=['file://examples/terminal_bench'] \
-  +terminal_bench_config=default \
-  ++terminal_bench_config.trials_dir=$TRIALS_DIR \
+  hydra.searchpath=['file://examples/harbor'] \
+  +harbor_config=default \
+  ++harbor_config.trials_dir=$TRIALS_DIR \
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.algorithm.advantage_estimator=grpo \

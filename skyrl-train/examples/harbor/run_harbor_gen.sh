@@ -7,19 +7,19 @@ export WANDB_API_KEY=YOUR_KEY_HERE
 # Got after hf download open-thoughts/OpenThoughts-Agent-v1-RL --repo-type=dataset
 # cd into the downloaded folder, say /path/to/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/hash_code
 # python extract_parquet_tasks.py tasks_new.parquet ./extracted_tasks
-TRAIN_DATA="['/home/ray/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/39ab71434e90d8f87d2cd69c13b6d8a0cb2c238f/extracted_tasks']"
+TRAIN_DATA="['/home/ray/.cache/huggingface/hub/datasets--DCAgent--code-contests-sandboxes-with-tests/snapshots/23155a8cc2da4e0cbeea3b99fe78f8fc80c1aed4/extracted_tasks']"
 
 CHAT_TEMPLATE_PATH="/home/ray/default/SkyRLHarbor3/skyrl-train/skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
 TRIALS_DIR="/home/ray/trials_run"
 
 NUM_GPUS=4
 
-uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypoints.main_tbench_generate \
+uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.main_harbor_generate \
   data.train_data=$TRAIN_DATA \
-  hydra.searchpath=['file://examples/terminal_bench'] \
-  +terminal_bench_config=default \
-  ++terminal_bench_config.trials_dir=$TRIALS_DIR \
-  ++terminal_bench_config.trial_name="dummy" \
+  hydra.searchpath=['file://examples/harbor'] \
+  +harbor_config=default \
+  ++harbor_config.trials_dir=$TRIALS_DIR \
+  ++harbor_config.trial_name="dummy" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   generator.served_model_name="Qwen2.5-1.5B-Instruct" \
   generator.num_inference_engines=$NUM_GPUS \

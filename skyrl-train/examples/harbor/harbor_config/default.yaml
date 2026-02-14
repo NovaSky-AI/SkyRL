@@ -1,6 +1,6 @@
-# @package terminal_bench_config
+# @package harbor_config
 #
-# Default Harbor Configuration for SkyRL Terminal Bench
+# Default Harbor Configuration for SkyRL training
 #
 # This config is passed directly to Harbor's TrialConfig. You can use any
 # Harbor-supported options here. SkyRL only injects a few runtime values:
@@ -105,4 +105,4 @@ rate_limit:
   trajectories_per_second: 5
   # Maximum concurrent trial.run() calls allowed (must be >= 1)
   # Set to null or omit to disable concurrency limiting
-  max_concurrency: 512
+  max_concurrency: 10

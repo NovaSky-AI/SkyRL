@@ -17,14 +17,14 @@ CHAT_TEMPLATE_PATH="/home/ray/default/SkyRLHarbor3/skyrl-train/skyrl_train/utils
 NUM_GPUS=4
 
 # Run SkyRL command
-uv run --isolated --extra vllm --extra harbor -m examples.terminal_bench.entrypoints.main_tbench \
+uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
   generator.served_model_name=Qwen3-8B \
-  hydra.searchpath=['file://examples/terminal_bench'] \
-  +terminal_bench_config=default \
-  ++terminal_bench_config.trials_dir=$TRIALS_DIR \
+  hydra.searchpath=['file://examples/harbor'] \
+  +harbor_config=default \
+  ++harbor_config.trials_dir=$TRIALS_DIR \
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.algorithm.advantage_estimator=grpo \
