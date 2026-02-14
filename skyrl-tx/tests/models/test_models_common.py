@@ -1,46 +1,23 @@
 from typing import Any
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
 from tx.models.types import CausalLMOutput, ModelForCausalLM
 
-from tests.models.conftest import load_model
+from tests.models.conftest import create_model, load_model
 
 MODEL_PARAMS = [
     ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("fsdp", "tp")),
     ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
 ]
 MODEL_IDS = ["llama3", "qwen3"]
-
-
-def create_model(
-    model_name: str,
-    config_cls: type[ModelConfig],
-    model_cls: type[ModelForCausalLM],
-    mesh_axes: tuple[str, str],
-    *,
-    mesh_axis_types: tuple[jax.sharding.AxisType, ...] | None = None,
-    seed: int = 0,
-    **config_kwargs: Any,
-) -> tuple[ModelForCausalLM, ModelConfig]:
-    """Create model with random weights for testing."""
-    base_config = AutoConfig.from_pretrained(model_name)
-    config = config_cls(base_config, max_lora_adapters=1, max_lora_rank=1, shard_attention_heads=True, **config_kwargs)
-    # Default to Auto axis types to avoid sharding resolution errors
-    if mesh_axis_types is None:
-        mesh_axis_types = (jax.sharding.AxisType.Auto,) * len(mesh_axes)
-    mesh = jax.make_mesh((1, 1), mesh_axes, axis_types=mesh_axis_types)
-    with jax.set_mesh(mesh):
-        model = model_cls(config, dtype=jnp.float32, rngs=nnx.Rngs(seed))
-    return model, config
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
@@ -57,8 +34,14 @@ class TestGradientCheckpointing:
     ) -> tuple[ModelForCausalLM, ModelConfig, CausalLMOutput]:
         """Create model, run forward pass, and return (model, config, out)."""
         batch_size, seq_len = 2, 8
-        model, config = create_model(
-            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=gradient_checkpointing
+        config, model = create_model(
+            model_name,
+            config_cls,
+            model_cls,
+            mesh_axes,
+            max_lora_adapters=1,
+            max_lora_rank=1,
+            gradient_checkpointing=gradient_checkpointing,
         )
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
@@ -118,7 +101,14 @@ class TestGradientCheckpointing:
         mesh_axes: tuple[str, str],
     ) -> None:
         """KV cache should be populated even with gradient checkpointing enabled."""
-        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
+        config, model = create_model(
+            model_name,
+            config_cls,
+            model_cls,
+            mesh_axes,
+            max_lora_adapters=1,
+            max_lora_rank=1,
+        )
         config.gradient_checkpointing = True
 
         batch_size, seq_len = 2, 8
