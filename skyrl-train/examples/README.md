@@ -27,7 +27,7 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 ## Integrations
 
 - `flash_rl/`: Integration with [FlashRL’s](https://fengyao.notion.site/flash-rl) patched vLLM inference engine for high-throughput RL training.
-- `terminal_bench/`: Custom [Terminal-Bench/Harbor](https://harborframework.com/) Generator for training agents to solve command-line tasks.
+- `harbor/`: Custom [Harbor](https://harborframework.com/) Generator for training agents to solve TerminalBench tasks.
 - `mini_swe_agent/`: Integration with [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent) to train coding agents on SWE-Bench via SkyRL.
 - `../integrations/verifiers/`: Integration with PrimeIntellect's [Verifiers Library](https://github.com/PrimeIntellect-ai/verifiers) + [Environments Hub](https://app.primeintellect.ai/dashboard/environments?_gl=1*1vogwn8*_gcl_au*NjA1ODI2MTMxLjE3NjczOTkwMTM)
 - `../integrations/openenv/`: Integration with HuggingFace/Meta [OpenEnv](https://github.com/meta-pytorch/OpenEnv)

@@ -164,11 +164,11 @@ def get_backend_classes(backend_name: str):
 
         return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
-        from skyrl.backends.skyrl_train import SkyRLTrainBackend, FSDPBackendConfig
+        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, FSDPBackendConfig
 
         return SkyRLTrainBackend, FSDPBackendConfig
     elif backend_name == "megatron":
-        from skyrl.backends.skyrl_train import SkyRLTrainBackend, MegatronBackendConfig
+        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, MegatronBackendConfig
 
         return SkyRLTrainBackend, MegatronBackendConfig
     else:
@@ -254,23 +254,42 @@ class TinkerEngine:
         or FAILED based on whether an exception occurred.
         """
         with Session(self.db_engine) as session:
-            checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type))
-            if checkpoint_db is None:
+            # Fail fast if API didn't create the checkpoint row first.
+            if session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type)) is None:
                 raise ValueError(
                     f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}', type '{checkpoint_type}'"
                 )
 
-            try:
-                yield checkpoint_db
-                checkpoint_db.status = CheckpointStatus.COMPLETED
-            except Exception as e:
-                logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
-                checkpoint_db.status = CheckpointStatus.FAILED
-                checkpoint_db.error_message = str(e)
-                raise
-            finally:
-                checkpoint_db.completed_at = datetime.now(timezone.utc)
-                session.add(checkpoint_db)
+        status = CheckpointStatus.FAILED
+        error_message = "checkpoint operation interrupted"
+        try:
+            # Run potentially slow checkpoint I/O without an open DB transaction.
+            yield
+            status = CheckpointStatus.COMPLETED
+            error_message = None
+        except Exception as e:
+            logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
+            error_message = str(e)
+            raise
+        finally:
+            # Persist final status in a short write transaction.
+            with Session(self.db_engine) as session:
+                result = session.exec(
+                    update(CheckpointDB)
+                    .where(CheckpointDB.model_id == model_id)
+                    .where(CheckpointDB.checkpoint_id == checkpoint_id)
+                    .where(CheckpointDB.checkpoint_type == checkpoint_type)
+                    .values(
+                        status=status,
+                        error_message=error_message,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                )
+                if not result.rowcount:
+                    logger.warning(
+                        f"Checkpoint row disappeared before status update: "
+                        f"model_id={model_id}, checkpoint_id={checkpoint_id}, checkpoint_type={checkpoint_type}"
+                    )
                 session.commit()
 
     def find_batchable_model_passes(
@@ -439,27 +458,39 @@ class TinkerEngine:
                 )
             ).all()
 
-            sessions_with_failed_unloads = set()
-            for model in models_to_process:
-                if self.backend.has_model(model.model_id):
-                    try:
-                        self.backend.delete_model(model.model_id)
-                        model.status = "unloaded"
-                        unloaded_count += 1
-                        logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
-                        sessions_with_failed_unloads.add(model.session_id)
-                else:
-                    # Model not in backend but status not unloaded - fix DB state
-                    model.status = "unloaded"
+        # Unload models outside DB transactions to minimize lock time.
+        sessions_with_failed_unloads: set[str] = set()
+        unloaded_model_ids: set[str] = set()
+        for model in models_to_process:
+            if self.backend.has_model(model.model_id):
+                try:
+                    self.backend.delete_model(model.model_id)
+                    unloaded_model_ids.add(model.model_id)
+                    unloaded_count += 1
+                    logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
+                except Exception as e:
+                    logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
+                    sessions_with_failed_unloads.add(model.session_id)
+            else:
+                # Model already missing in backend; only DB state needs cleanup.
+                unloaded_model_ids.add(model.model_id)
 
-            for sess in stale_sessions:
-                if sess.session_id not in sessions_with_failed_unloads:
-                    sess.status = "expired"
-                    logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
+        sessions_to_expire = [s.session_id for s in stale_sessions if s.session_id not in sessions_with_failed_unloads]
 
+        # Apply DB status updates in one short write transaction.
+        with Session(self.db_engine) as session:
+            if unloaded_model_ids:
+                _ = session.exec(
+                    update(ModelDB).where(ModelDB.model_id.in_(unloaded_model_ids)).values(status="unloaded")
+                )
+            if sessions_to_expire:
+                _ = session.exec(
+                    update(SessionDB).where(SessionDB.session_id.in_(sessions_to_expire)).values(status="expired")
+                )
             session.commit()
+
+        for session_id in sessions_to_expire:
+            logger.info(f"Expired stale session {session_id}")
 
         return unloaded_count
 

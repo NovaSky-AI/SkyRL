@@ -467,8 +467,6 @@ class DeepseekV3Model(nnx.Module):
 
     def __init__(self, config: DeepseekV3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
-        self.num_dense_layers = config.first_k_dense_replace
-        self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
 
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
@@ -483,14 +481,17 @@ class DeepseekV3Model(nnx.Module):
         )
 
         # Create stacked layers: dense layers followed by MoE layers
+        num_dense_layers = config.first_k_dense_replace
+        num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
+
         def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
             return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MLP, dtype=dtype, rngs=rngs)
 
         def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
             return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MoE, dtype=dtype, rngs=rngs)
 
-        dense_layers = StackedDecoderLayers(create_dense_layer, self.num_dense_layers, rngs)
-        moe_layers = StackedDecoderLayers(create_moe_layer, self.num_moe_layers, rngs)
+        dense_layers = StackedDecoderLayers(create_dense_layer, num_dense_layers, rngs)
+        moe_layers = StackedDecoderLayers(create_moe_layer, num_moe_layers, rngs)
         self.layers = MultiStackedDecoderLayers(dense_layers, moe_layers)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)

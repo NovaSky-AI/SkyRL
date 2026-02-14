@@ -2,7 +2,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
-from skyrl.utils.models import filter_lora
+from skyrl.tx.utils.models import filter_lora
 from skyrl.tx.layers.util import Param, prepare_routing, ragged_dot
 from skyrl.tx.models.types import ModelForCausalLM
 from skyrl.tinker.types import LoraConfig

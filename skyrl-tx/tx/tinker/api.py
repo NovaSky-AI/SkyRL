@@ -178,6 +178,7 @@ async def create_checkpoint(
     try:
         await session.flush()
     except IntegrityError:
+        await session.rollback()
         # Determine which constraint failed by checking if the model exists
         statement = select(ModelDB).where(ModelDB.model_id == model_id)
         result = await session.exec(statement)

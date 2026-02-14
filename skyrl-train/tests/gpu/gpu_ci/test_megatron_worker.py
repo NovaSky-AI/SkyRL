@@ -501,6 +501,8 @@ async def test_megatron_train(
         assert "loss_metrics/clip_ratio" in result
         assert "policy_entropy" in result
         for k, v in result.items():
+            if k == "loss_fn_outputs":
+                continue
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
@@ -625,6 +627,8 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
         assert "loss_metrics/clip_ratio" in result
         assert "policy_entropy" in result
         for k, v in result.items():
+            if k == "loss_fn_outputs":
+                continue
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
