@@ -10,6 +10,7 @@
 # GPUs: B200:8 (192GB HBM3e per GPU = 1.5TB total)
 #
 # v0.1.0: Initial xLAM-70b config
+# v0.1.1: Reduce policy_mini_batch_size 16→8 to fix OOM during backward pass
 
 name: fleet-task-grpo-xlam-70b
 
@@ -161,7 +162,7 @@ run: |
     trainer.train_batch_size=16 \
     trainer.use_hybrid_env_sampling=true \
     trainer.min_samples_per_env=1 \
-    trainer.policy_mini_batch_size=16 \
+    trainer.policy_mini_batch_size=8 \
     trainer.micro_forward_batch_size_per_gpu=1 \
     trainer.micro_train_batch_size_per_gpu=1 \
     trainer.ckpt_interval=10 \
