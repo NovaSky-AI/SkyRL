@@ -1,18 +1,29 @@
-# My key
-export DAYTONA_API_KEY=YOUR_KEY_HERE
-export WANDB_API_KEY=YOUR_KEY_HERE
+set -x
 
-# Got after hf download open-thoughts/OpenThoughts-Agent-v1-RL --repo-type=dataset
-# cd into the downloaded folder, say /path/to/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/hash_code
-# python extract_parquet_tasks.py tasks_new.parquet ./extracted_tasks
-TRAIN_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/e4636fa481f6a5a540c74340cf69b2d28150978f/extracted_tasks']"
-# Got after hf download open-thoughts/OpenThoughts-TB-dev --repo-type=dataset
-EVAL_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-TB-dev/snapshots/c1df0436e2d58c89f67d552c36cab9172280c5ae']"
+# wandb api key.
+# export WANDB_API_KEY=YOUR_KEY_HERE
 
-CHAT_TEMPLATE_PATH="/home/ec2-user/SkyRL/skyrl-train/examples/harbor/qwen3_thinking_acc.jinja2"
-TRIALS_DIR="/home/ec2-user/trials_run"
-CKPTS_DIR="/home/ec2-user/otagent/ckpts"
-EXPORTS_DIR="/home/ec2-user/otagent/exports"
+# Pick the sandbox provider and provide the credentials.
+# export DAYTONA_API_KEY=YOUR_KEY_HERE
+# export MODAL_TOKEN_ID=YOUR_KEY_HERE
+# export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
+
+# Prepare datasets (downloads from HuggingFace and extracts tasks automatically)
+# Idempotent - skips if already prepared. Output dir auto-derived from dataset name.
+TRAIN_DATASET="open-thoughts/OpenThoughts-Agent-v1-RL"
+EVAL_DATASET="open-thoughts/OpenThoughts-TB-dev"
+DATA_DIR="$HOME/data/harbor"
+
+python examples/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
+python examples/harbor/prepare_harbor_dataset.py --dataset $EVAL_DATASET
+
+TRAIN_DATA="['$DATA_DIR/${TRAIN_DATASET##*/}']"
+EVAL_DATA="['$DATA_DIR/${EVAL_DATASET##*/}']"
+
+CHAT_TEMPLATE_PATH="$(dirname "$0")/../../skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+TRIALS_DIR="$HOME/trials_run"
+CKPTS_DIR="$HOME/otagent/ckpts"
+EXPORTS_DIR="$HOME/otagent/exports"
 
 # Run SkyRL command
 uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.main_harbor \

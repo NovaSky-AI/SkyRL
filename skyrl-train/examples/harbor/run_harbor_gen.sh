@@ -1,16 +1,24 @@
 set -x
 
-# My key
-export DAYTONA_API_KEY=YOUR_KEY_HERE
-export WANDB_API_KEY=YOUR_KEY_HERE
+# wandb api key.
+# export WANDB_API_KEY=YOUR_KEY_HERE
 
-# Got after hf download open-thoughts/OpenThoughts-Agent-v1-RL --repo-type=dataset
-# cd into the downloaded folder, say /path/to/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/hash_code
-# python extract_parquet_tasks.py tasks_new.parquet ./extracted_tasks
-TRAIN_DATA="['/home/ray/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/39ab71434e90d8f87d2cd69c13b6d8a0cb2c238f/extracted_tasks']"
+# Pick the sandbox provider and provide the credentials.
+# export DAYTONA_API_KEY=YOUR_KEY_HERE
+# export MODAL_TOKEN_ID=YOUR_KEY_HERE
+# export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
-CHAT_TEMPLATE_PATH="/home/ray/default/SkyRLHarbor3/skyrl-train/skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
-TRIALS_DIR="/home/ray/trials_run"
+# Prepare dataset (downloads from HuggingFace and extracts tasks automatically)
+# Output dir auto-derived from dataset name.
+TRAIN_DATASET="open-thoughts/OpenThoughts-Agent-v1-RL"
+DATA_DIR="$HOME/data/harbor"
+
+python examples/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
+
+TRAIN_DATA="['$DATA_DIR/${TRAIN_DATASET##*/}']"
+
+CHAT_TEMPLATE_PATH="$(dirname "$0")/../../skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+TRIALS_DIR="$HOME/trials_run"
 
 NUM_GPUS=4
 

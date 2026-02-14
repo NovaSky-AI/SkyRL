@@ -1,18 +1,29 @@
-# My key
-export DAYTONA_API_KEY=YOUR_KEY_HERE
-export WANDB_API_KEY=YOUR_KEY_HERE
+set -x
 
-# Got after hf download DCAgent/code-contests-sandboxes-with-tests --repo-type=dataset
-# cd into the downloaded folder, and do:
-# python extract_parquet_tasks.py tasks_new.parquet ./extracted_tasks
-TRAIN_DATA="['/home/ray/.cache/huggingface/hub/datasets--DCAgent--code-contests-sandboxes-with-tests/snapshots/23155a8cc2da4e0cbeea3b99fe78f8fc80c1aed4/extracted_tasks']"
-# Got after hf download DCAgent/code-contests-sandboxes-with-tests-dev --repo-type=dataset
-EVAL_DATA="['/home/ray/.cache/huggingface/hub/datasets--DCAgent--code-contests-sandboxes-with-tests-dev/snapshots/23155a8cc2da4e0cbeea3b99fe78f8fc80c1aed4/extracted_tasks']"
+# wandb api key.
+# export WANDB_API_KEY=YOUR_KEY_HERE
 
-TRIALS_DIR="/home/ray/trials_run"
-CKPTS_DIR="/home/ray/otagent/ckpts"
-EXPORTS_DIR="/home/ray/otagent/exports"
-CHAT_TEMPLATE_PATH="/home/ray/default/SkyRLHarbor3/skyrl-train/skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+# Pick the sandbox provider and provide the credentials.
+# export DAYTONA_API_KEY=YOUR_KEY_HERE
+# export MODAL_TOKEN_ID=YOUR_KEY_HERE
+# export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
+
+# Prepare datasets (downloads from HuggingFace and extracts tasks automatically)
+# Idempotent - skips if already prepared. Output dir auto-derived from dataset name.
+TRAIN_DATASET="DCAgent/code-contests-sandboxes-with-tests"
+EVAL_DATASET="DCAgent/code-contests-sandboxes-with-tests-dev"
+DATA_DIR="$HOME/data/harbor"
+
+python examples/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
+python examples/harbor/prepare_harbor_dataset.py --dataset $EVAL_DATASET
+
+TRAIN_DATA="['$DATA_DIR/${TRAIN_DATASET##*/}']"
+EVAL_DATA="['$DATA_DIR/${EVAL_DATASET##*/}']"
+
+TRIALS_DIR="$HOME/trials_run"
+CKPTS_DIR="$HOME/otagent/ckpts"
+EXPORTS_DIR="$HOME/otagent/exports"
+CHAT_TEMPLATE_PATH="$(dirname "$0")/../../skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
 
 NUM_GPUS=4
 
