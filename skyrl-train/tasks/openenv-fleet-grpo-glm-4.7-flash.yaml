@@ -11,6 +11,7 @@
 # GPUs: B200:4 (sufficient for 3B active params)
 #
 # v0.1.0: Initial GLM-4.7-Flash config
+# v0.1.1: Install transformers from source for glm4_moe_lite architecture support
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -100,6 +101,9 @@ setup: |
   source .venv/bin/activate
   uv sync --extra vllm
   uv pip install wandb boto3 awscli
+
+  # GLM-4.7-Flash uses glm4_moe_lite architecture - requires transformers from source
+  uv pip install git+https://github.com/huggingface/transformers.git
 
   uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
 
