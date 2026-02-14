@@ -1,4 +1,4 @@
-set -x
+set -ex
 
 # wandb api key.
 # export WANDB_API_KEY=YOUR_KEY_HERE
