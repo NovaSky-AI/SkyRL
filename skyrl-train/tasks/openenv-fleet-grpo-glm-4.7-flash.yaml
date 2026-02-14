@@ -18,6 +18,7 @@
 #         glm4_moe_lite architecture needs transformers 5.x from source
 # v0.1.5: Install ALL deps in setup, don't use --isolated (fixes flash-attn ABI mismatch)
 #         --isolated builds flash-attn from source with wrong PyTorch version
+# v0.1.6: Install torchvision after vLLM (transformers 5.x needs compatible torchvision)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -113,8 +114,9 @@ setup: |
   # (--isolated would rebuild flash-attn with wrong PyTorch ABI)
   uv sync  # Base deps only, no vllm extra
 
-  # vLLM nightly first (sets PyTorch version), then transformers
+  # vLLM nightly first (sets PyTorch version), then compatible torchvision, then transformers
   uv pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip install torchvision --upgrade  # Must match PyTorch from vLLM
   uv pip install git+https://github.com/huggingface/transformers.git
 
   # All runtime deps (previously in --with flags)
