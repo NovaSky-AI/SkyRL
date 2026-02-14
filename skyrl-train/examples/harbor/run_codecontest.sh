@@ -11,7 +11,7 @@ set -x
 # Prepare datasets (downloads from HuggingFace and extracts tasks automatically)
 # Idempotent - skips if already prepared. Output dir auto-derived from dataset name.
 TRAIN_DATASET="DCAgent/code-contests-sandboxes-with-tests"
-EVAL_DATASET="DCAgent/code-contests-sandboxes-with-tests-dev"
+EVAL_DATASET="open-thoughts/OpenThoughts-TB-dev"
 DATA_DIR="$HOME/data/harbor"
 
 python examples/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
