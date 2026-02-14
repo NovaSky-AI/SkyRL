@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import jax
 
 from skyrl.tx.models.configs import ModelConfig
-from skyrl.utils.generator import KVCache
+from skyrl.tx.utils.generator import KVCache
 
 
 class ModelForCausalLM:

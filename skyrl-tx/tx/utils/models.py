@@ -285,7 +285,8 @@ def save_lora_checkpoint(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
     )
 
-    with pack_and_upload(output_path) as temp_dir:
+    with pack_and_upload(output_path, rank=jax.process_index()) as temp_dir:
+
         save_safetensors(
             model.config,
             model,

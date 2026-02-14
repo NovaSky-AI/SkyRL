@@ -19,15 +19,16 @@ from skyrl.utils.log import logger
 
 import ray
 from ray.util.placement_group import placement_group, PlacementGroup
-from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl_train.utils.utils import initialize_ray
-from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.config.utils import get_default_config
-from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl.train.config.utils import get_default_config
+from skyrl.backends.skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+    create_ray_wrapped_inference_engines,
+)
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 
 class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
@@ -75,6 +76,11 @@ def _build_config(
     assert config.strategy in ("fsdp2", "megatron"), "Only fsdp and megatron are supported for SkyRL-Train backend"
     cfg.trainer.strategy = config.strategy
 
+    # Apply LoRA configuration
+    if lora_config is not None and lora_config.rank > 0:
+        cfg.trainer.policy.model.lora.rank = lora_config.rank
+        cfg.trainer.policy.model.lora.alpha = int(lora_config.alpha)
+
     # Apply user overrides from backend_config
     for key, value in config.model_extra.items():
         OmegaConf.update(cfg, key, value)
@@ -103,27 +109,29 @@ class SkyRLTrainBackend(AbstractBackend):
         self._cfg = None
         self._dispatch: WorkerDispatch | None = None
         self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
-        self._inference_engine_client = None  # InferenceEngineClient for sampling
+        self._inference_engine_client = None
+        self._inference_engines_initialized = False
 
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
 
     def build_models(self, PolicyWorker):
         cfg = self._cfg
+        colocate_all = cfg.trainer.placement.colocate_all
         pg = self._colocate_pg
-        assert cfg.trainer.placement.colocate_all, "colocate_all must be true for SkyRL-Train backend"
-        assert pg is not None, "placement group must be created for SkyRL-Train backend"
 
-        num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
-        num_rollout_gpus = (
-            cfg.generator.num_inference_engines
-            * cfg.generator.inference_engine_tensor_parallel_size
-            * cfg.generator.inference_engine_pipeline_parallel_size
-            * cfg.generator.inference_engine_data_parallel_size
-        )
-        assert (
-            num_policy_gpus == num_rollout_gpus
-        ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
+        if colocate_all:
+            assert pg is not None, "placement group must be created when colocate_all=True"
+            num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+            num_rollout_gpus = (
+                cfg.generator.num_inference_engines
+                * cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_pipeline_parallel_size
+                * cfg.generator.inference_engine_data_parallel_size
+            )
+            assert (
+                num_policy_gpus == num_rollout_gpus
+            ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
 
         policy_model = PPORayActorGroup(
             cfg,
@@ -131,8 +139,8 @@ class SkyRLTrainBackend(AbstractBackend):
             cfg.trainer.placement.policy_num_gpus_per_node,
             PolicyWorker,
             pg=pg,
-            num_gpus_per_actor=0.2,
-            colocate_all=True,
+            num_gpus_per_actor=0.2 if colocate_all else 1,
+            colocate_all=colocate_all,
             sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
             record_memory=cfg.trainer.policy.record_memory,
         )
@@ -147,7 +155,10 @@ class SkyRLTrainBackend(AbstractBackend):
             )
         )
         ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
-        policy_model.offload_to_cpu()
+
+        if colocate_all:
+            policy_model.offload_to_cpu()
+
         # Create unified dispatch that manages all actor groups
         self._dispatch = WorkerDispatch(
             cfg=cfg,
@@ -156,7 +167,8 @@ class SkyRLTrainBackend(AbstractBackend):
         )
 
         # Mark all models as offloaded
-        self._dispatch.mark_all_offloaded()
+        if colocate_all:
+            self._dispatch.mark_all_offloaded()
 
         logger.info("init policy model done")
 
@@ -166,6 +178,21 @@ class SkyRLTrainBackend(AbstractBackend):
         """
         self._dispatch.init_weight_sync_state(self._inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
+
+    def _ensure_inference_engines(self):
+        """Lazily create inference engines and init weight sync on first sampling-related call."""
+        if self._inference_engines_initialized:
+            return
+
+        logger.info(f"Creating {self._cfg.generator.num_inference_engines} inference engines")
+        self._inference_engine_client = InferenceEngineClient(
+            create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
+            self._tokenizer,
+            self._cfg,
+        )
+        self._dispatch.set_inference_engine_client(self._inference_engine_client)
+        self.init_weight_sync_state()
+        self._inference_engines_initialized = True
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
         if self._model_id is not None:
@@ -178,30 +205,22 @@ class SkyRLTrainBackend(AbstractBackend):
             logger.info("Initializing Ray with runtime environment")
             initialize_ray(self._cfg)
 
-        # Create placement group
-        self._colocate_pg = self._create_colocate_pg()
-
-        # Create inference engine client
-        logger.info(f"Creating {self._cfg.generator.num_inference_engines} inference engines")
-        self._inference_engine_client = InferenceEngineClient(
-            create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
-            self._tokenizer,
-            self._cfg,
-        )
+        # Create shared placement group only when colocating training + inference
+        if self._cfg.trainer.placement.colocate_all:
+            self._colocate_pg = self._create_colocate_pg()
+        else:
+            self._colocate_pg = None
 
         # Get worker types based on strategy
         if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
+            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
         elif self._cfg.trainer.strategy == "megatron":
-            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker
+            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import PolicyWorker
         else:
             raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
         logger.info("Building models.")
         self.build_models(PolicyWorker)
-
-        logger.info("Initializing weight sync state.")
-        self.init_weight_sync_state()
 
         self._model_id = model_id
         self._model_metadata = types.ModelMetadata(adapter_index=0, lora_config=lora_config)
@@ -287,19 +306,24 @@ class SkyRLTrainBackend(AbstractBackend):
         batch.metadata = {"response_length": max_response_len}
         return batch
 
-    def _pad_batch(self, batch: TrainingInputBatch) -> tuple[TrainingInputBatch, int]:
-        """Pad the batch so its size is divisible by dp_size.
+    def _pad_batch(
+        self, batch: TrainingInputBatch, micro_batch_size: int | None = None
+    ) -> tuple[TrainingInputBatch, int]:
+        """Pad the batch so its size is divisible by the required alignment.
 
         The dispatch layer splits the batch evenly across DP workers, so the
-        batch size must be a multiple of dp_size.  We pad by cloning the first
-        N entries (with loss_mask zeroed) and record the pad count so callers
-        can trim the results.
+        batch size must be a multiple of dp_size.  When *micro_batch_size* is
+        given (needed for the Megatron backend whose ``forward_backward_func``
+        doesn't support ragged micro-batches), we align to
+        ``dp_size * micro_batch_size`` so each per-worker shard is also evenly
+        divisible by *micro_batch_size*.
 
         Returns:
             (padded_batch, pad_size)
         """
         dp_size = self._dispatch.get_lcm_dp_size()
-        pad_size = (dp_size - batch.batch_size % dp_size) % dp_size
+        alignment = dp_size * micro_batch_size if micro_batch_size else dp_size
+        pad_size = (alignment - batch.batch_size % alignment) % alignment
         if pad_size == 0:
             return batch, 0
 
@@ -317,7 +341,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         padded = TrainingInputBatch(new_tensors)
         padded.metadata = batch.metadata
-        logger.info(f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (dp_size={dp_size})")
+        logger.info(f"Padded batch from {batch.batch_size} to {batch.batch_size + pad_size} (alignment={alignment})")
         return padded, pad_size
 
     def _extract_metrics(self, data: dict) -> dict[str, float]:
@@ -343,6 +367,11 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return metrics
 
+    def _sleep_inference_engines(self):
+        """Sleep inference engines to free GPU memory for training."""
+        if self._inference_engines_initialized and self._cfg.trainer.placement.colocate_all:
+            asyncio.run(self._inference_engine_client.sleep())
+
     def forward_backward(
         self,
         prepared_batch: types.PreparedModelPassBatch,
@@ -350,8 +379,12 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_input_ids:
             return {}
 
+        self._sleep_inference_engines()
         batch = self._to_training_batch(prepared_batch)
-        batch, pad_size = self._pad_batch(batch)
+        micro_bs = (
+            self._cfg.trainer.micro_train_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
+        )
+        batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
 
         loss_fn = prepared_batch.all_loss_fns[0]
         if len(set(prepared_batch.all_loss_fns)) > 1:
@@ -409,8 +442,12 @@ class SkyRLTrainBackend(AbstractBackend):
         if not prepared_batch.all_input_ids:
             return {}
 
+        self._sleep_inference_engines()
         batch = self._to_training_batch(prepared_batch)
-        batch, pad_size = self._pad_batch(batch)
+        micro_bs = (
+            self._cfg.trainer.micro_forward_batch_size_per_gpu if self._cfg.trainer.strategy == "megatron" else None
+        )
+        batch, pad_size = self._pad_batch(batch, micro_batch_size=micro_bs)
         data = self._dispatch.forward("policy", batch)
 
         # dispatch.forward() returns TrainingOutputBatch({"output": tensor[batch, max_response_len]})
@@ -471,13 +508,8 @@ class SkyRLTrainBackend(AbstractBackend):
         save_weights_for_sampler() explicitly before calling sample() if weights
         have been updated.
         """
-        # 1. Validate inference is enabled
-        if self._inference_engine_client is None:
-            error = types.ErrorResponse(
-                error="Sampling not enabled. Inference engines were not initialized (num_inference_engines=0 in SkyRL config).",
-                status="error",
-            )
-            return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
+        # 1. Ensure inference engines are initialized
+        self._ensure_inference_engines()
 
         # 2. Validate single model
         unique_models = set(prepared_batch.all_model_ids)
@@ -651,13 +683,14 @@ class SkyRLTrainBackend(AbstractBackend):
         """
         self._validate_model_state(model_id)
 
-        # Always sync weights to inference engines (in-memory NCCL broadcast)
-        if self._inference_engine_client is not None:
-            asyncio.run(self._dispatch.save_weights_for_sampler())
-            logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
+        # Lazily create inference engines on first sampling-related call
+        self._ensure_inference_engines()
+
+        asyncio.run(self._dispatch.save_weights_for_sampler())
+        logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
         if persist:
-            # Full HuggingFace model export to disk
+            # TODO(tyler): For LoRA, only save the adapters instead of the full merged model
             with tempfile.TemporaryDirectory() as temp_dir:
                 hf_dir = os.path.join(temp_dir, "model")
                 self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
@@ -673,7 +706,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainBackendConfig, colocate_pg: PlacementGroup, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainBackendConfig, colocate_pg: PlacementGroup | None, tokenizer: PreTrainedTokenizerBase
 ):
     engine_kwargs = {
         "num_inference_engines": cfg.generator.num_inference_engines,
