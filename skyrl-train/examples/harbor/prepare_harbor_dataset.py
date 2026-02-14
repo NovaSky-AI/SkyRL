@@ -38,9 +38,7 @@ from pathlib import Path, PurePosixPath
 
 def _is_within(base: Path, target: Path) -> bool:
     try:
-        return os.path.commonpath([str(base.resolve()), str(target.resolve())]) == str(
-            base.resolve()
-        )
+        return os.path.commonpath([str(base.resolve()), str(target.resolve())]) == str(base.resolve())
     except Exception:
         return False
 
@@ -223,9 +221,7 @@ def prepare(dataset_name: str, output_dir: str | None = None, force: bool = Fals
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Prepare Harbor task dataset from HuggingFace Hub"
-    )
+    parser = argparse.ArgumentParser(description="Prepare Harbor task dataset from HuggingFace Hub")
     parser.add_argument(
         "--dataset",
         required=True,
