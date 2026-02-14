@@ -10,8 +10,8 @@ on:
           - tool_use
           - computer_use
         default: tool_use
-      env_key:
-        description: "Fleet environment filter (empty=all, or: github, booking, reddit, etc.)"
+      env_keys:
+        description: "Fleet environment filter (empty=all, or comma-separated: github,booking,reddit)"
         type: string
         default: ""
       max_tasks:
@@ -137,7 +137,7 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --env DATA_VERSION=${{ inputs.data_version }}"
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-          [ -n "${{ inputs.env_key }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEY=${{ inputs.env_key }}"
+          [ -n "${{ inputs.env_keys }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEYS=${{ inputs.env_keys }}"
           [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
           LAUNCH_CMD="$LAUNCH_CMD -y"  # No -d flag, run attached to stream logs
 
