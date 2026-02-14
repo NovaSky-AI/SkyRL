@@ -16,6 +16,8 @@
 # v0.1.3: Add vLLM + transformers to uv run --with (--isolated doesn't see setup packages)
 # v0.1.4: Use vLLM nightly - stable vLLM requires transformers<5 but
 #         glm4_moe_lite architecture needs transformers 5.x from source
+# v0.1.5: Install ALL deps in setup, don't use --isolated (fixes flash-attn ABI mismatch)
+#         --isolated builds flash-attn from source with wrong PyTorch version
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -104,13 +106,19 @@ setup: |
   uv venv --python 3.12 --seed
   source .venv/bin/activate
 
-  # GLM-4.7-Flash: glm4_moe_lite requires transformers 5.x (from source)
-  # vLLM stable requires transformers<5 - use nightly which supports transformers 5.x
+  # GLM-4.7-Flash requires:
+  # - vLLM nightly (stable vLLM requires transformers<5)
+  # - transformers 5.x from source (glm4_moe_lite architecture)
+  # Install ALL deps here so we don't need --isolated in run phase
+  # (--isolated would rebuild flash-attn with wrong PyTorch ABI)
   uv sync  # Base deps only, no vllm extra
-  uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly
-  uv pip install git+https://github.com/huggingface/transformers.git
-  uv pip install wandb boto3 awscli
 
+  # vLLM nightly first (sets PyTorch version), then transformers
+  uv pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip install git+https://github.com/huggingface/transformers.git
+
+  # All runtime deps (previously in --with flags)
+  uv pip install "litellm>=1.75.5" boto3 wandb awscli
   uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
 
   mkdir -p $HOME/data/fleet
@@ -159,17 +167,8 @@ run: |
 
   # Run GRPO training with GLM-4.7-Flash
   # MoE model: 30B total, 3B active - efficient training
-  # glm4_moe_lite requires: vLLM nightly + transformers 5.x from source
-  uv run --isolated \
-    --index-url https://wheels.vllm.ai/nightly \
-    --extra-index-url https://pypi.org/simple \
-    --with vllm \
-    --with "git+https://github.com/huggingface/transformers.git" \
-    --with "litellm>=1.75.5" \
-    --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" \
-    --with "fleet-python" \
-    --with "boto3" \
-    -m integrations.fleet.entrypoints.main_fleet \
+  # All deps installed in setup - use python directly (no --isolated)
+  python -m integrations.fleet.entrypoints.main_fleet \
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/validation.parquet']" \
     environment.env_class=fleet_task \
