@@ -345,11 +345,8 @@ class MultiStackedDecoderLayers(nnx.Module):
     @staticmethod
     def _concat_kv_caches(caches: list[KVCache]) -> KVCache:
         assert caches, "Expected at least one KV cache."
-        keys: list[jax.Array] = []
-        values: list[jax.Array] = []
-        for cache in caches:
-            keys.extend(cache.keys)
-            values.extend(cache.values)
+        keys = [key for cache in caches for key in cache.keys]
+        values = [value for cache in caches for value in cache.values]
         return KVCache(keys=keys, values=values, cache_position=caches[-1].cache_position)
 
     def __call__(
