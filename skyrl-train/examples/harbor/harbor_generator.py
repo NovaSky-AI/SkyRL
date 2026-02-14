@@ -61,22 +61,22 @@ class HarborGenerator(GeneratorInterface):
 
         # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
         # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
-        self._harbor_config_template = OmegaConf.to_container(harbor_cfg, resolve=True)
+        self._harbor_trial_config_template = OmegaConf.to_container(harbor_cfg, resolve=True)
 
         # Set model_name and api_base once (constant across all trials)
         assert generator_cfg.served_model_name is not None, "served_model_name must be set"
         assert (
             "/" not in generator_cfg.served_model_name
         ), "served_model_name must not contain '/', Harbor expects hosted_vllm/{model_name}"
-        self._harbor_config_template.setdefault("agent", {})[
+        self._harbor_trial_config_template.setdefault("agent", {})[
             "model_name"
         ] = f"hosted_vllm/{generator_cfg.served_model_name}"
-        self._harbor_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
+        self._harbor_trial_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
         logger.info(
             f"HarborGenerator initialized with Harbor config. "
-            f"Agent: {self._harbor_config_template.get('agent', {}).get('name')}, "
-            f"Trials dir: {self._harbor_config_template.get('trials_dir', 'trials')}"
+            f"Agent: {self._harbor_trial_config_template.get('agent', {}).get('name')}, "
+            f"Trials dir: {self._harbor_trial_config_template.get('trials_dir', 'trials')}"
         )
 
         # Read custom chat template
@@ -84,16 +84,14 @@ class HarborGenerator(GeneratorInterface):
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()
-            logger.info(
-                f"HarborGenerator initialized with custom chat template read from: {custom_chat_template_path}"
-            )
+            logger.info(f"HarborGenerator initialized with custom chat template read from: {custom_chat_template_path}")
         else:
             self.custom_chat_template_content = None
 
         # Initialize rate limiter
         rate_limit_config = harbor_cfg.get("rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
-        self._harbor_config_template.pop("rate_limit", None)
+        self._harbor_trial_config_template.pop("rate_limit", None)
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
@@ -223,7 +221,7 @@ class HarborGenerator(GeneratorInterface):
             results = None
             try:
                 # Create a fresh Trial each attempt so agent state is clean on retry.
-                config = deepcopy(self._harbor_config_template)
+                config = deepcopy(self._harbor_trial_config_template)
                 config["task"] = {"path": prompt}
                 config["agent"]["kwargs"]["session_id"] = uuid4().hex
                 trial_config = TrialConfig.model_validate(config)

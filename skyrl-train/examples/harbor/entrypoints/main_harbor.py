@@ -19,7 +19,7 @@ class HarborExp(BasePPOExp):
         """
         return HarborGenerator(
             generator_cfg=cfg.generator,
-            harbor_cfg=cfg.harbor_config,  # Pass harbor config to the generator
+            harbor_cfg=cfg.harbor_trial_config,  # Pass harbor config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
         )

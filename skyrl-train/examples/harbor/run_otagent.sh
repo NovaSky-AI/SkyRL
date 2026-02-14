@@ -21,8 +21,8 @@ uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.mai
   trainer.policy.model.path=open-thoughts/OpenThinker-Agent-v1-SFT \
   generator.served_model_name=OpenThinker-Agent-v1-SFT \
   hydra.searchpath=['file://examples/harbor'] \
-  +harbor_config=default \
-  ++harbor_config.trials_dir=$TRIALS_DIR \
+  +harbor_trial_config=default \
+  ++harbor_trial_config.trials_dir=$TRIALS_DIR \
   trainer.export_path=$EXPORTS_DIR \
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.algorithm.advantage_estimator=grpo \

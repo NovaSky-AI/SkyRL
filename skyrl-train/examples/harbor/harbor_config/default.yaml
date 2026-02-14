@@ -1,4 +1,4 @@
-# @package harbor_config
+# @package harbor_trial_config
 #
 # Default Harbor Configuration for SkyRL training
 #
@@ -105,4 +105,4 @@ rate_limit:
   trajectories_per_second: 5
   # Maximum concurrent trial.run() calls allowed (must be >= 1)
   # Set to null or omit to disable concurrency limiting
-  max_concurrency: 10
+  max_concurrency: 512

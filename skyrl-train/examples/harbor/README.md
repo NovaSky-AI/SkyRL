@@ -36,12 +36,12 @@ Currently, you'd have to have [Daytona](https://app.daytona.io/) access to host 
 
 ### Configuration
 
-To configure the Harbor-specific parameters (e.g. the maximum turns a rollout can take), we offer the base yaml in `harbor_config/default.yaml`. Then in the launch script, specifying the following feeds that yaml to `HarborGenerator`. 
+To configure the Harbor-specific parameters (e.g. the maximum turns a rollout can take), we offer the base yaml in `harbor_trial_config/default.yaml`. Then in the launch script, specifying the following feeds that yaml to `HarborGenerator`. 
 
 ```sh
   hydra.searchpath=['file://examples/harbor'] \
-  +harbor_config=default \
-  ++harbor_config.trials_dir=$TRIALS_DIR \
+  +harbor_trial_config=default \
+  ++harbor_trial_config.trials_dir=$TRIALS_DIR \
 ```
 
 You can override any config supported by Harbor's `TrialConfig` in the script with `++`, just like what we do for `trials_dir` here.
@@ -50,7 +50,7 @@ For all the configurations, see [Harbor's documentation](https://harborframework
 
 ### Main configuration knobs
 
-- `++harbor_config.environment.type=daytona` or `=modal`
+- `++harbor_trial_config.environment.type=daytona` or `=modal`
   - Harbor supports various ways of [hosting the sandboxes](https://harborframework.com/docs/core-concepts#container-environment) for the agent to run the task (Daytona, Modal, E2B, GKE (Google Kubernetes Engine))
   - SkyRL + Harbor integration has tested with Daytona and Modal, but the other providers should work out of the box
 - More documentations to come
