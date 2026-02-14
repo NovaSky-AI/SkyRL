@@ -292,8 +292,9 @@ class MultiStackedDecoderLayers(nnx.Module):
     """Multiple StackedDecoderLayers groups with a unified forward/unstack interface."""
 
     def __init__(self, *layer_groups: StackedDecoderLayers):
-        self.layer_groups = nnx.List(layer_groups)
+        self.layer_groups = nnx.List([group for group in layer_groups if group.num_layers > 0])
         self.num_layers = sum(group.num_layers for group in self.layer_groups)
+        assert self.num_layers > 0, "MultiStackedDecoderLayers requires at least one non-empty layer group."
 
     def __len__(self) -> int:
         return self.num_layers
@@ -328,13 +329,10 @@ class MultiStackedDecoderLayers(nnx.Module):
         return result
 
     @staticmethod
-    def _split_kv_cache(kv_cache: KVCache, split_points: list[int]) -> tuple[KVCache | None, ...]:
+    def _split_kv_cache(kv_cache: KVCache, split_points: list[int]) -> tuple[KVCache, ...]:
         boundaries = [0, *split_points, len(kv_cache.keys)]
-        caches: list[KVCache | None] = []
+        caches: list[KVCache] = []
         for start, end in zip(boundaries[:-1], boundaries[1:]):
-            if start == end:
-                caches.append(None)
-                continue
             caches.append(
                 KVCache(
                     keys=kv_cache.keys[start:end],
@@ -345,20 +343,14 @@ class MultiStackedDecoderLayers(nnx.Module):
         return tuple(caches)
 
     @staticmethod
-    def _concat_kv_caches(caches: list[KVCache | None]) -> KVCache | None:
-        non_none = [cache for cache in caches if cache is not None]
-        if not non_none:
-            return None
-        if len(non_none) == 1:
-            return non_none[0]
-
+    def _concat_kv_caches(caches: list[KVCache]) -> KVCache:
+        assert caches, "Expected at least one KV cache."
         keys: list[jax.Array] = []
         values: list[jax.Array] = []
-        for cache in non_none:
+        for cache in caches:
             keys.extend(cache.keys)
             values.extend(cache.values)
-
-        return KVCache(keys=keys, values=values, cache_position=non_none[-1].cache_position)
+        return KVCache(keys=keys, values=values, cache_position=caches[-1].cache_position)
 
     def __call__(
         self,
@@ -384,7 +376,7 @@ class MultiStackedDecoderLayers(nnx.Module):
         else:
             kv_caches = (None,) * len(self.layer_groups)
 
-        kv_results: list[KVCache | None] = []
+        kv_results: list[KVCache] = []
         for group, group_kv_cache in zip(self.layer_groups, kv_caches):
             hidden_states, layer_hidden_states, layer_kv_cache = group(
                 hidden_states,
@@ -397,9 +389,11 @@ class MultiStackedDecoderLayers(nnx.Module):
                 is_training=is_training,
             )
             all_hidden_states.extend(layer_hidden_states)
-            kv_results.append(layer_kv_cache)
+            if not is_training:
+                assert layer_kv_cache is not None, "Expected KV cache in non-training mode."
+                kv_results.append(layer_kv_cache)
 
-        return hidden_states, all_hidden_states, self._concat_kv_caches(kv_results)
+        return hidden_states, all_hidden_states, None if is_training else self._concat_kv_caches(kv_results)
 
 
 def unstack_state(module: nnx.Module) -> nnx.GraphState:
