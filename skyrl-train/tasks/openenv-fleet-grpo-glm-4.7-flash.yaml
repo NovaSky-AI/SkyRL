@@ -61,7 +61,7 @@ envs:
   FLEET_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
-  ENV_KEY: ""
+  ENV_KEYS: ""
   MODALITY: "tool_use"
   MAX_TURNS: 50
   # GLM-4.7-Flash supports 128K context natively
@@ -116,10 +116,9 @@ setup: |
   echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
 
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
-  uv run python -m integrations.fleet.prepare_dataset \
-    --tasks-json "$TASKS_FILE" \
-    --output-dir "$DATA_DIR" \
-    --modality "$MODALITY"
+  PREPARE_CMD="uv run python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
+  [ -n "$ENV_KEYS" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
+  eval "$PREPARE_CMD"
 
 run: |
   set -euo pipefail

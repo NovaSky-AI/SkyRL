@@ -182,10 +182,11 @@ def prepare_fleet_dataset(
         tasks = [t for t in tasks if t.get("task_modality") == modality]
         print(f"After modality filter ({modality}): {len(tasks)} tasks")
 
-    # Filter by env_key if specified
+    # Filter by env_key(s) if specified - supports comma-separated list
     if env_filter:
-        tasks = [t for t in tasks if t.get("env_key") == env_filter or t.get("env_id") == env_filter]
-        print(f"After env filter ({env_filter}): {len(tasks)} tasks")
+        env_list = [e.strip() for e in env_filter.split(",") if e.strip()]
+        tasks = [t for t in tasks if t.get("env_key") in env_list or t.get("env_id") in env_list]
+        print(f"After env filter ({env_list}): {len(tasks)} tasks")
 
     # Limit tasks if specified
     if max_tasks and len(tasks) > max_tasks:
