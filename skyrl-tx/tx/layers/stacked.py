@@ -48,8 +48,8 @@ class StackedDecoderLayers(nnx.Module):
     """Decoder layers with stacked weights for efficient scan-based forward pass.
 
     Parameters are stored in stacked format (num_layers, ...). The forward pass
-    uses jax.lax.scan for all modes (training/prefill/decode) with KV cache as
-    scan carry for efficient buffer donation.
+    uses jax.lax.scan for training/prefill, and uses a Python loop for decode
+    to update per-layer KV cache entries without stacked-cache copy overhead.
 
     This class encapsulates both layer creation and forward pass logic.
     """
@@ -83,7 +83,12 @@ class StackedDecoderLayers(nnx.Module):
         # Create first layer to get structure and shapes
         first_layer = create_layer_fn(nnx.Rngs(layer_keys[0]))
         graphdef, first_state = nnx.split(first_layer)
-        flat_first, treedef = jax.tree_util.tree_flatten(first_state)
+        flat_first, state_treedef = jax.tree_util.tree_flatten(first_state)
+
+        # Build a treedef with stacked partition metadata so tree_unflatten
+        # reconstructs Variables with the correct leading-layer sharding axis.
+        stacked_first_state = nnx.spmd.add_axis(first_state, 0, {nnx.PARTITION_NAME: None})
+        _, stacked_treedef = jax.tree_util.tree_flatten(stacked_first_state)
 
         # Pre-allocate stacked arrays with correct sharding
         stacked_flat = []
@@ -102,36 +107,20 @@ class StackedDecoderLayers(nnx.Module):
         def copy_to_slice(stacked, arr, idx):
             return stacked.at[idx].set(arr)
 
-        # Copy first layer's params to slot 0
-        for i, arr in enumerate(flat_first):
-            stacked_flat[i] = copy_to_slice(stacked_flat[i], flat_first[i], 0)
-
-        # Create remaining layers one at a time and copy params
-        for layer_idx in range(1, num_layers):
-            layer = create_layer_fn(nnx.Rngs(layer_keys[layer_idx]))
-            _, state = nnx.split(layer)
-            flat, _ = jax.tree_util.tree_flatten(state)
+        # Create layers one at a time and copy params into stacked slots
+        for layer_idx in range(num_layers):
+            if layer_idx == 0:
+                flat = flat_first
+            else:
+                layer = create_layer_fn(nnx.Rngs(layer_keys[layer_idx]))
+                _, state = nnx.split(layer)
+                flat, current_treedef = jax.tree_util.tree_flatten(state)
+                assert current_treedef == state_treedef, "Layer state structure mismatch while stacking decoder layers."
             for i, arr in enumerate(flat):
-                stacked_flat[i] = copy_to_slice(stacked_flat[i], flat[i], layer_idx)
+                stacked_flat[i] = copy_to_slice(stacked_flat[i], arr, layer_idx)
 
         # Reconstruct state from stacked arrays
-        stacked_state = jax.tree_util.tree_unflatten(treedef, stacked_flat)
-
-        # Sync NNX sharding metadata with actual array sharding.
-        # The arrays have correct stacked sharding from device_put, but NNX APIs
-        # (nnx.get_partition_spec, nnx.Optimizer) read from 'sharding_names' metadata.
-        def update_sharding_metadata(var):
-            if isinstance(var, nnx.Variable) and hasattr(var.value, "sharding"):
-                array_sharding = var.value.sharding
-                if hasattr(array_sharding, "spec"):
-                    var.set_metadata("sharding_names", tuple(array_sharding.spec))
-            return var
-
-        jax.tree.map(
-            update_sharding_metadata,
-            stacked_state,
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
+        stacked_state = jax.tree_util.tree_unflatten(stacked_treedef, stacked_flat)
 
         self._stacked = nnx.merge(graphdef, stacked_state)
 
@@ -167,21 +156,20 @@ class StackedDecoderLayers(nnx.Module):
             List of (path, ArrayRef) tuples for unstacked parameters.
         """
         result = []
+        prefix_len = len(base_path)
         for path, param in nnx.to_flat_state(state):
             # Only process paths belonging to this module
-            if not path[: len(base_path)] == base_path:
+            if path[:prefix_len] != base_path:
                 continue
+
+            rel_path = path[prefix_len:]
             # Only process _stacked paths
-            if "_stacked" not in path[len(base_path) :]:
+            if "_stacked" not in rel_path:
                 continue
 
-            # Find _stacked in the relative path
-            rel_path = path[len(base_path) :]
-            stacked_idx = rel_path.index("_stacked")
-
-            # Create per-layer paths: base_path + (layer_idx,) + rest
+            suffix = rel_path[rel_path.index("_stacked") + 1 :]
             for layer_idx in range(self.num_layers):
-                new_path = base_path + (str(layer_idx),) + rel_path[stacked_idx + 1 :]
+                new_path = base_path + (str(layer_idx),) + suffix
                 result.append((new_path, ArrayRef(param, layer_idx)))
 
         return result
@@ -301,70 +289,76 @@ class StackedDecoderLayers(nnx.Module):
 
 
 class MultiStackedDecoderLayers(nnx.Module):
-    """Multiple StackedDecoderLayers groups with unified interface.
-
-    This allows models like DeepSeek to have different layer types (dense/MoE)
-    while presenting a unified interface for forward passes and checkpointing.
-    """
+    """Multiple StackedDecoderLayers groups with a unified forward/unstack interface."""
 
     def __init__(self, *layer_groups: StackedDecoderLayers):
-        """Create multi-stacked decoder layers.
-
-        Args:
-            *layer_groups: One or more StackedDecoderLayers to combine.
-        """
         self.layer_groups = nnx.List(layer_groups)
         self.num_layers = sum(group.num_layers for group in self.layer_groups)
 
     def __len__(self) -> int:
-        """Return the total number of layers across all groups."""
         return self.num_layers
 
     def __getitem__(self, index: int) -> nnx.Module:
-        """Get view into layer at global index (across all groups)."""
         if index < 0 or index >= self.num_layers:
             raise IndexError(f"Layer index {index} out of range [0, {self.num_layers})")
 
-        # Find which group contains this index
         offset = 0
         for group in self.layer_groups:
             if index < offset + group.num_layers:
                 return group[index - offset]
             offset += group.num_layers
+        raise IndexError(f"Layer index {index} out of range [0, {self.num_layers})")
 
     def __iter__(self):
-        """Iterate over all layers across all groups."""
         for group in self.layer_groups:
             yield from group
 
     def unstack_paths(self, state: nnx.GraphState, base_path: tuple = ()) -> list[tuple[tuple, ArrayRef]]:
-        """Transform _stacked paths from all groups to unified per-layer paths.
-
-        Args:
-            state: GraphState containing this module's state.
-            base_path: Path prefix to this module (e.g., ("model", "layers")).
-
-        Returns:
-            List of (path, ArrayRef) tuples for unstacked parameters.
-        """
         result = []
         checkpoint_idx = 0
 
         for i, group in enumerate(self.layer_groups):
-            # Path to this group: base_path + ("layer_groups", i)
             group_path = base_path + ("layer_groups", i)
-
-            # Get unstacked paths from the group
             for path, array_ref in group.unstack_paths(state, group_path):
-                # Extract layer index from path: group_path + (layer_idx,) + rest
                 layer_idx = int(path[len(group_path)])
-                # New path: base_path + (checkpoint_idx + layer_idx,) + rest
                 new_path = base_path + (str(checkpoint_idx + layer_idx),) + path[len(group_path) + 1 :]
                 result.append((new_path, array_ref))
-
             checkpoint_idx += group.num_layers
 
         return result
+
+    @staticmethod
+    def _split_kv_cache(kv_cache: KVCache, split_points: list[int]) -> tuple[KVCache | None, ...]:
+        boundaries = [0, *split_points, len(kv_cache.keys)]
+        caches: list[KVCache | None] = []
+        for start, end in zip(boundaries[:-1], boundaries[1:]):
+            if start == end:
+                caches.append(None)
+                continue
+            caches.append(
+                KVCache(
+                    keys=kv_cache.keys[start:end],
+                    values=kv_cache.values[start:end],
+                    cache_position=kv_cache.cache_position,
+                )
+            )
+        return tuple(caches)
+
+    @staticmethod
+    def _concat_kv_caches(caches: list[KVCache | None]) -> KVCache | None:
+        non_none = [cache for cache in caches if cache is not None]
+        if not non_none:
+            return None
+        if len(non_none) == 1:
+            return non_none[0]
+
+        keys: list[jax.Array] = []
+        values: list[jax.Array] = []
+        for cache in non_none:
+            keys.extend(cache.keys)
+            values.extend(cache.values)
+
+        return KVCache(keys=keys, values=values, cache_position=non_none[-1].cache_position)
 
     def __call__(
         self,
@@ -378,36 +372,19 @@ class MultiStackedDecoderLayers(nnx.Module):
         gradient_checkpointing: bool,
         is_training: bool = False,
     ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
-        """Forward pass through all layer groups.
-
-        Args:
-            hidden_states: Input hidden states of shape (batch, seq, hidden).
-            attention_mask: Attention mask of shape (batch, seq).
-            positions: Position indices of shape (batch, seq).
-            adapter_indices: Optional LoRA adapter indices of shape (batch,).
-            kv_cache: Optional KV cache for decode mode (None for prefill).
-            output_hidden_states: Whether to return intermediate hidden states.
-            gradient_checkpointing: Whether to use gradient checkpointing.
-            is_training: Whether in training mode. Skips KV cache to save memory.
-
-        Returns:
-            Tuple of (final_hidden_states, all_hidden_states, kv_cache).
-        """
         all_hidden_states: list[jax.Array] = []
 
-        # Split KV cache for each group
         if kv_cache is not None:
             split_points = []
             cumsum = 0
             for group in self.layer_groups[:-1]:
                 cumsum += group.num_layers
                 split_points.append(cumsum)
-            kv_caches = kv_cache.split(*split_points)
+            kv_caches = self._split_kv_cache(kv_cache, split_points)
         else:
             kv_caches = (None,) * len(self.layer_groups)
 
-        # Forward through each group
-        kv_results = []
+        kv_results: list[KVCache | None] = []
         for group, group_kv_cache in zip(self.layer_groups, kv_caches):
             hidden_states, layer_hidden_states, layer_kv_cache = group(
                 hidden_states,
@@ -422,10 +399,7 @@ class MultiStackedDecoderLayers(nnx.Module):
             all_hidden_states.extend(layer_hidden_states)
             kv_results.append(layer_kv_cache)
 
-        # Concatenate KV caches
-        new_kv_cache = KVCache.concatenate(*kv_results) if kv_results else None
-
-        return hidden_states, all_hidden_states, new_kv_cache
+        return hidden_states, all_hidden_states, self._concat_kv_caches(kv_results)
 
 
 def unstack_state(module: nnx.Module) -> nnx.GraphState:
