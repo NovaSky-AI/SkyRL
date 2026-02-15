@@ -90,8 +90,7 @@ class LoRAMixin:
 
         assert adapter_indices.shape[0] == x.shape[0]
 
-        # Flatten x: (tokens, features) for linear, (tokens,) for embed (in that case feature_shape is ())
-        # or x: (batch_size, seq_len, features) for linear, (batch_size, seq_len,) for embed.
+        # Flatten x: (tokens, features) for linear, (tokens,) for embed, in that case feature_shape is ()
         feature_shape = x.shape[base_output.ndim - 1:]
         x_flat = x.reshape(-1, *feature_shape)
         adapter_indices_expanded = jnp.repeat(adapter_indices, x_flat.shape[0] // adapter_indices.shape[0])
