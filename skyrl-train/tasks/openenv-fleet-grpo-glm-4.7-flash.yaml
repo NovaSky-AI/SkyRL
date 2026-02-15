@@ -23,6 +23,7 @@
 # v0.1.8: Install torch+torchvision together from nightly/cu128 to ensure they match
 # v0.1.9: Uninstall torchvision - text model doesn't need it (transformers#38065)
 # v0.1.10: Install vLLM LAST so its PyTorch/C++ ABI is preserved
+# v0.1.11: Uninstall torchvision AFTER vLLM (vLLM reinstalls it as dep)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -121,8 +122,8 @@ setup: |
   # Install transformers FIRST, then vLLM LAST
   # vLLM must be last to preserve its PyTorch C++ ABI (vllm/_C.abi3.so)
   uv pip install git+https://github.com/huggingface/transformers.git
-  uv pip uninstall torchvision || true  # Remove before vLLM - text model doesn't need it
   uv pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip uninstall torchvision || true  # AFTER vLLM - it reinstalls torchvision as dep
 
   # All runtime deps (previously in --with flags)
   uv pip install "litellm>=1.75.5" boto3 wandb awscli
