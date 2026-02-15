@@ -20,6 +20,7 @@
 #         --isolated builds flash-attn from source with wrong PyTorch version
 # v0.1.6: Install torchvision after vLLM (transformers 5.x needs compatible torchvision)
 # v0.1.7: Force reinstall torchvision from PyTorch CUDA 12.8 index (B200 Blackwell)
+# v0.1.8: Install torch+torchvision together from nightly/cu128 to ensure they match
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -115,12 +116,11 @@ setup: |
   # (--isolated would rebuild flash-attn with wrong PyTorch ABI)
   uv sync  # Base deps only, no vllm extra
 
-  # vLLM nightly first (sets PyTorch version), then compatible torchvision, then transformers
+  # vLLM nightly first, then reinstall torch+torchvision together from nightly/cu128
+  # to ensure they match (B200 Blackwell requires CUDA 12.8)
   uv pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
-  # Force reinstall torchvision from PyTorch CUDA 12.8 index (required for B200 Blackwell)
-  TORCH_VERSION=$(python -c "import torch; print(torch.__version__)")
-  echo "PyTorch version: $TORCH_VERSION - installing matching torchvision from cu128 index"
-  uv pip install --force-reinstall torchvision --index-url https://download.pytorch.org/whl/cu128
+  echo "Reinstalling torch+torchvision from PyTorch nightly cu128 index..."
+  uv pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
   uv pip install git+https://github.com/huggingface/transformers.git
 
   # All runtime deps (previously in --with flags)
