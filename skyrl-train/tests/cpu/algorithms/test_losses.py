@@ -13,6 +13,7 @@ from skyrl_train.config import (
     ClipCovConfig,
     KLCovConfig,
     OffPolicyCorrectionConfig,
+    DPPOConfig,
 )
 
 from skyrl_train.utils.ppo_utils import (
@@ -616,3 +617,136 @@ def test_sapo_policy_loss_basic():
 
     # SAPO should always report clip_ratio = 0.0
     assert loss_metrics["clip_ratio"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "name, dppo_type, delta_low, delta_high, old_lp, new_lp, advs, rollout_lp, expect_mask, expect_clip_gt_zero",
+    [
+        (
+            "tv_pos_adv_masked",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0, -1.0]],
+            [[-0.3, -2.0, -0.9]],
+            [[1.0, -1.0, 1.0]],
+            None,
+            [[0.0, 0.0, 1.0]],
+            True,
+        ),
+        (
+            "tv_wrong_direction_not_masked",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0]],
+            [[-2.0, -0.3]],
+            [[1.0, -1.0]],
+            None,
+            [[1.0, 1.0]],
+            False,
+        ),
+        (
+            "tv_uses_rollout_logprobs",
+            "binary_tv",
+            0.2,
+            0.2,
+            [[-1.0, -1.0]],
+            [[-0.3, -0.95]],
+            [[1.0, 1.0]],
+            [[-0.35, -1.0]],
+            None,
+            None,
+        ),
+        (
+            "kl_masked",
+            "binary_kl",
+            0.05,
+            0.05,
+            [[-1.0, -1.0]],
+            [[-0.1, -0.95]],
+            [[1.0, 1.0]],
+            None,
+            None,
+            True,
+        ),
+        (
+            "kl_no_masking_within_delta",
+            "binary_kl",
+            0.5,
+            0.5,
+            [[-1.0, -1.0]],
+            [[-1.01, -0.99]],
+            [[1.0, -1.0]],
+            None,
+            [[1.0, 1.0]],
+            False,
+        ),
+    ],
+)
+def test_dppo_policy_loss(
+    name,
+    dppo_type,
+    delta_low,
+    delta_high,
+    old_lp,
+    new_lp,
+    advs,
+    rollout_lp,
+    expect_mask,
+    expect_clip_gt_zero,
+):
+    device = "cpu"
+    old_log_probs = torch.tensor(old_lp, device=device)
+    log_probs = torch.tensor(new_lp, device=device)
+    advantages = torch.tensor(advs, device=device)
+    rollout_logprobs = torch.tensor(rollout_lp, device=device) if rollout_lp is not None else None
+
+    config = AlgorithmConfig(
+        policy_loss_type="dppo",
+        loss_reduction="token_mean",
+        max_seq_len=4,
+        dppo=DPPOConfig(dppo_type=dppo_type, delta_low=delta_low, delta_high=delta_high),
+        off_policy_correction=NULL_OFF_POLICY_CORR,
+    )
+
+    loss_fn = PolicyLossRegistry.get("dppo")
+
+    if name == "tv_uses_rollout_logprobs":
+        loss_with, m1 = loss_fn(
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            config=config,
+            rollout_logprobs=rollout_logprobs,
+        )
+        loss_without, m2 = loss_fn(
+            log_probs=log_probs,
+            old_log_probs=old_log_probs,
+            advantages=advantages,
+            config=config,
+            rollout_logprobs=None,
+        )
+        assert not torch.allclose(
+            loss_with, loss_without
+        ), "rollout_logprobs should change the mask and therefore the loss"
+        return
+
+    loss, metrics = loss_fn(
+        log_probs=log_probs,
+        old_log_probs=old_log_probs,
+        advantages=advantages,
+        config=config,
+        rollout_logprobs=rollout_logprobs,
+    )
+
+    if expect_mask is not None:
+        expected_mask = torch.tensor(expect_mask, device=device)
+        ratio = torch.exp(log_probs - old_log_probs)
+        expected_loss = -(ratio * advantages * expected_mask).mean()
+        torch.testing.assert_close(loss, expected_loss, rtol=1e-4, atol=1e-6)
+
+    if expect_clip_gt_zero is True:
+        assert metrics["clip_ratio"] > 0.0, f"{name}: expected some masking"
+    elif expect_clip_gt_zero is False:
+        assert metrics["clip_ratio"] == pytest.approx(0.0, abs=1e-6), f"{name}: expected no masking"
