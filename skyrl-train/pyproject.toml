@@ -24,7 +24,7 @@ dependencies = [
     "ninja",
     "tensorboard",
     "func_timeout",
-    "transformers>=4.51.0",
+    "transformers",
     "hydra-core==1.3.2",
     "accelerate",
     "torchdata",
@@ -81,6 +81,8 @@ override-dependencies = [
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.15.0; sys_platform == 'linux'",
+    "transformers==5.0.0; sys_platform == 'linux'",
+    "opencv-python-headless<4.13.0; sys_platform == 'linux'"
 ]
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
@@ -108,7 +110,7 @@ flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "extra == 'vllm' o
 flashinfer-python = [
     { url = "https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl", marker = "extra == 'sglang' and extra != 'mcore' and extra != 'vllm'" }
 ]
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "04e370eedf8cc44a812189a19f2171d90555c07a", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/erictang000/Megatron-Bridge", branch = "glm_flash_4.7", marker = "sys_platform == 'linux'"}
 
 
 [project.optional-dependencies]
@@ -132,11 +134,11 @@ harbor = [
     "harbor",
 ]
 vllm = [
-    "vllm==0.13.0; sys_platform == 'linux'",
+    "vllm==0.15.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.9.0; sys_platform == 'linux'",
-    "flashinfer-python; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux'",
+    "torch==2.9.1; sys_platform == 'linux'",
+    "flashinfer-python==0.6.1; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.1; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
 ]
 sglang = [
@@ -149,13 +151,13 @@ sglang = [
 mcore = [
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "flash-attn==2.8.1; sys_platform == 'linux'",
-    "vllm==0.13.0; sys_platform == 'linux'",
-    "torch==2.9.0; sys_platform == 'linux'",
-    "flashinfer-python==0.5.3; sys_platform == 'linux'",
+    "vllm==0.15.0; sys_platform == 'linux'",
+    "torch==2.9.1; sys_platform == 'linux'",
+    "flashinfer-python==0.6.1; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core==0.15.0; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.1; sys_platform == 'linux'",
     "nvidia-modelopt; sys_platform == 'linux'",
 ]
 flashrl = [

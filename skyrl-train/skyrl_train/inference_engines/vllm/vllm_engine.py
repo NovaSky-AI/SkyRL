@@ -11,16 +11,17 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ErrorResponse,
-    CompletionRequest,
-    CompletionResponse,
 )
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest, CompletionResponse
+
 from vllm.lora.request import LoRARequest
 from uuid import uuid4
 from skyrl_train.inference_engines.base import (

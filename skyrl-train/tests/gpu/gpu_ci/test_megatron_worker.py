@@ -33,7 +33,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
-MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+MOE_MODEL_NAME = "zai-org/GLM-4.7-Flash"
 
 
 def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLConfig:
@@ -110,19 +110,19 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
-    [(True, 4, 2, 2, 1, None, False), (False, 2, 2, 1, 1, None, False), (True, 4, 2, 2, 1, None, True)],
-    ids=["colocate_all", "non_colocated", "colocate_all_lora"],
+    ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "num_gpus_per_node", "lora", "model_name"),
+    [(True, 4, 4, 1, 8, 1, 8, False, MOE_MODEL_NAME), (False, 2, 2, 1, 1, None, 2, False, MODEL_NAME), (True, 4, 2, 2, 1, None, 4, True, MOE_MODEL_NAME)],
+    ids=["x", "non_colocated", "colocate_all_lora"],
 )
 @pytest.mark.megatron
 def test_megatron_policy_weight_sync(
-    colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+    colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, num_gpus_per_node, lora, model_name
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
     """
     try:
-        cfg = get_test_actor_config(model_name=MODEL_NAME)
+        cfg = get_test_actor_config(model_name=model_name)
         if lora:
             cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
         cfg.trainer.placement.colocate_all = colocate_all
@@ -139,12 +139,13 @@ def test_megatron_policy_weight_sync(
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg, router, server_group = init_inference_engines(
-            model=MODEL_NAME,
+            model=model_name,
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
+            num_inference_engines=num_gpus_per_node // cfg.generator.inference_engine_tensor_parallel_size,
             backend="vllm",
             sleep_level=2,  # since we explicitly sync weights
         )
@@ -155,7 +156,7 @@ def test_megatron_policy_weight_sync(
             "policy",
             shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+            num_gpus_per_node=num_gpus_per_node,
             cfg=cfg,
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
@@ -170,7 +171,7 @@ def test_megatron_policy_weight_sync(
         policy.offload_to_cpu()
         asyncio.run(client.wake_up(tags=["kv_cache"]))
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
+        outputs = asyncio.run(run_inference(client, get_test_prompts(model_name), sampling_params))
 
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
@@ -179,17 +180,17 @@ def test_megatron_policy_weight_sync(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "lora"),
+    ("worker_type", "tp", "pp", "cp", "ep", "etp", "gpus_per_node", "use_sample_packing", "lora", "model_name"),
     [
-        ("policy", 2, 1, 1, 1, None, 2, False, False),
+        ("policy", 2, 1, 1, 1, None, 2, False, False, MODEL_NAME),
         # ref has same forward pass as policy - just duplicate one test to test setup
-        ("ref", 2, 1, 1, 1, None, 2, False, False),
-        ("policy", 2, 2, 1, 1, None, 4, False, False),
-        ("policy", 2, 2, 1, 1, None, 4, True, False),
-        ("policy", 2, 2, 1, 1, None, 4, True, True),
-        ("policy", 1, 1, 2, 1, None, 2, True, False),
-        ("policy", 2, 1, 2, 1, None, 4, True, False),
-        ("policy", 4, 1, 1, 4, 1, 4, True, False),
+        ("ref", 2, 1, 1, 1, None, 2, False, False, MODEL_NAME),
+        ("policy", 2, 2, 1, 1, None, 4, False, False, MODEL_NAME),
+        ("policy", 2, 2, 1, 1, None, 4, True, False, MODEL_NAME),
+        ("policy", 2, 2, 1, 1, None, 4, True, True, MODEL_NAME),
+        ("policy", 1, 1, 2, 1, None, 2, True, False, MODEL_NAME),
+        ("policy", 2, 1, 2, 1, None, 4, True, False, MODEL_NAME),
+        ("policy", 4, 1, 1, 4, 1, 4, True, False, MOE_MODEL_NAME),
     ],
     ids=[
         "tp2_pp1_policy",
@@ -204,12 +205,12 @@ def test_megatron_policy_weight_sync(
 )
 @pytest.mark.megatron
 async def test_megatron_forward(
-    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, lora
+    ray_init_fixture, worker_type, tp, pp, cp, ep, etp, gpus_per_node, use_sample_packing, lora, model_name
 ):
     """
     Test that the Megatron forward pass is numerically equivalent to just running a huggingface model forward.
     """
-    cfg = get_test_actor_config(model_name=MOE_MODEL_NAME if ep > 1 else MODEL_NAME)
+    cfg = get_test_actor_config(model_name=model_name)
     #### Megatron forward pass ####
     cfg.trainer.strategy = "megatron"
     cfg.trainer.placement.policy_num_gpus_per_node = gpus_per_node
@@ -278,7 +279,7 @@ async def test_megatron_forward(
         return attention_mask.to("cpu").detach(), action_log_probs.to("cpu").detach(), num_actions
 
     attention_mask, action_log_probs, num_actions = ray.get(
-        run_hf_forward.remote(batch, MOE_MODEL_NAME if ep > 1 else MODEL_NAME)
+        run_hf_forward.remote(batch, model_name)
     )
 
     #### Compare results ####
