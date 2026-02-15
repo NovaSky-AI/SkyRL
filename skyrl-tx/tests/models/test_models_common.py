@@ -48,46 +48,36 @@ class TestGradientCheckpointing:
         out = model(input_ids, attention_mask=attention_mask, **forward_kwargs)
         return model, config, out
 
-    def test_output_matches_non_checkpointed(
+    def test_output_and_hidden_states_match(
         self,
         model_name: str,
         config_cls: type[ModelConfig],
         model_cls: type[ModelForCausalLM],
         mesh_axes: tuple[str, str],
     ) -> None:
-        """Forward pass should produce identical outputs with/without checkpointing."""
-        model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False)
-        logits_no_ckpt = model.compute_logits(out.last_hidden_state)
-        del model, out
+        """Forward pass should produce identical outputs and hidden states with/without checkpointing."""
+        results = {}
+        for use_checkpointing in (False, True):
+            model, config, out = self._forward(
+                model_name,
+                config_cls,
+                model_cls,
+                mesh_axes,
+                gradient_checkpointing=use_checkpointing,
+                output_hidden_states=True,
+            )
+            results[use_checkpointing] = {
+                "logits": np.asarray(model.compute_logits(out.last_hidden_state)),
+                "hidden_states": [np.asarray(hs) for hs in out.hidden_states],
+                "num_hidden_layers": config.num_hidden_layers,
+            }
+            del model, config, out
 
-        model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True)
-        logits_ckpt = model.compute_logits(out.last_hidden_state)
-        del model, out
+        np.testing.assert_allclose(results[False]["logits"], results[True]["logits"], rtol=1e-4, atol=1e-6)
 
-        np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-6)
-
-    def test_hidden_states_length_matches(
-        self,
-        model_name: str,
-        config_cls: type[ModelConfig],
-        model_cls: type[ModelForCausalLM],
-        mesh_axes: tuple[str, str],
-    ) -> None:
-        """Both paths should return same number of hidden states."""
-        _, config, out = self._forward(
-            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False, output_hidden_states=True
-        )
-        hidden_states_no_ckpt = out.hidden_states
-        num_hidden_layers = config.num_hidden_layers
-        del out
-
-        _, _, out = self._forward(
-            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True, output_hidden_states=True
-        )
-        hidden_states_ckpt = out.hidden_states
-        del out
-
-        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == num_hidden_layers + 1
+        hidden_states_no_ckpt = results[False]["hidden_states"]
+        hidden_states_ckpt = results[True]["hidden_states"]
+        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == results[False]["num_hidden_layers"] + 1
         for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
             np.testing.assert_allclose(
                 hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
