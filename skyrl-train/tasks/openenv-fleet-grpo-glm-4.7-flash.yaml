@@ -50,7 +50,7 @@
 # v0.1.28: Add ALL deps from pyproject.toml (--no-deps skips them all)
 # v0.1.29: Install skyrl-gym from local path (not PyPI - different package)
 # v0.1.30: Use +generator.reasoning_parser (add new key to Hydra config)
-# v0.1.31: Add flash-attn with FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE (prebuilt wheels)
+# v0.1.31: Fix flash-attn: remove SKIP_CUDA_BUILD (was breaking flash_attn_2_cuda)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -137,9 +137,9 @@ setup: |
   # https://huggingface.co/zai-org/GLM-4.7-Flash
   uv pip install vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
 
-  # Step 2: Install flash-attn (prebuilt wheel, skip CUDA build)
-  # Requires torch to be installed first
-  FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE uv pip install flash-attn
+  # Step 2: Install flash-attn (CUDA build, ~20min)
+  # Requires torch first. Do NOT skip CUDA build - we need flash_attn_2_cuda module!
+  uv pip install flash-attn
 
   # Step 3: Install transformers from source for glm4_moe_lite architecture
   uv pip install git+https://github.com/huggingface/transformers.git
