@@ -8,7 +8,7 @@
 # - vLLM day-zero support
 #
 # Model: zai-org/GLM-4.7-Flash (30B-A3B MoE)
-# GPUs: B200:4 (sufficient for 3B active params)
+# GPUs: B200:8 (more parallelism for faster training)
 #
 # v0.1.0: Initial GLM-4.7-Flash config
 # v0.1.1: Install transformers from source for glm4_moe_lite architecture support
@@ -39,6 +39,7 @@
 #          vLLM brings PyTorch 2.10.0, uv sync after won't downgrade it
 # v0.1.18: Use uv sync --inexact to prevent removing vLLM
 # v0.1.19: Replace uv sync with uv pip install -e . (uv sync downgrades PyTorch)
+# v0.1.20: Increase GPU count from 4 to 8 for faster training
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -46,34 +47,34 @@ resources:
   disk_size: 300
   ports: 6479
   any_of:
-    - accelerators: B200:4
+    - accelerators: B200:8
       cloud: lambda
       memory: 750+
-    - accelerators: B200:4
+    - accelerators: B200:8
       cloud: runpod
       memory: 750+
-    - accelerators: B200:4
+    - accelerators: B200:8
       cloud: vast
       memory: 750+
-    - accelerators: B200:4
+    - accelerators: B200:8
       cloud: primeintellect
       memory: 750+
-    - accelerators: B200:4
+    - accelerators: B200:8
       cloud: nebius
       memory: 750+
-    - accelerators: H200:4
+    - accelerators: H200:8
       cloud: lambda
       memory: 750+
-    - accelerators: H200:4
+    - accelerators: H200:8
       cloud: runpod
       memory: 750+
-    - accelerators: H200:4
+    - accelerators: H200:8
       cloud: vast
       memory: 750+
-    - accelerators: H200:4
+    - accelerators: H200:8
       cloud: primeintellect
       memory: 750+
-    - accelerators: H200:4
+    - accelerators: H200:8
       cloud: nebius
       memory: 750+
 
