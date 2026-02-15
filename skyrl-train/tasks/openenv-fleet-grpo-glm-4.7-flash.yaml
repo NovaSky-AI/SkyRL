@@ -133,6 +133,19 @@ setup: |
   uv pip install "litellm>=1.75.5" boto3 wandb awscli
   uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
 
+  # Diagnostics: print versions and test vLLM import
+  echo "=== DIAGNOSTIC: Package versions ==="
+  pip show torch | grep -E "^(Name|Version)"
+  pip show transformers | grep -E "^(Name|Version)"
+  pip show vllm | grep -E "^(Name|Version)"
+  echo "=== DIAGNOSTIC: Test vLLM import ==="
+  python3 -c "import torch; print(f'torch: {torch.__version__}')"
+  python3 -c "import transformers; print(f'transformers: {transformers.__version__}')"
+  python3 -c "import vllm; print(f'vllm: {vllm.__version__}')"
+  echo "=== DIAGNOSTIC: Test vLLM CUDA module ==="
+  python3 -c "import vllm._C; print('vllm._C imported successfully')"
+  echo "=== DIAGNOSTIC: Complete ==="
+
   mkdir -p $HOME/data/fleet
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
   S3_PATH="s3://${S3_DATASET_BUCKET}/${DATA_VERSION}/openenv/all_${MODALITY}.json"
@@ -162,11 +175,19 @@ run: |
 
   uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
 
+  # Diagnostics: verify environment at run time
+  echo "=== RUN DIAGNOSTIC: Package versions ==="
+  python3 -c "import torch; print(f'torch: {torch.__version__}')"
+  python3 -c "import transformers; print(f'transformers: {transformers.__version__}')"
+  python3 -c "import vllm; print(f'vllm: {vllm.__version__}')"
+  python3 -c "import vllm._C; print('vllm._C imported successfully')"
+
+  # Kill any stale Ray clusters
+  ray stop || true
+
   export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
   export RAY_object_store_memory=10000000000
-  if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
-    ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
-  fi
+  ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
 
   for i in $(seq 1 24); do
     if ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
@@ -176,6 +197,11 @@ run: |
   done
 
   TOTAL_GPUS=$SKYPILOT_NUM_GPUS_PER_NODE
+
+  # Diagnostics: test vLLM import in Ray worker
+  echo "=== RUN DIAGNOSTIC: Testing vLLM import in Ray worker ==="
+  python3 -c "import ray; print(ray.get(ray.remote(lambda: __import__('vllm').__version__).remote()))"
+  echo "=== RUN DIAGNOSTIC: Ray worker vLLM import successful ==="
 
   # Run GRPO training with GLM-4.7-Flash
   # MoE model: 30B total, 3B active - efficient training
