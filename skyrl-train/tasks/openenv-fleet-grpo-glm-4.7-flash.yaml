@@ -31,6 +31,8 @@
 #          Nightly wheels have availability issues, source build is more reliable
 # v0.1.14: Revert to nightly wheels - source build requires CUDA toolkit (nvcc)
 #          which RunPod images don't include (only CUDA runtime)
+# v0.1.15: Use exact install command from HuggingFace model card
+#          --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -126,11 +128,11 @@ setup: |
   # (--isolated would rebuild flash-attn with wrong PyTorch ABI)
   uv sync  # Base deps only, no vllm extra
 
-  # Install vLLM FIRST - it has pinned deps (PyTorch 2.10.0, transformers 4.57.x)
+  # Install vLLM using exact command from HuggingFace model card:
+  # https://huggingface.co/zai-org/GLM-4.7-Flash
   # Then install transformers from source AFTER to override vLLM's downgrade
   # Finally uninstall torchvision (vLLM installs it but text models don't need it)
-  # NOTE: GLM-4.7-Flash requires vLLM nightly (glm4_moe_lite architecture not in stable)
-  uv pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip install vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
   uv pip install git+https://github.com/huggingface/transformers.git
   uv pip uninstall torchvision || true
 
