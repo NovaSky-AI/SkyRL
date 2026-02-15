@@ -44,6 +44,7 @@
 # v0.1.22: Remove Nebius (fabric config issues causing stuck launches)
 # v0.1.23: Use --no-deps for editable install (uv pip install -e . still downgrades PyTorch)
 # v0.1.24: Don't use 'uv run' in run phase (re-syncs lockfile, downgrades PyTorch)
+# v0.1.25: Also remove 'uv run' from setup PREPARE_CMD (same issue)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -160,7 +161,7 @@ setup: |
   echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
 
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
-  PREPARE_CMD="uv run python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
+  PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
   [ -n "$ENV_KEYS" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
   eval "$PREPARE_CMD"
 
