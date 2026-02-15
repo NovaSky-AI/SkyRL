@@ -49,6 +49,7 @@
 # v0.1.27: Remove 'ray stop' (kills SkyPilot's Ray cluster that manages the job)
 # v0.1.28: Add ALL deps from pyproject.toml (--no-deps skips them all)
 # v0.1.29: Install skyrl-gym from local path (not PyPI - different package)
+# v0.1.30: Use +generator.reasoning_parser (add new key to Hydra config)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -266,8 +267,8 @@ run: |
     generator.n_samples_per_prompt=4 \
     generator.eval_n_samples_per_prompt=3 \
     generator.gpu_memory_utilization=0.7 \
-    generator.reasoning_parser=glm45 \
-    generator.tool_call_parser=glm47 \
+    +generator.reasoning_parser=glm45 \
+    +generator.tool_call_parser=glm47 \
     trainer.logger="$LOGGER" \
     trainer.project_name="fleet-task-grpo" \
     trainer.run_name="fleet_${MODALITY}_glm47flash_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
