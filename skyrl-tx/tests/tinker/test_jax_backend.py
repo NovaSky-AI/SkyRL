@@ -621,3 +621,25 @@ def test_mixed_train_unembed_adapters():
         atol=1e-4,
         err_msg="Chunked vs non-chunked losses mismatch with mixed train_unembed adapters",
     )
+
+
+def test_auto_micro_batch_forward_backward():
+    """Forward-backward should succeed with auto-determined micro-batch size."""
+    config = JaxBackendConfig(
+        max_lora_adapters=2,
+        max_lora_rank=32,
+        auto_micro_batch_size=True,
+        train_micro_batch_size=0,
+    )
+    backend = JaxBackend(BASE_MODEL, config)
+    assert backend._train_token_budget > 0
+
+    model_id = "test_auto"
+    backend.create_model(model_id, LoraConfig(rank=8, alpha=16, seed=0))
+
+    fwd_bwd_input = make_fwd_bwd_input([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]])
+    reqs = {"req1": (model_id, fwd_bwd_input)}
+
+    results = backend.forward_backward(prepare_model_pass_batch(reqs))
+    assert "req1" in results
+    assert isinstance(results["req1"], types.ForwardBackwardOutput)

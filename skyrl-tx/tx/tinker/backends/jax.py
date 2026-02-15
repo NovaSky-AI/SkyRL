@@ -89,6 +89,13 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=1024,
         description="Chunk size for cross-entropy loss computation. Reduces memory by avoiding full [B*T, V] logits materialization. Set to 0 to disable chunking.",
     )
+    auto_micro_batch_size: bool = Field(
+        default=False, description="Automatically determine train_micro_batch_size using XLA memory analysis."
+    )
+    auto_micro_batch_safety_margin: float = Field(
+        default=0.85,
+        description="Fraction of total device memory to use as budget for auto micro-batch sizing.",
+    )
     # Multi-node configuration
     coordinator_address: str | None = Field(
         default=None,
@@ -216,27 +223,194 @@ class JaxBackendImpl(AbstractBackend):
             f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
         )
 
-        if config.train_micro_batch_size <= 0:
+        # Call before potentially determining token budget
+        self._create_loss_and_grad_fn()
+
+        self._train_token_budget: int = 0
+
+        if config.auto_micro_batch_size and config.train_micro_batch_size <= 0:
+            # Auto micro-batch sizing via XLA memory analysis
+            if config.enforce_eager:
+                logger.warning(
+                    "auto_micro_batch_size requires JIT compilation and is "
+                    "incompatible with enforce_eager=True. Skipping."
+                )
+            else:
+                self._train_token_budget = self._determine_token_budget()
+                if self._train_token_budget > 0:
+                    logger.info(f"Auto micro-batch sizing: token budget C={self._train_token_budget}")
+                else:
+                    logger.warning(
+                        "Auto micro-batch sizing failed to determine a valid token budget. "
+                        "Falling back to full batch (may OOM)."
+                    )
+
+        if config.train_micro_batch_size <= 0 and self._train_token_budget <= 0:
             logger.warning(
                 '"train_micro_batch_size" is not set. This can lead to OOMs. '
-                'Consider setting "train_micro_batch_size" via --backend-config to limit memory usage during training. '
-                "In the future, we plan to add a heuristic to set this automatically: "
+                'Consider setting "train_micro_batch_size" via --backend-config to limit memory usage during training, '
+                'or enable "auto_micro_batch_size" for automatic sizing. '
                 "https://github.com/NovaSky-AI/SkyRL/issues/1048"
             )
         if config.sample_max_num_sequences <= 0:
             logger.warning(
                 '"sample_max_num_sequences" is not set. This can lead to OOMs. '
                 'Consider setting "sample_max_num_sequences" via --backend-config to limit memory usage during sampling. '
-                "In the future, we plan to add a heuristic to set this automatically: "
                 "https://github.com/NovaSky-AI/SkyRL/issues/1048"
             )
-
-        self._create_loss_and_grad_fn()
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
         mb = self.config.train_micro_batch_size
         return total if mb <= 0 else max(1, min(mb, total))
+
+    def _get_train_peak_memory(self, batch_size: int, seq_len: int) -> int | None:
+        """Estimate peak memory for a training step at (batch_size, seq_len).
+
+        Uses `jax.jit(...).lower(...).compile().memory_analysis()` to get a static
+        memory estimate from the XLA compiler. No actual GPU execution takes place.
+
+        Returns:
+            Peak memory in bytes, or `None` if analysis is unavailable.
+        """
+        fsdp_size = self.mesh.shape["fsdp"]
+
+        # Pad batch to FSDP size
+        padded_bs = batch_size + (fsdp_size - batch_size % fsdp_size) % fsdp_size
+
+        # Build abstract shapes for the batch inputs
+        abs_2d_i32 = jax.ShapeDtypeStruct((padded_bs, seq_len), jnp.int32)
+        abs_2d_f32 = jax.ShapeDtypeStruct((padded_bs, seq_len), jnp.float32)
+        abs_1d_i32 = jax.ShapeDtypeStruct((padded_bs,), jnp.int32)
+
+        # Build abstract representations of the model state (shapes only)
+        abs_accumulated_grads = jax.tree.map(
+            lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+            self.accumulated_grads,
+        )
+        abs_lora_params = jax.tree.map(
+            lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+            self.lora_params,
+        )
+        abs_non_lora_params = jax.tree.map(
+            lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+            self.non_lora_params,
+        )
+
+        try:
+            lowered = self._forward_backward_and_accumulate.lower(
+                abs_accumulated_grads,
+                abs_lora_params,
+                abs_non_lora_params,
+                abs_2d_i32,  # input_ids
+                abs_2d_i32,  # attention_mask
+                abs_1d_i32,  # adapter_indices
+                abs_2d_i32,  # target_ids
+                abs_2d_f32,  # loss_mask
+                abs_1d_i32,  # loss_fn_types
+                abs_2d_f32,  # sampling_logprobs
+                abs_2d_f32,  # advantages
+            )
+            compiled = lowered.compile()
+            stats = compiled.memory_analysis()
+            return stats.peak_memory_in_bytes if stats is not None else None
+        except Exception as e:
+            logger.warning(f"XLA memory_analysis() failed for bs={batch_size}, seq_len={seq_len}: {e}")
+            return None
+
+    def _find_max_batch_size(self, seq_len: int, memory_budget: int, start_bs: int) -> int:
+        """Search for the largest batch_size at seq_len that fits in memory_budget.
+
+        Returns 0 if even batch_size=1 does not fit.
+        """
+        # Always verify bs=1 fits
+        peak = self._get_train_peak_memory(1, seq_len)
+        if peak is None or peak > memory_budget:
+            return 0
+
+        # Exponential doubling
+        last_good = 1
+        bs = max(start_bs, 2)
+        while True:
+            peak = self._get_train_peak_memory(bs, seq_len)
+            if peak is not None and peak <= memory_budget:
+                last_good = bs
+                logger.debug(f"  exp-search: bs={bs}, seq_len={seq_len} ({peak / 1e9:.2f} GB fits)")
+                bs *= 2
+            else:
+                logger.debug(
+                    f"  exp-search: bs={bs}, seq_len={seq_len} "
+                    f"({'N/A' if peak is None else f'{peak / 1e9:.2f} GB'} exceeds budget)"
+                )
+                break
+
+        # Binary search between last_good and bs
+        low, high = last_good, bs
+        while low < high:
+            mid = (low + high + 1) // 2
+            peak = self._get_train_peak_memory(mid, seq_len)
+            if peak is not None and peak <= memory_budget:
+                low = mid
+                logger.debug(f"  bin-search: bs={mid}, seq_len={seq_len} ({peak / 1e9:.2f} GB fits)")
+            else:
+                high = mid - 1
+                logger.debug(
+                    f"  bin-search: bs={mid}, seq_len={seq_len} "
+                    f"({'N/A' if peak is None else f'{peak / 1e9:.2f} GB'} exceeds budget)"
+                )
+
+        return low
+
+    def _determine_token_budget(self) -> int:
+        """Profile the compiled training step to estimate a token budget C.
+
+        The token budget is defined such that any micro-batch with
+        `batch_size x seq_len ≤ C` fits safely in GPU memory.
+
+        Returns:
+            The token budget `C`. A value of 0 means profiling failed.
+        """
+        safety_margin = self.config.auto_micro_batch_safety_margin
+
+        device = jax.devices()[0]
+        mem_stats = device.memory_stats()
+        total_memory = mem_stats["bytes_limit"]
+        memory_budget = int(total_memory * safety_margin)
+
+        logger.info(
+            f"Token-budget profiling: total device memory={total_memory / 1e9:.2f} GB, "
+            f"budget={memory_budget / 1e9:.2f} GB (safety_margin={safety_margin})"
+        )
+
+        max_pos = getattr(self.model_config, "max_position_embeddings", 128 * 1024)
+        profile_seq_lens = [256, 1024, 4096]
+        seq_lens = [s for s in profile_seq_lens if s <= max_pos]
+        if not seq_lens:
+            logger.warning("Token-budget profiling: no valid sequence lengths to profile.")
+            return 0
+
+        boundary_products: list[int] = []
+        max_bs_size = 0
+
+        for seq_len in reversed(seq_lens):
+            max_bs = self._find_max_batch_size(seq_len, memory_budget, max_bs_size)
+
+            if max_bs <= 0:
+                logger.warning(f"Token-budget profiling: batch_size=1 at seq_len={seq_len} exceeds budget.")
+                continue
+
+            max_bs_size = max_bs
+            product = max_bs * seq_len
+            boundary_products.append(product)
+            logger.info(f"Token-budget profiling: seq_len={seq_len} | max_bs={max_bs} -> product={product}")
+
+        if not boundary_products:
+            logger.warning("Token-budget profiling: no valid boundary found. Returning 0.")
+            return 0
+
+        token_budget = min(boundary_products)
+        logger.info(f"Token-budget profiling complete: C={token_budget} " f"(boundary products={boundary_products})")
+        return token_budget
 
     @contextmanager
     def _jit_timing_context(self, seq_len: int, mode: str):
@@ -551,8 +725,14 @@ class JaxBackendImpl(AbstractBackend):
         advantages = pad_batch(all_advantages, max_len, np.float32)
 
         total_bs = int(input_ids.shape[0])
-        micro_bs = self._micro_batch_size(total_bs)
         seq_lens = [len(seq) for seq in all_input_ids]
+
+        # Determine micro-batch size: token budget (dynamic) > config (static) > full batch
+        if self._train_token_budget > 0:
+            seq_len_for_budget = input_ids.shape[1]  # padded seq_len
+            micro_bs = max(1, min(self._train_token_budget // seq_len_for_budget, total_bs))
+        else:
+            micro_bs = self._micro_batch_size(total_bs)
 
         # Collect full padded arrays on device, slice after transfer
         token_losses_device = []
