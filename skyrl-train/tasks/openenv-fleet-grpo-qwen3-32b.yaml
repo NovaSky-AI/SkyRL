@@ -10,6 +10,7 @@
 # v0.4.0: Initial 32B config with google-maps excluded from dataset
 # v0.4.1: B200:8 to fix OOM during backward pass
 # v0.4.2: disk_size 300→750, max_ckpts_to_keep=1 to fix disk full during checkpoint save
+# v0.4.3: Fix workdir ref to main (feat/vl-multimodal-support had broken prepare_dataset.py)
 
 name: fleet-task-grpo-qwen3-32b
 
@@ -38,7 +39,7 @@ num_nodes: 1
 
 workdir:
   url: https://github.com/fleet-ai/SkyRL.git
-  ref: feat/vl-multimodal-support
+  ref: main
 
 envs:
   WANDB_API_KEY: ""
