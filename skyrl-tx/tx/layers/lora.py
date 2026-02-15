@@ -88,11 +88,12 @@ class LoRAMixin:
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
             raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
-        (batch_size, seq_len, *dims) = x.shape
-        assert adapter_indices.shape[0] == batch_size
+        assert adapter_indices.shape[0] == x.shape[0]
 
-        feat_dims = x.shape[base_output.ndim - 1:]
-        x_flat = x.reshape(-1, *feat_dims)
+        # Flatten x: (tokens, features) for linear, (tokens,) for embed (in that case feature_shape is ())
+        # or x: (batch_size, seq_len, features) for linear, (batch_size, seq_len,) for embed.
+        feature_shape = x.shape[base_output.ndim - 1:]
+        x_flat = x.reshape(-1, *feature_shape)
         adapter_indices_expanded = jnp.repeat(adapter_indices, x_flat.shape[0] // adapter_indices.shape[0])
 
         # Sort tokens to prepare for ragged_dot
@@ -104,7 +105,7 @@ class LoRAMixin:
         intermediate = self._apply_lora_weight(self.lora_A[...], x_sorted, adapter_indices_sorted, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
-        # Unsort, reshape, scale
+        # Unsort, scale, reshape to match base_output
         lora_output = lora_output_sorted[unsort_indices].reshape(base_output.shape)
         scaling = self.lora_scaling[...][adapter_indices_expanded]
         lora_output = lora_output * scaling.reshape(base_output.shape[:-1] + (1,))
