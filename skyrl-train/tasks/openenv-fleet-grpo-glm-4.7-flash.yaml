@@ -43,6 +43,7 @@
 # v0.1.21: Fix GPU names per provider (H200-SXM for RunPod/Vast)
 # v0.1.22: Remove Nebius (fabric config issues causing stuck launches)
 # v0.1.23: Use --no-deps for editable install (uv pip install -e . still downgrades PyTorch)
+# v0.1.24: Don't use 'uv run' in run phase (re-syncs lockfile, downgrades PyTorch)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -177,7 +178,8 @@ run: |
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
 
-  uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
+  # Don't use 'uv run' - it re-syncs lockfile and downgrades PyTorch
+  python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
 
   # Diagnostics: verify environment at run time
   echo "=== RUN DIAGNOSTIC: Package versions ==="
