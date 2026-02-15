@@ -601,11 +601,19 @@ class RayPPOTrainer:
             max_seq_len,
         )
         policy_budgets = ray.get(policy_refs)
-        global_budget = min(policy_budgets)
+        all_budgets = list(policy_budgets)
+        logger.info(f"Auto micro-batch sizing: policy per-worker budgets={policy_budgets}")
 
-        logger.info(
-            f"Auto micro-batch sizing: per-worker token budgets={policy_budgets}, " f"using min={global_budget}"
-        )
+        if critic_model is not None:
+            logger.info(f"Auto micro-batch sizing: profiling critic workers (max_seq_len={max_seq_len})")
+            critic_refs = critic_model.async_run_ray_method("pass_through", "auto_determine_token_budget", max_seq_len)
+            critic_budgets = ray.get(critic_refs)
+            all_budgets.extend(critic_budgets)
+            logger.info(f"Auto micro-batch sizing: critic per-worker budgets={critic_budgets}")
+
+        global_budget = min(all_budgets)
+
+        logger.info(f"Auto micro-batch sizing: all budgets={all_budgets}, using global min={global_budget}")
 
         assert global_budget > 0, (
             f"Auto micro-batch sizing failed: token budget is {global_budget}.  "

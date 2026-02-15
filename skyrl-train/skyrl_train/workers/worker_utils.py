@@ -93,12 +93,15 @@ class BatchIterator:
         return batch_to_experience(batch)
 
 
-def _select_indices(data: TrainingInputBatch, indices: torch.Tensor) -> TrainingInputBatch:
+def _select_indices(data: TrainingInputBatch, indices: torch.Tensor, max_seq_len: int = 0) -> TrainingInputBatch:
     """Index a `TrainingInputBatch` with a 1d int tensor of row indices."""
     selected = {}
     for key, value in data.items():
         if value is not None:
-            selected[key] = value[indices]
+            val = value[indices]
+            if max_seq_len > 0 and val.ndim >= 2:
+                val = val[:, :max_seq_len]  # trim sequence dim
+            selected[key] = val
         else:
             selected[key] = None
     batch = TrainingInputBatch(selected)
@@ -146,13 +149,13 @@ class MemoryAwareBatchIterator:
             else:
                 if current_indices:
                     idx_tensor = torch.tensor(current_indices, dtype=torch.long)
-                    self._micro_batches.append(_select_indices(data, idx_tensor))
+                    self._micro_batches.append(_select_indices(data, idx_tensor, current_max_len))
                 current_indices = [idx]
                 current_max_len = length
 
         if current_indices:
             idx_tensor = torch.tensor(current_indices, dtype=torch.long)
-            self._micro_batches.append(_select_indices(data, idx_tensor))
+            self._micro_batches.append(_select_indices(data, idx_tensor, current_max_len))
 
         self._iter = iter(self._micro_batches)
 

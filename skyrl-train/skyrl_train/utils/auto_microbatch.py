@@ -58,7 +58,7 @@ def determine_token_budget(
         entropy_requires_grad=entropy_requires_grad,
     )
 
-    seq_lens = (torch.linspace(1, 0.25, 4) * max_seq_len).to(dtype=torch.long)
+    seq_lens = (torch.linspace(1, 0.25, 3) * max_seq_len).to(dtype=torch.long)
     logger.info(f"Profiling sequence lengths of: {list(seq_lens)}")
     boundary_products: List[int] = []
 
@@ -73,7 +73,7 @@ def determine_token_budget(
         )
 
         if max_bs <= 0:
-            logger.warning(f"Token-budget profiling: even batch_size=1 at seq_len={seq_len} " "exceeds memory budget.")
+            logger.warning(f"Token-budget profiling: even batch_size=1 at seq_len={seq_len} exceeds memory budget.")
             if seq_len == seq_lens[0]:
                 # can't even fit 1 sample at the longest seq_len
                 # return 0 so the caller falls back to fixed micro-batch size.

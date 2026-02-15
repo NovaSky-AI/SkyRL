@@ -218,10 +218,31 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         self._transfer_strategy_cls = get_transfer_strategy_cls(self.cfg)
+        self._token_budget: Optional[int] = None
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
         raise NotImplementedError()
+
+    def auto_determine_token_budget(self, max_seq_len: int) -> int:
+        """Profile GPU memory to estimate the token budget *C*.
+
+        Returns:
+            The token budget C (`batch_size x max_seq_len ≤ C`).
+        """
+        from skyrl_train.utils.auto_microbatch import determine_token_budget
+
+        budget = determine_token_budget(
+            model=self.model,
+            strategy=self.strategy,
+            max_seq_len=max_seq_len,
+            safety_margin=0.85,
+            temperature=self.cfg.generator.sampling_params.temperature,
+            compute_entropy=self.cfg.trainer.algorithm.use_entropy_loss,
+            entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
+        )
+        self._token_budget = budget
+        return budget
 
     def empty_cache(self) -> None:
         """Empty GPU memory cache on Worker's CUDA device"""
@@ -655,27 +676,6 @@ class PolicyWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._micro_batches_accumulated = 0
-        self._token_budget: Optional[int] = None
-
-    def auto_determine_token_budget(self, max_seq_len: int) -> int:
-        """Profile GPU memory to estimate the token budget *C*.
-
-        Returns:
-            The token budget C (`batch_size x max_seq_len ≤ C`).
-        """
-        from skyrl_train.utils.auto_microbatch import determine_token_budget
-
-        budget = determine_token_budget(
-            model=self.model,
-            strategy=self.strategy,
-            max_seq_len=max_seq_len,
-            safety_margin=0.85,
-            temperature=self.cfg.generator.sampling_params.temperature,
-            compute_entropy=self.cfg.trainer.algorithm.use_entropy_loss,
-            entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
-        )
-        self._token_budget = budget
-        return budget
 
     def forward_backward(
         self,
@@ -1061,7 +1061,6 @@ class CriticWorkerBase(Worker):
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
         self._micro_batches_accumulated = 0
-        self._token_budget: Optional[int] = None
 
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
         """
