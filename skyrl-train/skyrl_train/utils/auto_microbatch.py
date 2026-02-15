@@ -46,6 +46,13 @@ def determine_token_budget(
     _cleanup_memory()
     torch.cuda.synchronize(device)
     free_baseline, _total = torch.cuda.mem_get_info(device)
+
+    # synchronize memory budget
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        free_tensor = torch.tensor([free_baseline], dtype=torch.long, device=device)
+        dist.all_reduce(free_tensor, op=dist.ReduceOp.MIN)
+        free_baseline = free_tensor.item()
+
     memory_budget = int(free_baseline * safety_margin)
     logger.info(
         f"Token-budget profiling: free baseline={free_baseline / 1e9:.2f} GB, "
