@@ -24,6 +24,9 @@
 # v0.1.9: Uninstall torchvision - text model doesn't need it (transformers#38065)
 # v0.1.10: Install vLLM LAST so its PyTorch/C++ ABI is preserved
 # v0.1.11: Uninstall torchvision AFTER vLLM (vLLM reinstalls it as dep)
+# v0.1.12: Install vLLM FIRST, then transformers from source AFTER
+#          vLLM has pinned deps that downgrade transformers to 4.57.x
+#          Installing transformers after vLLM overrides this downgrade
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -119,11 +122,12 @@ setup: |
   # (--isolated would rebuild flash-attn with wrong PyTorch ABI)
   uv sync  # Base deps only, no vllm extra
 
-  # Install transformers FIRST, then vLLM LAST
-  # vLLM must be last to preserve its PyTorch C++ ABI (vllm/_C.abi3.so)
-  uv pip install git+https://github.com/huggingface/transformers.git
+  # Install vLLM FIRST - it has pinned deps (PyTorch 2.10.0, transformers 4.57.x)
+  # Then install transformers from source AFTER to override vLLM's downgrade
+  # Finally uninstall torchvision (vLLM installs it but text models don't need it)
   uv pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
-  uv pip uninstall torchvision || true  # AFTER vLLM - it reinstalls torchvision as dep
+  uv pip install git+https://github.com/huggingface/transformers.git
+  uv pip uninstall torchvision || true
 
   # All runtime deps (previously in --with flags)
   uv pip install "litellm>=1.75.5" boto3 wandb awscli
