@@ -62,7 +62,7 @@ def determine_token_budget(
     logger.info(f"Profiling sequence lengths of: {list(seq_lens)}")
     boundary_products: List[int] = []
 
-    for seq_len in seq_lens:
+    for seq_len in seq_lens.tolist():
         max_bs = _find_max_batch_size(
             model=model,
             strategy=strategy,
@@ -82,7 +82,7 @@ def determine_token_budget(
             # skip this seq_len but continue with shorter ones
             continue
 
-        product = max_bs * seq_len
+        product = int(max_bs * seq_len)
         boundary_products.append(product)
         logger.info(f"Token-budget profiling: seq_len={seq_len} | max_bs={max_bs} -> product={product}")
 
