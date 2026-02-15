@@ -42,6 +42,7 @@
 # v0.1.20: Increase GPU count from 4 to 8 for faster training
 # v0.1.21: Fix GPU names per provider (H200-SXM for RunPod/Vast)
 # v0.1.22: Remove Nebius (fabric config issues causing stuck launches)
+# v0.1.23: Use --no-deps for editable install (uv pip install -e . still downgrades PyTorch)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -123,8 +124,8 @@ setup: |
   # https://huggingface.co/zai-org/GLM-4.7-Flash
   uv pip install vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
 
-  # Install base deps via pip (won't downgrade PyTorch like uv sync does)
-  uv pip install -e .
+  # Install package without deps (--no-deps prevents PyTorch downgrade)
+  uv pip install -e . --no-deps
 
   # transformers from source for glm4_moe_lite architecture
   uv pip install git+https://github.com/huggingface/transformers.git
