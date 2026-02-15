@@ -184,7 +184,14 @@ def local_read_dir(input_path: str):
             # Download everything from cloud path to temp_dir
             download_directory(input_path, temp_dir)
             logger.info(f"Downloaded directory contents from {input_path}")
-            yield temp_dir
+            # s3fs.get with recursive=True may nest files under a subdirectory
+            # named after the last path component. If temp_dir contains a single
+            # subdirectory and no files, yield that subdirectory instead.
+            entries = os.listdir(temp_dir)
+            if len(entries) == 1 and os.path.isdir(os.path.join(temp_dir, entries[0])):
+                yield os.path.join(temp_dir, entries[0])
+            else:
+                yield temp_dir
     else:
         # For local paths, use directly (but check it exists)
         if not exists(input_path):

@@ -137,11 +137,14 @@ class BasePPOExp:
 
     def get_tokenizer(self, padding_side="left"):
         """Initializes a tokenizer for the given model."""
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.cfg.trainer.policy.model.path,
-            trust_remote_code=True,
-            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
-        )
+        from skyrl_train.utils.io import io
+
+        with io.local_read_dir(self.cfg.trainer.policy.model.path) as model_path:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                use_fast=not self.cfg.trainer.disable_fast_tokenizer,
+            )
         tokenizer.padding_side = padding_side
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token

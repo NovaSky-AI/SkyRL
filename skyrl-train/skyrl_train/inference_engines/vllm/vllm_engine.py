@@ -74,6 +74,18 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
+        from skyrl_train.utils.io import io
+
+        original_model_path = kwargs.get("model", "")
+
+        self._cloud_model_ctx = None
+        if io.is_cloud_path(original_model_path):
+            self._cloud_model_ctx = io.local_read_dir(original_model_path)
+            local_model_path = self._cloud_model_ctx.__enter__()
+            kwargs["model"] = local_model_path
+            if kwargs.get("served_model_name") is None:
+                kwargs["served_model_name"] = original_model_path
+
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
@@ -91,6 +103,11 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
 
         # Weight loader is created by subclass after engine initialization
         self._weight_loader = None
+
+        # Clean up temp directory now that model is loaded into GPU memory
+        if self._cloud_model_ctx is not None:
+            self._cloud_model_ctx.__exit__(None, None, None)
+            self._cloud_model_ctx = None
 
     def tp_size(self):
         return self._tp_size
