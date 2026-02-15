@@ -18,9 +18,41 @@ import site
 
 
 def create_stub():
+    site_packages = site.getsitepackages()[0]
+
     # Create flash_attn package in site-packages
-    pkg_dir = os.path.join(site.getsitepackages()[0], "flash_attn")
+    pkg_dir = os.path.join(site_packages, "flash_attn")
     os.makedirs(pkg_dir, exist_ok=True)
+
+    # Create dist-info directory for importlib.metadata compatibility
+    # This is required because transformers calls:
+    #   importlib.metadata.version("flash_attn")
+    # which looks for flash_attn-*.dist-info/METADATA, not __version__
+    dist_info_dir = os.path.join(site_packages, "flash_attn-2.7.0.stub.dist-info")
+    os.makedirs(dist_info_dir, exist_ok=True)
+
+    # Create METADATA file (minimal PEP 566 format)
+    metadata_content = """Metadata-Version: 2.1
+Name: flash-attn
+Version: 2.7.0.stub
+Summary: Stub package for flash_attn (no CUDA required)
+"""
+    with open(os.path.join(dist_info_dir, "METADATA"), "w") as f:
+        f.write(metadata_content)
+
+    # Create INSTALLER file
+    with open(os.path.join(dist_info_dir, "INSTALLER"), "w") as f:
+        f.write("stub\n")
+
+    # Create top_level.txt
+    with open(os.path.join(dist_info_dir, "top_level.txt"), "w") as f:
+        f.write("flash_attn\n")
+
+    # Create RECORD file (empty is fine for our purposes)
+    with open(os.path.join(dist_info_dir, "RECORD"), "w") as f:
+        f.write("")
+
+    print(f"Created flash_attn-2.7.0.stub.dist-info at {dist_info_dir}")
 
     # Create ops/triton directory structure for rotary embedding
     ops_dir = os.path.join(pkg_dir, "ops")

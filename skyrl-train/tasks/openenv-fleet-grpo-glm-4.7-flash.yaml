@@ -73,6 +73,10 @@
 #          - vLLM imports flash_attn.ops.triton.rotary.apply_rotary internally
 #          - Add pure PyTorch implementation (no Triton kernel needed)
 #          - Now supports: bert_padding + ops.triton.rotary
+# v0.1.37: Add package metadata (.dist-info) to flash_attn stub
+#          - transformers calls importlib.metadata.version("flash_attn")
+#          - This requires flash_attn-*.dist-info/METADATA, not __version__
+#          - Create proper dist-info directory with METADATA file
 
 name: fleet-task-grpo-glm-4.7-flash
 
