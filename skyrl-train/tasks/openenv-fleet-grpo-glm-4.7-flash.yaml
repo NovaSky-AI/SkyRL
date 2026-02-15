@@ -69,6 +69,10 @@
 #          - Copies pad_input/unpad_input from flash-attn source (pure Python)
 #          - Avoids all CUDA import issues - no flash_attn_2_cuda needed
 #          - Works in all processes (main, Ray workers, etc.)
+# v0.1.36: Extend flash_attn stub with rotary embedding module
+#          - vLLM imports flash_attn.ops.triton.rotary.apply_rotary internally
+#          - Add pure PyTorch implementation (no Triton kernel needed)
+#          - Now supports: bert_padding + ops.triton.rotary
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -160,10 +164,10 @@ setup: |
   # https://huggingface.co/zai-org/GLM-4.7-Flash
   uv pip install vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
 
-  # Step 2: Create minimal flash_attn stub package
-  # SkyRL training code only needs flash_attn.bert_padding.pad_input/unpad_input
-  # These are pure Python functions - we copy them from flash-attn source
-  # This avoids all CUDA import issues (no flash_attn_2_cuda needed)
+  # Step 2: Create flash_attn stub package (pure Python, no CUDA build)
+  # - bert_padding: pad_input/unpad_input (used by SkyRL training)
+  # - ops.triton.rotary: apply_rotary (used by vLLM internally for rotary embeddings)
+  # Pure PyTorch implementations - avoids all CUDA import issues
   # Script is in integrations/fleet/scripts/create_flash_attn_stub.py
   python3 integrations/fleet/scripts/create_flash_attn_stub.py
 
@@ -199,6 +203,7 @@ setup: |
   python3 -c "import transformers; print(f'transformers: {transformers.__version__}')"
   python3 -c "import vllm; print(f'vllm: {vllm.__version__}')"
   python3 -c "from flash_attn.bert_padding import pad_input, unpad_input; print('flash_attn.bert_padding: OK')"
+  python3 -c "from flash_attn.ops.triton.rotary import apply_rotary; print('flash_attn.ops.triton.rotary: OK')"
   python3 -c "import skyrl_gym; print(f'skyrl_gym loaded from: {skyrl_gym.__file__}')"
   echo "=== DIAGNOSTIC: Test vLLM CUDA module ==="
   python3 -c "import vllm._C; print('vllm._C imported successfully')"
