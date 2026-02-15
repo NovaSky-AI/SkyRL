@@ -46,6 +46,7 @@
 # v0.1.24: Don't use 'uv run' in run phase (re-syncs lockfile, downgrades PyTorch)
 # v0.1.25: Also remove 'uv run' from setup PREPARE_CMD (same issue)
 # v0.1.26: Install missing deps (datasets, ray, etc.) since --no-deps skips them
+# v0.1.27: Remove 'ray stop' (kills SkyPilot's Ray cluster that manages the job)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -193,9 +194,7 @@ run: |
   python3 -c "import vllm; print(f'vllm: {vllm.__version__}')"
   python3 -c "import vllm._C; print('vllm._C imported successfully')"
 
-  # Kill any stale Ray clusters
-  ray stop || true
-
+  # Don't run 'ray stop' - it kills SkyPilot's Ray cluster that manages this job
   export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
   export RAY_object_store_memory=10000000000
   ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
