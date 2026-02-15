@@ -35,6 +35,8 @@
 #          --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
 # v0.1.16: Enable preserved thinking for multi-turn tool use
 #          reasoning_parser=glm45, tool_call_parser=glm47 (from HF model card)
+# v0.1.17: Install vLLM BEFORE uv sync (from B200 debugging)
+#          vLLM brings PyTorch 2.10.0, uv sync after won't downgrade it
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -123,19 +125,22 @@ setup: |
   uv venv --python 3.12 --seed
   source .venv/bin/activate
 
-  # GLM-4.7-Flash requires:
-  # - vLLM nightly (stable vLLM requires transformers<5)
-  # - transformers 5.x from source (glm4_moe_lite architecture)
-  # Install ALL deps here so we don't need --isolated in run phase
-  # (--isolated would rebuild flash-attn with wrong PyTorch ABI)
-  uv sync  # Base deps only, no vllm extra
-
-  # Install vLLM using exact command from HuggingFace model card:
+  # GLM-4.7-Flash requires specific install order (from B200 debugging):
+  # 1. vLLM FIRST - brings PyTorch 2.10.0 (compiled against this version)
+  # 2. uv sync - base deps, won't downgrade PyTorch
+  # 3. transformers from source - overrides vLLM's 4.57.x downgrade
+  #
+  # Install vLLM FIRST using HuggingFace model card command:
   # https://huggingface.co/zai-org/GLM-4.7-Flash
-  # Then install transformers from source AFTER to override vLLM's downgrade
-  # Finally uninstall torchvision (vLLM installs it but text models don't need it)
   uv pip install vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
+
+  # Now install base deps (won't downgrade PyTorch since it's already installed)
+  uv sync
+
+  # transformers from source for glm4_moe_lite architecture
   uv pip install git+https://github.com/huggingface/transformers.git
+
+  # Uninstall torchvision (vLLM installs it but text models don't need it)
   uv pip uninstall torchvision || true
 
   # All runtime deps (previously in --with flags)
