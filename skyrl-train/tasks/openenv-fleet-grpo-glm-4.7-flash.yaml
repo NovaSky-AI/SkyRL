@@ -47,6 +47,7 @@
 # v0.1.25: Also remove 'uv run' from setup PREPARE_CMD (same issue)
 # v0.1.26: Install missing deps (datasets, ray, etc.) since --no-deps skips them
 # v0.1.27: Remove 'ray stop' (kills SkyPilot's Ray cluster that manages the job)
+# v0.1.28: Add ALL deps from pyproject.toml (--no-deps skips them all)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -137,8 +138,8 @@ setup: |
   # Uninstall torchvision (vLLM installs it but text models don't need it)
   uv pip uninstall torchvision || true
 
-  # Core deps (--no-deps skipped these)
-  uv pip install datasets==4.0.0 ray==2.51.1 hydra-core==1.3.2 accelerate peft polars pyarrow
+  # Core deps (--no-deps skipped these, from pyproject.toml)
+  uv pip install loguru tqdm ninja tensorboard func_timeout hydra-core==1.3.2 accelerate torchdata omegaconf ray==2.51.1 peft debugpy==1.8.0 hf_transfer datasets==4.0.0 tensordict jaxtyping skyrl-gym polars s3fs fastapi uvicorn pybind11 setuptools pyarrow
 
   # All runtime deps (previously in --with flags)
   uv pip install "litellm>=1.75.5" boto3 wandb awscli
