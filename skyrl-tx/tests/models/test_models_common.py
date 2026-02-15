@@ -101,21 +101,9 @@ class TestGradientCheckpointing:
         mesh_axes: tuple[str, str],
     ) -> None:
         """KV cache should be populated even with gradient checkpointing enabled."""
-        config, model = create_model(
-            model_name,
-            config_cls,
-            model_cls,
-            mesh_axes,
-            max_lora_adapters=1,
-            max_lora_rank=1,
+        _, config, out = self._forward(
+            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True
         )
-        config.gradient_checkpointing = True
-
-        batch_size, seq_len = 2, 8
-        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
-        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-
-        out = model(input_ids, attention_mask=attention_mask)
 
         # keys is a list with one entry per layer
         assert len(out.kv_cache.keys) == config.num_hidden_layers
