@@ -427,6 +427,7 @@ class AdvantageEstimator(StrEnum):
     GRPO = "grpo"
     RLOO = "rloo"
     REINFORCE_PP = "reinforce++"
+    MAXRL = "MAXRL"
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -453,6 +454,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
             "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
+            "MAXRL": [AdvantageEstimator.MAXRL, compute_maxrl_advantage],
         }
 
         for ae_name, (ae_type, ae_func) in ae_types.items():
@@ -1177,6 +1179,38 @@ def compute_grpo_outcome_advantage(
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
+
+
+@register_advantage_estimator(AdvantageEstimator.MAXRL)
+def compute_maxrl_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute advantage for MAXRL using mean-normalized group-relative rewards."""
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2score = defaultdict(list)
+    id2mean = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        for i in range(bsz):
+            scores[i] = (scores[i] - id2mean[index[i]]) / (id2mean[index[i]] + epsilon)
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
