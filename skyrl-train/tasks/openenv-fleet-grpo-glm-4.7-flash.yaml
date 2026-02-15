@@ -51,6 +51,11 @@
 # v0.1.29: Install skyrl-gym from local path (not PyPI - different package)
 # v0.1.30: Use +generator.reasoning_parser (add new key to Hydra config)
 # v0.1.31: DEBUG flash-attn build - check nvcc, CUDA, pyproject.toml settings
+# v0.1.32: Skip flash-attn entirely, use FLASHINFER attention backend
+#          - flash-attn has NO prebuilt wheels for PyTorch 2.10.0 (vLLM nightly)
+#          - Building from source requires nvcc which RunPod doesn't have
+#          - FLASHINFER is bundled with vLLM and works without external deps
+#          - Set VLLM_ATTENTION_BACKEND=FLASHINFER in environment
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -84,6 +89,9 @@ envs:
   FLEET_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
+  # Use FLASHINFER attention backend (bundled with vLLM, no flash-attn needed)
+  # flash-attn has no prebuilt wheels for PyTorch 2.10.0 and building requires nvcc
+  VLLM_ATTENTION_BACKEND: "FLASHINFER"
   ENV_KEYS: ""
   MODALITY: "tool_use"
   MAX_TURNS: 50
@@ -125,48 +133,32 @@ setup: |
 
   # GLM-4.7-Flash requires specific install order:
   # 1. vLLM nightly FIRST - brings PyTorch 2.10.0 (vLLM compiled against this version)
-  # 2. flash-attn - needs PyTorch installed first, use prebuilt wheels
-  # 3. transformers from source - for glm4_moe_lite architecture (overrides vLLM's 4.x pin)
-  # 4. skyrl-gym from local - PyPI has different package with same name
-  # 5. Other deps via pip (NOT uv sync - it enforces lockfile and downgrades PyTorch)
+  # 2. transformers from source - for glm4_moe_lite architecture (overrides vLLM's 4.x pin)
+  # 3. skyrl-gym from local - PyPI has different package with same name
+  # 4. Other deps via pip (NOT uv sync - it enforces lockfile and downgrades PyTorch)
   #
   # Why not uv sync? The lockfile pins torch==2.9.0 but vLLM nightly needs torch==2.10.0
   # Why --no-deps for main package? Prevents installing vllm/transformers from PyPI
+  # Why no flash-attn? No prebuilt wheels for torch 2.10, and RunPod lacks nvcc for source build
+  #                    We use FLASHINFER backend instead (bundled with vLLM)
 
   # Step 1: Install vLLM nightly (HuggingFace model card command)
   # https://huggingface.co/zai-org/GLM-4.7-Flash
   uv pip install vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
 
-  # Step 2: Install flash-attn - DEBUG to understand build behavior
-  echo "=== DEBUG: CUDA toolkit check ==="
-  which nvcc || echo "nvcc not found in PATH"
-  nvcc --version || echo "nvcc --version failed"
-  echo "CUDA_HOME=$CUDA_HOME"
-  echo "=== DEBUG: Check if flash-attn wheel exists for our torch version ==="
-  python3 -c "import torch; print(f'torch version: {torch.__version__}')"
-  python3 -c "import torch; print(f'CUDA version: {torch.version.cuda}')"
-  echo "=== DEBUG: Check pyproject.toml build variables ==="
-  cat pyproject.toml | grep -A5 "extra-build-variables" || echo "No extra-build-variables found"
-  echo "=== DEBUG: Try pip install with verbose to see what happens ==="
-  # Use pip directly (not uv) to bypass uv's pyproject.toml settings
-  pip install flash-attn --no-build-isolation -v 2>&1 | tail -100 || echo "pip install failed, trying uv"
-  echo "=== DEBUG: Check if flash_attn_2_cuda was built ==="
-  python3 -c "import flash_attn; print(dir(flash_attn))" || echo "flash_attn import failed"
-  python3 -c "import flash_attn_2_cuda; print('flash_attn_2_cuda exists')" || echo "flash_attn_2_cuda module NOT found"
-
-  # Step 3: Install transformers from source for glm4_moe_lite architecture
+  # Step 2: Install transformers from source for glm4_moe_lite architecture
   uv pip install git+https://github.com/huggingface/transformers.git
 
-  # Step 4: Install skyrl-gym from LOCAL path (NOT PyPI - different package!)
+  # Step 3: Install skyrl-gym from LOCAL path (NOT PyPI - different package!)
   uv pip install -e ../skyrl-gym
 
-  # Step 5: Install main package without deps (deps installed separately to avoid version conflicts)
+  # Step 4: Install main package without deps (deps installed separately to avoid version conflicts)
   uv pip install -e . --no-deps
 
-  # Step 6: Install remaining core deps from pyproject.toml (--no-deps skipped these)
+  # Step 5: Install remaining core deps from pyproject.toml (--no-deps skipped these)
   uv pip install loguru tqdm ninja tensorboard func_timeout hydra-core==1.3.2 accelerate torchdata omegaconf ray==2.51.1 peft debugpy==1.8.0 hf_transfer datasets==4.0.0 tensordict jaxtyping polars s3fs fastapi uvicorn pybind11 setuptools pyarrow
 
-  # Step 7: Install runtime deps
+  # Step 6: Install runtime deps
   uv pip install "litellm>=1.75.5" boto3 wandb awscli
   uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
 
@@ -178,16 +170,16 @@ setup: |
   pip show torch | grep -E "^(Name|Version)"
   pip show transformers | grep -E "^(Name|Version)"
   pip show vllm | grep -E "^(Name|Version)"
-  pip show flash-attn | grep -E "^(Name|Version)"
   pip show skyrl-gym | grep -E "^(Name|Version|Location)"
   echo "=== DIAGNOSTIC: Test imports ==="
   python3 -c "import torch; print(f'torch: {torch.__version__}')"
   python3 -c "import transformers; print(f'transformers: {transformers.__version__}')"
   python3 -c "import vllm; print(f'vllm: {vllm.__version__}')"
-  python3 -c "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')"
   python3 -c "import skyrl_gym; print(f'skyrl_gym loaded from: {skyrl_gym.__file__}')"
   echo "=== DIAGNOSTIC: Test vLLM CUDA module ==="
   python3 -c "import vllm._C; print('vllm._C imported successfully')"
+  echo "=== DIAGNOSTIC: FLASHINFER backend ==="
+  echo "VLLM_ATTENTION_BACKEND=$VLLM_ATTENTION_BACKEND"
   echo "=== DIAGNOSTIC: Complete ==="
 
   mkdir -p $HOME/data/fleet
