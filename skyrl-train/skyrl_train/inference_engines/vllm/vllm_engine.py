@@ -20,22 +20,20 @@ try:
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
     from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+        ChatCompletionResponse,
+    )
+    from vllm.entrypoints.openai.completion.protocol import (
+        CompletionRequest,
+        CompletionResponse,
+    )
+    from vllm.entrypoints.openai.protocol import ErrorResponse
 except ImportError:
     # vLLM stable (<=0.13) - flat module structure
     from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
     from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
     from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-
-# Protocol imports - try new path first
-try:
-    from vllm.entrypoints.openai.models.protocol import (
-        ChatCompletionRequest,
-        ChatCompletionResponse,
-        ErrorResponse,
-        CompletionRequest,
-        CompletionResponse,
-    )
-except ImportError:
     from vllm.entrypoints.openai.protocol import (
         ChatCompletionRequest,
         ChatCompletionResponse,
