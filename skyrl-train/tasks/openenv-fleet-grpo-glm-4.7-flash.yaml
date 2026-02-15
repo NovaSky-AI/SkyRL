@@ -50,7 +50,7 @@
 # v0.1.28: Add ALL deps from pyproject.toml (--no-deps skips them all)
 # v0.1.29: Install skyrl-gym from local path (not PyPI - different package)
 # v0.1.30: Use +generator.reasoning_parser (add new key to Hydra config)
-# v0.1.31: Fix flash-attn: override pyproject.toml's SKIP_CUDA_BUILD=TRUE with FALSE
+# v0.1.31: DEBUG flash-attn build - check nvcc, CUDA, pyproject.toml settings
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -137,10 +137,22 @@ setup: |
   # https://huggingface.co/zai-org/GLM-4.7-Flash
   uv pip install vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
 
-  # Step 2: Install flash-attn (CUDA build, ~20min)
-  # MUST set FALSE to override pyproject.toml's [tool.uv.extra-build-variables] which sets TRUE
-  # Without this override, flash_attn_2_cuda module is not built!
-  FLASH_ATTENTION_SKIP_CUDA_BUILD=FALSE uv pip install flash-attn
+  # Step 2: Install flash-attn - DEBUG to understand build behavior
+  echo "=== DEBUG: CUDA toolkit check ==="
+  which nvcc || echo "nvcc not found in PATH"
+  nvcc --version || echo "nvcc --version failed"
+  echo "CUDA_HOME=$CUDA_HOME"
+  echo "=== DEBUG: Check if flash-attn wheel exists for our torch version ==="
+  python3 -c "import torch; print(f'torch version: {torch.__version__}')"
+  python3 -c "import torch; print(f'CUDA version: {torch.version.cuda}')"
+  echo "=== DEBUG: Check pyproject.toml build variables ==="
+  cat pyproject.toml | grep -A5 "extra-build-variables" || echo "No extra-build-variables found"
+  echo "=== DEBUG: Try pip install with verbose to see what happens ==="
+  # Use pip directly (not uv) to bypass uv's pyproject.toml settings
+  pip install flash-attn --no-build-isolation -v 2>&1 | tail -100 || echo "pip install failed, trying uv"
+  echo "=== DEBUG: Check if flash_attn_2_cuda was built ==="
+  python3 -c "import flash_attn; print(dir(flash_attn))" || echo "flash_attn import failed"
+  python3 -c "import flash_attn_2_cuda; print('flash_attn_2_cuda exists')" || echo "flash_attn_2_cuda module NOT found"
 
   # Step 3: Install transformers from source for glm4_moe_lite architecture
   uv pip install git+https://github.com/huggingface/transformers.git

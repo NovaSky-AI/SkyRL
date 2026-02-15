@@ -43,6 +43,10 @@ on:
         description: "Dataset version in S3 (e.g., v0.1, v0.2, v0.3)"
         type: string
         default: "v0.3"
+      disable_slack:
+        description: "Disable Slack notifications (for debugging)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -99,6 +103,7 @@ jobs:
           echo "wandb_run_name=fleet_${{ inputs.modality }}_${RUN_ID}" >> $GITHUB_OUTPUT
 
       - name: Notify Slack - Starting
+        if: ${{ inputs.disable_slack != true }}
         id: slack_start
         uses: slackapi/slack-github-action@v2.0.0
         with:
@@ -152,7 +157,7 @@ jobs:
           sky down "${{ steps.cluster.outputs.name }}" -y || true
 
       - name: Notify Slack - Completed
-        if: steps.launch.outputs.status == 'SUCCEEDED'
+        if: steps.launch.outputs.status == 'SUCCEEDED' && inputs.disable_slack != true
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -173,7 +178,7 @@ jobs:
             }
 
       - name: Notify Slack - Failed
-        if: failure()
+        if: failure() && inputs.disable_slack != true
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -194,7 +199,7 @@ jobs:
             }
 
       - name: Notify Slack - Cancelled
-        if: cancelled()
+        if: cancelled() && inputs.disable_slack != true
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
