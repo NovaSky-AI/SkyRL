@@ -27,6 +27,8 @@
 # v0.1.12: Install vLLM FIRST, then transformers from source AFTER
 #          vLLM has pinned deps that downgrade transformers to 4.57.x
 #          Installing transformers after vLLM overrides this downgrade
+# v0.1.13: Install vLLM from source (git+) instead of nightly wheels
+#          Nightly wheels have availability issues, source build is more reliable
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -122,10 +124,11 @@ setup: |
   # (--isolated would rebuild flash-attn with wrong PyTorch ABI)
   uv sync  # Base deps only, no vllm extra
 
-  # Install vLLM FIRST - it has pinned deps (PyTorch 2.10.0, transformers 4.57.x)
+  # Install vLLM from source - GLM-4.7-Flash requires main branch (glm4_moe_lite architecture)
+  # Nightly wheels have availability issues, building from source is more reliable
   # Then install transformers from source AFTER to override vLLM's downgrade
   # Finally uninstall torchvision (vLLM installs it but text models don't need it)
-  uv pip install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+  uv pip install git+https://github.com/vllm-project/vllm.git
   uv pip install git+https://github.com/huggingface/transformers.git
   uv pip uninstall torchvision || true
 
