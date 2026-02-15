@@ -104,11 +104,11 @@ class LoRAMixin:
         intermediate = self._apply_lora_weight(self.lora_A[...], x_sorted, adapter_indices_sorted, group_sizes)
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
-        # Unsort, scale, reshape to match base_output
+        # Unsort, scale, reshape
         lora_output = lora_output_sorted[unsort_indices].reshape(base_output.shape)
         scaling = self.lora_scaling[...][adapter_indices_expanded]
         lora_output = lora_output * scaling.reshape(base_output.shape[:-1] + (1,))
-        return base_output + lora_output.reshape(base_output.shape)
+        return base_output + lora_output
 
 
 class LoRAEmbed(LoRAMixin, nnx.Embed):
