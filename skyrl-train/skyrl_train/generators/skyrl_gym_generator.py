@@ -175,6 +175,15 @@ class SkyRLGymGenerator(GeneratorInterface):
             if not self.use_conversation_multi_turn:
                 raise ValueError("`step_wise_trajectories` doesn't support `use_conversation_multi_turn=False`")
 
+        if self.generator_cfg.previous_observation_only:
+            if not self.generator_cfg.step_wise_trajectories:
+                raise ValueError("`previous_observation_only` doesn't support `step_wise_trajectories=False`")
+            # The below error is redundant given the current config, but we keep it here to future-proof the code in case `step_wise_trajectories`  eventually supports `custom_chat_template`.
+            if self.custom_chat_template is not None:
+                raise ValueError(
+                    f"`previous_observation_only` doesn't support custom chat template, got {generator_cfg.chat_template}"
+                )
+
     async def _run_in_executor_if_available(self, func, *args, **kwargs):
         if (executor := self.env_executor) is not None:
             loop = asyncio.get_running_loop()
@@ -237,6 +246,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
+        previous_observation = chat_history
         initial_chat_history_length = len(chat_history)
         initial_input_ids = self.tokenizer.apply_chat_template(
             chat_history,
@@ -269,6 +279,8 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         is_step_wise = self.generator_cfg.step_wise_trajectories
 
+        is_previous_observation_only = self.generator_cfg.previous_observation_only
+
         agent_loop_output = StepWiseOutput(step_outputs=[]) if is_step_wise else None
 
         get_logprobs = self.generator_cfg.sampling_params.logprobs is not None
@@ -290,8 +302,15 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
+                use_chat_history = chat_history
+                if is_previous_observation_only:
+                    # For previous_observation_only mode, we only keep the immediate previous observation in the chat history for the next turn's generation input.
+                    use_chat_history = previous_observation
+                    assert (
+                        use_chat_history != []
+                    ), "previous_observation_only is enabled, but recieved an empty observation from the environment. Ensure that the environment always returns at least one observation message when `step` is called."
                 agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
-                    chat_history,
+                    use_chat_history,
                     chat_template=self.custom_chat_template if retokenize_chat_history else None,
                     add_generation_prompt=True,
                     tokenize=True,
@@ -334,6 +353,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             new_obs = env_step_output["observations"]
             step_reward: float = env_step_output["reward"]
             agent_loop_state.done = env_step_output["done"]
+            previous_observation = new_obs
 
             if env_step_output.get("postprocessed_action", None) is not None:
                 # TODO(Charlie): come back to this, we should deprecate postprocessed action
@@ -401,7 +421,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Close the environment
         await self._run_in_executor_if_available(env.close)
 
-        prompt_ids = agent_loop_state.input_ids[:initial_prompt_length]
+        prompt_ids = initial_input_ids
         rollout_logprobs = None
         response_ids = None
 

@@ -365,6 +365,9 @@ generator:
   rope_theta: ${trainer.rope_theta}
 
   step_wise_trajectories: false
+  previous_observation_only: false
+  # When enabled, compute loss as P(output | immediate_previous_observation) instead of
+  # P(output | full_conversation_history). This only applies when step_wise_trajectories=true.
 
 environment:
   env_class: "gsm8k"
