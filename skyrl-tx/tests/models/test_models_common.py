@@ -77,10 +77,14 @@ class TestGradientCheckpointing:
 
         hidden_states_no_ckpt = results[False]["hidden_states"]
         hidden_states_ckpt = results[True]["hidden_states"]
-        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == results[False]["num_hidden_layers"] + 1
+        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == (results[False]["num_hidden_layers"] + 1)
         for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
             np.testing.assert_allclose(
-                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
+                hs_no_ckpt,
+                hs_ckpt,
+                rtol=1e-4,
+                atol=1e-6,
+                err_msg=f"Mismatch at hidden state {i}",
             )
 
     def test_kv_cache_with_checkpointing(
@@ -92,7 +96,11 @@ class TestGradientCheckpointing:
     ) -> None:
         """KV cache should be populated even with gradient checkpointing enabled."""
         _, config, out = self._forward(
-            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True
+            model_name,
+            config_cls,
+            model_cls,
+            mesh_axes,
+            gradient_checkpointing=True,
         )
 
         # keys is a list with one entry per layer
@@ -161,7 +169,14 @@ def test_chunked_logprobs(
     del model, outputs
 
     # Load chunked model, compute logprobs
-    _, model = load_model(model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size, **common_kwargs)
+    _, model = load_model(
+        model_name,
+        config_cls,
+        model_cls,
+        mesh_axes,
+        loss_chunk_size=chunk_size,
+        **common_kwargs,
+    )
     outputs = model(input_ids, attention_mask=attention_mask)
     logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
 

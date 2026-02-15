@@ -28,10 +28,12 @@ from jaxtyping import Float
 from loguru import logger
 from omegaconf import DictConfig
 
-from skyrl.train.config import AlgorithmConfig
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import apply_off_policy_correction
+from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
+    apply_off_policy_correction,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
+from skyrl.train.config import AlgorithmConfig
 
 # Import cloudpickle for function serialization
 try:
@@ -427,6 +429,7 @@ class AdvantageEstimator(StrEnum):
     GRPO = "grpo"
     RLOO = "rloo"
     REINFORCE_PP = "reinforce++"
+    MAXRL = "maxrl"
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -453,6 +456,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
             "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
+            "maxrl": [AdvantageEstimator.MAXRL, compute_maxrl_advantage],
         }
 
         for ae_name, (ae_type, ae_func) in ae_types.items():
@@ -609,7 +613,9 @@ def sapo_policy_loss(
         # The SAPO paper uses sequence_mean reduction; there's no reason
         # why a user couldn't use token_mean reduction, but
         # it's not clear whether it would be stable or not.
-        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
+        from loguru import (
+            logger as logger_,  # have to do lazy import to avoid pickling error
+        )
 
         logger_.warning(f"With SAPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
 
@@ -685,7 +691,9 @@ def gspo_policy_loss(
         # The GSPO paper uses sequence_mean reduction; there's no reason
         # why a user couldn't use token_mean reduction, but
         # it's not clear whether it would be stable or not.
-        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
+        from loguru import (
+            logger as logger_,  # have to do lazy import to avoid pickling error
+        )
 
         logger_.warning(f"With GSPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
 
@@ -1175,6 +1183,41 @@ def compute_grpo_outcome_advantage(
         for i in range(bsz):
             if grpo_norm_by_std:
                 scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            else:
+                scores[i] = scores[i] - id2mean[index[i]]
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
+
+
+@register_advantage_estimator(AdvantageEstimator.MAXRL)
+def compute_maxrl_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute advantage for MAXRL using mean-normalized group-relative rewards."""
+    scores = token_level_rewards.sum(dim=-1)
+
+    id2score = defaultdict(list)
+    id2mean = {}
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])
+        for idx in id2score:
+            if len(id2score[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+            elif len(id2score[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+        for i in range(bsz):
+            if len(id2score[index[i]]) > 1:
+                scores[i] = (scores[i] - id2mean[index[i]]) / (id2mean[index[i]] + epsilon)
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(-1) * response_mask
