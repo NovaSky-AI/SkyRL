@@ -93,37 +93,73 @@ class BatchIterator:
         return batch_to_experience(batch)
 
 
-def _select_indices(data: TrainingInputBatch, indices: torch.Tensor, max_seq_len: int = 0) -> TrainingInputBatch:
-    """Index a `TrainingInputBatch` with a 1d int tensor of row indices."""
+def _select_indices(data: TrainingInputBatch, indices: torch.Tensor) -> TrainingInputBatch:
+    """Index a `TrainingInputBatch` and trim padding from both sides."""
+    original_total_len = data["sequences"].shape[1]
+    original_resp_len = data.metadata.get("response_length", 0)
+
+    left_trim = 0
+    right_trim = 0
+    attn = data.get("attention_mask")
+    if attn is not None:
+        selected_attn = attn[indices]
+        attn_long = selected_attn.to(torch.long)
+
+        # left trim: min first-1 position (shared leading PADs)
+        left_trim = attn_long.argmax(dim=1).min().item()
+
+        # right trim: total_len - max(rightmost-1 position + 1)
+        reversed_attn = attn_long.flip(dims=[1])
+        rightmost_plus_1 = selected_attn.shape[1] - reversed_attn.argmax(dim=1)
+        right_trim = original_total_len - rightmost_plus_1.max().item()
+
+    new_resp_len = max(original_resp_len - right_trim, 0) if right_trim > 0 else original_resp_len
+
     selected = {}
     for key, value in data.items():
         if value is not None:
             val = value[indices]
-            if max_seq_len > 0 and val.ndim >= 2:
-                val = val[:, :max_seq_len]  # trim sequence dim
+            if val.ndim >= 2 and (right_trim > 0 or left_trim > 0):
+                if val.shape[1] == original_total_len:
+                    # total-width tensor (sequences, attention_mask): trim both sides
+                    end = val.shape[1] - right_trim
+                    val = val[:, left_trim:end]
+                elif right_trim > 0:
+                    # response-width tensor (loss_mask, advantages, …): right only
+                    val = val[:, :-right_trim]
             selected[key] = val
         else:
             selected[key] = None
+
     batch = TrainingInputBatch(selected)
-    batch.metadata = data.metadata
+    # give each micro batch its own metadata
+    batch.metadata = dict(data.metadata)
+    if right_trim > 0 and "response_length" in batch.metadata:
+        batch.metadata["response_length"] = max(new_resp_len, 1)
     return batch
 
 
 class MemoryAwareBatchIterator:
     """Yield micro-batches packed by sequence length to maximise GPU utilisation.
 
-    Get each sequence's actual length and greedily batch them by size
-    such that batch_size * max_seq_len <= token_budget
+    The idea here is to:
+        1. Measure each sequence's width from the attention mask. Go to the rightmost 1 + 1
+        2. Sort descending by effective width
+        3. Greedily pack into micro batches
+        4. Trim each micro batch (left and right padding) after grouping
     """
 
     def __init__(self, data: TrainingInputBatch, token_budget: int):
         self.data = data
         self.token_budget = token_budget
 
-        # get per-sequence actual lengths from attention_mask
         attention_mask = data.get("attention_mask")
         if attention_mask is not None:
-            seq_lengths = attention_mask.sum(dim=1)
+            seq_len_dim = attention_mask.shape[1]
+            # For each row find the first 1 from the right
+            reversed_mask = attention_mask.flip(dims=[1])
+            first_one_from_right = reversed_mask.to(torch.long).argmax(dim=1)
+            seq_lengths = seq_len_dim - first_one_from_right
         else:
             seq_lengths = torch.full((data.batch_size,), data["sequences"].shape[1], dtype=torch.long)
 
@@ -149,13 +185,13 @@ class MemoryAwareBatchIterator:
             else:
                 if current_indices:
                     idx_tensor = torch.tensor(current_indices, dtype=torch.long)
-                    self._micro_batches.append(_select_indices(data, idx_tensor, current_max_len))
+                    self._micro_batches.append(_select_indices(data, idx_tensor))
                 current_indices = [idx]
                 current_max_len = length
 
         if current_indices:
             idx_tensor = torch.tensor(current_indices, dtype=torch.long)
-            self._micro_batches.append(_select_indices(data, idx_tensor, current_max_len))
+            self._micro_batches.append(_select_indices(data, idx_tensor))
 
         self._iter = iter(self._micro_batches)
 
