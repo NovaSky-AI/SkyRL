@@ -46,7 +46,7 @@ uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.0.5b_int8 --
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
-  generator.sampling_params.logprobs=0 \
+  generator.sampling_params.logprobs=1 \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \
   trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \

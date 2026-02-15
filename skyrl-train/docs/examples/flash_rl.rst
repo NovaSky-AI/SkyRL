@@ -67,10 +67,10 @@ We highlight some important training parameters configured for FlashRL from our 
         ...
         trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
         trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
-        generator.sampling_params.logprobs=0 \
+        generator.sampling_params.logprobs=1 \
         ...
 
-Here, we've configured training to use TIS with the importance sampling ratio cap of 8.0. ``generator.sampling_params.logprobs=0`` ensures that logprobs for the chosen tokens are returned by the inference engine, which is required for TIS. Note that for making sure the FlashRL patches are applied for vLLM, we use the ``FLASHRL_CONFIG`` environment variable in ``examples/flash_rl/.env.int8``: 
+Here, we've configured training to use TIS with the importance sampling ratio cap of 8.0. ``generator.sampling_params.logprobs=1`` ensures that logprobs for the chosen tokens are returned by the inference engine, which is required for TIS. Note that for making sure the FlashRL patches are applied for vLLM, we use the ``FLASHRL_CONFIG`` environment variable in ``examples/flash_rl/.env.int8``: 
 
 .. code-block:: bash
     :caption: Environment variables at ``examples/flash_rl/.env.int8``

@@ -184,6 +184,7 @@ class RemoteInferenceClient:
             raise ValueError("n > 1 is not supported. Use `config.generator.n_samples_per_prompt` instead.")
 
         session_ids = input_batch.get("session_ids")
+        get_logprobs = sampling_params.get("logprobs") is not None
 
         # Create parallel tasks for all prompts
         # Each task handles its own retry on abort
@@ -203,7 +204,7 @@ class RemoteInferenceClient:
             responses=[r["response"] for r in results],
             stop_reasons=[r["stop_reason"] for r in results],
             response_ids=[r["response_ids"] for r in results],
-            response_logprobs=None,
+            response_logprobs=[r["response_logprobs"] for r in results] if get_logprobs else None,
         )
 
     # TODO: Delete retry logic when vLLM RFC #32103 lands with PauseMode.KEEP
@@ -227,7 +228,7 @@ class RemoteInferenceClient:
             Dict with keys: response, stop_reason, response_ids
         """
         session = await self._get_session()
-        url = f"{self.proxy_url}/v1/completions"
+        url = f"{self.proxy_url}/inference/v1/generate"
 
         # Determine max_tokens key and original value
         max_key = None
@@ -238,9 +239,10 @@ class RemoteInferenceClient:
         original_max_tokens = sampling_params.get(max_key) if max_key else None
 
         # Accumulate across retries
-        accum_text = ""
         accum_token_ids: List[int] = []
         stop_reason = "abort"
+
+        response_logprobs: Optional[List[float]] = []
 
         while stop_reason == "abort":
             # Build payload with accumulated context
@@ -248,15 +250,20 @@ class RemoteInferenceClient:
             if original_max_tokens is not None and max_key:
                 remaining = original_max_tokens - len(accum_token_ids)
                 if remaining <= 0:
+                    # If `remaining` is zero, but the stop_reason was "abort",
+                    # we assume that the generation was interrupted but has reached the max length
+                    stop_reason = "length"
                     break
                 cur_params[max_key] = remaining
 
             # New prompt = original + accumulated tokens
-            new_prompt = prompt_token_ids + accum_token_ids
+            new_prompt_ids = prompt_token_ids + accum_token_ids
 
-            payload = cur_params.copy()
-            payload["model"] = self.model_name
-            payload["prompt"] = new_prompt
+            payload = {
+                "sampling_params": cur_params,
+                "model": self.model_name,
+                "token_ids": new_prompt_ids,
+            }
 
             headers = {"Content-Type": "application/json"}
             if session_id:
@@ -267,24 +274,23 @@ class RemoteInferenceClient:
                 response = await resp.json()
 
             choice = response["choices"][0]
-            new_text = choice["text"]
+            new_token_ids = choice["token_ids"]
             stop_reason = choice["finish_reason"]
+            logprobs = choice.get("logprobs", None)
+            if logprobs is not None:
+                logprobs_content = choice["logprobs"].get("content", [])
+                if logprobs_content:
+                    response_logprobs.extend([logprob_info["logprob"] for logprob_info in logprobs_content])
 
-            # Accumulate text
-            accum_text += new_text
-            # Tokenize the new text to get token IDs for next iteration
-            if stop_reason == "abort" and new_text:
-                new_token_ids = (await self.tokenize([new_text], add_special_tokens=False))[0]
-                accum_token_ids.extend(new_token_ids)
-
-        # Final response
-        # Tokenize full accumulated text for response_ids
-        final_token_ids = (await self.tokenize([accum_text], add_special_tokens=False))[0] if accum_text else []
+            # Accumulate token ids
+            accum_token_ids += new_token_ids
 
         return {
-            "response": accum_text,
+            # Another vllm server request per sample for detokenization is bad - we should just store tokenizer in the RemoteInferenceClient
+            "response": (await self.detokenize([accum_token_ids]))[0],
             "stop_reason": stop_reason,
-            "response_ids": final_token_ids,
+            "response_ids": accum_token_ids,
+            "response_logprobs": response_logprobs if len(response_logprobs) > 0 else None,
         }
 
     async def chat_completion(

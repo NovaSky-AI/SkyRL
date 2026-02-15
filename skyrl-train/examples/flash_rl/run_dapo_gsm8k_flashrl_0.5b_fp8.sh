@@ -51,7 +51,7 @@ uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.fp8 --with v
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
-  generator.sampling_params.logprobs=0 \
+  generator.sampling_params.logprobs=1 \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \

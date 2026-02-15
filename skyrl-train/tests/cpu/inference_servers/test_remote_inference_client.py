@@ -46,6 +46,18 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             ]
         }
 
+    @app.post("/inference/v1/generate")
+    async def generate(request: Request):
+        body = await request.json()  # Consume body
+        num_prompts = len(body.get("token_ids", []))
+
+        return {
+            "choices": [
+                {"request_id": "dummy", "token_ids": [i, i + 1, i + 2], "finish_reason": "stop"}
+                for i in range(num_prompts)
+            ]
+        }
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         return {"choices": [{"message": {"content": f"Chat from server {server_id}"}}]}
@@ -381,23 +393,29 @@ class TestRetryOnAbort:
     def abort_mock_server(self):
         """Create a mock server that returns abort on first call, then stop."""
         app = FastAPI()
-        call_count = {"completions": 0}
+        call_count = {"generations": 0}
 
         @app.get("/health")
         async def health():
             return {"status": "ok"}
 
-        @app.post("/v1/completions")
-        async def completions(request: Request):
-            call_count["completions"] += 1
+        @app.post("/inference/v1/generate")
+        async def generate(request: Request):
+            call_count["generations"] += 1
             await request.json()  # Consume body
 
             # First call returns abort with partial response
-            if call_count["completions"] == 1:
-                return {"choices": [{"index": 0, "text": "Partial ", "finish_reason": "abort"}]}
+            if call_count["generations"] == 1:
+                return {"choices": [{"request_id": "dummy", "token_ids": [1, 2, 3], "finish_reason": "abort"}]}
             # Second call returns complete response
             else:
-                return {"choices": [{"index": 0, "text": "response complete", "finish_reason": "stop"}]}
+                return {"choices": [{"request_id": "dummy", "token_ids": [4, 5, 6], "finish_reason": "stop"}]}
+
+        @app.post("/v1/completions")
+        async def completions(request: Request):
+            await request.json()  # Consume body
+
+            return {"choices": [{"index": 0, "text": "Dummy response", "finish_reason": "stop"}]}
 
         @app.post("/tokenize")
         async def tokenize(request: Request):
@@ -406,6 +424,14 @@ class TestRetryOnAbort:
             # Simple tokenization: one token per word
             tokens = [hash(word) % 10000 for word in prompt.split()]
             return {"tokens": tokens}
+
+        @app.post("/detokenize")
+        async def detokenize(request: Request):
+            body = await request.json()
+            token_ids = body.get("tokens", "")
+            # Simple detokenization: one word per token
+            tokens = [str(i) for i in token_ids]
+            return {"prompt": " ".join(tokens)}
 
         @app.get("/get_server_info")
         async def get_server_info():
@@ -455,8 +481,8 @@ class TestRetryOnAbort:
 
             # Should get complete response after retry
             assert result["stop_reasons"][0] == "stop"
-            assert result["responses"][0] == "Partial response complete"
-            assert call_count["completions"] == 2
+            assert result["responses"][0] == "1 2 3 4 5 6"
+            assert call_count["generations"] == 2
             # Should have response_ids from tokenization
             assert len(result["response_ids"][0]) > 0
         finally:
