@@ -37,6 +37,7 @@
 #          reasoning_parser=glm45, tool_call_parser=glm47 (from HF model card)
 # v0.1.17: Install vLLM BEFORE uv sync (from B200 debugging)
 #          vLLM brings PyTorch 2.10.0, uv sync after won't downgrade it
+# v0.1.18: Use uv sync --inexact to prevent removing vLLM
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -134,8 +135,8 @@ setup: |
   # https://huggingface.co/zai-org/GLM-4.7-Flash
   uv pip install vllm --pre --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
 
-  # Now install base deps (won't downgrade PyTorch since it's already installed)
-  uv sync
+  # Now install base deps (--inexact prevents removing vLLM)
+  uv sync --inexact
 
   # transformers from source for glm4_moe_lite architecture
   uv pip install git+https://github.com/huggingface/transformers.git
