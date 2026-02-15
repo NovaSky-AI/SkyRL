@@ -429,7 +429,7 @@ class AdvantageEstimator(StrEnum):
     GRPO = "grpo"
     RLOO = "rloo"
     REINFORCE_PP = "reinforce++"
-    MAXRL = "MAXRL"
+    MAXRL = "maxrl"
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -456,7 +456,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
             "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
-            "MAXRL": [AdvantageEstimator.MAXRL, compute_maxrl_advantage],
+            "maxrl": [AdvantageEstimator.MAXRL, compute_maxrl_advantage],
         }
 
         for ae_name, (ae_type, ae_func) in ae_types.items():
