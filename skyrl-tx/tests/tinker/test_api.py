@@ -58,7 +58,7 @@ def start_api_server(overrides: dict[str, str] | None = None):
                 "host": "0.0.0.0",
                 "port": str(TEST_SERVER_PORT),
                 "base-model": BASE_MODEL,
-                "backend-config": '{"max_lora_adapters": 4}',
+                "backend-config": '{"max_lora_adapters": 4, "deterministic": true}',
                 "database-url": f"sqlite:///{db_path}",
             }
             if overrides:
@@ -186,16 +186,34 @@ def test_training_workflow(service_client):
     fwdbwd_result3 = training_client.forward_backward(processed_examples, "cross_entropy").result()
     assert fwdbwd_result3.loss_fn_outputs == fwdbwd_result.loss_fn_outputs
 
+    # Run one train step from resume state, then save a sampler checkpoint.
+    _ = training_client.forward_backward(processed_examples, "cross_entropy").result()
+    _ = training_client.optim_step(types.AdamParams(learning_rate=1e-4)).result()
     sampling_path = training_client.save_weights_for_sampler(name="final").result().path
     parsed = urlparse(sampling_path)
     training_run_id = parsed.netloc
     checkpoint_id = parsed.path.lstrip("/")
+
+    # Re-run the same train step from the same resume point and verify checkpoint bytes match.
+    training_client.load_state(resume_path)
+    _ = training_client.forward_backward(processed_examples, "cross_entropy").result()
+    _ = training_client.optim_step(types.AdamParams(learning_rate=1e-4)).result()
+    sampling_path_2 = training_client.save_weights_for_sampler(name="final_replayed").result().path
+    parsed_2 = urlparse(sampling_path_2)
+    training_run_id_2 = parsed_2.netloc
+    checkpoint_id_2 = parsed_2.path.lstrip("/")
+
     rest_client = service_client.create_rest_client()
     # Download the checkpoint
     checkpoint_response = rest_client.get_checkpoint_archive_url(training_run_id, checkpoint_id).result()
-    with tempfile.NamedTemporaryFile() as tmp_archive:
-        urllib.request.urlretrieve(checkpoint_response.url, tmp_archive.name)
-        assert os.path.getsize(tmp_archive.name) > 0
+    with urllib.request.urlopen(checkpoint_response.url) as resp:
+        checkpoint_bytes = resp.read()
+    assert len(checkpoint_bytes) > 0
+
+    checkpoint_response_2 = rest_client.get_checkpoint_archive_url(training_run_id_2, checkpoint_id_2).result()
+    with urllib.request.urlopen(checkpoint_response_2.url) as resp:
+        checkpoint_bytes_2 = resp.read()
+    assert checkpoint_bytes == checkpoint_bytes_2
 
     # List all checkpoints for the original training run
     checkpoints_response = rest_client.list_checkpoints(original_training_run_id).result()
