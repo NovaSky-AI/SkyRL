@@ -33,6 +33,8 @@
 #          which RunPod images don't include (only CUDA runtime)
 # v0.1.15: Use exact install command from HuggingFace model card
 #          --index-url https://pypi.org/simple --extra-index-url https://wheels.vllm.ai/nightly
+# v0.1.16: Enable preserved thinking for multi-turn tool use
+#          reasoning_parser=glm45, tool_call_parser=glm47 (from HF model card)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -258,6 +260,8 @@ run: |
     generator.n_samples_per_prompt=4 \
     generator.eval_n_samples_per_prompt=3 \
     generator.gpu_memory_utilization=0.7 \
+    generator.reasoning_parser=glm45 \
+    generator.tool_call_parser=glm47 \
     trainer.logger="$LOGGER" \
     trainer.project_name="fleet-task-grpo" \
     trainer.run_name="fleet_${MODALITY}_glm47flash_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
