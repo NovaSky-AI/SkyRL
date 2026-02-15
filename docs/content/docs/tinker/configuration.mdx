@@ -50,11 +50,11 @@ LoRA is configured from the **client side**, not the server. When creating a mod
 # LoRA training (default in most recipes)
 python -m tinker_cookbook.recipes.sl_loop ... lora_rank=32
 
-# Full fine-tuning
+# Full-parameter fine-tuning
 python -m tinker_cookbook.recipes.sl_loop ... lora_rank=0
 ```
 
-No server-side configuration is needed to switch between LoRA and full fine-tuning.
+No server-side configuration is needed to switch between LoRA and full-parameter fine-tuning.
 
 ## Full Config Reference
 
