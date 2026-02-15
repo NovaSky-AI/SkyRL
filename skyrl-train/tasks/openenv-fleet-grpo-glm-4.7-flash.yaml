@@ -40,6 +40,7 @@
 # v0.1.18: Use uv sync --inexact to prevent removing vLLM
 # v0.1.19: Replace uv sync with uv pip install -e . (uv sync downgrades PyTorch)
 # v0.1.20: Increase GPU count from 4 to 8 for faster training
+# v0.1.21: Fix GPU names per provider (H200-SXM for RunPod/Vast)
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -47,6 +48,7 @@ resources:
   disk_size: 300
   ports: 6479
   any_of:
+    # B200 options
     - accelerators: B200:8
       cloud: lambda
       memory: 750+
@@ -54,28 +56,17 @@ resources:
       cloud: runpod
       memory: 750+
     - accelerators: B200:8
-      cloud: vast
-      memory: 750+
-    - accelerators: B200:8
-      cloud: primeintellect
-      memory: 750+
-    - accelerators: B200:8
       cloud: nebius
       memory: 750+
+    # H200 options (use H200-SXM for RunPod/Vast)
     - accelerators: H200:8
-      cloud: lambda
+      cloud: nebius
       memory: 750+
-    - accelerators: H200:8
+    - accelerators: H200-SXM:8
       cloud: runpod
       memory: 750+
-    - accelerators: H200:8
+    - accelerators: H200-SXM:8
       cloud: vast
-      memory: 750+
-    - accelerators: H200:8
-      cloud: primeintellect
-      memory: 750+
-    - accelerators: H200:8
-      cloud: nebius
       memory: 750+
 
 num_nodes: 1
