@@ -217,7 +217,10 @@ def merge_probabilities_with_alignment_groups(
     alignment_groups: list[list[int]],
 ) -> torch.Tensor:
     """
-    Merge probabilities based on alignment groups using geometric mean.
+    Merge probabilities based on alignment groups via element-wise product + renormalization.
+
+    For multi-token groups, computes softmax(sum of log-probs), which is equivalent to
+    normalizing the element-wise product of probability distributions.
 
     Adapted from TRL's _merge_probabilities_with_alignment_groups.
 
@@ -237,7 +240,8 @@ def merge_probabilities_with_alignment_groups(
 
     for group_idx, group in enumerate(alignment_groups):
         if len(group) > 1:
-            # Multiple tokens map to this group - merge via geometric mean
+            # Multiple tokens map to this group - merge via element-wise product + renormalization
+            # This computes: softmax(log(p1) + log(p2) + ...) = normalized(p1 * p2 * ...)
             eps = 1e-8
             # Vectorized operation is more efficient than a loop
             logp = torch.log(probs[group].clamp_min(eps)).sum(dim=0)
