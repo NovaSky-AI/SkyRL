@@ -11,6 +11,7 @@
 # v0.4.1: B200:8 to fix OOM during backward pass
 # v0.4.2: disk_size 300→750, max_ckpts_to_keep=1 to fix disk full during checkpoint save
 # v0.4.3: Fix workdir ref to main (feat/vl-multimodal-support had broken prepare_dataset.py)
+# v0.4.4: S3 checkpoint resume support (keep_local=True, download from S3 via RESUME_RUN_NAME)
 
 name: fleet-task-grpo-qwen3-32b
 
@@ -61,6 +62,7 @@ envs:
   S3_DATASET_BUCKET: "fleet-internal-datasets"
   S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
   S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  RESUME_RUN_NAME: ""
   DATA_VERSION: "v0.3"
 
 setup: |

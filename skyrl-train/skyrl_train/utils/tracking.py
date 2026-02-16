@@ -31,7 +31,15 @@ import numpy as np
 class Tracking:
     supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console"]
 
-    def __init__(self, project_name, experiment_name, backends: Union[str, List[str]] = "console", config=None):
+    def __init__(
+        self,
+        project_name,
+        experiment_name,
+        backends: Union[str, List[str]] = "console",
+        config=None,
+        wandb_resume=None,
+        wandb_id=None,
+    ):
         if isinstance(backends, str):
             backends = [backends]
         for backend in backends:
@@ -43,7 +51,14 @@ class Tracking:
             import wandb
             from omegaconf import OmegaConf
 
-            wandb.init(project=project_name, name=experiment_name, config=OmegaConf.to_container(config, resolve=True))
+            wandb_kwargs = dict(
+                project=project_name, name=experiment_name, config=OmegaConf.to_container(config, resolve=True)
+            )
+            if wandb_resume is not None:
+                wandb_kwargs["resume"] = wandb_resume
+            if wandb_id is not None:
+                wandb_kwargs["id"] = wandb_id
+            wandb.init(**wandb_kwargs)
             self.logger["wandb"] = wandb
 
         if "mlflow" in backends:

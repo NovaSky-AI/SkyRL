@@ -1,16 +1,23 @@
 """
-S3 Checkpoint and Eval Uploader for SkyRL Training.
+S3 Checkpoint Management for SkyRL Training.
 
-Provides async upload of checkpoints and eval results to S3 with local cleanup.
+Provides checkpoint upload to S3, download from S3 for resume, and local cleanup.
 
 Key behavior:
 - Cleans up old local checkpoints BEFORE saving new one (prevents disk full)
 - Uploads to S3 asynchronously (non-blocking, training continues)
-- Deletes local checkpoint after successful upload
+- Downloads checkpoint from S3 before training for cross-VM resume
 - Uploads eval results to S3 for persistence
 
 Usage:
-    from integrations.fleet.s3_checkpoints import wrap_trainer_with_s3_upload, upload_eval_results_to_s3
+    from integrations.fleet.s3_checkpoints import (
+        wrap_trainer_with_s3_upload,
+        download_checkpoint_from_s3,
+        upload_eval_results_to_s3,
+    )
+
+    # Download checkpoint before training (for resume on new VM)
+    download_checkpoint_from_s3(ckpt_path, run_name)
 
     trainer = wrap_trainer_with_s3_upload(trainer, bucket="skyrl-checkpoints")
     upload_eval_results_to_s3(local_dir, run_name, global_step)
@@ -105,8 +112,8 @@ class S3CheckpointUploader:
                 f"Uploaded {checkpoint_name}: {uploaded_files} files, {total_size / 1e9:.2f} GB to s3://{self.bucket}/{s3_prefix}/"
             )
 
-            # Delete local after successful upload
-            logger.info(f"Deleting local checkpoint: {local_dir}")
+            # Delete local after successful upload to free disk space
+            logger.info(f"Deleting local checkpoint after S3 upload: {local_dir}")
             shutil.rmtree(local_dir)
 
             return True
@@ -165,20 +172,18 @@ def wrap_trainer_with_s3_upload(
     bucket: Optional[str] = None,
     prefix: Optional[str] = None,
     region: Optional[str] = None,
-    keep_local: bool = False,
 ):
     """
     Wrap a SkyRL trainer to:
     1. Clean up old checkpoints BEFORE saving (prevents disk full)
     2. Upload to S3 asynchronously AFTER saving (if credentials set)
-    3. Delete local checkpoint after successful upload
+    3. Delete local checkpoint after successful S3 upload (frees disk)
 
     Args:
         trainer: SkyRL trainer instance
         bucket: S3 bucket (default: from S3_CHECKPOINT_BUCKET env var)
         prefix: S3 prefix (default: from trainer config)
         region: AWS region (default: from AWS_REGION env var)
-        keep_local: If True, keep local checkpoints after upload
 
     Returns:
         The trainer (modified in place)
@@ -235,6 +240,121 @@ def wrap_trainer_with_s3_upload(
     trainer._s3_uploader = uploader
 
     return trainer
+
+
+def download_checkpoint_from_s3(
+    ckpt_path: str,
+    run_name: str,
+    bucket: Optional[str] = None,
+    region: Optional[str] = None,
+    project_name: str = "fleet-task-grpo",
+    model_name: str = "Qwen3-32B",
+) -> bool:
+    """
+    Download the latest checkpoint from S3 for resume on a fresh VM.
+
+    Looks for checkpoint directories under the S3 prefix matching the run_name,
+    downloads the latest one, and writes latest_ckpt_global_step.txt.
+
+    Args:
+        ckpt_path: Local checkpoint directory (e.g., ~/ckpts/fleet_tool_use_32b)
+        run_name: W&B run name used as S3 prefix (e.g., fleet_tool_use_32b_d7167c1c)
+        bucket: S3 bucket (default: from S3_CHECKPOINT_BUCKET env var)
+        region: AWS region (default: from AWS_REGION env var)
+        project_name: Project name used in S3 prefix
+        model_name: Model name used in S3 prefix
+
+    Returns:
+        True if checkpoint was downloaded, False otherwise
+    """
+    bucket = bucket or os.environ.get("S3_CHECKPOINT_BUCKET", "skyrl-checkpoints")
+    region = region or os.environ.get("AWS_REGION", "us-east-1")
+
+    aws_key = os.environ.get("AWS_ACCESS_KEY_ID")
+    aws_secret = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    if not (aws_key and aws_secret):
+        logger.info("No AWS credentials, skipping S3 checkpoint download")
+        return False
+
+    # Check if local checkpoint already exists
+    latest_file = os.path.join(ckpt_path, "latest_ckpt_global_step.txt")
+    if os.path.exists(latest_file):
+        with open(latest_file, "r") as f:
+            step = f.read().strip()
+        local_ckpt = os.path.join(ckpt_path, f"global_step_{step}")
+        if os.path.exists(local_ckpt):
+            logger.info(f"Local checkpoint already exists at step {step}, skipping S3 download")
+            return False
+
+    try:
+        import boto3
+        from botocore.config import Config
+
+        config = Config(
+            retries={"max_attempts": 3, "mode": "adaptive"},
+            connect_timeout=30,
+            read_timeout=120,
+        )
+        s3 = boto3.client("s3", region_name=region, config=config)
+
+        # S3 prefix matches what wrap_trainer_with_s3_upload builds
+        s3_prefix = f"{project_name}/{model_name}/{run_name}/"
+
+        # List all checkpoint directories in S3
+        paginator = s3.get_paginator("list_objects_v2")
+        checkpoint_steps = set()
+        for page in paginator.paginate(Bucket=bucket, Prefix=s3_prefix, Delimiter="/"):
+            for prefix_obj in page.get("CommonPrefixes", []):
+                dir_name = prefix_obj["Prefix"].rstrip("/").split("/")[-1]
+                if dir_name.startswith("global_step_"):
+                    try:
+                        step = int(dir_name.split("_")[-1])
+                        checkpoint_steps.add(step)
+                    except ValueError:
+                        pass
+
+        if not checkpoint_steps:
+            logger.info(f"No checkpoints found in s3://{bucket}/{s3_prefix}")
+            return False
+
+        latest_step = max(checkpoint_steps)
+        s3_ckpt_prefix = f"{s3_prefix}global_step_{latest_step}/"
+        local_ckpt_dir = os.path.join(ckpt_path, f"global_step_{latest_step}")
+
+        logger.info(f"Downloading checkpoint step {latest_step} from s3://{bucket}/{s3_ckpt_prefix}")
+
+        os.makedirs(local_ckpt_dir, exist_ok=True)
+
+        downloaded_files = 0
+        total_size = 0
+        for page in paginator.paginate(Bucket=bucket, Prefix=s3_ckpt_prefix):
+            for obj in page.get("Contents", []):
+                s3_key = obj["Key"]
+                relative_path = s3_key[len(s3_ckpt_prefix) :]
+                if not relative_path:
+                    continue
+                local_file = os.path.join(local_ckpt_dir, relative_path)
+                os.makedirs(os.path.dirname(local_file), exist_ok=True)
+                file_size = obj["Size"]
+                total_size += file_size
+                logger.info(f"Downloading {relative_path} ({file_size / 1e6:.1f} MB)")
+                s3.download_file(bucket, s3_key, local_file)
+                downloaded_files += 1
+
+        # Write latest_ckpt_global_step.txt so SkyRL's resume_mode=latest can find it
+        os.makedirs(ckpt_path, exist_ok=True)
+        with open(latest_file, "w") as f:
+            f.write(str(latest_step))
+
+        logger.info(
+            f"Downloaded checkpoint: {downloaded_files} files, {total_size / 1e9:.2f} GB "
+            f"from s3://{bucket}/{s3_ckpt_prefix} to {local_ckpt_dir}"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to download checkpoint from S3: {e}")
+        return False
 
 
 def upload_eval_results_to_s3(

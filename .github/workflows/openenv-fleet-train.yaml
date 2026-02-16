@@ -43,6 +43,10 @@ on:
         description: "Dataset version in S3 (e.g., v0.1, v0.2, v0.3)"
         type: string
         default: "v0.3"
+      resume_run_name:
+        description: "Resume from S3 checkpoint (W&B run name, e.g., fleet_tool_use_32b_d7167c1c)"
+        type: string
+        default: ""
       disable_slack:
         description: "Disable Slack notifications (for debugging)"
         type: boolean
@@ -144,6 +148,7 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           [ -n "${{ inputs.env_keys }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEYS=${{ inputs.env_keys }}"
           [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
+          [ -n "${{ inputs.resume_run_name }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env RESUME_RUN_NAME=${{ inputs.resume_run_name }}"
           LAUNCH_CMD="$LAUNCH_CMD -y"  # No -d flag, run attached to stream logs
 
           echo "Command: $LAUNCH_CMD"
