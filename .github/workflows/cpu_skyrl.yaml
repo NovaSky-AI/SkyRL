@@ -4,11 +4,11 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'skyrl/**'
+      - '**'
       - '.github/workflows/cpu_skyrl.yaml'
   pull_request:
     paths:
-      - 'skyrl/**'
+      - '**'
       - '.github/workflows/cpu_skyrl.yaml'
   workflow_dispatch:
 
@@ -27,7 +27,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: ./skyrl
+        working-directory: .
     steps:
     - uses: actions/checkout@v4
     - name: Install uv
