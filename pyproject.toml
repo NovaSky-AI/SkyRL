@@ -286,6 +286,12 @@ extend-ignore = [
     "W605",
 ]
 
+[tool.ruff]
+exclude = [
+    "skyrl-agent/",
+    "examples/",
+]
+
 [tool.ruff.lint]
 ignore = [
     "F722" # Syntax error in annotation - ignored because this doesn't play well with jaxtyping

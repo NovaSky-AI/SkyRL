@@ -6,12 +6,18 @@ on:
       - main 
       - rc/**
     paths:
+      - 'ci/**'
       - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - 'skyrl-gym/**'
       - '.github/workflows/cpu_skyrl_train.yaml'
   pull_request:
     paths:
+      - 'ci/**'
       - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - 'skyrl-gym/**'
       - '.github/workflows/cpu_skyrl_train.yaml'
 
