@@ -57,7 +57,8 @@ from tx.utils.models import (
 )
 from tx.utils.log import logger
 
-_DEFAULT_PPO_CLIP_RATIO = 0.2
+_DEFAULT_PPO_CLIP_LOW_THRESHOLD = 0.8
+_DEFAULT_PPO_CLIP_HIGH_THRESHOLD = 1.2
 
 
 class JaxBackendConfig(BaseModel, extra="forbid"):
@@ -246,10 +247,18 @@ class JaxBackendImpl(AbstractBackend):
     ) -> LossFnConfig:
         """Build per-example loss config arrays."""
         configs = [config or {} for config in all_loss_fn_configs]
-        clip_ratio = np.asarray([float(config.get("clip_ratio", _DEFAULT_PPO_CLIP_RATIO)) for config in configs], dtype=np.float32)
-        clip_low = np.asarray([float(config.get("clip_low", 1.0 - ratio)) for config, ratio in zip(configs, clip_ratio)], dtype=np.float32)
-        clip_high = np.asarray([float(config.get("clip_high", 1.0 + ratio)) for config, ratio in zip(configs, clip_ratio)], dtype=np.float32)
-        return LossFnConfig(clip_low=clip_low, clip_high=clip_high)
+        clip_low_threshold = np.asarray(
+            [float(config.get("clip_low_threshold", _DEFAULT_PPO_CLIP_LOW_THRESHOLD)) for config in configs],
+            dtype=np.float32,
+        )
+        clip_high_threshold = np.asarray(
+            [float(config.get("clip_high_threshold", _DEFAULT_PPO_CLIP_HIGH_THRESHOLD)) for config in configs],
+            dtype=np.float32,
+        )
+        return LossFnConfig(
+            clip_low_threshold=clip_low_threshold,
+            clip_high_threshold=clip_high_threshold,
+        )
 
     @contextmanager
     def _jit_timing_context(self, seq_len: int, mode: str):
@@ -439,8 +448,8 @@ class JaxBackendImpl(AbstractBackend):
             # All batch arrays are sharded along batch dimension
             batch_sharded_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
             loss_fn_config_shardings = LossFnConfig(
-                clip_low=batch_sharded_1d,
-                clip_high=batch_sharded_1d,
+                clip_low_threshold=batch_sharded_1d,
+                clip_high_threshold=batch_sharded_1d,
             )
             input_shardings = (
                 batch_sharded_2d,  # input_ids
@@ -616,8 +625,8 @@ class JaxBackendImpl(AbstractBackend):
                     mb_advantages,
                     mb_adapter_indices,
                     mb_loss_fn_types,
-                    mb_clip_low,
-                    mb_clip_high,
+                    mb_clip_low_threshold,
+                    mb_clip_high_threshold,
                 ) = jax.device_put(
                     (
                         pad_to_fsdp(input_ids[mb_start:mb_end], fsdp_size),
@@ -628,14 +637,14 @@ class JaxBackendImpl(AbstractBackend):
                         pad_to_fsdp(advantages[mb_start:mb_end], fsdp_size),
                         pad_to_fsdp(adapter_indices[mb_start:mb_end], fsdp_size),
                         pad_to_fsdp(loss_fn_types[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(loss_fn_config.clip_low[mb_start:mb_end], fsdp_size),
-                        pad_to_fsdp(loss_fn_config.clip_high[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(loss_fn_config.clip_low_threshold[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(loss_fn_config.clip_high_threshold[mb_start:mb_end], fsdp_size),
                     ),
                     (sharding_2d,) * 6 + (sharding_1d,) * 4,
                 )
                 mb_loss_fn_config = LossFnConfig(
-                    clip_low=mb_clip_low,
-                    clip_high=mb_clip_high,
+                    clip_low_threshold=mb_clip_low_threshold,
+                    clip_high_threshold=mb_clip_high_threshold,
                 )
 
                 self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(

@@ -93,7 +93,7 @@ def test_prepare_model_pass_batch_loss_fn_config():
             logprobs=types.TensorData(data=[]),
         ),
     )
-    config = {"clip_ratio": 0.3, "entropy_coef": 0.01}
+    config = {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3, "entropy_coef": 0.01}
 
     # With loss_fn_config
     requests_with_config = {

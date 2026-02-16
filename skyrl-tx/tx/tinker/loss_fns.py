@@ -13,8 +13,8 @@ from tx.tinker.types import LOSS_TYPES
 class LossFnConfig:
     """Fixed loss config arrays passed through the JAX loss path."""
 
-    clip_low: jax.Array
-    clip_high: jax.Array
+    clip_low_threshold: jax.Array
+    clip_high_threshold: jax.Array
 
 
 def safe_loss_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
@@ -54,9 +54,9 @@ def ppo_loss(
 ) -> jax.Array:
     "PPO style clipped version of the importance sampling loss."
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
-    clip_low = loss_fn_config.clip_low
-    clip_high = loss_fn_config.clip_high
-    clipped_ratio = jnp.clip(prob_ratio, clip_low, clip_high)
+    clip_low_threshold = loss_fn_config.clip_low_threshold
+    clip_high_threshold = loss_fn_config.clip_high_threshold
+    clipped_ratio = jnp.clip(prob_ratio, clip_low_threshold, clip_high_threshold)
     unclipped = prob_ratio * advantages
     clipped = clipped_ratio * advantages
     return -safe_loss_mask(jnp.minimum(unclipped, clipped), loss_mask)
