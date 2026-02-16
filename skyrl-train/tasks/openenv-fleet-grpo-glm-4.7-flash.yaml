@@ -84,6 +84,10 @@
 #          - flash_attn stub can't provide flash_attn_func (CUDA kernels)
 #          - SDPA is PyTorch's built-in efficient attention (no external deps)
 #          - Set use_flash_attention_2=false in training config
+# v0.1.40: Override attn_implementation in model config
+#          - use_flash_attention_2=false doesn't work - model config.json overrides it
+#          - Set attn_implementation=sdpa via model_config_kwargs
+#          - This overrides the HF config before model instantiation
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -288,7 +292,7 @@ run: |
     environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="zai-org/GLM-4.7-Flash" \
-    +trainer.policy.model.use_flash_attention_2=false \
+    +trainer.policy.model.model_config_kwargs.attn_implementation=sdpa \
     trainer.placement.colocate_all=true \
     trainer.strategy=fsdp2 \
     trainer.placement.policy_num_gpus_per_node=$TOTAL_GPUS \
