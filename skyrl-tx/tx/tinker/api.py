@@ -70,6 +70,8 @@ async def lifespan(app: FastAPI):
         "tinker",
         "--extra",
         app.state.engine_config.backend,
+        "--extra",
+        "azure",
         "-m",
         "tx.tinker.engine",
     ]

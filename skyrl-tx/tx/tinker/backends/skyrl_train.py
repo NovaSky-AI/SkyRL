@@ -24,6 +24,7 @@ from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl_train.utils.utils import initialize_ray
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
+from skyrl_train.utils.io import io as cloud_io
 from skyrl_train.config.utils import get_default_config
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
@@ -610,35 +611,75 @@ class SkyRLTrainBackend(AbstractBackend):
         with tarfile.open(output_path, "w") as tar:
             tar.add(source_dir, arcname=".")
 
+    @staticmethod
+    def _cloud_ckpt_dir(output_path) -> str:
+        """Derive a cloud directory path from a ``*.tar.gz`` output path.
+
+        For cloud storage we skip tar archives and save/load checkpoint
+        files directly as a directory.  Each FSDP worker independently
+        uploads/downloads its own rank shard via ``io.local_work_dir`` /
+        ``io.local_read_dir``.
+        """
+        p = str(output_path)
+        if p.endswith(".tar.gz"):
+            p = p[: -len(".tar.gz")]
+        elif p.endswith(".tar"):
+            p = p[: -len(".tar")]
+        return p
+
     def save_checkpoint(self, output_path, model_id: str) -> None:
-        """Save full training checkpoint (model + optimizer + scheduler) as tar."""
+        """Save full training checkpoint (model + optimizer + scheduler).
+
+        For cloud paths (az://, s3://, gs://), each worker saves its shard
+        directly to cloud storage — no tar archive is created.  This avoids
+        the requirement for a shared filesystem across nodes.
+
+        For local paths, the existing tar-based flow is preserved.
+        """
         self._validate_model_state(model_id)
 
-        # Create temp directory for checkpoint
-        with tempfile.TemporaryDirectory() as temp_dir:
-            ckpt_dir = os.path.join(temp_dir, "checkpoint")
+        output_path_str = str(output_path)
 
-            # Save checkpoint directory (includes optimizer state automatically)
+        if cloud_io.is_cloud_path(output_path_str):
+            # Cloud: each worker uploads its rank shard independently via
+            # io.local_work_dir inside fsdp_strategy.save_checkpoint.
+            ckpt_dir = self._cloud_ckpt_dir(output_path_str)
             self._dispatch.save_checkpoint(model="policy", ckpt_dir=ckpt_dir, tokenizer=self._tokenizer)
-
-            # Create tar archive
-            self._create_tar_from_directory(ckpt_dir, output_path)
+        else:
+            # Local: save to temp dir, then pack into a tar archive.
+            with tempfile.TemporaryDirectory() as temp_dir:
+                ckpt_dir = os.path.join(temp_dir, "checkpoint")
+                self._dispatch.save_checkpoint(model="policy", ckpt_dir=ckpt_dir, tokenizer=self._tokenizer)
+                self._create_tar_from_directory(ckpt_dir, output_path_str)
 
         logger.info(f"Saved checkpoint for {model_id} to {output_path}")
 
     def load_checkpoint(self, checkpoint_path, model_id: str) -> None:
-        """Load full training checkpoint (model + optimizer + scheduler) from tar."""
+        """Load full training checkpoint (model + optimizer + scheduler).
+
+        For cloud paths, each worker downloads its rank shard independently
+        via ``io.local_read_dir`` inside ``fsdp_strategy.load_checkpoint``.
+
+        For local paths, the tar archive is extracted first.
+        """
         self._validate_model_state(model_id)
 
-        # Extract tar to temp directory (filter='data' prevents path traversal attacks)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with tarfile.open(checkpoint_path, "r") as tar:
-                tar.extractall(temp_dir, filter="data")
+        checkpoint_path_str = str(checkpoint_path)
 
-            # Load checkpoint (includes optimizer and scheduler states)
+        if cloud_io.is_cloud_path(checkpoint_path_str):
+            # Cloud: workers download their own shards independently.
+            ckpt_dir = self._cloud_ckpt_dir(checkpoint_path_str)
             self._dispatch.load_checkpoint(
-                model="policy", ckpt_dir=temp_dir, load_optimizer_states=True, load_lr_scheduler_states=True
+                model="policy", ckpt_dir=ckpt_dir, load_optimizer_states=True, load_lr_scheduler_states=True
             )
+        else:
+            # Local: extract tar to temp directory, then load.
+            with tempfile.TemporaryDirectory() as temp_dir:
+                with tarfile.open(checkpoint_path_str, "r") as tar:
+                    tar.extractall(temp_dir, filter="data")
+                self._dispatch.load_checkpoint(
+                    model="policy", ckpt_dir=temp_dir, load_optimizer_states=True, load_lr_scheduler_states=True
+                )
 
         logger.info(f"Loaded checkpoint for {model_id} from {checkpoint_path}")
 
@@ -656,19 +697,33 @@ class SkyRLTrainBackend(AbstractBackend):
             asyncio.run(self._dispatch.save_weights_for_sampler())
             logger.info(f"Synced weights for {model_id} to inference engines via NCCL")
 
+        output_path_str = str(output_path)
+
         if persist:
-            # Full HuggingFace model export to disk
-            with tempfile.TemporaryDirectory() as temp_dir:
-                hf_dir = os.path.join(temp_dir, "model")
+            if cloud_io.is_cloud_path(output_path_str):
+                # Cloud: save HF model directly to cloud directory.
+                # Only rank-0 writes; io.local_work_dir handles the upload.
+                hf_dir = self._cloud_ckpt_dir(output_path_str)
                 self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
-                self._create_tar_from_directory(hf_dir, output_path)
+            else:
+                # Local: save to temp dir, then pack into tar.
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    hf_dir = os.path.join(temp_dir, "model")
+                    self._dispatch.save_hf_model(model="policy", export_dir=hf_dir, tokenizer=self._tokenizer)
+                    self._create_tar_from_directory(hf_dir, output_path_str)
             logger.info(f"Saved sampler checkpoint for {model_id} to {output_path}")
         else:
             # Hot path: write a lightweight marker so the engine's checkpoint
             # bookkeeping stays consistent.  Actual weights live in GPU memory.
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            with tarfile.open(output_path, "w"):
-                pass  # empty tar — marker only
+            if cloud_io.is_cloud_path(output_path_str):
+                # Cloud: write a small marker blob.
+                marker_path = self._cloud_ckpt_dir(output_path_str) + "/.marker"
+                with cloud_io.open_file(marker_path, "w") as f:
+                    f.write("")
+            else:
+                os.makedirs(os.path.dirname(output_path_str), exist_ok=True)
+                with tarfile.open(output_path_str, "w"):
+                    pass  # empty tar — marker only
             logger.info(f"Synced weights for {model_id} (disk save skipped)")
 
 

@@ -41,6 +41,7 @@ dependencies = [
     "flash-attn; sys_platform == 'linux'",
     "polars",
     "s3fs",
+    "adlfs",
     "fastapi",
     "uvicorn",
     "pybind11",
