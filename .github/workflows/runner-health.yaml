@@ -162,6 +162,7 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
           MAX_ATTEMPTS=2
@@ -171,6 +172,12 @@ jobs:
             PREV_ATTEMPTS=$(jq -r '.recovery_attempts // {}' /tmp/runner-health-state/state.json)
           else
             PREV_ATTEMPTS="{}"
+          fi
+
+          # Get list of runners currently executing a job (busy runners)
+          BUSY_RUNNERS=$(gh api repos/${{ github.repository }}/actions/runners --paginate --jq '.runners[] | select(.busy == true) | .name' 2>/dev/null || echo "")
+          if [ -n "$BUSY_RUNNERS" ]; then
+            echo "Busy runners (will not stop/start): $BUSY_RUNNERS"
           fi
 
           DETAILS=$(cat /tmp/unhealthy_details.json)
@@ -198,6 +205,14 @@ jobs:
             ATTEMPTS=$(echo "$PREV_ATTEMPTS" | jq -r --arg id "$INSTANCE_ID" '.[$id] // 0')
 
             echo "Processing $INSTANCE_NAME ($INSTANCE_ID): state=$INSTANCE_STATE health=$INSTANCE_HEALTH attempts=$ATTEMPTS"
+
+            # Skip if runner is actively executing a job
+            if echo "$BUSY_RUNNERS" | grep -qx "$INSTANCE_NAME"; then
+              echo "⏭️ **$INSTANCE_NAME**: Skipped — runner is busy (executing a job)" >> $GITHUB_STEP_SUMMARY
+              SKIPPED_NAMES="$SKIPPED_NAMES $INSTANCE_NAME"
+              SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+              continue
+            fi
 
             # Skip if max attempts reached
             if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
@@ -238,9 +253,9 @@ jobs:
               aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
             fi
 
-            # Wait for instance to be running and pass status checks (up to 5 min)
+            # Wait for instance to be running and pass status checks (up to 10 min)
             echo "  Waiting for instance to pass status checks..."
-            if timeout 300 aws ec2 wait instance-status-ok --instance-ids "$INSTANCE_ID" 2>/dev/null; then
+            if timeout 600 aws ec2 wait instance-status-ok --instance-ids "$INSTANCE_ID" 2>/dev/null; then
               echo "✅ **$INSTANCE_NAME**: Recovered successfully" >> $GITHUB_STEP_SUMMARY
               RECOVERED_NAMES="$RECOVERED_NAMES $INSTANCE_NAME"
               RECOVERED_COUNT=$((RECOVERED_COUNT + 1))
