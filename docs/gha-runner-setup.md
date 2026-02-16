@@ -20,7 +20,9 @@ Self-hosted runners for long training jobs (24+ hours) that exceed GitHub's 6-ho
 
 - **Watchdog:** Auto-restarts crashed/hung services (5-min timeout)
 - **Health check:** Cron every 5 min detects GitHub disconnection
-- **Central monitoring:** `runner-health.yaml` checks all runners every 15 min, alerts Slack
+- **Central monitoring:** `runner-health.yaml` checks all runners every 15 min, auto-recovers unhealthy instances via EC2 stop/start, and alerts Slack
+
+The central health check (`runner-health.yaml`) will automatically attempt to recover unhealthy runners by stopping and restarting the EC2 instance. It tracks recovery attempts per instance and escalates to a manual intervention Slack alert after 2 failed attempts.
 
 ## Installed Cloud Providers
 
@@ -54,14 +56,17 @@ chmod +x setup-gha-runner.sh && ./setup-gha-runner.sh fleet-runner-N <TOKEN>
 ## Troubleshooting
 
 **Runner offline:**
-```bash
-# Watchdog should auto-fix within 5 min. If not:
-aws ec2 reboot-instances --instance-ids <INSTANCE_ID>
 
-# If still broken (impaired status), stop/start:
+The health check workflow will auto-recover most cases. If manual intervention is needed:
+
+```bash
+# Stop/start the instance (reboot does NOT fix impaired instances):
 aws ec2 stop-instances --instance-ids <INSTANCE_ID>
+aws ec2 wait instance-stopped --instance-ids <INSTANCE_ID>
 aws ec2 start-instances --instance-ids <INSTANCE_ID>
 ```
+
+> **Note:** `reboot-instances` does not work for instances with `impaired` status. Always use stop/start instead.
 
 **Check instance health:**
 ```bash
