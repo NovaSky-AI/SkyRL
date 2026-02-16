@@ -1,9 +1,21 @@
 """Loss functions for training (JAX implementations)."""
 
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 
 from tx.tinker.types import LOSS_TYPES
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class LossFnConfig:
+    """Fixed loss config arrays passed through the JAX loss path."""
+
+    clip_ratio: jax.Array
+    clip_low: jax.Array
+    clip_high: jax.Array
 
 
 def safe_loss_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
@@ -12,26 +24,43 @@ def safe_loss_mask(loss_output: jax.Array, loss_mask: jax.Array) -> jax.Array:
 
 
 def cross_entropy_loss(
-    target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
+    target_logprobs: jax.Array,
+    loss_mask: jax.Array,
+    sampling_logprobs: jax.Array,
+    advantages: jax.Array,
+    loss_fn_config: LossFnConfig,
 ) -> jax.Array:
     "Standard cross-entropy loss (i.e., negative log-likelihood)."
+    del sampling_logprobs, advantages, loss_fn_config
     return -safe_loss_mask(target_logprobs, loss_mask)
 
 
 def importance_sampling_loss(
-    target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
+    target_logprobs: jax.Array,
+    loss_mask: jax.Array,
+    sampling_logprobs: jax.Array,
+    advantages: jax.Array,
+    loss_fn_config: LossFnConfig,
 ) -> jax.Array:
     "Importance sampling loss with target_logprobs from learner policy and sampling_logprobs from sampling policy."
+    del loss_fn_config
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
     return -safe_loss_mask(prob_ratio * advantages, loss_mask)
 
 
 def ppo_loss(
-    target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
+    target_logprobs: jax.Array,
+    loss_mask: jax.Array,
+    sampling_logprobs: jax.Array,
+    advantages: jax.Array,
+    loss_fn_config: LossFnConfig,
 ) -> jax.Array:
     "PPO style clipped version of the importance sampling loss."
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
-    clipped_ratio = jnp.clip(prob_ratio, 0.8, 1.2)
+    clip_ratio = loss_fn_config.clip_ratio
+    clip_low = loss_fn_config.clip_low
+    clip_high = loss_fn_config.clip_high
+    clipped_ratio = jnp.clip(prob_ratio, clip_low, clip_high)
     unclipped = prob_ratio * advantages
     clipped = clipped_ratio * advantages
     return -safe_loss_mask(jnp.minimum(unclipped, clipped), loss_mask)
