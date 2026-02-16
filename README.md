@@ -21,6 +21,10 @@ SkyRL is a full-stack RL library that provides the following components:
 - [`skyrl-gym`](./skyrl-gym): Our gymnasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
 - [`skyrl-tx`](./skyrl-tx): A cross-platform library to enable users to expose a local [Tinker](https://thinkingmachines.ai/tinker/)-like REST API for model post-training.
 
+> [!IMPORTANT]
+> The SkyRL repo is currently under re-organization. We will soon move everything to `SkyRL/skyrl`, merging `skyrl-train` and `skyrl-tx` into a single folder. We expect to finish by end of February, and in the meantime, please try to develop on top of the new `SkyRL/skyrl` folder. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
+
+
 # Getting Started
 
 For a guide on developing with SkyRL, take at look at our [Development Guide](https://docs.skyrl.ai/docs/getting-started/development) docs.
