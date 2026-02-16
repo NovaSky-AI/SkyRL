@@ -32,6 +32,26 @@ def _get_filesystem(path: str):
         fs = get_s3_fs()
         s3_refresh_if_expiring(fs)
         return fs
+    if proto in ("az", "abfs"):
+        # adlfs requires account_name for Azure Blob Storage.
+        # When key-based auth is disabled, use DefaultAzureCredential
+        # (supports managed identity, az cli, env vars, etc.)
+        account_name = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
+        if not account_name:
+            # Try to extract from the path: az://container@account.blob.core.windows.net/...
+            # or just use the env var
+            raise ValueError(
+                "AZURE_STORAGE_ACCOUNT_NAME environment variable must be set for Azure storage"
+            )
+        try:
+            from azure.identity import DefaultAzureCredential
+            credential = DefaultAzureCredential()
+        except ImportError:
+            raise ImportError(
+                "azure-identity is required for Azure AD authentication. "
+                "Install it with: pip install azure-identity"
+            )
+        return fsspec.filesystem(proto, account_name=account_name, credential=credential)
     return fsspec.filesystem(proto)
 
 

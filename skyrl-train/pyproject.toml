@@ -42,6 +42,7 @@ dependencies = [
     "polars",
     "s3fs",
     "adlfs",
+    "azure-identity",
     "fastapi",
     "uvicorn",
     "pybind11",
