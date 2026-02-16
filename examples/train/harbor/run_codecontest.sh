@@ -8,17 +8,13 @@ set -ex
 # export MODAL_TOKEN_ID=YOUR_KEY_HERE
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
-# Prepare datasets (downloads from HuggingFace and extracts tasks automatically)
-# Idempotent - skips if already prepared. Output dir auto-derived from dataset name.
-TRAIN_DATASET="DCAgent/code-contests-sandboxes-with-tests"
-EVAL_DATASET="open-thoughts/OpenThoughts-TB-dev"
+# Prepare datasets first (downloads from HuggingFace and extracts tasks):
+# python examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/CodeContests
+# python examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-TB-dev
+
 DATA_DIR="$HOME/data/harbor"
-
-python examples/train/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
-python examples/train/harbor/prepare_harbor_dataset.py --dataset $EVAL_DATASET
-
-TRAIN_DATA="['$DATA_DIR/${TRAIN_DATASET##*/}']"
-EVAL_DATA="['$DATA_DIR/${EVAL_DATASET##*/}']"
+TRAIN_DATA="['$DATA_DIR/CodeContests']"
+EVAL_DATA="['$DATA_DIR/OpenThoughts-TB-dev']"
 
 TRIALS_DIR="$HOME/trials_run"
 CKPTS_DIR="$HOME/otagent/ckpts"

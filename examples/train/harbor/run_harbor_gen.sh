@@ -8,14 +8,11 @@ set -ex
 # export MODAL_TOKEN_ID=YOUR_KEY_HERE
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
-# Prepare dataset (downloads from HuggingFace and extracts tasks automatically)
-# Output dir auto-derived from dataset name.
-TRAIN_DATASET="open-thoughts/OpenThoughts-Agent-v1-RL"
+# Prepare dataset first (downloads from HuggingFace and extracts tasks):
+# python examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-Agent-v1-RL
+
 DATA_DIR="$HOME/data/harbor"
-
-python examples/train/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
-
-TRAIN_DATA="['$DATA_DIR/${TRAIN_DATASET##*/}']"
+TRAIN_DATA="['$DATA_DIR/OpenThoughts-Agent-v1-RL']"
 
 CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
 TRIALS_DIR="$HOME/trials_run"
