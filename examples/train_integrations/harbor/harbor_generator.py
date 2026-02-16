@@ -304,7 +304,7 @@ class HarborGenerator(GeneratorInterface):
         )
 
         # Determine stop reason
-        max_response_tokens = self.max_seq_len - initial_prompt_length
+        max_response_tokens = max(0, self.max_seq_len - initial_prompt_length)
         if is_context_length_error or len(response_ids) > max_response_tokens:
             stop_reason = "context_length"
         else:
