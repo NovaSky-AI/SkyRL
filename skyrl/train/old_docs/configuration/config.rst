@@ -389,8 +389,12 @@ Algorithm Configuration
 
       # To be deprecated in favor of off_policy_correction.tis_ratio_type = "token"
       # and "token_tis_ratio_clip_high"
-      use_tis: false 
+      use_tis: false
       tis_imp_ratio_cap: -1.0
+
+      # Used for seq_mean_token_sum_norm loss reduction. Users should set this value for multi-turn for that loss.
+      # If not set, will be calculated as generator.max_input_length + generator.sampling_params.max_generate_length
+      max_seq_len: null
 
       # references
       # - https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
@@ -484,7 +488,7 @@ Algorithm Configuration
 
   - ``token_mean``: computes average loss over all valid tokens in the batch. Used in `DAPO <https://dapo-sia.github.io/>`_.
   - ``sequence_mean``: computes per-sequence avg token loss, then averages over the batch.
-  - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by the max sequence length (computed as ``cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length``), and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
+  - ``seq_mean_token_sum_norm``: computes the sum of token losses for each sequence, normalizes by ``max_seq_len``, and then averages over the batch. This is used in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_. If ``algorithm.max_seq_len`` is not explicitly set, it defaults to ``generator.max_input_length + generator.sampling_params.max_generate_length``.
 
 - ``algorithm.grpo_norm_by_std``: Whether to normalize advantages by the standard deviation in GRPO. This is set to ``false`` in `Dr. GRPO <https://arxiv.org/abs/2503.20783>`_.
 - ``algorithm.zero_variance_filter``: Whether to loss mask out prompts with zero variance rewards. This is only applicable when rewards are response-level.
@@ -499,6 +503,7 @@ Algorithm Configuration
   - ``algorithm.dynamic_sampling.max_sample_batches``: Maximum number of batches to sample before stopping. Set to ``-1`` to sample forever.
   - ``algorithm.dynamic_sampling.min_replace_ratio``: Minimum proportion of good samples with which to replace bad samples for ``replace`` strategy.
 - ``algorithm.use_tis``: Whether to use Truncated Importance Sampling (TIS) as proposed in `this blog <https://fengyao.notion.site/off-policy-rl>`_. This flag is to be deprecated, use ``off_policy_correction.tis_ratio_type = "token"`` instead.
+- ``algorithm.max_seq_len``: Used for ``seq_mean_token_sum_norm`` ``loss_reduction``. Users should set this value for multi-turn for that loss. If not set, will be calculated as ``generator.max_input_length + generator.sampling_params.max_generate_length``, which is incorrect for multi-turn.
 - ``algorithm.tis_imp_ratio_cap``: Cap parameter for the importance ratio in TIS. This flag is to be deprecated, use ``off_policy_correction.token_tis_ratio_clip_high`` instead.
 - ``algorithm.clip_cov``: Clip-Cov parameters (only used when ``policy_loss_type`` is ``clip_cov``):
 
