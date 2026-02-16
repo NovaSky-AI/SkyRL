@@ -69,6 +69,7 @@ from skyrl_train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
+from skyrl_train.utils.alerts import check_tool_error_rate_alert
 from skyrl_train.utils.utils import configure_ray_worker_logging
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -339,6 +340,11 @@ class RayPPOTrainer:
                     **{f"timing/{k}": v for k, v in self.all_timings.items()},
                 }
                 self.tracker.log(log_payload, step=self.global_step, commit=True)
+
+                # Check for high tool error rate and alert via Slack
+                run_name = self.cfg.trainer.get("experiment_name", None)
+                check_tool_error_rate_alert(self.all_metrics, self.global_step, threshold=0.5, run_name=run_name)
+
                 self.all_metrics = {}
                 self.all_timings = {}
 

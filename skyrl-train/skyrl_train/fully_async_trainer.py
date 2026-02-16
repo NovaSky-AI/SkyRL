@@ -24,6 +24,7 @@ from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.generators.base import GeneratorOutput
 from skyrl_train.utils.trainer_utils import ResumeMode, build_dataloader
+from skyrl_train.utils.alerts import check_tool_error_rate_alert
 from skyrl_train.utils.io import io
 from skyrl_train.generators.utils import prepare_generator_input, concatenate_generator_outputs
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -425,6 +426,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 logger.info(status)
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
                 self.tracker.log(self.all_metrics, step=self.global_step)
+
+                # Check for high tool error rate and alert via Slack
+                run_name = self.cfg.trainer.get("experiment_name", None)
+                check_tool_error_rate_alert(self.all_metrics, self.global_step, threshold=0.5, run_name=run_name)
+
                 self.all_metrics = {}
                 pbar.update(1)
 
