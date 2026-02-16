@@ -80,6 +80,10 @@
 # v0.1.38: Use PEP 440 compliant version (2.7.0+stub not 2.7.0.stub)
 #          - uv/pip reject non-compliant versions like "2.7.0.stub"
 #          - Use local version identifier format: "2.7.0+stub"
+# v0.1.39: Use SDPA attention instead of flash_attention_2
+#          - flash_attn stub can't provide flash_attn_func (CUDA kernels)
+#          - SDPA is PyTorch's built-in efficient attention (no external deps)
+#          - Set use_flash_attention_2=false in training config
 
 name: fleet-task-grpo-glm-4.7-flash
 
@@ -284,6 +288,7 @@ run: |
     environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="zai-org/GLM-4.7-Flash" \
+    trainer.policy.model.use_flash_attention_2=false \
     trainer.placement.colocate_all=true \
     trainer.strategy=fsdp2 \
     trainer.placement.policy_num_gpus_per_node=$TOTAL_GPUS \

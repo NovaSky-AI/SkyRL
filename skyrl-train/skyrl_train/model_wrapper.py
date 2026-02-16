@@ -14,7 +14,13 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndByt
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
-from flash_attn.bert_padding import pad_input, unpad_input
+
+# Import conditionally - only needed for sample packing with flash attention
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input
+except ImportError:
+    pad_input = None
+    unpad_input = None
 from packaging.version import Version
 
 
@@ -68,7 +74,7 @@ class HFModelWrapper(nn.Module):
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
