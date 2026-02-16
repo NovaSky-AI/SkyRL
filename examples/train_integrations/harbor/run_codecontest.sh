@@ -84,7 +84,6 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   trainer.hf_save_interval=5 \
   trainer.algorithm.max_seq_len=$MAX_MODEL_LEN \
   trainer.policy.optimizer_config.lr=1.0e-6 \
-  trainer.algorithm.use_kl_loss=true \
   generator.n_samples_per_prompt=8 \
   generator.eval_n_samples_per_prompt=4 \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
