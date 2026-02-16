@@ -4,11 +4,17 @@ on:
   push:
     branches: [ main ]
     paths:
+      - 'ci/**'
       - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - '.github/workflows/gpu_skyrl.yaml'
   pull_request:
     paths:
+      - 'ci/**'
       - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - '.github/workflows/gpu_skyrl.yaml'
   workflow_dispatch:
 
@@ -26,7 +32,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: ./skyrl
+        working-directory: .
 
     steps:
       - uses: actions/checkout@v4

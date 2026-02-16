@@ -16,7 +16,7 @@ uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
     --backend-config '{"trainer.placement.policy_num_gpus_per_node": 4, "generator.num_inference_engines": 4}'
 ```
 
-Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/configuration/config) can be overridden this way (see the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/skyrl/train/config/ppo_base_config.yaml) for all available keys and defaults). The most commonly used options are listed below.
+Any field in the [SkyRL-Train config](https://docs.skyrl.ai/docs/configuration/config) can be overridden this way (see the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/ppo_base_config.yaml) for all available keys and defaults). The most commonly used options are listed below.
 
 ### GPU and Parallelism
 
@@ -58,4 +58,4 @@ No server-side configuration is needed to switch between LoRA and full-parameter
 
 ## Full Config Reference
 
-For the complete list of configuration options, see the [SkyRL-Train configuration docs](https://docs.skyrl.ai/docs/configuration/config) and the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/skyrl/train/config/ppo_base_config.yaml).
+For the complete list of configuration options, see the [SkyRL-Train configuration docs](https://docs.skyrl.ai/docs/configuration/config) and the [default config YAML](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/config/ppo_base_config.yaml).

@@ -9,7 +9,7 @@ The SkyRL + Harbor integration uses Harbor as the **environment and reward sourc
 ## Quick Start
 
 ```bash
-cd SkyRL/skyrl-train
+cd SkyRL
 
 # 1. Set credentials
 export WANDB_API_KEY=your_wandb_api_key
@@ -18,14 +18,14 @@ export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_ID=your_modal_token_id
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
 
-# 2. Prepare dataset (downloads from HuggingFace, extracts tasks to ~/data/harbor/)
-python examples/harbor/prepare_harbor_dataset.py \
-    --dataset DCAgent/code-contests-sandboxes-with-tests
-python examples/harbor/prepare_harbor_dataset.py \
+# 2. Prepare datasets (downloads from HuggingFace, extracts tasks to ~/data/harbor/)
+uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
+    --dataset open-thoughts/CodeContests
+uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-TB-dev
 
 # 3. Launch training
-bash examples/harbor/run_codecontest.sh
+bash examples/train_integrations/harbor/run_codecontest.sh
 ```
 
 ## How the Integration Works
@@ -57,10 +57,10 @@ A `GeneratorInput` provides a batch of prompts with trajectory IDs. A `Generator
 
 ## Code Structure
 
-The integration lives in `skyrl-train/examples/harbor/`:
+The integration lives in `examples/train_integrations/harbor/`:
 
 ```
-examples/harbor/
+examples/train_integrations/harbor/
   harbor_generator.py          # HarborGenerator: core bridge between SkyRL and Harbor
   dataset.py                   # HarborTaskDataset: loads task directory paths
   harbor_trial_config/
@@ -295,44 +295,34 @@ For the full specification of Harbor's task format and all supported fields in `
 Most publicly available Harbor datasets are hosted on HuggingFace Hub. The `prepare_harbor_dataset.py` script handles downloading and extracting them into the task directory layout that `HarborTaskDataset` expects.
 
 The script handles two dataset formats automatically:
-- **Parquet-based datasets** (e.g., `OpenThoughts-Agent-v1-RL`): Tasks are stored as tar archives in a `task_binary` column. The script extracts each archive into its own task directory.
+- **Parquet-based datasets** (e.g., `OpenThoughts-Agent-v1-RL`, `CodeContests`): Tasks are stored as tar archives in a parquet file with `path` and `task_binary` columns. The script extracts each archive into its own task directory.
 - **Direct task directories** (e.g., `OpenThoughts-TB-dev`): The dataset already contains task directories. The script creates a symlink to the downloaded snapshot.
 
 ```bash
-cd SkyRL/skyrl-train
+cd SkyRL
 
-# Download and extract a training dataset
-# Output goes to ~/data/harbor/OpenThoughts-Agent-v1-RL/
-python examples/harbor/prepare_harbor_dataset.py \
+# Download and extract training datasets
+uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-Agent-v1-RL
 
-# Download an eval dataset -> ~/data/harbor/OpenThoughts-TB-dev/
-python examples/harbor/prepare_harbor_dataset.py \
-    --dataset open-thoughts/OpenThoughts-TB-dev
+uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
+    --dataset open-thoughts/CodeContests
 
-# Download code-contests dataset -> ~/data/harbor/code-contests-sandboxes-with-tests/
-python examples/harbor/prepare_harbor_dataset.py \
-    --dataset DCAgent/code-contests-sandboxes-with-tests
+# Download an eval dataset (symlinked, no extraction needed)
+uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
+    --dataset open-thoughts/OpenThoughts-TB-dev
 ```
 
-The output directory defaults to `~/data/harbor/<repo-name>`, derived from the dataset name. Each dataset automatically gets its own directory, so different datasets never overwrite each other. You can override this with `--output_dir` if needed:
+The output directory defaults to `~/data/harbor/<repo-name>`, derived from the dataset name. You can override this with `--output_dir`:
 
 ```bash
-python examples/harbor/prepare_harbor_dataset.py \
-    --dataset open-thoughts/OpenThoughts-Agent-v1-RL \
+uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
+    --dataset open-thoughts/CodeContests \
     --output_dir ~/my-custom-path
 ```
 
-The script is **idempotent** — it skips extraction if the output directory already contains valid tasks. Use `--force` to re-extract:
-
-```bash
-python examples/harbor/prepare_harbor_dataset.py \
-    --dataset open-thoughts/OpenThoughts-Agent-v1-RL \
-    --force
-```
-
 <Callout type="info">
-The launch scripts (`run_otagent.sh`, `run_codecontest.sh`) call `prepare_harbor_dataset.py` automatically before starting training, so you don't need to run it separately if using those scripts.
+You must run `prepare_harbor_dataset.py` before launching training. The launch scripts (`run_otagent.sh`, `run_codecontest.sh`) assume datasets are already prepared at `~/data/harbor/`.
 </Callout>
 
 ## Running Training
@@ -347,20 +337,20 @@ The launch scripts (`run_otagent.sh`, `run_codecontest.sh`) call `prepare_harbor
 ### Launch
 
 ```bash
-cd SkyRL/skyrl-train
+cd SkyRL
 
 # Full RL training
-bash examples/harbor/run_otagent.sh
+bash examples/train_integrations/harbor/run_otagent.sh
 
 # Generation-only debugging (no training, useful for testing the integration)
-bash examples/harbor/run_harbor_gen.sh
+bash examples/train_integrations/harbor/run_harbor_gen.sh
 ```
 
 The scripts use Hydra to configure the run. A typical invocation looks like:
 
 ```bash
-uv run --isolated --extra vllm --extra harbor \
-  -m examples.harbor.entrypoints.main_harbor \
+uv run --isolated --extra fsdp --extra harbor \
+  -m examples.train_integrations.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
   generator.served_model_name=Qwen3-8B \
