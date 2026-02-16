@@ -91,9 +91,7 @@ class TestGradientCheckpointing:
         mesh_axes: tuple[str, str],
     ) -> None:
         """KV cache should be populated even with gradient checkpointing enabled."""
-        _, config, out = self._forward(
-            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True
-        )
+        _, config, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True)
 
         # keys is a list with one entry per layer
         assert len(out.kv_cache.keys) == config.num_hidden_layers

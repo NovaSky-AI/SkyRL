@@ -24,12 +24,12 @@ class ModelOutput:
 
     Attributes:
         last_hidden_state: The last hidden state from the model.
-        kv_cache: The updated key-value cache.
+        kv_cache: The updated key-value cache (None during training).
         hidden_states: All hidden states if output_hidden_states=True.
     """
 
     last_hidden_state: jax.Array
-    kv_cache: KVCache
+    kv_cache: KVCache | None
     hidden_states: list[jax.Array] | None = None
 
 
@@ -40,10 +40,10 @@ class CausalLMOutput:
 
     Attributes:
         last_hidden_state: The last hidden state from the model.
-        kv_cache: The updated key-value cache.
+        kv_cache: The updated key-value cache (None during training).
         hidden_states: All hidden states, if output_hidden_states=True.
     """
 
     last_hidden_state: jax.Array
-    kv_cache: KVCache
+    kv_cache: KVCache | None
     hidden_states: list[jax.Array] | None = None
