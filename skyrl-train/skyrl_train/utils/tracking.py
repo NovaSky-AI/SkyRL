@@ -37,8 +37,6 @@ class Tracking:
         experiment_name,
         backends: Union[str, List[str]] = "console",
         config=None,
-        wandb_resume=None,
-        wandb_id=None,
     ):
         if isinstance(backends, str):
             backends = [backends]
@@ -51,14 +49,7 @@ class Tracking:
             import wandb
             from omegaconf import OmegaConf
 
-            wandb_kwargs = dict(
-                project=project_name, name=experiment_name, config=OmegaConf.to_container(config, resolve=True)
-            )
-            if wandb_resume is not None:
-                wandb_kwargs["resume"] = wandb_resume
-            if wandb_id is not None:
-                wandb_kwargs["id"] = wandb_id
-            wandb.init(**wandb_kwargs)
+            wandb.init(project=project_name, name=experiment_name, config=OmegaConf.to_container(config, resolve=True))
             self.logger["wandb"] = wandb
 
         if "mlflow" in backends:

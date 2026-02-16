@@ -35,7 +35,6 @@ from omegaconf import DictConfig
 from skyrl_gym.envs import register
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_train.utils import initialize_ray
-from skyrl_train.utils.tracking import Tracking
 
 logger = logging.getLogger(__name__)
 
@@ -49,54 +48,7 @@ class FleetPPOExp(BasePPOExp):
     - Clean up old checkpoints before saving (prevents disk exhaustion)
     - Upload to S3 if AWS credentials are set
     - Keep local checkpoints for same-VM resume
-    - Resume W&B run when resuming from checkpoint
     """
-
-    def get_tracker(self):
-        """Override tracker to support W&B run resume when RESUME_RUN_NAME is set."""
-        resume_run_name = os.environ.get("RESUME_RUN_NAME", "")
-        if not resume_run_name:
-            return super().get_tracker()
-
-        # Look up the W&B run ID so we can resume logging to the same run
-        wandb_id = self._lookup_wandb_run_id(self.cfg.trainer.project_name, resume_run_name)
-        if wandb_id:
-            # Override run_name in config to match the resumed run
-            from omegaconf import OmegaConf
-
-            OmegaConf.update(self.cfg, "trainer.run_name", resume_run_name)
-            logger.info(f"Resuming W&B run: name={resume_run_name}, id={wandb_id}")
-            return Tracking(
-                project_name=self.cfg.trainer.project_name,
-                experiment_name=resume_run_name,
-                backends=self.cfg.trainer.logger,
-                config=self.cfg,
-                wandb_resume="allow",
-                wandb_id=wandb_id,
-            )
-
-        logger.warning(f"Could not find W&B run '{resume_run_name}', creating new run")
-        return super().get_tracker()
-
-    @staticmethod
-    def _lookup_wandb_run_id(project_name, run_name):
-        """Look up W&B run ID from run name for resume."""
-        try:
-            import wandb
-
-            api = wandb.Api()
-            entity = os.environ.get("WANDB_ENTITY", api.default_entity)
-            runs = api.runs(
-                f"{entity}/{project_name}",
-                filters={"display_name": run_name},
-            )
-            for run in runs:
-                logger.info(f"Found W&B run: {run.name} (id={run.id}, state={run.state})")
-                return run.id
-            logger.warning(f"No W&B run found with name '{run_name}' in {entity}/{project_name}")
-        except Exception as e:
-            logger.warning(f"Failed to look up W&B run ID: {e}")
-        return None
 
     def run(self):
         trainer = self._setup_trainer()
