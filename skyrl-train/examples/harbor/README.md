@@ -1,6 +1,6 @@
 ## Harbor Integration
 
-RL training with [Harbor](https://github.com/laude-institute/harbor) as the environment and reward source. See the [full documentation](https://skyrl.ai/docs/harbor) for details.
+RL training with [Harbor](https://github.com/laude-institute/harbor) as the environment and reward source. See the [full documentation](https://docs.skyrl.ai/docs/harbor) for details.
 
 ### Structure
 

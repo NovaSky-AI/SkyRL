@@ -16,10 +16,10 @@ DATA_DIR="$HOME/data/harbor"
 TRAIN_DATA="['$DATA_DIR/CodeContests']"
 EVAL_DATA="['$DATA_DIR/OpenThoughts-TB-dev']"
 
+CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
 TRIALS_DIR="$HOME/trials_run"
 CKPTS_DIR="$HOME/otagent/ckpts"
 EXPORTS_DIR="$HOME/otagent/exports"
-CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
 
 NUM_GPUS=4
 MINI_BATCH_SIZE=32

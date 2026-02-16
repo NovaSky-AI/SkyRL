@@ -46,6 +46,8 @@ uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.har
   generator.num_inference_engines=$NUM_GPUS \
   generator.inference_engine_tensor_parallel_size=1 \
   +generator.engine_init_kwargs.chat_template=$CHAT_TEMPLATE_PATH \
+  +generator.engine_init_kwargs.max_model_len=$MAX_MODEL_LEN \
+  +generator.engine_init_kwargs.enable_log_requests=false \
   trainer.epochs=3 \
   trainer.eval_batch_size=128 \
   trainer.eval_before_train=true \
