@@ -2,7 +2,7 @@ import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
 from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator
+from typing import Literal, Any, AsyncGenerator, ClassVar
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager, suppress
@@ -299,6 +299,12 @@ class Datum(BaseModel):
 
 
 class ForwardBackwardInput(BaseModel):
+    _ALLOWED_KEYS_BY_LOSS_FN: ClassVar[dict[str, set[str]]] = {
+        "cross_entropy": set(),
+        "importance_sampling": set(),
+        "ppo": {"clip_low_threshold", "clip_high_threshold"},
+    }
+
     data: list[Datum]
     loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
     loss_fn_config: dict[str, float] | None = None
@@ -309,12 +315,7 @@ class ForwardBackwardInput(BaseModel):
         if self.loss_fn_config is None:
             return self
 
-        allowed_keys_by_loss_fn = {
-            "cross_entropy": set(),
-            "importance_sampling": set(),
-            "ppo": {"clip_low_threshold", "clip_high_threshold"},
-        }
-        allowed_keys = allowed_keys_by_loss_fn[self.loss_fn]
+        allowed_keys = self._ALLOWED_KEYS_BY_LOSS_FN[self.loss_fn]
         invalid_keys = sorted(set(self.loss_fn_config.keys()) - allowed_keys)
         if invalid_keys:
             if allowed_keys:
