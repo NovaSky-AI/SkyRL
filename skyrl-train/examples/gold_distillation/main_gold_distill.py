@@ -227,6 +227,61 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             return None
         return output
 
+    def _log_alignment_sample(
+        self,
+        student_token_ids: list[int],
+        teacher_token_ids: list[int],
+        student_groups: list[list[int]],
+        teacher_groups: list[list[int]],
+    ):
+        """
+        Log a sample alignment for debugging/visualization.
+
+        Args:
+            student_token_ids: Student token IDs
+            teacher_token_ids: Teacher token IDs
+            student_groups: Student alignment groups
+            teacher_groups: Teacher alignment groups
+        """
+        # Decode tokens
+        student_decoded = [self.tokenizer.decode([tid]) for tid in student_token_ids]
+        teacher_decoded = [self.ref_tokenizer.decode([tid]) for tid in teacher_token_ids]
+
+        logger.info("=" * 60)
+        logger.info("GOLD Alignment Sample:")
+        logger.info(f"Student tokens ({len(student_token_ids)}): {student_decoded}")
+        logger.info(f"Teacher tokens ({len(teacher_token_ids)}): {teacher_decoded}")
+        logger.info(f"Alignment groups ({len(student_groups)}):")
+
+        for i, (s_group, t_group) in enumerate(zip(student_groups, teacher_groups)):
+            s_tokens = [student_decoded[idx] for idx in s_group]
+            t_tokens = [teacher_decoded[idx] for idx in t_group]
+            s_text = "".join(s_tokens)
+            t_text = "".join(t_tokens)
+            logger.info(f"  Group {i}: '{s_text}' ({s_tokens}) ↔ '{t_text}' ({t_tokens})")
+        logger.info("=" * 60)
+
+    def _log_probability_comparison(
+        self,
+        student_probs: torch.Tensor,
+        teacher_probs: torch.Tensor,
+        top_k: int = 5,
+    ):
+        """
+        Log top-k probabilities for student vs teacher.
+
+        Args:
+            student_probs: Student probability distribution [vocab_size]
+            teacher_probs: Teacher probability distribution [vocab_size]
+            top_k: Number of top probabilities to log
+        """
+        s_top_probs, s_top_ids = student_probs.topk(top_k)
+        t_top_probs, t_top_ids = teacher_probs.topk(top_k)
+
+        logger.info("Probability Comparison (first aligned group):")
+        logger.info(f"  Student top-{top_k}: {list(zip(s_top_ids.tolist(), s_top_probs.tolist()))}")
+        logger.info(f"  Teacher top-{top_k}: {list(zip(t_top_ids.tolist(), t_top_probs.tolist()))}")
+
     def _compute_gold_rewards(
         self,
         student_logits: torch.Tensor,
@@ -262,6 +317,15 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         # Initialize rewards tensor with loss_mask shape for compatibility
         rewards = torch.zeros(batch_size, loss_mask_seq_len, device=device)
 
+        # Tracking metrics for logging
+        alignment_successes = 0
+        total_student_tokens = 0
+        total_teacher_tokens = 0
+        total_alignment_groups = 0
+        tokens_per_student_group = []
+        tokens_per_teacher_group = []
+        sample_logged = False  # Log only first sample for debugging
+
         for i in range(batch_size):
             # Get student response region
             student_mask = student_loss_mask[i].bool()
@@ -293,6 +357,10 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             student_token_ids = student_input_ids[i, student_start:student_end].tolist()
             teacher_token_ids = teacher_input_ids[i, teacher_start:teacher_end].tolist()
 
+            # Track token counts
+            total_student_tokens += len(student_token_ids)
+            total_teacher_tokens += len(teacher_token_ids)
+
             if len(student_token_ids) > 0 and len(teacher_token_ids) > 0:
                 # Build alignment groups using greedy text matching
                 student_groups, teacher_groups = build_alignment_groups_from_ids(
@@ -300,9 +368,28 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                 )
 
                 if student_groups and teacher_groups:
+                    # Track successful alignment
+                    alignment_successes += 1
+                    total_alignment_groups += len(student_groups)
+
+                    # Track tokens per group
+                    for s_group in student_groups:
+                        tokens_per_student_group.append(len(s_group))
+                    for t_group in teacher_groups:
+                        tokens_per_teacher_group.append(len(t_group))
+
+                    # Log sample alignment for first batch item (debugging)
+                    if not sample_logged and i == 0:
+                        self._log_alignment_sample(student_token_ids, teacher_token_ids, student_groups, teacher_groups)
+                        sample_logged = True
+
                     # Merge probabilities for aligned spans
                     student_aligned = merge_probabilities_with_alignment_groups(student_probs, student_groups)
                     teacher_aligned = merge_probabilities_with_alignment_groups(teacher_probs, teacher_groups)
+
+                    # Log probability comparison for first group of first sample
+                    if not sample_logged and i == 0 and len(student_aligned) > 0:
+                        self._log_probability_comparison(student_aligned[0], teacher_aligned[0])
 
                     # Compute per-group L1 loss and distribute to student tokens
                     min_groups = min(student_aligned.size(0), teacher_aligned.size(0))
@@ -342,6 +429,32 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                     f"Student tokens: {len(student_token_ids)}, Teacher tokens: {len(teacher_token_ids)}. "
                     "Rewards will be zero for this sample."
                 )
+
+        # Log alignment statistics
+        if batch_size > 0:
+            alignment_success_rate = alignment_successes / batch_size
+            avg_student_tokens = total_student_tokens / batch_size
+            avg_teacher_tokens = total_teacher_tokens / batch_size
+            tokenizer_ratio = avg_teacher_tokens / avg_student_tokens if avg_student_tokens > 0 else 0.0
+            avg_alignment_groups = total_alignment_groups / alignment_successes if alignment_successes > 0 else 0
+            avg_tokens_per_student_group = (
+                sum(tokens_per_student_group) / len(tokens_per_student_group) if tokens_per_student_group else 0
+            )
+            avg_tokens_per_teacher_group = (
+                sum(tokens_per_teacher_group) / len(tokens_per_teacher_group) if tokens_per_teacher_group else 0
+            )
+
+            self.all_metrics.update(
+                {
+                    "gold/alignment_success_rate": alignment_success_rate,
+                    "gold/avg_student_tokens": avg_student_tokens,
+                    "gold/avg_teacher_tokens": avg_teacher_tokens,
+                    "gold/tokenizer_ratio": tokenizer_ratio,
+                    "gold/avg_alignment_groups": avg_alignment_groups,
+                    "gold/avg_tokens_per_student_group": avg_tokens_per_student_group,
+                    "gold/avg_tokens_per_teacher_group": avg_tokens_per_teacher_group,
+                }
+            )
 
         return rewards
 
@@ -461,14 +574,38 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             rewards = rewards * loss_masks_all
 
         # Log metrics
-        avg_reward = rewards[loss_masks_all > 0].mean().item() if (loss_masks_all > 0).any() else 0.0
-        self.all_metrics.update(
-            {
-                "gold/avg_reward": avg_reward,
-                "gold/min_reward": rewards[loss_masks_all > 0].min().item() if (loss_masks_all > 0).any() else 0.0,
-                "gold/max_reward": rewards[loss_masks_all > 0].max().item() if (loss_masks_all > 0).any() else 0.0,
-            }
-        )
+        if (loss_masks_all > 0).any():
+            valid_rewards = rewards[loss_masks_all > 0]
+            avg_reward = valid_rewards.mean().item()
+            min_reward = valid_rewards.min().item()
+            max_reward = valid_rewards.max().item()
+            reward_std = valid_rewards.std().item()
+
+            # Compute percentiles for reward distribution
+            reward_percentile_25 = torch.quantile(valid_rewards, 0.25).item()
+            reward_percentile_75 = torch.quantile(valid_rewards, 0.75).item()
+
+            self.all_metrics.update(
+                {
+                    "gold/avg_reward": avg_reward,
+                    "gold/min_reward": min_reward,
+                    "gold/max_reward": max_reward,
+                    "gold/reward_std": reward_std,
+                    "gold/reward_percentile_25": reward_percentile_25,
+                    "gold/reward_percentile_75": reward_percentile_75,
+                }
+            )
+        else:
+            self.all_metrics.update(
+                {
+                    "gold/avg_reward": 0.0,
+                    "gold/min_reward": 0.0,
+                    "gold/max_reward": 0.0,
+                    "gold/reward_std": 0.0,
+                    "gold/reward_percentile_25": 0.0,
+                    "gold/reward_percentile_75": 0.0,
+                }
+            )
 
         data["rewards"] = rewards
 
