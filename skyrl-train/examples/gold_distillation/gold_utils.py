@@ -199,15 +199,11 @@ def build_alignment_groups_from_ids(
     if s_buf == t_buf and s_group and t_group:
         flush()
     elif s_group or t_group:
-        # Handle remaining unmatched tokens by forcing a flush
-        if s_group or t_group:
-            if not s_group:
-                s_group = []
-            if not t_group:
-                t_group = []
-            if s_group or t_group:
-                s_groups.append(s_group.copy() if s_group else [])
-                t_groups.append(t_group.copy() if t_group else [])
+        # Handle remaining unmatched tokens by forcing a flush.
+        # This ensures that if one sequence is longer than the other,
+        # the remaining tokens are still captured in a final, possibly misaligned, group.
+        s_groups.append(s_group.copy() if s_group else [])
+        t_groups.append(t_group.copy() if t_group else [])
 
     return s_groups, t_groups
 

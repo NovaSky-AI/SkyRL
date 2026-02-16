@@ -381,7 +381,6 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                     # Log sample alignment for first batch item (debugging)
                     if not sample_logged and i == 0:
                         self._log_alignment_sample(student_token_ids, teacher_token_ids, student_groups, teacher_groups)
-                        sample_logged = True
 
                     # Merge probabilities for aligned spans
                     student_aligned = merge_probabilities_with_alignment_groups(student_probs, student_groups)
@@ -390,6 +389,7 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                     # Log probability comparison for first group of first sample
                     if not sample_logged and i == 0 and len(student_aligned) > 0:
                         self._log_probability_comparison(student_aligned[0], teacher_aligned[0])
+                        sample_logged = True
 
                     # Compute per-group L1 loss and distribute to student tokens
                     min_groups = min(student_aligned.size(0), teacher_aligned.size(0))
