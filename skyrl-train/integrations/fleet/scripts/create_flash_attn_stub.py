@@ -28,13 +28,13 @@ def create_stub():
     # This is required because transformers calls:
     #   importlib.metadata.version("flash_attn")
     # which looks for flash_attn-*.dist-info/METADATA, not __version__
-    dist_info_dir = os.path.join(site_packages, "flash_attn-2.7.0.stub.dist-info")
+    dist_info_dir = os.path.join(site_packages, "flash_attn-2.7.0+stub.dist-info")
     os.makedirs(dist_info_dir, exist_ok=True)
 
     # Create METADATA file (minimal PEP 566 format)
     metadata_content = """Metadata-Version: 2.1
 Name: flash-attn
-Version: 2.7.0.stub
+Version: 2.7.0+stub
 Summary: Stub package for flash_attn (no CUDA required)
 """
     with open(os.path.join(dist_info_dir, "METADATA"), "w") as f:
@@ -52,7 +52,7 @@ Summary: Stub package for flash_attn (no CUDA required)
     with open(os.path.join(dist_info_dir, "RECORD"), "w") as f:
         f.write("")
 
-    print(f"Created flash_attn-2.7.0.stub.dist-info at {dist_info_dir}")
+    print(f"Created flash_attn-2.7.0+stub.dist-info at {dist_info_dir}")
 
     # Create ops/triton directory structure for rotary embedding
     ops_dir = os.path.join(pkg_dir, "ops")
@@ -62,7 +62,7 @@ Summary: Stub package for flash_attn (no CUDA required)
     # Create __init__.py files for package structure
     with open(os.path.join(pkg_dir, "__init__.py"), "w") as f:
         f.write("# Minimal flash_attn stub - provides bert_padding and rotary ops\n")
-        f.write("__version__ = '2.7.0.stub'\n")
+        f.write("__version__ = '2.7.0+stub'\n")
 
     with open(os.path.join(ops_dir, "__init__.py"), "w") as f:
         f.write("# flash_attn.ops stub\n")

@@ -77,6 +77,9 @@
 #          - transformers calls importlib.metadata.version("flash_attn")
 #          - This requires flash_attn-*.dist-info/METADATA, not __version__
 #          - Create proper dist-info directory with METADATA file
+# v0.1.38: Use PEP 440 compliant version (2.7.0+stub not 2.7.0.stub)
+#          - uv/pip reject non-compliant versions like "2.7.0.stub"
+#          - Use local version identifier format: "2.7.0+stub"
 
 name: fleet-task-grpo-glm-4.7-flash
 
