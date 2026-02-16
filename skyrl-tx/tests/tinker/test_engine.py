@@ -123,3 +123,28 @@ def test_prepare_model_pass_batch_loss_fn_config():
     batch_no_config = prepare_model_pass_batch(requests_without_config)
     assert batch_no_config.all_loss_fns == ["cross_entropy"]
     assert batch_no_config.all_loss_fn_configs == [None]
+
+
+def test_prepare_model_pass_batch_accepts_cispo():
+    datum = types.Datum(
+        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3])]),
+        loss_fn_inputs=types.LossFnInputs(
+            target_tokens=types.TensorData(data=[2, 3, 4]),
+            weights=types.TensorData(data=[1.0, 1.0, 1.0]),
+            advantages=types.TensorData(data=[0.1, 0.2, 0.3]),
+            logprobs=types.TensorData(data=[-1.1, -1.0, -0.9]),
+        ),
+    )
+
+    requests = {
+        "req1": (
+            "model1",
+            types.ForwardBackwardInput(
+                data=[datum],
+                loss_fn="cispo",
+            ),
+        ),
+    }
+
+    batch = prepare_model_pass_batch(requests)
+    assert batch.all_loss_fns == ["cispo"]
