@@ -241,7 +241,7 @@ class JaxBackendImpl(AbstractBackend):
         return total if mb <= 0 else max(1, min(mb, total))
 
     @staticmethod
-    def _build_loss_config_arrays(
+    def _build_loss_fn_config(
         all_loss_fn_configs: list[dict[str, float] | None],
     ) -> LossFnConfig:
         """Build per-example loss config arrays."""
@@ -249,7 +249,7 @@ class JaxBackendImpl(AbstractBackend):
         clip_ratio = np.asarray([float(config.get("clip_ratio", _DEFAULT_PPO_CLIP_RATIO)) for config in configs], dtype=np.float32)
         clip_low = np.asarray([float(config.get("clip_low", 1.0 - ratio)) for config, ratio in zip(configs, clip_ratio)], dtype=np.float32)
         clip_high = np.asarray([float(config.get("clip_high", 1.0 + ratio)) for config, ratio in zip(configs, clip_ratio)], dtype=np.float32)
-        return LossFnConfig(clip_ratio=clip_ratio, clip_low=clip_low, clip_high=clip_high)
+        return LossFnConfig(clip_low=clip_low, clip_high=clip_high)
 
     @contextmanager
     def _jit_timing_context(self, seq_len: int, mode: str):
@@ -439,7 +439,6 @@ class JaxBackendImpl(AbstractBackend):
             # All batch arrays are sharded along batch dimension
             batch_sharded_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
             loss_fn_config_shardings = LossFnConfig(
-                clip_ratio=batch_sharded_1d,
                 clip_low=batch_sharded_1d,
                 clip_high=batch_sharded_1d,
             )
@@ -581,7 +580,7 @@ class JaxBackendImpl(AbstractBackend):
         target_ids = pad_batch(all_targets, max_len, np.int32)
         adapter_indices = np.array(all_adapter_indices, dtype=np.int32)
         loss_fn_types = np.array(all_loss_fn_types, dtype=np.int32)
-        loss_fn_config = self._build_loss_config_arrays(all_loss_fn_configs)
+        loss_fn_config = self._build_loss_fn_config(all_loss_fn_configs)
 
         # Create attention mask (1 for real tokens, 0 for padding)
         attention_mask = pad_batch([[1] * len(seq) for seq in all_input_ids], max_len, np.int32)
@@ -631,9 +630,6 @@ class JaxBackendImpl(AbstractBackend):
                     (sharding_2d,) * 6 + (sharding_1d,) * 2,
                 )
                 mb_loss_fn_config = LossFnConfig(
-                    clip_ratio=jax.device_put(
-                        pad_to_fsdp(loss_fn_config.clip_ratio[mb_start:mb_end], fsdp_size), sharding_1d
-                    ),
                     clip_low=jax.device_put(pad_to_fsdp(loss_fn_config.clip_low[mb_start:mb_end], fsdp_size), sharding_1d),
                     clip_high=jax.device_put(
                         pad_to_fsdp(loss_fn_config.clip_high[mb_start:mb_end], fsdp_size), sharding_1d

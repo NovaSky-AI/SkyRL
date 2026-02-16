@@ -13,7 +13,6 @@ from tx.tinker.types import LOSS_TYPES
 class LossFnConfig:
     """Fixed loss config arrays passed through the JAX loss path."""
 
-    clip_ratio: jax.Array
     clip_low: jax.Array
     clip_high: jax.Array
 
@@ -57,7 +56,6 @@ def ppo_loss(
 ) -> jax.Array:
     "PPO style clipped version of the importance sampling loss."
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
-    clip_ratio = loss_fn_config.clip_ratio
     clip_low = loss_fn_config.clip_low
     clip_high = loss_fn_config.clip_high
     clipped_ratio = jnp.clip(prob_ratio, clip_low, clip_high)

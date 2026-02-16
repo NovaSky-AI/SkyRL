@@ -353,7 +353,7 @@ def test_gradient_checkpointing():
         loss_fn_types = jnp.zeros((B,), dtype=jnp.int32)
         sampling_logprobs = jnp.zeros((B, T), dtype=jnp.float32)
         advantages = jnp.zeros((B, T), dtype=jnp.float32)
-        loss_fn_config = backend._build_loss_config_arrays([None] * B)
+        loss_fn_config = backend._build_loss_fn_config([None] * B)
 
         # Compute loss, using gradient checkpointing if enabled
         _, per_token_losses, _ = backend._forward_backward_and_accumulate(
@@ -624,7 +624,7 @@ def test_mixed_train_unembed_adapters():
         loss_fn_types = jnp.zeros((batch_size,), dtype=jnp.int32)
         sampling_logprobs = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
         advantages = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
-        loss_fn_config = backend._build_loss_config_arrays([None] * batch_size)
+        loss_fn_config = backend._build_loss_fn_config([None] * batch_size)
         adapter_indices = jnp.array([normal_idx, unembed_idx], dtype=jnp.int32)
 
         _, losses, logprobs = backend._forward(
