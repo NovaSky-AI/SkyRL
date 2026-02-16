@@ -101,6 +101,17 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
             ),
             True,
         ),
+        (
+            (
+                DictKey(key="model"),
+                DictKey(key="layers"),
+                DictKey(key="layer_groups"),
+                DictKey(key="_stacked"),
+                DictKey(key="self_attn"),
+                DictKey(key="lora_A"),
+            ),
+            True,
+        ),
         # Non-stacked paths (DictKey)
         ((DictKey(key="model"), DictKey(key="embed_tokens"), DictKey(key="lora_A")), False),
         ((DictKey(key="lm_head"), DictKey(key="lora_A")), False),
@@ -108,7 +119,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
         (("model", "layers", "_stacked", "self_attn", "lora_A"), True),
         (("model", "embed_tokens", "lora_A"), False),
     ],
-    ids=["stacked_layers", "embed_tokens", "lm_head", "str_stacked", "str_embed"],
+    ids=["stacked_layers", "multi_stacked_layers", "embed_tokens", "lm_head", "str_stacked", "str_embed"],
 )
 def test_is_stacked_path(path, expected):
     """Test is_stacked_path correctly identifies stacked vs non-stacked paths."""
