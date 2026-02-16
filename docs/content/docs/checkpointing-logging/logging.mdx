@@ -1,0 +1,92 @@
+---
+title: "Logging"
+---
+
+By default, SkyRL separates **training progress** from **infrastructure logs**:
+
+- **stdout** shows only what you care about during a run: configuration, dataset loading, training steps, rewards, and metrics.
+- **Infrastructure logs** (vLLM engine startup, model loading, KV cache allocation, weight syncing, worker initialization) are written to a log file on disk.
+
+This keeps your terminal clean while preserving full diagnostic detail for debugging.
+
+## Log File Location
+
+Infrastructure logs are written to:
+
+```
+{cfg.trainer.log_path}/infra-YYMMDD_HHMMSS.log
+```
+
+With default settings this is e.g. `/tmp/skyrl-logs/infra-260212_143052.log`. Each run creates a new timestamped file so previous logs are preserved.
+
+## Configuration
+
+`trainer.log_path`
+  - **Default**: `/tmp/skyrl-logs`
+  - **Purpose**: Directory for infrastructure log files
+  - Can be set via Hydra override: `trainer.log_path=/path/to/logs`, just like `cfg.trainer.ckpt_path` and `cfg.trainer.export_path`
+
+`SKYRL_DUMP_INFRA_LOG_TO_STDOUT`
+  - **Default**: `False` (disabled)
+  - **Purpose**: When set to `1`, infrastructure logs are shown on stdout instead of being redirected to the log file. Useful for debugging startup issues.
+
+> `SKYRL_LOG_FILE` is set automatically by `initialize_ray()` — you do not need to set it yourself.
+
+## Usage
+
+**Normal run** — clean stdout, infrastructure logs to `/tmp/skyrl-logs/infra-YYMMDD_HHMMSS.log`:
+
+```bash
+bash examples/gsm8k/run_gsm8k.sh
+```
+
+**Custom log directory:**
+
+```bash
+bash examples/gsm8k/run_gsm8k.sh trainer.log_path=/home/user/logs
+```
+
+**Dump infrastructure logs to stdout** (no file redirection):
+
+```bash
+SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 bash examples/gsm8k/run_gsm8k.sh
+```
+
+## How It Works
+
+SkyRL uses OS-level file descriptor redirection (`os.dup2`) to route each Ray actor's stdout/stderr to a shared log file. The key design principle is selective redirection:
+
+- **vLLM inference engines** and **training workers** redirect their output to the log file at actor initialization time.
+- The **training entrypoint** (`skyrl_entrypoint`) does *not* redirect, so training progress flows to your terminal as usual.
+
+Because redirection happens at the file descriptor level, it captures all output — including logs from vLLM's `EngineCore` subprocess (model loading, KV cache setup) that would bypass Python-level logging intercepts.
+
+The redirect logic lives in `skyrl_train/utils/ray_logging.py` and is called from:
+
+- `BaseVLLMInferenceEngine.__init__()` — covers both sync and async vLLM engines
+- `DistributedTorchRayActor.__init__()` — covers policy and reference model workers
+
+## Log File Lifecycle
+
+Each run generates a new log file with a unique timestamp in its filename (e.g., `infra-260212_143052.log`). Existing log files are automatically preserved, which is especially helpful for retried runs, as each run's logs remain separate and are not overwritten by subsequent runs.
+
+## Multi-Node
+
+By default, `trainer.log_path` is `/tmp/skyrl-logs`, which is a **node-local** path. In multi-node training, each node writes its own timestamped log file at the same local path. The log directory is created automatically on each node when the first actor starts.
+
+To consolidate all nodes' infrastructure logs into a **single file**, point `trainer.log_path` at a shared filesystem that is mounted on all nodes, e.g.:
+
+```bash
+bash examples/gsm8k/run_gsm8k.sh trainer.log_path=/mnt/shared_storage/skyrl-logs
+```
+
+With a shared filesystem, all actors across all nodes append to the same timestamped log file. Individual log lines remain intact (POSIX atomic append), but lines from different actors will be interleaved.
+
+This is consistent with how `trainer.ckpt_path` and `trainer.export_path` work — they also default to local paths and should be pointed at shared storage for multi-node runs.
+
+## Known Limitations
+
+- **Ray system messages still appear on stdout.** A small number of `(raylet)` log lines are emitted by Ray itself before any actors start. These are not captured by actor-level redirection.
+
+- **All actors share one log file.** vLLM engines and workers on the same node (or across nodes if using shared storage) all append to the same timestamped log file. Under heavy logging, lines from different actors may interleave.
+- **No deduplication.** Infrastructure logs lose Ray's deduplication functionality ("repeated Nx across cluster" messages), making the log more bloated than Ray's.

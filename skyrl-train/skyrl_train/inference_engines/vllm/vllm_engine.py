@@ -74,6 +74,12 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
+        # Redirect infrastructure output to log file before any engine initialization.
+        # Done here in the base class so all subclasses get it automatically.
+        from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
+
+        redirect_actor_output_to_file()
+
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
