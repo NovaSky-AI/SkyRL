@@ -158,8 +158,8 @@ explicit = true
 [tool.uv.sources]
 # For now, just always use the current main branch, later it will be better to pin it to a released version. For development, you
 # can set it to your own development branch.
-#skyrl-train = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-train" }
-skyrl-train = { path = "../skyrl-train"}
+skyrl-train = { git = "https://github.com/chiragbhatt311/SkyRL.git", subdirectory = "skyrl-train", branch = "chirag/skyrl_train_multinode" }
+#skyrl-train = { path = "../skyrl-train"}
 # Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config)
 torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },

@@ -48,8 +48,8 @@ if __name__ == "__main__":
 
     dataset = datasets.load_dataset(data_source, "main")
 
-    train_dataset = dataset["train"]
-    val_dataset = dataset["test"]
+    train_dataset = dataset["train"].select(range(128))
+    val_dataset = dataset["test"].select(range(64))
 
     if args.max_train_dataset_length is not None:
         max_len = min(args.max_train_dataset_length, len(train_dataset))
