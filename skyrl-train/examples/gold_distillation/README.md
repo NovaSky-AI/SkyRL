@@ -49,10 +49,14 @@ To get started, first set up the dataset from the DAPO example:
 bash examples/algorithms/dapo/prepare_dapo_data.sh
 ```
 
-Then, just make sure you set `TEACHER_MODEL` to your desired teacher model, and you're ready to kick off training!
+The script uses Qwen as teacher and TinyLlama as student by default. You can override the teacher model via command-line arguments:
 
 ```bash
+# Use default teacher (Qwen/Qwen2.5-0.5B-Instruct)
 bash examples/gold_distillation/run_gold_distill_qwen_to_llama.sh
+
+# Or specify a custom teacher model
+bash examples/gold_distillation/run_gold_distill_qwen_to_llama.sh trainer.ref.model.path=<YOUR_MODEL_HERE>
 ```
 
 ## References
