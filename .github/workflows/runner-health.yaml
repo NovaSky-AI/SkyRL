@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   check-runners:
@@ -165,19 +166,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
-          MAX_ATTEMPTS=2
+          MAX_ATTEMPTS=3
+          COOLDOWN_SECONDS=3600  # Reset attempt counter after 1 hour
 
-          # Load per-instance recovery attempt counts from previous state
+          # Load per-instance recovery state from previous run
+          # Format: {"instance_id": {"count": N, "last_attempt": "ISO8601"}, ...}
+          # Also handles legacy format: {"instance_id": N}
           if [ -f /tmp/runner-health-state/state.json ]; then
-            PREV_ATTEMPTS=$(jq -r '.recovery_attempts // {}' /tmp/runner-health-state/state.json)
+            RAW_ATTEMPTS=$(jq -r '.recovery_attempts // {}' /tmp/runner-health-state/state.json)
           else
-            PREV_ATTEMPTS="{}"
+            RAW_ATTEMPTS="{}"
           fi
 
+          # Migrate legacy format (plain int) to new format (object with count + timestamp)
+          NOW_TS=$(date -u +%s)
+          NOW_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          PREV_ATTEMPTS=$(echo "$RAW_ATTEMPTS" | jq --arg now "$NOW_ISO" '
+            to_entries | map(
+              if (.value | type) == "number" then
+                .value = {"count": .value, "last_attempt": $now}
+              else . end
+            ) | from_entries
+          ')
+
           # Get list of runners currently executing a job (busy runners)
-          BUSY_RUNNERS=$(gh api repos/${{ github.repository }}/actions/runners --paginate --jq '.runners[] | select(.busy == true) | .name' 2>/dev/null || echo "")
+          BUSY_RUNNERS=$(gh api repos/${{ github.repository }}/actions/runners --paginate --jq '.runners[] | select(.busy == true) | .name' 2>/dev/null || true)
           if [ -n "$BUSY_RUNNERS" ]; then
-            echo "Busy runners (will not stop/start): $BUSY_RUNNERS"
+            echo "Busy runners (will not stop/start):"
+            echo "$BUSY_RUNNERS"
           fi
 
           DETAILS=$(cat /tmp/unhealthy_details.json)
@@ -189,7 +205,6 @@ jobs:
           FAILED_COUNT=0
           SKIPPED_NAMES=""
           SKIPPED_COUNT=0
-          # Track updated attempt counts (will be saved in state)
           UPDATED_ATTEMPTS="$PREV_ATTEMPTS"
 
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -201,22 +216,37 @@ jobs:
             INSTANCE_STATE=$(echo "$DETAILS" | jq -r ".[$i].state")
             INSTANCE_HEALTH=$(echo "$DETAILS" | jq -r ".[$i].health")
 
-            # Get previous attempt count for this instance
-            ATTEMPTS=$(echo "$PREV_ATTEMPTS" | jq -r --arg id "$INSTANCE_ID" '.[$id] // 0')
+            # Get previous attempt count and last attempt time
+            ATTEMPTS=$(echo "$PREV_ATTEMPTS" | jq -r --arg id "$INSTANCE_ID" '.[$id].count // 0')
+            LAST_ATTEMPT=$(echo "$PREV_ATTEMPTS" | jq -r --arg id "$INSTANCE_ID" '.[$id].last_attempt // empty')
+            ELAPSED=0
 
-            echo "Processing $INSTANCE_NAME ($INSTANCE_ID): state=$INSTANCE_STATE health=$INSTANCE_HEALTH attempts=$ATTEMPTS"
+            # Reset attempts if cooldown has elapsed
+            if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ] && [ -n "$LAST_ATTEMPT" ]; then
+              LAST_TS=$(date -u -d "$LAST_ATTEMPT" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_ATTEMPT" +%s 2>/dev/null || echo "0")
+              ELAPSED=$((NOW_TS - LAST_TS))
+              if [ "$ELAPSED" -ge "$COOLDOWN_SECONDS" ]; then
+                echo "Cooldown elapsed for $INSTANCE_NAME ($ELAPSED >= $COOLDOWN_SECONDS sec), resetting attempts"
+                ATTEMPTS=0
+                UPDATED_ATTEMPTS=$(echo "$UPDATED_ATTEMPTS" | jq --arg id "$INSTANCE_ID" 'del(.[$id])')
+              fi
+            fi
+
+            echo "Processing $INSTANCE_NAME ($INSTANCE_ID): state=$INSTANCE_STATE health=$INSTANCE_HEALTH attempts=$ATTEMPTS/$MAX_ATTEMPTS"
 
             # Skip if runner is actively executing a job
-            if echo "$BUSY_RUNNERS" | grep -qx "$INSTANCE_NAME"; then
+            if [ -n "$BUSY_RUNNERS" ] && echo "$BUSY_RUNNERS" | grep -qx "$INSTANCE_NAME"; then
               echo "⏭️ **$INSTANCE_NAME**: Skipped — runner is busy (executing a job)" >> $GITHUB_STEP_SUMMARY
               SKIPPED_NAMES="$SKIPPED_NAMES $INSTANCE_NAME"
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
               continue
             fi
 
-            # Skip if max attempts reached
+            # Skip if max attempts reached (cooldown not yet elapsed)
             if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
-              echo "⏭️ **$INSTANCE_NAME**: Skipped — $ATTEMPTS recovery attempts exhausted, needs manual intervention" >> $GITHUB_STEP_SUMMARY
+              REMAINING=$((COOLDOWN_SECONDS - ELAPSED))
+              REMAINING_MIN=$((REMAINING / 60))
+              echo "⏭️ **$INSTANCE_NAME**: In cooldown — $ATTEMPTS attempts exhausted, retrying in ~${REMAINING_MIN}m" >> $GITHUB_STEP_SUMMARY
               SKIPPED_NAMES="$SKIPPED_NAMES $INSTANCE_NAME"
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
               continue
@@ -224,7 +254,7 @@ jobs:
 
             # Skip terminated/shutting-down instances — can't recover these
             if [ "$INSTANCE_STATE" = "terminated" ] || [ "$INSTANCE_STATE" = "shutting-down" ]; then
-              echo "⏭️ **$INSTANCE_NAME**: Skipped — instance is $INSTANCE_STATE" >> $GITHUB_STEP_SUMMARY
+              echo "⏭️ **$INSTANCE_NAME**: Skipped — instance is $INSTANCE_STATE (needs replacement)" >> $GITHUB_STEP_SUMMARY
               SKIPPED_NAMES="$SKIPPED_NAMES $INSTANCE_NAME"
               SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
               continue
@@ -259,14 +289,15 @@ jobs:
               echo "✅ **$INSTANCE_NAME**: Recovered successfully" >> $GITHUB_STEP_SUMMARY
               RECOVERED_NAMES="$RECOVERED_NAMES $INSTANCE_NAME"
               RECOVERED_COUNT=$((RECOVERED_COUNT + 1))
-              # Reset attempt counter on success
+              # Clear attempt tracking on success
               UPDATED_ATTEMPTS=$(echo "$UPDATED_ATTEMPTS" | jq --arg id "$INSTANCE_ID" 'del(.[$id])')
             else
-              echo "❌ **$INSTANCE_NAME**: Recovery failed (instance did not pass status checks)" >> $GITHUB_STEP_SUMMARY
+              NEW_COUNT=$((ATTEMPTS + 1))
+              echo "❌ **$INSTANCE_NAME**: Recovery failed (attempt $NEW_COUNT/$MAX_ATTEMPTS)" >> $GITHUB_STEP_SUMMARY
               FAILED_NAMES="$FAILED_NAMES $INSTANCE_NAME"
               FAILED_COUNT=$((FAILED_COUNT + 1))
-              # Increment attempt counter
-              UPDATED_ATTEMPTS=$(echo "$UPDATED_ATTEMPTS" | jq --arg id "$INSTANCE_ID" --argjson n $((ATTEMPTS + 1)) '.[$id] = $n')
+              # Record attempt count and timestamp
+              UPDATED_ATTEMPTS=$(echo "$UPDATED_ATTEMPTS" | jq --arg id "$INSTANCE_ID" --argjson n "$NEW_COUNT" --arg ts "$NOW_ISO" '.[$id] = {"count": $n, "last_attempt": $ts}')
             fi
           done
 
@@ -304,6 +335,49 @@ jobs:
           echo "queued=$QUEUED" >> $GITHUB_OUTPUT
           echo "in_progress=$IN_PROGRESS" >> $GITHUB_OUTPUT
 
+      - name: Check if alert needed
+        id: alert_check
+        if: steps.recover.outputs.still_unhealthy != '' && steps.recover.outputs.still_unhealthy != '0'
+        run: |
+          # Only send Slack alert for NEW unhealthy runners not already alerted
+          if [ -f /tmp/runner-health-state/state.json ]; then
+            PREV_ALERTED=$(jq -r '.alerted_instances // [] | .[]' /tmp/runner-health-state/state.json)
+          else
+            PREV_ALERTED=""
+          fi
+
+          FAILED="${{ steps.recover.outputs.failed_names }}"
+          SKIPPED="${{ steps.recover.outputs.skipped_names }}"
+          ALL_UNHEALTHY="$FAILED $SKIPPED"
+
+          NEW_ALERTS=""
+          for name in $ALL_UNHEALTHY; do
+            if ! echo "$PREV_ALERTED" | grep -qx "$name"; then
+              NEW_ALERTS="$NEW_ALERTS $name"
+            fi
+          done
+          NEW_ALERTS=$(echo $NEW_ALERTS | xargs)
+
+          if [ -n "$NEW_ALERTS" ]; then
+            echo "should_alert=true" >> $GITHUB_OUTPUT
+            echo "new_unhealthy=$NEW_ALERTS" >> $GITHUB_OUTPUT
+            echo "New unhealthy runners to alert on: $NEW_ALERTS"
+          else
+            echo "should_alert=false" >> $GITHUB_OUTPUT
+            echo "All unhealthy runners already alerted, skipping Slack"
+          fi
+
+          # Update alerted list (will be persisted in save step)
+          ALL_ALERTED="$PREV_ALERTED"
+          for name in $ALL_UNHEALTHY; do
+            if ! echo "$ALL_ALERTED" | grep -qx "$name"; then
+              ALL_ALERTED="$ALL_ALERTED
+          $name"
+            fi
+          done
+          # Write as JSON array for save step
+          echo "$ALL_ALERTED" | grep -v '^$' | jq -R . | jq -s . > /tmp/updated_alerted.json
+
       - name: Save current state
         if: always()
         run: |
@@ -318,13 +392,41 @@ jobs:
             ATTEMPTS="{}"
           fi
 
+          # Clean up recovery_attempts for instances that are now healthy
+          UNHEALTHY_IDS="${{ steps.ec2.outputs.unhealthy_ids }}"
+          ATTEMPTS=$(echo "$ATTEMPTS" | jq --arg ids "$UNHEALTHY_IDS" '
+            ($ids | split(" ") | map(select(. != ""))) as $unhealthy |
+            to_entries | map(select(.key as $k | $unhealthy | index($k))) | from_entries
+          ')
+
           # Determine final unhealthy count (after recovery)
           STILL_UNHEALTHY="${{ steps.recover.outputs.still_unhealthy }}"
           if [ -z "$STILL_UNHEALTHY" ]; then
             STILL_UNHEALTHY="${{ steps.ec2.outputs.unhealthy_count }}"
           fi
 
-          jq -n --argjson attempts "$ATTEMPTS" --argjson count "${STILL_UNHEALTHY:-0}" '{unhealthy_count: $count, recovery_attempts: $attempts, updated_at: now | todate}' > /tmp/runner-health-state/state.json
+          # Load alerted list (from alert_check step, or previous state, pruned to still-unhealthy)
+          if [ -f /tmp/updated_alerted.json ]; then
+            ALERTED=$(cat /tmp/updated_alerted.json)
+          elif [ -f /tmp/runner-health-state/state.json ]; then
+            ALERTED=$(jq -r '.alerted_instances // []' /tmp/runner-health-state/state.json)
+          else
+            ALERTED="[]"
+          fi
+          # Prune alerted list to only currently unhealthy runners
+          UNHEALTHY_NAMES="${{ steps.ec2.outputs.unhealthy_names }}"
+          ALERTED=$(echo "$ALERTED" | jq --arg names "$UNHEALTHY_NAMES" '
+            ($names | split(" ") | map(select(. != ""))) as $current |
+            map(select(. as $a | $current | index($a))) |
+            unique
+          ')
+
+          jq -n \
+            --argjson attempts "$ATTEMPTS" \
+            --argjson count "${STILL_UNHEALTHY:-0}" \
+            --argjson alerted "$ALERTED" \
+            '{unhealthy_count: $count, recovery_attempts: $attempts, alerted_instances: $alerted, updated_at: now | todate}' \
+            > /tmp/runner-health-state/state.json
 
           # Remove old format file if it exists
           rm -f /tmp/runner-health-state/last_unhealthy_count
@@ -371,7 +473,7 @@ jobs:
             }
 
       - name: Alert - manual intervention needed
-        if: steps.recover.outputs.still_unhealthy != '' && steps.recover.outputs.still_unhealthy != '0'
+        if: steps.alert_check.outputs.should_alert == 'true'
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -396,7 +498,7 @@ jobs:
                   "type": "section",
                   "text": {
                     "type": "mrkdwn",
-                    "text": "Auto-recovery via stop/start failed or max attempts reached.\nManual fix: `aws ec2 stop-instances --instance-ids <ID>` then `aws ec2 start-instances --instance-ids <ID>`\nOr launch a replacement runner per `docs/gha-runner-setup.md`."
+                    "text": "Auto-recovery failed. Will retry after 1h cooldown.\nManual fix: `aws ec2 stop-instances --instance-ids <ID>` then `aws ec2 start-instances --instance-ids <ID>`\nOr launch a replacement runner per `docs/gha-runner-setup.md`."
                   }
                 },
                 {
@@ -436,8 +538,7 @@ jobs:
               ]
             }
 
-      - name: Fail if runners still unhealthy after recovery
+      - name: Report status
         if: steps.recover.outputs.still_unhealthy != '' && steps.recover.outputs.still_unhealthy != '0'
         run: |
-          echo "::error::${{ steps.recover.outputs.still_unhealthy }} runner(s) still unhealthy after auto-recovery: ${{ steps.recover.outputs.failed_names }} ${{ steps.recover.outputs.skipped_names }}"
-          exit 1
+          echo "::warning::${{ steps.recover.outputs.still_unhealthy }} runner(s) still unhealthy: ${{ steps.recover.outputs.failed_names }} ${{ steps.recover.outputs.skipped_names }} (will auto-retry after cooldown)"
