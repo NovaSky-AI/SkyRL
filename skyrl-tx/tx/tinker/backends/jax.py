@@ -616,6 +616,8 @@ class JaxBackendImpl(AbstractBackend):
                     mb_advantages,
                     mb_adapter_indices,
                     mb_loss_fn_types,
+                    mb_clip_low,
+                    mb_clip_high,
                 ) = jax.device_put(
                     (
                         pad_to_fsdp(input_ids[mb_start:mb_end], fsdp_size),
@@ -626,14 +628,14 @@ class JaxBackendImpl(AbstractBackend):
                         pad_to_fsdp(advantages[mb_start:mb_end], fsdp_size),
                         pad_to_fsdp(adapter_indices[mb_start:mb_end], fsdp_size),
                         pad_to_fsdp(loss_fn_types[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(loss_fn_config.clip_low[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(loss_fn_config.clip_high[mb_start:mb_end], fsdp_size),
                     ),
-                    (sharding_2d,) * 6 + (sharding_1d,) * 2,
+                    (sharding_2d,) * 6 + (sharding_1d,) * 4,
                 )
                 mb_loss_fn_config = LossFnConfig(
-                    clip_low=jax.device_put(pad_to_fsdp(loss_fn_config.clip_low[mb_start:mb_end], fsdp_size), sharding_1d),
-                    clip_high=jax.device_put(
-                        pad_to_fsdp(loss_fn_config.clip_high[mb_start:mb_end], fsdp_size), sharding_1d
-                    ),
+                    clip_low=mb_clip_low,
+                    clip_high=mb_clip_high,
                 )
 
                 self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
