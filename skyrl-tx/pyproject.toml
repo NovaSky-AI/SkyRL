@@ -51,6 +51,7 @@ gcp = [
 
 azure = [
     "cloudpathlib[azure]",
+    "azure-identity",
 ]
 
 # The extras "jax", "fsdp", and "megatron" are the dependencies the

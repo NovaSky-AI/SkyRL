@@ -714,6 +714,10 @@ class TinkerEngine:
 
 def main():
     """Entry point for the background engine."""
+    # Set up Azure credentials before argparse tries to construct AnyPath for az:// paths
+    from tx.tinker.config import _ensure_azure_default_client
+    _ensure_azure_default_client()
+
     # Create argument parser and add Pydantic model fields
     parser = argparse.ArgumentParser(description="SkyRL tx tinker engine for processing requests")
     add_model(parser, EngineConfig)

@@ -1179,6 +1179,9 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
+    from tx.tinker.config import _ensure_azure_default_client
+    _ensure_azure_default_client()
+
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="SkyRL tx tinker API server")
     add_model(parser, EngineConfig)

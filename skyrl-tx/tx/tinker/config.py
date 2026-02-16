@@ -2,12 +2,63 @@
 
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
 
 from cloudpathlib import AnyPath
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+logger = logging.getLogger("tx")
+
+
+def _ensure_azure_default_client():
+    """Register a default AzureBlobClient for cloudpathlib.
+
+    Fallback chain:
+      1. Connection string  (AZURE_STORAGE_CONNECTION_STRING)
+      2. Managed identity    (AZURE_CLIENT_ID for user-assigned, otherwise system-assigned)
+      3. DefaultAzureCredential (CLI, env-vars, workload identity, etc.)
+
+    Must be called before cloudpathlib tries to parse az:// paths.
+    """
+    try:
+        from cloudpathlib import AzureBlobClient
+
+        conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+        if conn_str:
+            try:
+                AzureBlobClient(connection_string=conn_str).set_as_default_client()
+                logger.info("Azure auth: using connection string")
+                return
+            except Exception as e:
+                logger.warning(f"Connection string auth failed ({e}), falling back to managed identity")
+
+        # Need account_url for credential-based auth
+        account_name = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
+        if not account_name:
+            logger.info("No AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT_NAME set, skipping Azure client setup")
+            return
+        account_url = f"https://{account_name}.blob.core.windows.net"
+
+        # 2. Managed identity
+        client_id = os.environ.get("AZURE_CLIENT_ID")
+        try:
+            from azure.identity import ManagedIdentityCredential
+            credential = ManagedIdentityCredential(client_id=client_id) if client_id else ManagedIdentityCredential()
+            AzureBlobClient(account_url=account_url, credential=credential).set_as_default_client()
+            logger.info(f"Azure auth: using ManagedIdentityCredential (client_id={client_id or 'system-assigned'})")
+            return
+        except Exception as e:
+            logger.warning(f"ManagedIdentityCredential failed ({e}), falling back to DefaultAzureCredential")
+
+        from azure.identity import DefaultAzureCredential
+        credential = DefaultAzureCredential()
+        AzureBlobClient(account_url=account_url, credential=credential).set_as_default_client()
+        logger.info("Azure auth: using DefaultAzureCredential")
+
+    except Exception as e:
+        logger.error(f"Failed to set up AzureBlobClient: {e}")
 
 class EngineConfig(BaseModel):
     """Configuration for the Tinker engine."""
@@ -23,6 +74,16 @@ class EngineConfig(BaseModel):
         default=AnyPath("/tmp/tx_checkpoints"),
         description="Base path where checkpoints will be stored",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _setup_azure_if_needed(cls, data):
+        """Set up Azure credentials before cloudpathlib parses az:// paths."""
+        cb = data.get("checkpoints_base", "")
+        if isinstance(cb, str) and cb.startswith(("az://", "abfs://")):
+            _ensure_azure_default_client()
+        return data
+
     database_url: str = Field(
         default=f'sqlite:///{Path(__file__).parent / "tinker.db"}',
         description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",

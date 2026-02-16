@@ -33,25 +33,31 @@ def _get_filesystem(path: str):
         s3_refresh_if_expiring(fs)
         return fs
     if proto in ("az", "abfs"):
-        # adlfs requires account_name for Azure Blob Storage.
-        # When key-based auth is disabled, use DefaultAzureCredential
-        # (supports managed identity, az cli, env vars, etc.)
+        # Fallback chain: connection string → managed identity → DefaultAzureCredential
+        conn_str = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+        if conn_str:
+            try:
+                return fsspec.filesystem(proto, connection_string=conn_str)
+            except Exception as e:
+                logger.warning(f"Connection string auth failed ({e}), falling back to managed identity")
+
         account_name = os.environ.get("AZURE_STORAGE_ACCOUNT_NAME")
-        if not account_name:
-            # Try to extract from the path: az://container@account.blob.core.windows.net/...
-            # or just use the env var
+        if not account_name and not conn_str:
             raise ValueError(
-                "AZURE_STORAGE_ACCOUNT_NAME environment variable must be set for Azure storage"
+                "Either AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT_NAME "
+                "must be set for Azure storage"
             )
-        try:
-            from azure.identity import DefaultAzureCredential
-            credential = DefaultAzureCredential()
-        except ImportError:
-            raise ImportError(
-                "azure-identity is required for Azure AD authentication. "
-                "Install it with: pip install azure-identity"
-            )
-        return fsspec.filesystem(proto, account_name=account_name, credential=credential)
+
+        if account_name:
+            client_id = os.environ.get("AZURE_CLIENT_ID")
+            try:
+                from azure.identity import ManagedIdentityCredential
+                credential = ManagedIdentityCredential(client_id=client_id) if client_id else ManagedIdentityCredential()
+                return fsspec.filesystem(proto, account_name=account_name, credential=credential)
+            except Exception as e:
+                logger.warning(f"ManagedIdentityCredential failed ({e}), falling back to DefaultAzureCredential")
+                from azure.identity import DefaultAzureCredential
+                return fsspec.filesystem(proto, account_name=account_name, credential=DefaultAzureCredential())
     return fsspec.filesystem(proto)
 
 
