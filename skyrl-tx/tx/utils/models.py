@@ -351,24 +351,35 @@ def insert_adapter_state(
     nnx.update(lora_params, updated)
 
 
-def round_up_seq_len(seq_len: int) -> int:
+def round_up_seq_len(seq_len: int, cp: int | None = None) -> int:
     """
     Rounds a sequence length up to roughly two significant binary digits.
     We do this to pad sequences, so the Jax JIT compiler needs to
     compile fewer different shapes.
+
+    If Context parallelism is enabled (cp > 1), the sequence length is
+    padded to be a multiple of shard count for even distribution.
     """
     if seq_len <= 32:
-        return 32
+        rounded = 32
+    else:
+        # Find the position of the most significant bit.
+        msb_pos = seq_len.bit_length() - 1
+        # Create a mask for the two most significant bits.
+        mask = (1 << msb_pos) | (1 << (msb_pos - 1))
+        # Round down to the nearest value with at most two significant bits.
+        rounded = seq_len & mask
 
-    # Find the position of the most significant bit.
-    msb_pos = seq_len.bit_length() - 1
-    # Create a mask for the two most significant bits.
-    mask = (1 << msb_pos) | (1 << (msb_pos - 1))
-    # Round down to the nearest value with at most two significant bits.
-    result = seq_len & mask
+        # If we rounded down, round up to the next bucket boundary.
+        if rounded < seq_len:
+            rounded += 1 << (msb_pos - 1)
 
-    # If we rounded down, round up to the next bucket boundary.
-    if result < seq_len:
-        result += 1 << (msb_pos - 1)
+    if cp is None:
+        # Try to infer from the mesh if not explicitly provided
+        mesh = jax.sharding.get_abstract_mesh()
+        cp = mesh.shape.get("cp", 1) if mesh is not None else 1
 
-    return result
+    if cp > 1:
+        rounded = ((rounded + cp - 1) // cp) * cp
+
+    return rounded

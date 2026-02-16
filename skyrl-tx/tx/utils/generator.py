@@ -1,6 +1,7 @@
 """Generator mixin for autoregressive text generation with KV caching."""
 
 from __future__ import annotations
+from collections.abc import Callable
 from dataclasses import dataclass
 import functools
 
@@ -60,11 +61,19 @@ class KVCache:
         """
         k_cache, v_cache = kv_cache
 
-        def update_at_pos(cache_slice, new_val_slice, pos):
-            return jax.lax.dynamic_update_slice(cache_slice, new_val_slice, (pos, 0, 0))
+        cp = jax.sharding.get_abstract_mesh().shape.get("cp", 1)
+        local_capacity = k_cache.shape[1]
+        update_positions = positions[:, 0] % local_capacity
+        owners = positions[:, 0] // local_capacity
+        axis_idx = jax.lax.axis_index("cp") if cp > 1 else 0
+        should_update = owners == axis_idx
 
-        k = jax.vmap(update_at_pos)(k_cache, k, positions[:, 0])
-        v = jax.vmap(update_at_pos)(v_cache, v, positions[:, 0])
+        def update_at_pos(cache_slice, new_val_slice, pos, do_update):
+            updated = jax.lax.dynamic_update_slice(cache_slice, new_val_slice, (pos, 0, 0))
+            return jnp.where(do_update, updated, cache_slice)
+
+        k = jax.vmap(update_at_pos)(k_cache, k, update_positions, should_update)
+        v = jax.vmap(update_at_pos)(v_cache, v, update_positions, should_update)
         return k, v
 
     def pad_to_length(self, max_length: int) -> KVCache:
@@ -153,6 +162,9 @@ def find_string_stop_position(
     return None
 
 
+DecodeRunner = Callable[..., tuple[jax.Array, jax.Array, jax.Array, jax.Array | None]]
+
+
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -164,6 +176,7 @@ class GeneratorMixin:
         model,
         input_ids: jax.Array,
         attention_mask: jax.Array,
+        positions: jax.Array,
         max_length: int,
         max_new_tokens: int,
         adapter_indices: jax.Array | None,
@@ -181,6 +194,7 @@ class GeneratorMixin:
         outputs = model(
             input_ids,
             attention_mask=attention_mask,
+            positions=positions,
             adapter_indices=adapter_indices,
         )
 
@@ -286,21 +300,27 @@ class GeneratorMixin:
         input_ids: jax.Array,
         attention_mask: jax.Array,
         *,
+        positions: jax.Array | None = None,
         sampling_params: list[types.SamplingParams],
         adapter_indices: jax.Array | None = None,
         prompt_logprobs: bool = False,
         tokenizer=None,
+        decode_runner: DecodeRunner | None = None,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
 
         Args:
             tokenizer: Optional tokenizer for string stop sequence detection.
                 Required if any sampling_params has stop_strings set.
+            decode_runner: Optional backend-provided decode implementation.
+                If not provided, uses the default `_prefill_and_decode`.
 
         Returns:
             GenerateOutput containing generated_ids, stop_reasons, and optionally logprobs.
         """
         batch_size, prompt_length = input_ids.shape
+        if positions is None:
+            positions = jnp.arange(prompt_length, dtype=jnp.int32)[None, :]
         assert len(sampling_params) == batch_size
         max_new_tokens = max(sampling_param.max_tokens for sampling_param in sampling_params)
         max_length = tx.utils.models.round_up_seq_len(prompt_length + max_new_tokens)
@@ -327,10 +347,13 @@ class GeneratorMixin:
         max_top_k = max((sp.top_k for sp in sampling_params if sp.top_k > 0), default=0)
         use_top_p = any(sp.top_p < 1.0 for sp in sampling_params)
 
-        new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = self._prefill_and_decode(
+        # Needs overriding for context parallelism
+        decode_runner = decode_runner or self._prefill_and_decode
+        new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = decode_runner(
             self,
             input_ids,
             attention_mask,
+            positions,
             max_length,
             max_new_tokens,
             adapter_indices,
@@ -341,7 +364,7 @@ class GeneratorMixin:
             top_p_values,
             max_top_k,
             use_top_p,
-            prompt_logprobs=prompt_logprobs,
+            prompt_logprobs,
         )
 
         max_tokens = jnp.array([sp.max_tokens for sp in sampling_params])

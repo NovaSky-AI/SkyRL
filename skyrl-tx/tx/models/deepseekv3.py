@@ -3,6 +3,7 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
+from tx.layers.attention import dot_product_attention, default_positions
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.rotary_embedding import get_rope
 from tx.layers.util import Param, prepare_routing, shard_map_ep
@@ -168,13 +169,15 @@ class DeepseekV3Attention(nnx.Module):
         # Jax attention expects v to have the same shape as k
         v = jnp.pad(v, ((0, 0), (0, 0), (0, 0), (0, self.qk_head_dim - self.v_head_dim)))
 
-        attn_output = jax.nn.dot_product_attention(
+        attn_output = dot_product_attention(
             q,
             k,
             v,
-            scale=self.scaling,
-            mask=attention_mask[:, None, None, :].astype(bool),
+            attention_mask,
             is_causal=kv_cache is None,
+            head_dim=self.qk_head_dim,
+            positions=positions,
+            scale=self.scaling,
         )
 
         attn_output = attn_output[:, :, :, : self.v_head_dim].reshape(B, T, self.num_heads * self.v_head_dim)
@@ -577,7 +580,7 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
         is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
-            positions = jnp.arange(attention_mask.shape[1])[None, :]
+            positions = default_positions(input_ids)
 
         outputs = self.model(
             input_ids,

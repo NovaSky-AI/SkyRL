@@ -55,6 +55,7 @@ def train(
         parser=json.loads,
     ),
     tp_size: int = typer.Option(1, "--tp-size", help="Tensor parallelism degree to use for the model"),
+    cp_size: int = typer.Option(1, "--cp-size", help="Context parallelism degree to use for the model"),
     tracker_name: ExperimentTracker | None = typer.Option(
         None, "--tracker", help="Experiment tracker to report results to"
     ),
@@ -77,13 +78,23 @@ def train(
     train_dataset = load_dataset(dataset, split=split)
     assert isinstance(train_dataset, Dataset)
     base_config = AutoConfig.from_pretrained(model_name)
-    model_config = Qwen3Config(base_config, max_lora_adapters=0, max_lora_rank=0, shard_attention_heads=True)
+    model_config = Qwen3Config(
+        base_config,
+        max_lora_adapters=0,
+        max_lora_rank=0,
+        shard_attention_heads=True,
+        context_parallel_size=cp_size,
+    )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     tracker = get_tracker(tracker_name, base_config, **tracker_args)
     loader = get_loader(loader_name)
 
     model_class = get_model_class(base_config)
-    mesh = jax.make_mesh((1, 1, tp_size), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
+    mesh = jax.make_mesh(
+        (1, 1, tp_size, cp_size),
+        ("fsdp", "ep", "tp", "cp"),
+        axis_types=(jax.sharding.AxisType.Auto,) * 4,
+    )
     with jax.set_mesh(mesh):
         model = model_class(model_config, dtype=get_dtype(model_config.dtype), rngs=nnx.Rngs(0))
         optimizer = nnx.Optimizer(model, get_optimizer(optimizer_name, optimizer_args), wrt=nnx.Param)

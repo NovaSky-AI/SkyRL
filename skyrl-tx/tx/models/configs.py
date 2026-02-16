@@ -22,6 +22,7 @@ class ModelConfig(PretrainedConfig):
     max_lora_adapters: int
     max_lora_rank: int
     shard_attention_heads: bool
+    context_parallel_size: int
     loss_chunk_size: int
     gradient_checkpointing: bool
 
@@ -32,6 +33,7 @@ class ModelConfig(PretrainedConfig):
         max_lora_adapters: int,
         max_lora_rank: int,
         shard_attention_heads: bool,
+        context_parallel_size: int = 1,
         loss_chunk_size: int = 0,
         gradient_checkpointing: bool = False,
     ):
@@ -42,6 +44,7 @@ class ModelConfig(PretrainedConfig):
         self.max_lora_adapters = max_lora_adapters
         self.max_lora_rank = max_lora_rank
         self.shard_attention_heads = shard_attention_heads
+        self.context_parallel_size = context_parallel_size
         self.loss_chunk_size = loss_chunk_size
         self.gradient_checkpointing = gradient_checkpointing
 

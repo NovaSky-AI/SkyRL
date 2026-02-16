@@ -38,7 +38,8 @@ def assert_attention_match(q, k, v, mask, is_causal, head_dim, seq_lengths=None)
                     If None, compare all positions.
     """
     scale = 1.0 / head_dim**0.5
-    result = dot_product_attention(q, k, v, mask, is_causal=is_causal, head_dim=head_dim)
+    positions = jnp.broadcast_to(jnp.arange(q.shape[1], dtype=jnp.int32), (q.shape[0], q.shape[1]))
+    result = dot_product_attention(q, k, v, mask, is_causal=is_causal, head_dim=head_dim, positions=positions)
     expected = jax.nn.dot_product_attention(
         q, k, v, scale=scale, mask=mask[:, None, None, :].astype(bool), is_causal=is_causal
     )
