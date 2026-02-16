@@ -5,6 +5,7 @@ on:
     branches: 
       - main
     paths:
+      - 'ci/**'
       - 'skyrl/backends/skyrl_train/**'
       - 'skyrl/train/**'
       - 'tests/backends/skyrl_train/**'

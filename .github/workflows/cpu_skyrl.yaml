@@ -4,11 +4,17 @@ on:
   push:
     branches: [ main ]
     paths:
-      - '**'
+      - 'ci/**'
+      - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - '.github/workflows/cpu_skyrl.yaml'
   pull_request:
     paths:
-      - '**'
+      - 'ci/**'
+      - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - '.github/workflows/cpu_skyrl.yaml'
   workflow_dispatch:
 
