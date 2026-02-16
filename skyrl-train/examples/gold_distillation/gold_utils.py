@@ -239,10 +239,8 @@ def merge_probabilities_with_alignment_groups(
         if len(group) > 1:
             # Multiple tokens map to this group - merge via geometric mean
             eps = 1e-8
-            logp = torch.log(probs[group[0]].clamp_min(eps))
-            for idx in group[1:]:
-                if idx < probs.size(0):
-                    logp = logp + torch.log(probs[idx].clamp_min(eps))
+            # Vectorized operation is more efficient than a loop
+            logp = torch.log(probs[group].clamp_min(eps)).sum(dim=0)
             aligned_probs[group_idx] = torch.softmax(logp, dim=-1)
         elif len(group) == 1:
             aligned_probs[group_idx] = probs[group[0]]
