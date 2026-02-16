@@ -9,8 +9,8 @@ set -ex
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
 # Prepare datasets first (downloads from HuggingFace and extracts tasks):
-# python examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/CodeContests
-# python examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-TB-dev
+# uv run examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/CodeContests
+# uv run examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-TB-dev
 
 DATA_DIR="$HOME/data/harbor"
 TRAIN_DATA="['$DATA_DIR/CodeContests']"

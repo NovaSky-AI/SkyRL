@@ -5,7 +5,7 @@ RL training with [Harbor](https://github.com/laude-institute/harbor) as the envi
 ### Structure
 
 ```
-examples/harbor/
+examples/train/harbor/
   harbor_generator.py              # HarborGenerator: bridges SkyRL <-> Harbor
   dataset.py                       # HarborTaskDataset: loads task directory paths
   prepare_harbor_dataset.py        # Downloads + extracts datasets from HuggingFace
@@ -22,7 +22,7 @@ examples/harbor/
 ### Quick Start
 
 ```bash
-cd SkyRL/skyrl-train
+cd SkyRL
 
 # 1. Set credentials
 export WANDB_API_KEY=your_wandb_api_key
@@ -32,11 +32,11 @@ export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
 
 # 2. Prepare dataset
-python examples/train/harbor/prepare_harbor_dataset.py \
-    --dataset DCAgent/code-contests-sandboxes-with-tests
-python examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train/harbor/prepare_harbor_dataset.py \
+    --dataset open-thoughts/CodeContests
+uv run examples/train/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-TB-dev
 
 # 3. Launch training
-bash examples/harbor/run_codecontest.sh
+bash examples/train/harbor/run_codecontest.sh
 ```

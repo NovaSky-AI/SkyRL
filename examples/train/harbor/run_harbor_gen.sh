@@ -9,7 +9,7 @@ set -ex
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
 # Prepare dataset first (downloads from HuggingFace and extracts tasks):
-# python examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-Agent-v1-RL
+# uv run examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-Agent-v1-RL
 
 DATA_DIR="$HOME/data/harbor"
 TRAIN_DATA="['$DATA_DIR/OpenThoughts-Agent-v1-RL']"

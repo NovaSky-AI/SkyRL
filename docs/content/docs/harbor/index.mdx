@@ -19,9 +19,9 @@ export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
 
 # 2. Prepare datasets (downloads from HuggingFace, extracts tasks to ~/data/harbor/)
-python examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/CodeContests
-python examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-TB-dev
 
 # 3. Launch training
@@ -302,21 +302,21 @@ The script handles two dataset formats automatically:
 cd SkyRL
 
 # Download and extract training datasets
-python examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-Agent-v1-RL
 
-python examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/CodeContests
 
 # Download an eval dataset (symlinked, no extraction needed)
-python examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-TB-dev
 ```
 
 The output directory defaults to `~/data/harbor/<repo-name>`, derived from the dataset name. You can override this with `--output_dir`:
 
 ```bash
-python examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/CodeContests \
     --output_dir ~/my-custom-path
 ```
@@ -349,7 +349,7 @@ bash examples/train/harbor/run_harbor_gen.sh
 The scripts use Hydra to configure the run. A typical invocation looks like:
 
 ```bash
-uv run --isolated --extra vllm --extra harbor \
+uv run --isolated --extra fsdp --extra harbor \
   -m examples.train.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
