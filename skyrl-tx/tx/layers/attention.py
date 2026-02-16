@@ -9,17 +9,7 @@ from jax.sharding import get_abstract_mesh
 _CUDNN_SUPPORTED_DTYPES = (jnp.float16, jnp.bfloat16, jnp.float8_e4m3fn, jnp.float8_e5m2)
 
 
-def _repeat_kv_for_gqa(x: jax.Array, num_heads: int) -> jax.Array:
-    """Repeat KV heads to match query heads for manual attention math."""
-    kv_heads = x.shape[2]
-    if kv_heads == num_heads:
-        return x
-    if num_heads % kv_heads != 0:
-        raise ValueError(f"num_heads={num_heads} must be divisible by num_kv_heads={kv_heads}")
-    return jnp.repeat(x, num_heads // kv_heads, axis=2)
-
-
-def _ring_attention_streaming(
+def _ring_attention(
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
@@ -32,50 +22,66 @@ def _ring_attention_streaming(
     axis_idx = jax.lax.axis_index("cp")
     local_len = k.shape[1]
 
-    # [B, Tq, H, D] -> [B, H, Tq, D]
-    qh = jnp.swapaxes(q, 1, 2).astype(jnp.float32)
-    k_block = _repeat_kv_for_gqa(k, q.shape[2])
-    v_block = _repeat_kv_for_gqa(v, q.shape[2])
+    # qh: [B, H, Tq, D]
+    qh = jnp.transpose(q, (0, 2, 1, 3))
+
+    # GQA handling: expand KV heads to match query heads.
+    # k/v: [B, Tk, H_kv, D] -> [B, Tk, H, D]
+    kv_repeat = q.shape[2] // k.shape[2]
+    k_block = jnp.repeat(k, kv_repeat, axis=2)
+    v_block = jnp.repeat(v, kv_repeat, axis=2)
     mask_block = attention_mask
 
+    # Online softmax state (kept per [B, H, Tq]):
+    # m   = running max score
+    # l   = running denominator sum(exp(score - m))
+    # acc = running numerator sum(exp(score - m) * value), shape [B, H, Tq, D]
     B, H, Tq, D = qh.shape
-    m = jnp.full((B, H, Tq), -jnp.inf, dtype=jnp.float32)
-    l = jnp.zeros((B, H, Tq), dtype=jnp.float32)
-    acc = jnp.zeros((B, H, Tq, D), dtype=jnp.float32)
-    neg_large = jnp.array(-1e30, dtype=jnp.float32)
+    m = jnp.full((B, H, Tq), -jnp.inf, dtype=q.dtype)
+    l = jnp.zeros((B, H, Tq), dtype=q.dtype)
+    acc = jnp.zeros((B, H, Tq, D), dtype=q.dtype)
+    neg_large = jnp.array(jnp.finfo(q.dtype).min, dtype=q.dtype)
 
-    # source i -> dest (i + 1) % cp
+    # Ring exchange: source i -> destination (i + 1) % cp.
     perm = [(i, (i + 1) % cp) for i in range(cp)]
 
     for step in range(cp):
         source_shard = (axis_idx - step) % cp
+        # Absolute token positions for the current KV block, shape [Tk].
         key_positions = source_shard * local_len + jnp.arange(local_len, dtype=jnp.int32)
 
-        kh = jnp.swapaxes(k_block, 1, 2).astype(jnp.float32)  # [B, H, Tk, D]
-        vh = jnp.swapaxes(v_block, 1, 2).astype(jnp.float32)  # [B, H, Tk, D]
-        scores = jnp.einsum("bhtd,bhsd->bhts", qh, kh) * scale
+        # vh:  [B, H, Tk, D]
+        # kht: [B, H, D, Tk] (K transposed for Q @ K^T)
+        kht = jnp.transpose(k_block, (0, 2, 3, 1))
+        vh = jnp.transpose(v_block, (0, 2, 1, 3))
+        scores = jnp.matmul(qh, kht) * scale
 
+        # Mask invalid keys (future tokens + padding) before softmax update.
         causal = key_positions[None, None, None, :] <= positions[:, None, :, None]
         padding = mask_block[:, None, None, :].astype(bool)
         valid = causal & padding
         scores = jnp.where(valid, scores, neg_large)
 
+        # Numerically stable online softmax merge:
+        # merge previous state (m,l,acc) with current block scores/values.
         m_block = jnp.max(scores, axis=-1)
         m_new = jnp.maximum(m, m_block)
         prev_scale = jnp.where(jnp.isfinite(m), jnp.exp(m - m_new), 0.0)
         p = jnp.exp(scores - m_new[..., None])
         p = jnp.where(valid, p, 0.0)
         l_new = prev_scale * l + jnp.sum(p, axis=-1)
-        acc_new = prev_scale[..., None] * acc + jnp.einsum("bhts,bhsd->bhtd", p, vh)
+        acc_new = prev_scale[..., None] * acc + jnp.matmul(p, vh)
         m, l, acc = m_new, l_new, acc_new
 
+        # Rotate KV/mask so the next iteration sees the next shard's block.
         if step < cp - 1:
             k_block = jax.lax.ppermute(k_block, axis_name="cp", perm=perm)
             v_block = jax.lax.ppermute(v_block, axis_name="cp", perm=perm)
             mask_block = jax.lax.ppermute(mask_block, axis_name="cp", perm=perm)
 
-    out = jnp.where(l[..., None] > 0, acc / jnp.maximum(l[..., None], 1e-9), 0.0)
-    return jnp.swapaxes(out.astype(q.dtype), 1, 2)  # [B, Tq, H, D]
+    # Final normalize and restore [B, Tq, H, D]
+    out = jnp.where(l[..., None] > 0, acc / jnp.maximum(l[..., None], jnp.asarray(1e-9, dtype=l.dtype)), 0.0)
+    return jnp.transpose(out, (0, 2, 1, 3))
 
 
 def default_positions(input_ids: jax.Array) -> jax.Array:
@@ -120,11 +126,9 @@ def dot_product_attention(
     scale = scale if scale is not None else 1.0 / head_dim**0.5
     cp = get_abstract_mesh().shape.get("cp", 1)
 
-    # CP path: stream KV blocks around the ring and accumulate online softmax.
-    # For decode (q_len == 1), the causal check against positions is equivalent to
-    # attending all valid cached keys.
+    # TODO: constraints for running ring attention
     if cp > 1 and (is_causal or q.shape[1] == 1):
-        return _ring_attention_streaming(q, k, v, attention_mask, positions, scale)
+        return _ring_attention(q, k, v, attention_mask, positions, scale)
 
     if jax.default_backend() == "gpu" and q.dtype in _CUDNN_SUPPORTED_DTYPES:
         kv_seq_lengths = attention_mask.sum(axis=1).astype(jnp.int32)
