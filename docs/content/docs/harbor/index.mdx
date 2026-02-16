@@ -82,6 +82,7 @@ class HarborExp(BasePPOExp):
             harbor_cfg=cfg.harbor_trial_config,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            max_seq_len=cfg.trainer.algorithm.max_seq_len,
         )
 
     def get_train_dataset(self):
@@ -168,12 +169,15 @@ Each trajectory gets up to 2 attempts (`MAX_NUM_RETRIES_PER_TRIAL = 2`). The ret
 | Error | Retries? | Reward | Trained on? |
 |---|---|---|---|
 | **Success** | N/A | From verifier | Yes |
-| **`ContextLengthExceededError`** | No | 0 | Yes (teaches conciseness) |
+| **`ContextLengthExceededError`** | No | 0 | Configurable (see below) |
 | **`AgentTimeoutError`** | No | - | No (loss-masked) |
 | **Missing verifier result** | Yes | - | - |
 | **Other exceptions** | Yes | - | - |
 
-The `ContextLengthExceededError` is intentionally trained with reward=0 rather than masked. This is a learnable signal: the model should learn to solve tasks within the context window.
+When a trajectory hits `ContextLengthExceededError`, its reward is set to 0. What happens next depends on the `generator.apply_overlong_filtering` setting:
+
+- **`apply_overlong_filtering=true`**: The loss mask is zeroed out, so the trajectory does **not** contribute gradients. This prevents the model from training on truncated, incomplete trajectories that hit the context limit.
+- **`apply_overlong_filtering=false`** (default): The trajectory is trained with reward=0, treating context-length exceeded as a learnable signal.
 
 ### Instance-Level Masking
 
@@ -207,6 +211,7 @@ The Harbor config template (`harbor_trial_config/default.yaml`) maps directly to
 ```yaml
 agent:
   name: terminus-2                    # Which Harbor agent to use
+  override_timeout_sec: 1200          # Time (seconds) given for a single Trial to run
   kwargs:
     max_turns: 32                     # Max agent iterations per trial
     store_all_messages: true          # Required for SkyRL to extract training data
@@ -229,7 +234,8 @@ agent:
 | `agent.kwargs.temperature` | Harbor config | Higher temperature increases exploration; typical RL value is 1.0 |
 | `agent.kwargs.model_info.max_input_tokens` | Harbor config | Controls the agent's context budget; should match vLLM's `max_model_len` |
 | `generator.n_samples_per_prompt` | SkyRL config | Number of trajectories per prompt for GRPO advantage estimation (e.g., 8) |
-| `generator.sampling_params.max_generate_length` | SkyRL config | Maximum response length in tokens |
+| `trainer.algorithm.max_seq_len` | SkyRL config | Maximum total sequence length (context window length). Required for Harbor — set to match vLLM's `max_model_len` |
+| `generator.apply_overlong_filtering` | SkyRL config | When `true`, zero out loss mask for context-length-exceeded trajectories (default: `false`) |
 | `trainer.algorithm.advantage_estimator` | SkyRL config | Advantage method: `grpo`, `rloo`, `reinforce_pp`, etc. |
 | `trainer.train_batch_size` | SkyRL config | Number of unique prompts per training batch |
 | `environment.type` | Harbor config | Sandbox provider: `daytona`, `docker`, `modal`, `e2b`, `gke` |
@@ -244,6 +250,9 @@ environment:
   type: daytona                       # Sandbox provider
   override_cpus: 1
   override_memory_mb: 1024
+  kwargs:
+    auto_stop_interval_mins: 30       # Daytona-specific: minutes of inactivity before sandbox auto-stops
+    # sandbox_timeout_secs: 1800      # Modal-specific: sandbox timeout
 
 verifier:
   disable: false                      # Set to true to skip verification (debugging)
@@ -318,13 +327,7 @@ uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-TB-dev
 ```
 
-The output directory defaults to `~/data/harbor/<repo-name>`, derived from the dataset name. You can override this with `--output_dir`:
-
-```bash
-uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
-    --dataset open-thoughts/CodeContests \
-    --output_dir ~/my-custom-path
-```
+The output directory defaults to `~/data/harbor/<repo-name>`, derived from the dataset name.
 
 <Callout type="info">
 You must run `prepare_harbor_dataset.py` before launching training. The launch scripts (e.g. `run_codecontest.sh`) assume datasets are already prepared at `~/data/harbor/`.
@@ -359,11 +362,12 @@ uv run --isolated --extra fsdp --extra harbor \
   data.train_data=$TRAIN_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
   generator.served_model_name=Qwen3-8B \
-  hydra.searchpath=['file://examples/harbor'] \
+  hydra.searchpath=['file://examples/train_integrations/harbor'] \
   +harbor_trial_config=default \
   ++harbor_trial_config.trials_dir=$TRIALS_DIR \
   ++harbor_trial_config.environment.type=daytona \
-  generator.sampling_params.max_generate_length=30720 \
+  trainer.algorithm.max_seq_len=32768 \
+  generator.apply_overlong_filtering=true \
   generator.n_samples_per_prompt=8 \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.train_batch_size=64 \
