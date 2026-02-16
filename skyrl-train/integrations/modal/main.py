@@ -46,8 +46,7 @@ def create_modal_image() -> modal.Image:
             local_path=str(local_repo_path),
             remote_path="/root/SkyRL",
             ignore=[
-                "**/.venv/",
-                "**/venv/",
+                ".venv/",
                 "*.pyc",
                 "__pycache__",
                 ".git",
