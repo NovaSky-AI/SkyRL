@@ -15,8 +15,8 @@ from skyrl.train.entrypoints.main_base import (
     config_dir,
 )
 from skyrl.train.generators.base import GeneratorInput, TrajectoryID
-from examples.harbor.harbor_generator import HarborGenerator
-from examples.harbor.dataset import HarborTaskDataset
+from ..harbor_generator import HarborGenerator
+from ..dataset import HarborTaskDataset
 
 
 # For debugging purposes, we only generate a few samples.

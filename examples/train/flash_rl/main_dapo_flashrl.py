@@ -24,7 +24,7 @@ from skyrl.train.generators.base import GeneratorOutput
 def create_ray_wrapped_inference_engines_from_config_flashrl(
     cfg: Union[SkyRLConfig, DictConfig], colocate_pg, tokenizer
 ):
-    from examples.flash_rl.flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
+    from .flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
 
     return create_ray_wrapped_inference_engines_flashrl(
         num_inference_engines=cfg.generator.num_inference_engines,

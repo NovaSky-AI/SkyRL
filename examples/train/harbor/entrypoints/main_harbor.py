@@ -8,8 +8,8 @@ from omegaconf import DictConfig
 from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
-from examples.harbor.harbor_generator import HarborGenerator
-from examples.harbor.dataset import HarborTaskDataset
+from ..harbor_generator import HarborGenerator
+from ..dataset import HarborTaskDataset
 
 
 class HarborExp(BasePPOExp):
