@@ -7,24 +7,24 @@ import hydra
 import torch
 from typing import List, Union
 from omegaconf import DictConfig
-from skyrl_train.config import SkyRLConfig
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import (
+from skyrl.train.config import SkyRLConfig
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
     validate_cfg,
     create_remote_inference_engines_from_config,
 )
-from skyrl_train.inference_engines.base import InferenceEngineInterface
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.train.generators.base import GeneratorOutput
 
 
 def create_ray_wrapped_inference_engines_from_config_flashrl(
     cfg: Union[SkyRLConfig, DictConfig], colocate_pg, tokenizer
 ):
-    from examples.flash_rl.flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
+    from .flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
 
     return create_ray_wrapped_inference_engines_flashrl(
         num_inference_engines=cfg.generator.num_inference_engines,

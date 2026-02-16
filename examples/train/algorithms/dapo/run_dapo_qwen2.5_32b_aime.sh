@@ -47,7 +47,7 @@ MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
 MICRO_TRAIN_BATCH_SIZE_PER_GPU=2
 
 
-uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
+uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \

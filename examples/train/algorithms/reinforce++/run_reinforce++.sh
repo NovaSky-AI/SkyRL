@@ -16,7 +16,7 @@ ADV_ESTIMATOR="reinforce++"
 USE_KL_IN_REWARD=true
 KL_ESTIMATOR_TYPE="k2"
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="$ADV_ESTIMATOR" \

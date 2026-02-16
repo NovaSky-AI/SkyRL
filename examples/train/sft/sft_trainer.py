@@ -6,7 +6,7 @@ but with loss_fn="cross_entropy" to compute simple negative log-likelihood loss.
 
 Usage:
     # First, make sure you have Ray installed and a GPU available
-    uv run --isolated --extra vllm python examples/sft/sft_trainer.py
+    uv run --isolated --extra fsdp python examples/train/sft/sft_trainer.py
 
 This example:
 1. Loads a small subset of the Alpaca dataset
@@ -26,13 +26,13 @@ from tqdm import tqdm
 
 from ray.util.placement_group import placement_group
 
-from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.entrypoints.main_base import config_dir
-from skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl_train.workers.worker import PPORayActorGroup
-from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
-from skyrl_train.utils.utils import initialize_ray, validate_cfg
-from skyrl_train.utils import get_ray_pg_ready_with_timeout
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.train.entrypoints.main_base import config_dir
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
+from skyrl.train.utils.utils import initialize_ray, validate_cfg
+from skyrl.train.utils import get_ray_pg_ready_with_timeout
 
 
 def get_sft_config() -> DictConfig:

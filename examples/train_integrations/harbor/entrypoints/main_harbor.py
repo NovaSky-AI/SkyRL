@@ -5,11 +5,11 @@ Main entrypoint for training on Harbor tasks.
 import ray
 import hydra
 from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
-from skyrl_train.utils import validate_cfg
-from skyrl_train.utils.utils import initialize_ray
-from examples.harbor.harbor_generator import HarborGenerator
-from examples.harbor.dataset import HarborTaskDataset
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
+from skyrl.train.utils import validate_cfg
+from skyrl.train.utils.utils import initialize_ray
+from ..harbor_generator import HarborGenerator
+from ..dataset import HarborTaskDataset
 
 
 class HarborExp(BasePPOExp):
@@ -22,6 +22,7 @@ class HarborExp(BasePPOExp):
             harbor_cfg=cfg.harbor_trial_config,  # Pass harbor config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            max_seq_len=cfg.trainer.algorithm.max_seq_len,
         )
 
     def get_train_dataset(self):

@@ -19,7 +19,7 @@ CISPO_EPS_CLIP_LOW=0
 CISPO_EPS_CLIP_HIGH=5
 USE_KL_LOSS=false
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.policy_loss_type="$POLICY_LOSS" \

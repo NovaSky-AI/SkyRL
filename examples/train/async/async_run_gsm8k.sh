@@ -8,7 +8,7 @@ set -x
 
 DATA_DIR="$HOME/data/gsm8k"
 
-uv run --isolated --extra vllm -m examples.async.main_async \
+uv run --isolated --extra fsdp -m examples.train.async.main_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

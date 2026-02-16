@@ -47,7 +47,7 @@ INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 # no kl loss, so just use the policy model
 USE_KL_LOSS=false
 
-uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

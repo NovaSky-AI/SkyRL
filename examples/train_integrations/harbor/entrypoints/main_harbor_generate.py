@@ -8,15 +8,15 @@ import hydra
 from loguru import logger
 from omegaconf import DictConfig
 
-from skyrl_train.utils import validate_cfg
-from skyrl_train.utils.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import (
+from skyrl.train.utils import validate_cfg
+from skyrl.train.utils.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
 )
-from skyrl_train.generators.base import GeneratorInput, TrajectoryID
-from examples.harbor.harbor_generator import HarborGenerator
-from examples.harbor.dataset import HarborTaskDataset
+from skyrl.train.generators.base import GeneratorInput, TrajectoryID
+from ..harbor_generator import HarborGenerator
+from ..dataset import HarborTaskDataset
 
 
 # For debugging purposes, we only generate a few samples.
@@ -33,6 +33,7 @@ class HarborGenerateExp(BasePPOExp):
             harbor_cfg=cfg.harbor_trial_config,  # Pass harbor config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            max_seq_len=cfg.trainer.algorithm.max_seq_len,
         )
 
     def _setup_generator(self):

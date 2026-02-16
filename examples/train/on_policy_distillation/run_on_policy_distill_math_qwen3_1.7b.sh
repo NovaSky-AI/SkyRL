@@ -37,7 +37,7 @@ EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true
 LR=1e-5
 
-uv run --isolated --extra vllm -m examples.on_policy_distillation.main_on_policy_distill \
+uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_policy_distill \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator=$ADVANTAGE_ESTIMATOR \

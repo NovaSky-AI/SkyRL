@@ -1,11 +1,11 @@
 from typing import List
 import ray
 import vllm
-from skyrl_train.inference_engines.vllm.vllm_engine import VLLMInferenceEngine
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
+from skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine import VLLMInferenceEngine
+from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
-from skyrl_train.inference_engines.base import (
+from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
 )
 
@@ -46,8 +46,8 @@ def create_ray_wrapped_inference_engines_flashrl(
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
     """
-    from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
-    from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+    from skyrl.train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
+    from skyrl.train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 
     assert not async_engine, "`async_engine` is not supported for FlashRL"
 
@@ -92,7 +92,7 @@ def create_ray_wrapped_inference_engines_flashrl(
             ).remote(
                 model=pretrain,
                 enforce_eager=enforce_eager,
-                worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+                worker_extension_cls="skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
                 tensor_parallel_size=tensor_parallel_size,
                 seed=seed + i,
                 distributed_executor_backend=distributed_executor_backend,

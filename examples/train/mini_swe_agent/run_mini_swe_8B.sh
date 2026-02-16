@@ -21,7 +21,7 @@ LOGGER=wandb
 # We use a small batch size here for demonstration
 # NOTE (sumanthrh): The `generator.max_turns` here is actually unused, and we use the `step_limit` from the `swebench.yaml` file. 
 # This simply has to be a value > 1
-uv run --isolated --extra vllm --extra miniswe --env-file examples/mini_swe_agent/.env.miniswe -m examples.mini_swe_agent.main_mini_swe \
+uv run --isolated --extra fsdp --extra miniswe --env-file examples/train/mini_swe_agent/.env.miniswe -m examples.train.mini_swe_agent.main_mini_swe \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

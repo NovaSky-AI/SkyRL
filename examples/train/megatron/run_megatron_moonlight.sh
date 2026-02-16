@@ -32,7 +32,7 @@ INFERENCE_ENGINE_TP=8
 # https://github.com/NVIDIA/TransformerEngine/blob/483d9594fb070f62966f6a12ed6c90942310b48e/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L483
 FLASH_ATTN=false
 
-uv run --isolated --extra mcore --with blobfile -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron --with blobfile -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

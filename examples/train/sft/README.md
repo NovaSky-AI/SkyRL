@@ -5,7 +5,7 @@ This example demonstrates how to use SkyRL's training infrastructure for supervi
 ## Usage
 
 ```bash
-uv run --isolated --extra vllm python examples/sft/sft_trainer.py
+uv run --isolated --extra fsdp python examples/train/sft/sft_trainer.py
 ```
 
 ## How It Works

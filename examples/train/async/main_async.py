@@ -4,10 +4,10 @@ Main entrypoint for async training.
 
 import hydra
 from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from .async_trainer import AsyncRayPPOTrainer
 import asyncio
-from skyrl_train.utils import initialize_ray
+from skyrl.train.utils import initialize_ray
 import ray
 
 

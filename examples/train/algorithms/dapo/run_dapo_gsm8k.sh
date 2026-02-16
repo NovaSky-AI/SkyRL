@@ -30,7 +30,7 @@ EVAL_TOP_P=0.7
 CLIP_RATIO_C=10.0
 MAX_RESPONSE_LENGTH=1024
 
-uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
+uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

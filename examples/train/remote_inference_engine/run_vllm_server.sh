@@ -1,8 +1,8 @@
 # Launches vllm server for Qwen2.5-1.5B-Instruct on 4 GPUs.
-# bash examples/remote_inference_engine/run_vllm_server.sh
+# bash examples/train/remote_inference_engine/run_vllm_server.sh
 set -x
 
-CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra fsdp -m skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server \
     --model Qwen/Qwen2.5-1.5B-Instruct \
     --tensor-parallel-size 4 \
     --host 127.0.0.1 \
@@ -18,4 +18,4 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --isolated --extra vllm -m skyrl_train.infer
     --max-num-seqs 1024 \
     --trust-remote-code \
     --distributed-executor-backend mp \
-    --worker-extension-cls skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap
+    --worker-extension-cls skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap

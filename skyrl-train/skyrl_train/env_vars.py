@@ -86,3 +86,20 @@ Set `_SKYRL_USE_NEW_INFERENCE=1` to enable the new inference layer.
 This flag is intended for internal testing and will be removed once the new
 inference layer is validated and made the default.
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_DUMP_INFRA_LOG_TO_STDOUT = str(os.environ.get("SKYRL_DUMP_INFRA_LOG_TO_STDOUT", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+"""
+When enabled, infrastructure logs (vLLM, Ray, workers) are shown on stdout
+instead of being redirected to the log file. Useful for debugging startup issues.
+
+Default: False (infrastructure logs go to file only, stdout shows training progress).
+Set ``SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1`` to show all logs on stdout.
+"""

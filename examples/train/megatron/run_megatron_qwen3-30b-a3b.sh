@@ -31,7 +31,7 @@ RECOMPUTE_GRANULARITY="full"
 RECOMPUTE_METHOD="uniform"
 RECOMPUTE_NUM_LAYERS=1
 
-uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
