@@ -83,7 +83,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     )
     gradient_checkpointing: bool = Field(
         default=False,
-        description="Whether to use gradient checkpointing (full recomputation strategy)",
+        description="Per-layer activation checkpointing: recompute activations during backward to save memory",
     )
     loss_chunk_size: int = Field(
         default=1024,
