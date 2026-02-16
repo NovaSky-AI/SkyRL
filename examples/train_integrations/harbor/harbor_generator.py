@@ -310,6 +310,12 @@ class HarborGenerator(GeneratorInterface):
         else:
             stop_reason = "complete"
 
+        # Apply overlong filtering.
+        # TODO(Charlie): should this also apply when the end reason is max_turns in Harbor?
+        # Revisit. We would like to reuse `utils.py`'s implementation for overlong filtering.
+        if self.generator_cfg.apply_overlong_filtering and stop_reason == "context_length":
+            loss_mask = [0] * len(loss_mask)
+
         # Truncate to maximum allowed length.
         # NOTE(Charlie): though it shouldn't happen since it'd reach `ContextLengthExceededError`
         # from Harbor first. We do it anyway to be safe.
