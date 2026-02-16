@@ -34,6 +34,12 @@ LOG_DIR="/tmp/skyrl-logs/$RUN_NAME"
 MINI_BATCH_SIZE=32
 MAX_MODEL_LEN=32768
 APPLY_OVERLONG_FILTERING=true
+
+# Dr. GRPO parameters
+LOSS_REDUCTION="seq_mean_token_sum_norm"
+GRPO_NORM_BY_STD=false
+USE_KL_LOSS=false
+
 # Essentially achieves interleaved thinking and hence on-policy training without step-wise training.
 CHAT_TEMPLATE_PATH="$(dirname "$0")/../../skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
 
@@ -52,6 +58,9 @@ uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.mai
   trainer.ckpt_path=$CKPTS_DIR \
   trainer.log_path=$LOG_DIR \
   trainer.algorithm.advantage_estimator=grpo \
+  trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
+  trainer.algorithm.grpo_norm_by_std=$GRPO_NORM_BY_STD \
+  trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_nodes=1 \
