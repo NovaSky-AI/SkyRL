@@ -275,13 +275,9 @@ class JaxBackendImpl(AbstractBackend):
                 input_ids,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
+                is_training=True,
             )
             return model.compute_logprobs(output.last_hidden_state, target_ids, adapter_indices)
-
-        if self.config.gradient_checkpointing:
-            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
-            # policy=None corresponds to full activation recomputation
-            _model_forward = jax.checkpoint(_model_forward, policy=None)
 
         def loss_for_lora(
             lora_params: nnx.State,
