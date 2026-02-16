@@ -288,7 +288,7 @@ run: |
     environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
     trainer.algorithm.advantage_estimator="grpo" \
     trainer.policy.model.path="zai-org/GLM-4.7-Flash" \
-    trainer.policy.model.use_flash_attention_2=false \
+    +trainer.policy.model.use_flash_attention_2=false \
     trainer.placement.colocate_all=true \
     trainer.strategy=fsdp2 \
     trainer.placement.policy_num_gpus_per_node=$TOTAL_GPUS \
