@@ -328,6 +328,34 @@ def test_process_optim_step_hyperparams_behavior():
     assert default_norm / tiny_norm == pytest.approx(1e4, rel=5e-3)
 
 
+def test_optim_step_returns_metrics():
+    """optim_step should return learning rate and grad norm metrics."""
+    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32)
+    backend = JaxBackend(BASE_MODEL, config)
+
+    model_id = "adapter_metrics"
+    backend.create_model(model_id, LoraConfig(rank=32, alpha=32, seed=0))
+
+    tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
+    reqs = {"1001": (model_id, make_fwd_bwd_input(tokens))}
+    backend.forward_backward(prepare_model_pass_batch(reqs))
+
+    learning_rate = 1e-4
+    step_output = backend.optim_step(
+        model_id,
+        OptimStepInput(adam_params=api.AdamParams(learning_rate=learning_rate).to_types()),
+    )
+    assert step_output.metrics is not None
+    assert step_output.metrics["learning_rate"] == learning_rate
+    assert step_output.metrics["grad_norm"] > 0
+
+    no_grad_output = backend.optim_step(
+        model_id,
+        OptimStepInput(adam_params=api.AdamParams(learning_rate=2e-4).to_types()),
+    )
+    assert no_grad_output.metrics == {"learning_rate": 2e-4}
+
+
 def test_gradient_checkpointing():
     """
     Verify gradient checkpointing doesn't affect loss values.
