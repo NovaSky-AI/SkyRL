@@ -11,7 +11,7 @@ DATA_DIR="$HOME/data/$ENV_ID"
 NUM_GPUS=1
 LOGGER="wandb"  # change to "console" to print to stdout
 
-uv run --isolated --with verifiers --extra vllm -m integrations.verifiers.entrypoints.main_verifiers \
+uv run --isolated --with verifiers --extra fsdp -m examples.train_integrations.verifiers.entrypoints.main_verifiers \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

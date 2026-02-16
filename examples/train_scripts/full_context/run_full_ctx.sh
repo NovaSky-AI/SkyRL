@@ -6,7 +6,7 @@ set -x
 
 DATA_DIR="$HOME/data/gsm8k"
 
-uv run --isolated --extra vllm -m scripts.full_context.main_full_ctx \
+uv run --isolated --extra fsdp -m examples.train_scripts.full_context.main_full_ctx \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

@@ -6,10 +6,10 @@ import ray
 @ray.remote(num_gpus=1)
 def run_task(with_padding: bool = True):
 
-    from skyrl_train.patches.gptoss.patch_transformers import custom_attention_mask, custom_attention
+    from skyrl.backends.skyrl_train.patches.gptoss.patch_transformers import custom_attention_mask, custom_attention
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from skyrl_train.model_wrapper import logprobs_from_logits
+    from skyrl.backends.skyrl_train.workers.model_wrapper import logprobs_from_logits
 
     from transformers import AttentionInterface, AttentionMaskInterface
 
@@ -59,7 +59,7 @@ def run_task(with_padding: bool = True):
         logprobs1 = logprobs_from_logits(output1["logits"], input_ids)
 
     # uncommment this to patch the full attention module
-    # from skyrl_train.patches.gptoss.patch_transformers import patch_GptOssAttention
+    # from skyrl.backends.skyrl_train.patches.gptoss.patch_transformers import patch_GptOssAttention
     # patch_GptOssAttention()
     model.set_attn_implementation("custom_flex")
 

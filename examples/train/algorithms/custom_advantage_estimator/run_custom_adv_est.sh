@@ -14,7 +14,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 # Configure the advantage estimator to use
 ADV_EST="simple_baseline"
 
-uv run --isolated --extra vllm -m examples.algorithm.custom_advantage_estimator.main_custom_adv_est \
+uv run --isolated --extra fsdp -m examples.train.algorithms.custom_advantage_estimator.main_custom_adv_est \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="$ADV_EST" \

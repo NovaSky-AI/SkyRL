@@ -11,7 +11,7 @@ set -x
 DATA_DIR="$HOME/data/sql"
 DB_PATH="$HOME/data/sql/db_files/data"
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \

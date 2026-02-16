@@ -15,7 +15,7 @@ TP_SIZE=1
 LOGGER=wandb
 
 # We use a smaller batch size here for demonstration
-uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_judge.main_llm_judge \
+uv run --isolated --extra fsdp --env-file .env.llm_judge -m examples.train.llm_as_a_judge.main_llm_judge \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

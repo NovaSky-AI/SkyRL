@@ -14,8 +14,8 @@ TRAIN_DATASET="DCAgent/code-contests-sandboxes-with-tests"
 EVAL_DATASET="open-thoughts/OpenThoughts-TB-dev"
 DATA_DIR="$HOME/data/harbor"
 
-python examples/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
-python examples/harbor/prepare_harbor_dataset.py --dataset $EVAL_DATASET
+python examples/train/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
+python examples/train/harbor/prepare_harbor_dataset.py --dataset $EVAL_DATASET
 
 TRAIN_DATA="['$DATA_DIR/${TRAIN_DATASET##*/}']"
 EVAL_DATA="['$DATA_DIR/${EVAL_DATASET##*/}']"
@@ -23,17 +23,17 @@ EVAL_DATA="['$DATA_DIR/${EVAL_DATASET##*/}']"
 TRIALS_DIR="$HOME/trials_run"
 CKPTS_DIR="$HOME/otagent/ckpts"
 EXPORTS_DIR="$HOME/otagent/exports"
-CHAT_TEMPLATE_PATH="$(dirname "$0")/../../skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
 
 NUM_GPUS=4
 
 # Run SkyRL command
-uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.main_harbor \
+uv run --isolated --extra fsdp --extra harbor -m examples.train.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
   generator.served_model_name=Qwen3-8B \
-  hydra.searchpath=['file://examples/harbor'] \
+  hydra.searchpath=['file://examples/train/harbor'] \
   +harbor_trial_config=default \
   ++harbor_trial_config.trials_dir=$TRIALS_DIR \
   trainer.export_path=$EXPORTS_DIR \

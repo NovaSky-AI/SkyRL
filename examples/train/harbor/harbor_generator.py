@@ -3,11 +3,11 @@ from dataclasses import dataclass
 from typing import List, Optional
 from loguru import logger
 from uuid import uuid4
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.base import ConversationType
-from skyrl_train.utils.rate_limiter import create_rate_limiter
+from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
+from skyrl.train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.train.utils.rate_limiter import create_rate_limiter
 from tqdm.asyncio import tqdm
 from omegaconf import DictConfig, OmegaConf
 from harbor.trial.trial import Trial

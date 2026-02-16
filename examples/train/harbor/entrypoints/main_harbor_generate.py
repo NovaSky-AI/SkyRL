@@ -8,13 +8,13 @@ import hydra
 from loguru import logger
 from omegaconf import DictConfig
 
-from skyrl_train.utils import validate_cfg
-from skyrl_train.utils.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import (
+from skyrl.train.utils import validate_cfg
+from skyrl.train.utils.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
 )
-from skyrl_train.generators.base import GeneratorInput, TrajectoryID
+from skyrl.train.generators.base import GeneratorInput, TrajectoryID
 from examples.harbor.harbor_generator import HarborGenerator
 from examples.harbor.dataset import HarborTaskDataset
 

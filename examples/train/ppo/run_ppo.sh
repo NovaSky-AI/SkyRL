@@ -8,7 +8,7 @@ set -x
 DATA_DIR="$HOME/data/gsm8k"
 
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="gae" \

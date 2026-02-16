@@ -1,17 +1,17 @@
 import torch
 import ray
 from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import BasePPOExp
+from skyrl.train.entrypoints.main_base import BasePPOExp
 import hydra
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import config_dir, validate_cfg
-from skyrl_train.utils.ppo_utils import (
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import config_dir, validate_cfg
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
     register_policy_loss,
     reduce_loss,
 )
-from skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
 
 class OnPolicyDistillationTrainer(RayPPOTrainer):

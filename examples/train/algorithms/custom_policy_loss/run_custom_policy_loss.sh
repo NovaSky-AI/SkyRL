@@ -14,7 +14,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 # Configure the policy loss to use
 POLICY_LOSS="reinforce"
 
-uv run --isolated --extra vllm -m examples.algorithm.custom_policy_loss.main_custom_policy_loss \
+uv run --isolated --extra fsdp -m examples.train.algorithms.custom_policy_loss.main_custom_policy_loss \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.policy_loss_type="$POLICY_LOSS" \

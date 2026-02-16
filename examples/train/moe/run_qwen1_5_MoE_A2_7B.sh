@@ -11,7 +11,7 @@ TP_SIZE=$NUM_GPUS
 EP_SIZE=$NUM_GPUS
 DP_SIZE=1
 
-uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

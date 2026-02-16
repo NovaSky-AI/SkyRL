@@ -4,7 +4,7 @@ Helper script to launch multiple vLLM remote servers in a Ray cluster.
 The main purpose is to be able to test out the remote endpoint functionality in SkyRL easily.
 
 Example usage:
-uv run --isolated --frozen --extra vllm scripts/launch_multiple_remote_servers.py --model-path Qwen/Qwen2.5-1.5B-Instruct --tp-size 2 --num-replicas 2 --gpu-memory-utilization 0.9 > my_server_logs.log 2>&1
+uv run --isolated --frozen --extra fsdp examples/train_scripts/launch_multiple_remote_servers.py --model-path Qwen/Qwen2.5-1.5B-Instruct --tp-size 2 --num-replicas 2 --gpu-memory-utilization 0.9 > my_server_logs.log 2>&1
 """
 
 import argparse
@@ -12,8 +12,8 @@ import os
 import ray
 import subprocess
 from ray.util.placement_group import placement_group, PlacementGroupSchedulingStrategy
-from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.utils.utils import initialize_ray
+from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.utils import initialize_ray
 import socket
 import signal
 import time
@@ -73,7 +73,7 @@ class VLLMServer:
         cmd = [
             "python",
             "-m",
-            "skyrl_train.inference_engines.vllm.vllm_server",
+            "skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server",
             "--model",
             self.model_path,
             "--enforce-eager",
@@ -95,7 +95,7 @@ class VLLMServer:
             "--port",
             str(self.port),
             "--worker-extension-cls",
-            "skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+            "skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
         ]
 
         # Set CUDA_VISIBLE_DEVICES based on Ray's GPU allocation

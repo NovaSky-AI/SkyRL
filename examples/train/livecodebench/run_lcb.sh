@@ -9,7 +9,7 @@ train_data="['${DATA_DIR}/deepcoder_train.json']"
 val_data="['${DATA_DIR}/test_livecodebench.json']"
 
 # NOTE (sumanthrh): micro_train_batch_size and micro_forward_batch_size can be tuned
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.algorithm.advantage_estimator="grpo" \
   data.train_data=$train_data \
   data.val_data=$val_data \

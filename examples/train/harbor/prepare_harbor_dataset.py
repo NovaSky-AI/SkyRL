@@ -10,19 +10,19 @@ dataset name), so each dataset automatically gets its own directory.
 
 Usage:
     # Prepare training data -> ~/data/harbor/OpenThoughts-Agent-v1-RL/
-    python examples/harbor/prepare_harbor_dataset.py \
+    python examples/train/harbor/prepare_harbor_dataset.py \
         --dataset open-thoughts/OpenThoughts-Agent-v1-RL
 
     # Prepare eval data -> ~/data/harbor/OpenThoughts-TB-dev/
-    python examples/harbor/prepare_harbor_dataset.py \
+    python examples/train/harbor/prepare_harbor_dataset.py \
         --dataset open-thoughts/OpenThoughts-TB-dev
 
     # Prepare code-contests training data -> ~/data/harbor/code-contests-sandboxes-with-tests/
-    python examples/harbor/prepare_harbor_dataset.py \
+    python examples/train/harbor/prepare_harbor_dataset.py \
         --dataset DCAgent/code-contests-sandboxes-with-tests
 
     # Override output directory
-    python examples/harbor/prepare_harbor_dataset.py \
+    python examples/train/harbor/prepare_harbor_dataset.py \
         --dataset open-thoughts/OpenThoughts-Agent-v1-RL \
         --output_dir ~/my-custom-path
 """

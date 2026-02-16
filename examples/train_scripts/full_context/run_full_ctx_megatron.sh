@@ -24,7 +24,7 @@ MAX_RESPONSE_LENGTH=8192
 
 MODEL_NAME="Qwen/Qwen3-4B"
 
-uv run --isolated --extra mcore -m scripts.full_context.main_full_ctx \
+uv run --isolated --extra megatron -m examples.train_scripts.full_context.main_full_ctx \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \

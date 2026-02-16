@@ -12,8 +12,8 @@ LOGGER="wandb"  # change to "console" to print to stdout
 
 INFERENCE_BACKEND="vllm"  # or "sglang"
 
-uv run --isolated --extra $INFERENCE_BACKEND \
-  -m skyrl_train.entrypoints.main_generate \
+uv run --isolated --extra fsdp \
+  -m skyrl.train.entrypoints.main_generate \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
   trainer.logger="$LOGGER" \

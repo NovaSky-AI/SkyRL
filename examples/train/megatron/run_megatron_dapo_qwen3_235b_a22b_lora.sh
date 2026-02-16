@@ -81,7 +81,7 @@ LR=1e-5 # 10x compared to full finetuning
 TIS_RATIO_TYPE="token"
 TIS_IMP_RATIO_CAP=2.0
 
-uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \

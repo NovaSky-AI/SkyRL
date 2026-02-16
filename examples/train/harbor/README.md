@@ -32,9 +32,9 @@ export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
 
 # 2. Prepare dataset
-python examples/harbor/prepare_harbor_dataset.py \
+python examples/train/harbor/prepare_harbor_dataset.py \
     --dataset DCAgent/code-contests-sandboxes-with-tests
-python examples/harbor/prepare_harbor_dataset.py \
+python examples/train/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-TB-dev
 
 # 3. Launch training

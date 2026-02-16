@@ -1,12 +1,12 @@
 """
-uv run --isolated --extra vllm -m examples.multiply.main_multiply
+uv run --isolated --extra fsdp -m examples.train.multiply.main_multiply
 """
 
 import ray
 import hydra
 from omegaconf import DictConfig
-from skyrl_train.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 from skyrl_gym.envs import register
 
 

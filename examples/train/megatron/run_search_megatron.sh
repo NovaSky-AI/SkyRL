@@ -26,7 +26,7 @@ MICRO_FORWARD_BATCH_SIZE_PER_GPU=2
 NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TP=8
 
-uv run --isolated --frozen --extra mcore -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

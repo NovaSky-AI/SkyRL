@@ -28,7 +28,7 @@ setup: |
   cd skyrl-train
   uv venv --python 3.12 --seed
   source .venv/bin/activate
-  uv sync --extra vllm
+  uv sync --extra fsdp
   uv pip install wandb
   uv run -- python examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
@@ -77,7 +77,7 @@ run: |
     #   num_inference_engines * inference_engine_tensor_parallel_size * inference_engine_data_parallel_size
     # Given TP=1 and DP=1, set num_inference_engines to total policy GPUs across the cluster.
     TOTAL_POLICY_GPUS=$((SKYPILOT_NUM_GPUS_PER_NODE * SKYPILOT_NUM_NODES))
-    uv run --isolated --extra "$INFERENCE_BACKEND" -m skyrl_train.entrypoints.main_base \
+    uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
       data.train_data="['${DATA_DIR}/train.parquet']" \
       data.val_data="['${DATA_DIR}/validation.parquet']" \
       trainer.algorithm.advantage_estimator="grpo" \
