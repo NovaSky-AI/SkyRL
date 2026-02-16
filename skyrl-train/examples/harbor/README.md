@@ -1,7 +1,7 @@
 ## Harbor Integration
 
 > [!IMPORTANT]
-> Please refer to [`SkyRL/examples/train_integrations/harbor`](/examples/train_integrations/harbor) instead, as SkyRL is undergoing a repo reorganization into the `SkyRL/skyrl` folder, which unifies the skyrl libraries below into a single package. The existing packages (e.g. `skyrl-train`) are fully functional but will be migrated to new paths shortly. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
+> Please refer to [`SkyRL/examples/train_integrations/harbor`](/examples/train_integrations/harbor) instead, as SkyRL is undergoing a repo reorganization into the `SkyRL/skyrl` folder, which unifies the skyrl libraries into a single package. The existing packages (e.g. `skyrl-train`) are fully functional but will be migrated to new paths shortly. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
 
 RL training with [Harbor](https://github.com/laude-institute/harbor) as the environment and reward source. See the [full documentation](https://docs.skyrl.ai/docs/harbor) for details.
 
