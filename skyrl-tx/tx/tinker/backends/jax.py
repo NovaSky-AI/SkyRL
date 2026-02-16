@@ -23,6 +23,7 @@ Usage:
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+import functools
 from typing import Any, Callable, get_type_hints
 
 from cloudpathlib import AnyPath
@@ -237,6 +238,7 @@ class JaxBackendImpl(AbstractBackend):
             )
 
         self._create_loss_and_grad_fn()
+        self._create_cp_sample_pass()
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
@@ -713,49 +715,41 @@ class JaxBackendImpl(AbstractBackend):
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
         return types.OptimStepOutput()
 
-    def _get_cp_sample_pass(
-        self,
-        *,
-        max_length: int,
-        max_new_tokens: int,
-        max_top_k: int,
-        use_top_p: bool,
-        prompt_logprobs: bool,
-    ) -> Callable:
-        """Return a cached shard-mapped CP sample pass for the given static args."""
-        cache = getattr(self, "_cp_sample_pass_cache", None)
-        if cache is None:
-            cache = {}
-            self._cp_sample_pass_cache = cache
-
-        key = (max_length, max_new_tokens, max_top_k, use_top_p, prompt_logprobs)
-        cp_sample_pass = cache.get(key)
-        if cp_sample_pass is not None:
-            return cp_sample_pass
-
+    def _create_cp_sample_pass(self) -> None:
+        """Create a single CP sample pass"""
         lora_specs = nnx.get_partition_spec(self.lora_params)
         non_lora_specs = nnx.get_partition_spec(self.non_lora_params)
-        sample_input_shardings = (
-            jax.P("fsdp", "cp"),  # input_ids
-            jax.P("fsdp", "cp"),  # attention_mask
-            jax.P(None, "cp"),  # positions
-            jax.P("fsdp"),  # adapter_indices
-            jax.P("fsdp"),  # temperatures
-            jax.P("fsdp", None),  # rngs
-            jax.P("fsdp", None),  # stop_tokens
-            jax.P("fsdp"),  # top_k_values
-            jax.P("fsdp"),  # top_p_values
+        batch_sharded_1d = jax.P("fsdp")
+        batch_sharded_2d = jax.P("fsdp", "cp")
+        positions_sharded = jax.P(None, "cp")
+        batch_sharded_2d_rep = jax.P("fsdp", None)
+        prefill_decode_in_specs = (
+            batch_sharded_2d,  # input_ids
+            batch_sharded_2d,  # attention_mask
+            positions_sharded,  # positions
+            None,  # max_length (static)
+            None,  # max_new_tokens (static)
+            batch_sharded_1d,  # adapter_indices
+            batch_sharded_1d,  # temperatures
+            batch_sharded_2d_rep,  # rngs
+            batch_sharded_2d_rep,  # stop_tokens
+            batch_sharded_1d,  # top_k_values
+            batch_sharded_1d,  # top_p_values
+            None,  # max_top_k (static)
+            None,  # use_top_p (static)
+            None,  # prompt_logprobs (static)
         )
         sample_output_shardings = (
-            jax.P("fsdp", None),  # generated tokens
-            jax.P("fsdp", None),  # generated logprobs
-            jax.P("fsdp"),  # stop positions
-            jax.P("fsdp", "cp"),  # prompt logprobs
+            batch_sharded_2d_rep,  # generated tokens
+            batch_sharded_2d_rep,  # generated logprobs
+            batch_sharded_1d,  # stop positions
+            batch_sharded_2d,  # prompt logprobs
         )
+        static_argnums = (5, 6, 13, 14, 15)
 
         @jax.shard_map(
             mesh=self.mesh,
-            in_specs=(lora_specs, non_lora_specs) + sample_input_shardings,
+            in_specs=(lora_specs, non_lora_specs) + prefill_decode_in_specs,
             out_specs=sample_output_shardings,
             axis_names=set(self.mesh.axis_names),
             check_vma=False,
@@ -763,100 +757,18 @@ class JaxBackendImpl(AbstractBackend):
         def _cp_sample_pass(
             lora_params: nnx.State,
             non_lora_params: nnx.State,
-            input_ids: jax.Array,
-            attention_mask: jax.Array,
-            positions: jax.Array,
-            adapter_indices: jax.Array,
-            temperatures: jax.Array,
-            rngs: jax.Array,
-            stop_tokens: jax.Array,
-            top_k_values: jax.Array,
-            top_p_values: jax.Array,
+            *decode_args,
         ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
-            new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = model._prefill_and_decode(
-                model,
-                input_ids,
-                attention_mask,
-                positions,
-                max_length=max_length,
-                max_new_tokens=max_new_tokens,
-                adapter_indices=adapter_indices,
-                temperatures=temperatures,
-                rngs=rngs,
-                stop_tokens=stop_tokens,
-                top_k_values=top_k_values,
-                top_p_values=top_p_values,
-                max_top_k=max_top_k,
-                use_top_p=use_top_p,
-                prompt_logprobs=prompt_logprobs,
-            )
+            new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = model._prefill_and_decode(model, *decode_args)
             if prompt_logprobs_array is None:
-                prompt_logprobs_array = jnp.zeros((input_ids.shape[0], 0), dtype=jnp.float32)
+                prompt_logprobs_array = jnp.zeros((decode_args[0].shape[0], 0), dtype=jnp.float32)
             return new_tokens, new_logprobs, stop_pos, prompt_logprobs_array
 
-        cp_sample_pass = jax.jit(_cp_sample_pass)
-        cache[key] = cp_sample_pass
-        return cp_sample_pass
+        self._cp_sample_pass = functools.partial(jax.jit, static_argnums=static_argnums)(_cp_sample_pass)
 
-    def _get_sample_decode_runner(
-        self,
-        *,
-        cp_size: int,
-        sharding_1d: jax.NamedSharding,
-        sharding_2d_rep: jax.NamedSharding,
-    ) -> Callable | None:
-        """Build the decode runner for sampling, overriding only when CP>1."""
-        if cp_size <= 1:
-            return None
-
-        def decode_runner(_model, *decode_args) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-            (
-                input_ids,
-                attention_mask,
-                positions,
-                max_length,
-                max_new_tokens,
-                adapter_indices,
-                temperatures,
-                rngs,
-                stop_tokens,
-                top_k_values,
-                top_p_values,
-                max_top_k,
-                use_top_p,
-                prompt_logprobs,
-            ) = decode_args
-
-            assert adapter_indices is not None
-            cp_sample_pass = self._get_cp_sample_pass(
-                max_length=max_length,
-                max_new_tokens=max_new_tokens,
-                max_top_k=max_top_k,
-                use_top_p=use_top_p,
-                prompt_logprobs=prompt_logprobs,
-            )
-
-            temperatures, rngs, stop_tokens, top_k_values, top_p_values = jax.device_put(
-                (temperatures, rngs, stop_tokens, top_k_values, top_p_values),
-                (sharding_1d, sharding_2d_rep, sharding_2d_rep, sharding_1d, sharding_1d),
-            )
-
-            return cp_sample_pass(
-                self.lora_params,
-                self.non_lora_params,
-                input_ids,
-                attention_mask,
-                positions,
-                adapter_indices,
-                temperatures,
-                rngs,
-                stop_tokens,
-                top_k_values,
-                top_p_values,
-            )
-
-        return decode_runner
+    def _cp_decode_runner(self, _model, *decode_args) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        return self._cp_sample_pass(self.lora_params, self.non_lora_params, *decode_args)
 
     def sample(
         self,
@@ -894,15 +806,12 @@ class JaxBackendImpl(AbstractBackend):
 
         # Sharding specs for sampling inputs
         cp_size = self.mesh.shape["cp"]
-        sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", "cp"))
+        batch_sharded_1d = jax.P("fsdp")
+        batch_sharded_2d = jax.P("fsdp", "cp")
+        sharding_2d = jax.NamedSharding(self.mesh, batch_sharded_2d)
         positions_sharding = jax.NamedSharding(self.mesh, jax.P(None, "cp"))
-        sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
-        sharding_2d_rep = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
-        decode_runner = self._get_sample_decode_runner(
-            cp_size=cp_size,
-            sharding_1d=sharding_1d,
-            sharding_2d_rep=sharding_2d_rep,
-        )
+        sharding_1d = jax.NamedSharding(self.mesh, batch_sharded_1d)
+        decode_runner = self._cp_decode_runner if cp_size > 1 else None
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
@@ -935,7 +844,6 @@ class JaxBackendImpl(AbstractBackend):
                         tokenizer=self.tokenizer,
                         decode_runner=decode_runner,
                     )
-
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start
                 all_sequences.extend(

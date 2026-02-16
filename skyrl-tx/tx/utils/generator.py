@@ -162,9 +162,6 @@ def find_string_stop_position(
     return None
 
 
-DecodeRunner = Callable[..., tuple[jax.Array, jax.Array, jax.Array, jax.Array | None]]
-
-
 class GeneratorMixin:
     """Adds autoregressive generation with KV caching to causal language models."""
 
@@ -305,15 +302,15 @@ class GeneratorMixin:
         adapter_indices: jax.Array | None = None,
         prompt_logprobs: bool = False,
         tokenizer=None,
-        decode_runner: DecodeRunner | None = None,
+        decode_runner: Callable | None = None,
     ) -> GenerateOutput:
         """Generate text autoregressively with KV caching.
 
         Args:
             tokenizer: Optional tokenizer for string stop sequence detection.
                 Required if any sampling_params has stop_strings set.
-            decode_runner: Optional backend-provided decode implementation.
-                If not provided, uses the default `_prefill_and_decode`.
+            decode_runner: Optional callable override for `_prefill_and_decode`
+                (for example, CP shard_map path).
 
         Returns:
             GenerateOutput containing generated_ids, stop_reasons, and optionally logprobs.
@@ -347,7 +344,6 @@ class GeneratorMixin:
         max_top_k = max((sp.top_k for sp in sampling_params if sp.top_k > 0), default=0)
         use_top_p = any(sp.top_p < 1.0 for sp in sampling_params)
 
-        # Needs overriding for context parallelism
         decode_runner = decode_runner or self._prefill_and_decode
         new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = decode_runner(
             self,
