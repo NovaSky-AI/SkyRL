@@ -1,11 +1,11 @@
 ## Harbor Integration
 
-RL training with [Harbor](https://github.com/laude-institute/harbor) as the environment and reward source. See the [full documentation](https://skyrl.ai/docs/harbor) for details.
+RL training with [Harbor](https://github.com/laude-institute/harbor) as the environment and reward source. See the [full documentation](https://docs.skyrl.ai/docs/harbor) for details.
 
 ### Structure
 
 ```
-examples/train/harbor/
+examples/train_integrations/harbor/
   harbor_generator.py              # HarborGenerator: bridges SkyRL <-> Harbor
   dataset.py                       # HarborTaskDataset: loads task directory paths
   prepare_harbor_dataset.py        # Downloads + extracts datasets from HuggingFace
@@ -32,11 +32,11 @@ export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
 
 # 2. Prepare dataset
-uv run examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/CodeContests
-uv run examples/train/harbor/prepare_harbor_dataset.py \
+uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-TB-dev
 
 # 3. Launch training
-bash examples/train/harbor/run_codecontest.sh
+bash examples/train_integrations/harbor/run_codecontest.sh
 ```

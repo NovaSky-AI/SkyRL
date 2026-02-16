@@ -9,7 +9,7 @@ set -ex
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
 # Prepare dataset first (downloads from HuggingFace and extracts tasks):
-# uv run examples/train/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-Agent-v1-RL
+# uv run examples/train_integrations/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-Agent-v1-RL
 
 DATA_DIR="$HOME/data/harbor"
 TRAIN_DATA="['$DATA_DIR/OpenThoughts-Agent-v1-RL']"
@@ -19,9 +19,9 @@ TRIALS_DIR="$HOME/trials_run"
 
 NUM_GPUS=4
 
-uv run --isolated --extra fsdp --extra harbor -m examples.train.harbor.entrypoints.main_harbor_generate \
+uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor_generate \
   data.train_data=$TRAIN_DATA \
-  hydra.searchpath=['file://examples/train/harbor'] \
+  hydra.searchpath=['file://examples/train_integrations/harbor'] \
   +harbor_trial_config=default \
   ++harbor_trial_config.trials_dir=$TRIALS_DIR \
   ++harbor_trial_config.trial_name="dummy" \
