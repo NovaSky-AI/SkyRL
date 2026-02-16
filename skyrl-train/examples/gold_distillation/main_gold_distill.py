@@ -68,7 +68,7 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         super().__init__(cfg, **kwargs)
 
         self.ref_tokenizer = ref_tokenizer
-        self.gold_temperature = 1.0
+        self.gold_temperature = self.cfg.trainer.algorithm.get("gold_temperature", 1.0)
 
     def update_ref_with_policy(self):
         """
