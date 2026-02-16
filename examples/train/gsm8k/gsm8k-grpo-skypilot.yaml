@@ -25,12 +25,11 @@ envs:
 
 # Commands run on each node of the remote cluster to set up the environment (e.g., install dependencies). These are run directly inside Docker.
 setup: |
-  cd skyrl-train
   uv venv --python 3.12 --seed
   source .venv/bin/activate
   uv sync --extra fsdp
   uv pip install wandb
-  uv run -- python examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+  uv run -- python examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
 # If you already have processed the data locally, delete the above line
 
@@ -40,7 +39,6 @@ setup: |
 run: |
   set -euo pipefail
 
-  cd skyrl-train
   source .venv/bin/activate
 
   TMP_DIR="$HOME/skyrl-tmp"
