@@ -19,9 +19,9 @@ EVAL_DATA="['$DATA_DIR/OpenThoughts-TB-dev']"
 CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
 
 RUN_NAME="codecontest"
-TRIALS_DIR="/home/ray/$RUN_NAME/trials_run"
-CKPTS_DIR="/home/ray/$RUN_NAME/ckpts"
-EXPORTS_DIR="/home/ray/$RUN_NAME/exports"
+TRIALS_DIR="$HOME/$RUN_NAME/trials_run"
+CKPTS_DIR="$HOME/$RUN_NAME/ckpts"
+EXPORTS_DIR="$HOME/$RUN_NAME/exports"
 LOG_DIR="/tmp/skyrl-logs/$RUN_NAME"
 
 NUM_GPUS=4
