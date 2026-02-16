@@ -440,6 +440,7 @@ class TrainerConfig(BaseConfig):
     seed: int = 42
     resume_mode: Optional[str] = "latest"
     resume_path: Optional[str] = None
+    log_path: str = "/tmp/skyrl-logs"
     ckpt_path: str = ""
     max_ckpts_to_keep: int = -1
     ckpt_interval: int = 10
