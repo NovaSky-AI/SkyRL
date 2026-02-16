@@ -936,6 +936,7 @@ class JaxBackendImpl(AbstractBackend):
                         decode_runner=decode_runner,
                     )
 
+                # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start
                 all_sequences.extend(
                     types.GeneratedSequence(stop_reason=stop_reason, tokens=tokens, logprobs=logprobs)
