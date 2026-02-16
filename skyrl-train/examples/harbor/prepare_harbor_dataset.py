@@ -17,6 +17,7 @@ Usage:
 import argparse
 import io
 import os
+import shutil
 import tarfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path, PurePosixPath
@@ -67,6 +68,8 @@ def _safe_extract_tar(archive_bytes: bytes, dest_dir: Path) -> None:
 def _extract_one(args: tuple) -> bool:
     """Extract a single task from its tar archive. Runs in a worker process."""
     rel_path, data, output_dir_str = args
+    if not isinstance(rel_path, str) or not isinstance(data, (bytes, bytearray, memoryview)):
+        return False
     output_dir = Path(output_dir_str)
 
     safe_rel = PurePosixPath(rel_path)
@@ -122,7 +125,8 @@ def prepare(dataset_name: str, output_dir: str | None = None) -> str:
             schema = pq.read_schema(f)
             if "path" in schema.names and "task_binary" in schema.names:
                 parquets.append(f)
-        except Exception:
+        except Exception as e:
+            print(f"  Warning: Could not read schema from {f}: {e}")
             continue
 
     if not parquets:
@@ -130,8 +134,10 @@ def prepare(dataset_name: str, output_dir: str | None = None) -> str:
         # Just symlink to the snapshot.
         print("No parquet files found, symlinking snapshot directly...")
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        if output_path.exists() or output_path.is_symlink():
+        if output_path.is_symlink():
             output_path.unlink()
+        elif output_path.exists():
+            shutil.rmtree(output_path)
         output_path.symlink_to(snapshot_dir)
         print(f"Done! Symlinked {output_path} -> {snapshot_dir}")
         return str(output_path)
