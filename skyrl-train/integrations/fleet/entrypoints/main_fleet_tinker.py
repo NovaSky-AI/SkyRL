@@ -111,6 +111,7 @@ class RolloutOutput(BaseModel):
     env_key: str
     turns: int
     tool_calls: int
+    tool_errors: int = 0  # Count of tool call errors in this rollout
     stop_reason: str
     duration: float
     # Timing breakdown for WandB
@@ -265,16 +266,29 @@ def compute_rollout_metrics(
     )
     metrics.update(per_env_metrics)
 
-    # Per-environment rollout stats (turns, tool_calls, duration) - Tinker-specific
+    # Per-environment rollout stats (turns, tool_calls, tool_errors, duration) - Tinker-specific
     rollout_stats = defaultdict(list)
     for r in valid_rollouts:
         env_key = sanitize_metric_key(r.get("env_key", "unknown"))
         rollout_stats[f"rollout/{env_key}/turns"].append(r.get("turns", 0))
         rollout_stats[f"rollout/{env_key}/tool_calls"].append(r.get("tool_calls", 0))
+        rollout_stats[f"rollout/{env_key}/tool_errors"].append(r.get("tool_errors", 0))
         rollout_stats[f"rollout/{env_key}/duration"].append(r.get("duration", 0.0))
 
     for key, values in rollout_stats.items():
         metrics[key] = np.mean(values)
+
+    # Compute tool error rate per environment
+    env_keys_seen = set()
+    for r in valid_rollouts:
+        env_keys_seen.add(sanitize_metric_key(r.get("env_key", "unknown")))
+    for env_key in env_keys_seen:
+        total_calls = sum(rollout_stats[f"rollout/{env_key}/tool_calls"])
+        total_errors = sum(rollout_stats[f"rollout/{env_key}/tool_errors"])
+        if total_calls > 0:
+            metrics[f"rollout/{env_key}/tool_error_rate"] = total_errors / total_calls
+        else:
+            metrics[f"rollout/{env_key}/tool_error_rate"] = 0.0
 
     # Overall rollout duration stats
     durations = [r.get("duration", 0.0) for r in valid_rollouts]
@@ -514,6 +528,7 @@ async def collect_fleet_rollout(
             env_key=env_key,
             turns=env.turns,
             tool_calls=env.tool_calls,
+            tool_errors=env.tool_errors,
             stop_reason=stop_reason,
             duration=time.time() - rollout_start,
             total_gen_time=total_gen_time,
@@ -572,6 +587,7 @@ async def collect_batch_rollouts(
                     env_key=task_config.get("env_key", "unknown"),
                     turns=0,
                     tool_calls=0,
+                    tool_errors=0,
                     stop_reason="error",
                     error=str(e),
                     duration=time.time() - rollout_start,

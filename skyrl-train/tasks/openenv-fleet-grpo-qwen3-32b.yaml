@@ -16,7 +16,7 @@
 name: fleet-task-grpo-qwen3-32b
 
 resources:
-  disk_size: 750  # 32B needs: model (~64GB) + optimizer (~192GB) + checkpoint (~256GB) + headroom
+  disk_size: 1500  # 32B needs: model (~64GB) + optimizer (~192GB) + checkpoint (~256GB) + headroom
   ports: 6479
   any_of:
     # B200:8 required for 32B model (OOM on B200:4 during backward pass)

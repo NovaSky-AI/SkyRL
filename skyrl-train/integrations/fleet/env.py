@@ -164,6 +164,7 @@ class FleetTaskEnv(BaseTextEnv):
         self.chat_history: ConversationType = []
         self.turns = 0
         self.tool_calls = 0
+        self.tool_errors = 0
         self.tools: List[Dict[str, Any]] = []
 
         # Context management (uses OpenEnv's ContextManager)
@@ -220,6 +221,7 @@ class FleetTaskEnv(BaseTextEnv):
         # Reset state
         self.turns = 0
         self.tool_calls = 0
+        self.tool_errors = 0
 
         # Reset context manager if enabled
         if self.context_manager:
@@ -389,6 +391,17 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
         # Check if episode is done
         episode_done = agent_done or max_turns_reached
 
+        # Detect error patterns in tool_result (tool returned error as successful response)
+        if not error and tool_result:
+            result_str = str(tool_result) if not isinstance(tool_result, str) else tool_result
+            # Check for common error patterns in tool response
+            if result_str.strip().startswith("Error:") or result_str.strip().startswith("error:"):
+                error = result_str
+                tool_result = None
+            elif isinstance(tool_result, dict) and "error" in tool_result:
+                error = tool_result.get("error", str(tool_result))
+                tool_result = None
+
         # Build observation message
         if max_turns_reached:
             return BaseTextEnvStepOutput(
@@ -400,6 +413,7 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
 
         # Build response observation
         if error:
+            self.tool_errors += 1
             obs_content = f"Error: {error}"
         elif tool_result:
             if isinstance(tool_result, dict):
@@ -467,6 +481,7 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
             "env_key": self.task_config.get("env_key") or self.task_config.get("env_id"),
             "turns": self.turns,
             "tool_calls": self.tool_calls,
+            "tool_errors": self.tool_errors,
         }
 
     @staticmethod
@@ -480,42 +495,56 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
         for m in metrics:
             env_key = m.get("env_key", "unknown")
             if env_key not in env_data:
-                env_data[env_key] = {"turns": [], "tool_calls": []}
+                env_data[env_key] = {"turns": [], "tool_calls": [], "tool_errors": []}
             env_data[env_key]["turns"].append(m.get("turns", 0))
             env_data[env_key]["tool_calls"].append(m.get("tool_calls", 0))
+            env_data[env_key]["tool_errors"].append(m.get("tool_errors", 0))
 
         result: Dict[str, Any] = {}
         total_turns = 0
         total_tool_calls = 0
+        total_tool_errors = 0
         total_episodes = 0
 
         # Per-env_key metrics
         for env_key, data in env_data.items():
             turns_list = data["turns"]
             tool_calls_list = data["tool_calls"]
+            tool_errors_list = data["tool_errors"]
 
             avg_turns = sum(turns_list) / len(turns_list)
             avg_tool_calls = sum(tool_calls_list) / len(tool_calls_list)
+            avg_tool_errors = sum(tool_errors_list) / len(tool_errors_list)
             # Tool calls per turn (avoid div by zero)
             total_env_turns = sum(turns_list)
             total_env_tool_calls = sum(tool_calls_list)
+            total_env_tool_errors = sum(tool_errors_list)
             tool_calls_per_turn = total_env_tool_calls / total_env_turns if total_env_turns > 0 else 0
+            # Tool error rate (errors per tool call)
+            tool_error_rate = total_env_tool_errors / total_env_tool_calls if total_env_tool_calls > 0 else 0
 
             result[f"{env_key}/avg_turns"] = avg_turns
             result[f"{env_key}/min_turns"] = min(turns_list)
             result[f"{env_key}/max_turns"] = max(turns_list)
             result[f"{env_key}/avg_tool_calls"] = avg_tool_calls
             result[f"{env_key}/tool_calls_per_turn"] = tool_calls_per_turn
+            result[f"{env_key}/avg_tool_errors"] = avg_tool_errors
+            result[f"{env_key}/total_tool_errors"] = total_env_tool_errors
+            result[f"{env_key}/tool_error_rate"] = tool_error_rate
             result[f"{env_key}/num_episodes"] = len(turns_list)
 
             total_turns += total_env_turns
             total_tool_calls += total_env_tool_calls
+            total_tool_errors += total_env_tool_errors
             total_episodes += len(turns_list)
 
         # Overall metrics
         result["avg_turns"] = total_turns / total_episodes if total_episodes > 0 else 0
         result["avg_tool_calls"] = total_tool_calls / total_episodes if total_episodes > 0 else 0
         result["tool_calls_per_turn"] = total_tool_calls / total_turns if total_turns > 0 else 0
+        result["avg_tool_errors"] = total_tool_errors / total_episodes if total_episodes > 0 else 0
+        result["total_tool_errors"] = total_tool_errors
+        result["tool_error_rate"] = total_tool_errors / total_tool_calls if total_tool_calls > 0 else 0
         result["total_episodes"] = total_episodes
 
         return result
