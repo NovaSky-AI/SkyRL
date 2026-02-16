@@ -58,7 +58,7 @@ from skyrl_train.utils.ppo_utils import (
 )
 from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.utils import configure_ray_worker_logging
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, MemoryAwareBatchIterator, reduce_metrics, all_reduce_metrics
 
 _SET_AFFINITY = False
 
@@ -223,10 +223,31 @@ class Worker(DistributedTorchRayActor):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         self._transfer_strategy_cls = get_transfer_strategy_cls(self.cfg)
+        self._token_budget: Optional[int] = None
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
         raise NotImplementedError()
+
+    def auto_determine_token_budget(self, max_seq_len: int) -> int:
+        """Profile GPU memory to estimate the token budget *C*.
+
+        Returns:
+            The token budget C (`batch_size x max_seq_len ≤ C`).
+        """
+        from skyrl_train.utils.auto_microbatch import determine_token_budget
+
+        budget = determine_token_budget(
+            model=self.model,
+            strategy=self.strategy,
+            max_seq_len=max_seq_len,
+            safety_margin=0.85,
+            temperature=self.cfg.generator.sampling_params.temperature,
+            compute_entropy=self.cfg.trainer.algorithm.use_entropy_loss,
+            entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
+        )
+        self._token_budget = budget
+        return budget
 
     def empty_cache(self) -> None:
         """Empty GPU memory cache on Worker's CUDA device"""
@@ -351,13 +372,15 @@ class Worker(DistributedTorchRayActor):
         self,
         data: TrainingInputBatch,
     ) -> TrainingOutputBatch:
-        """Run forward pass on the input batch in inference mode.
+        """Run forward pass on the input batch in inference mode."""
+        token_budget = getattr(self, "_token_budget", None)
+        if token_budget is not None and token_budget > 0:
+            padded_seq_len = data["sequences"].shape[1]
+            micro_batch_size = max(token_budget // padded_seq_len, 1)
+        else:
+            micro_batch_size = self.cfg.trainer.micro_forward_batch_size_per_gpu
 
-        This is a wrapper around `_forward_micro_batch` that runs in micro batches of `cfg.trainer.micro_forward_batch_size_per_gpu`.
-        """
-        # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
-        # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+        micro_batches = data.chunk(micro_batch_size)
 
         outputs = []
         for micro_batch in micro_batches:
@@ -668,7 +691,6 @@ class PolicyWorkerBase(Worker):
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
-        The batch is split into micro batches based on micro_train_batch_size_per_gpu.
         Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
 
         Args:
@@ -681,11 +703,16 @@ class PolicyWorkerBase(Worker):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+        if self._token_budget is not None and self._token_budget > 0:
+            iterator = MemoryAwareBatchIterator(data, self._token_budget)
+        else:
+            micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+            iterator = BatchIterator(data, micro_batch_size, drop_last=False)
+
         all_metrics = defaultdict(list)
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
-        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
+        for micro_batch in iterator:
             metrics = self._forward_backward_micro(micro_batch, loss_fn=loss_fn, loss_fn_config=loss_fn_config)
             self._micro_batches_accumulated += 1
 
@@ -1044,7 +1071,10 @@ class CriticWorkerBase(Worker):
         """
         Perform forward and backward passes for a batch, handling micro-batching internally.
 
-        The batch is split into micro batches based on micro_train_batch_size_per_gpu.
+        When a token budget is set, uses `MemoryAwareBatchIterator` for
+        dynamic packing.  Otherwise falls back to fixed
+        `micro_train_batch_size_per_gpu`.
+
         Gradients accumulate across micro batches. Gradient scaling happens at optim_step.
 
         Args:
@@ -1053,10 +1083,15 @@ class CriticWorkerBase(Worker):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+        if self._token_budget is not None and self._token_budget > 0:
+            iterator = MemoryAwareBatchIterator(data, self._token_budget)
+        else:
+            micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+            iterator = BatchIterator(data, micro_batch_size, drop_last=False)
+
         all_metrics = defaultdict(list)
 
-        for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
+        for micro_batch in iterator:
             metrics = self._forward_backward_micro(micro_batch)
             self._micro_batches_accumulated += 1
             for k, v in metrics.items():
