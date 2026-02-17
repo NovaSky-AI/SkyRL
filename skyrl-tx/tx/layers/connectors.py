@@ -4,7 +4,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
-from tx.layers.util import Param, sinkhorn_knopp
+from tx.layers.util import Param
 
 
 def is_connector_path(path: tuple[Any, ...]) -> bool:
@@ -72,20 +72,21 @@ class LoRAConnector(nnx.Module):
             return jnp.zeros((batch_size,), dtype=jnp.int32)
         return adapter_indices.astype(jnp.int32)
 
-    def _get_params(self, adapter_indices: jax.Array):
-        """Stop gradients when the connectors are not trainable."""
-        handle_grad = (
-            (lambda p: p[...][adapter_indices])
-            if self.trainable
-            else (lambda p: jax.lax.stop_gradient(p[...])[adapter_indices])
-        )
-        params = [self.input_norm_weight, self.alpha_pre, self.alpha_post, self.alpha_res,
-                  self.phi_pre, self.phi_post, self.phi_res, self.b_pre, self.b_post, self.b_res]
-        return [handle_grad(p) for p in params]
+    @staticmethod
+    def _sinkhorn_knopp(M: jax.Array, iters: int = 20) -> jax.Array:
+        """Project a matrix onto the set of doubly stochastic matrices."""
+        M = jnp.exp(M)
+
+        def step(_, mat):
+            mat = mat / mat.sum(axis=-1, keepdims=True)
+            mat = mat / mat.sum(axis=-2, keepdims=True)
+            return mat
+
+        return jax.lax.fori_loop(0, iters, step, M)
 
     def _norm(self, x_flat: jax.Array, adapter_indices: jax.Array) -> jax.Array:
         """Separate norm from layernorm.RMSNorm due to adapter indexing and trainability"""
-        input_norm_weight, *_ = self._get_params(adapter_indices)
+        input_norm_weight = self.input_norm_weight[adapter_indices]
         rms = jnp.sqrt(jnp.mean(x_flat**2, axis=-1, keepdims=True) + self.eps)
         return (input_norm_weight[:, None, :] * x_flat) / rms
 
@@ -99,7 +100,9 @@ class LoRAConnector(nnx.Module):
         x_flat = x.reshape(B, T, n * C)
         x_norm = self._norm(x_flat, adapter_indices)
 
-        (_, alpha_pre, _, _, phi_pre, _, _, b_pre, _, _) = self._get_params(adapter_indices)
+        alpha_pre = self.alpha_pre[adapter_indices]
+        phi_pre = self.phi_pre[adapter_indices]
+        b_pre = self.b_pre[adapter_indices]
         pre_logits = x_norm @ phi_pre
         tilde_H_pre = alpha_pre[:, None, None] * pre_logits + b_pre[:, None, :]
 
@@ -123,7 +126,12 @@ class LoRAConnector(nnx.Module):
 
         adapter_indices = self._get_adapter_indices(B, adapter_indices)
 
-        (_, _, alpha_post, alpha_res, _, phi_post, phi_res, _, b_post, b_res) = self._get_params(adapter_indices)
+        alpha_post = self.alpha_post[adapter_indices]
+        alpha_res = self.alpha_res[adapter_indices]
+        phi_post = self.phi_post[adapter_indices]
+        phi_res = self.phi_res[adapter_indices]
+        b_post = self.b_post[adapter_indices]
+        b_res = self.b_res[adapter_indices]
 
         post_logits = residual_norm @ phi_post
         tilde_H_post = alpha_post[:, None, None] * post_logits + b_post[:, None, :]
@@ -131,7 +139,7 @@ class LoRAConnector(nnx.Module):
         tilde_H_res = alpha_res[:, None, None, None] * res_logits.reshape(B, T, n, n) + b_res[:, None, :, :]
 
         H_post = 2.0 * jax.nn.sigmoid(tilde_H_post)
-        M = sinkhorn_knopp(tilde_H_res, self.sinkhorn_iters)
+        M = self._sinkhorn_knopp(tilde_H_res, self.sinkhorn_iters)
 
         y_dist = H_post[..., None] * output[..., None, :]
         x_mixed = M @ residual

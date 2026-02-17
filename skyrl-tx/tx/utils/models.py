@@ -166,7 +166,7 @@ def load_safetensors(
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         # Skip connector parameters
-        if is_connector_path(path):
+        if skip_lora and is_connector_path(path):
             continue
         if key not in tensors:
             continue

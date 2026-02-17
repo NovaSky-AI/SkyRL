@@ -48,16 +48,16 @@ def test_connector_identity_initialization(mesh, expansion_rate: int):
         adapter_indices = jnp.array([adapter_idx], dtype=jnp.int32)
 
         # Verify H_pre = 1/n
-        _, _, _, _, _, _, _, b_pre, _, _ = conn._get_params(adapter_indices)
+        b_pre = conn.b_pre[adapter_indices]
         h_pre = jax.nn.sigmoid(b_pre[0])
         assert np.allclose(h_pre, 1.0 / n, atol=1e-5)
 
         # Verify H_post = 1
-        _, _, _, _, _, _, _, _, b_post, _ = conn._get_params(adapter_indices)
+        b_post = conn.b_post[adapter_indices]
         h_post = 2.0 * jax.nn.sigmoid(b_post[0])
         assert np.allclose(h_post, 1.0, atol=1e-6)
 
         # Verify M = I
-        _, _, _, _, _, _, _, _, _, b_res = conn._get_params(adapter_indices)
+        b_res = conn.b_res[adapter_indices]
         M = sinkhorn_knopp(b_res[0])
         assert np.allclose(M, jnp.eye(n), atol=1e-3)
