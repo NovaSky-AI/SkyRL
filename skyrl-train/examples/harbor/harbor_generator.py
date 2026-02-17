@@ -46,6 +46,7 @@ class HarborGenerator(GeneratorInterface):
         harbor_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        max_seq_len: int,
     ):
         """
         Args:
@@ -53,10 +54,12 @@ class HarborGenerator(GeneratorInterface):
             harbor_cfg: DictConfig object containing the Harbor configuration
             inference_engine_client: InferenceEngineClient object for interacting with the inference engines
             tokenizer: tokenizer object for encoding and decoding text
+            max_seq_len: Maximum total sequence length (prompt + response). Used to truncate responses.
         """
         self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
         self.model_name = generator_cfg.model_name
 
         # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
@@ -88,10 +91,9 @@ class HarborGenerator(GeneratorInterface):
         else:
             self.custom_chat_template_content = None
 
-        # Initialize rate limiter
-        rate_limit_config = harbor_cfg.get("rate_limit", None)
+        # Initialize rate limiter from generator config (not part of Harbor TrialConfig)
+        rate_limit_config = generator_cfg.get("rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
-        self._harbor_trial_config_template.pop("rate_limit", None)
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []
@@ -174,9 +176,6 @@ class HarborGenerator(GeneratorInterface):
             )
             rollout_metrics["generate/trajectories_summarized"] = sum(
                 1 for output in successful_outputs if output.summarization_count > 0
-            )
-            rollout_metrics["generate/trajectories_truncated"] = sum(
-                1 for output in successful_outputs if output.stop_reason == "length"
             )
             rollout_metrics["generate/trajectories_context_length_exceeded"] = sum(
                 1 for output in successful_outputs if output.stop_reason == "context_length"
@@ -304,19 +303,21 @@ class HarborGenerator(GeneratorInterface):
         )
 
         # Determine stop reason
-        max_response_tokens = (
-            self.generator_cfg.sampling_params.max_generate_length
-            + self.generator_cfg.max_input_length
-            - initial_prompt_length
-        )
-        if is_context_length_error:
+        max_response_tokens = max(0, self.max_seq_len - initial_prompt_length)
+        if is_context_length_error or len(response_ids) > max_response_tokens:
             stop_reason = "context_length"
-        elif len(response_ids) > max_response_tokens:
-            stop_reason = "length"
         else:
             stop_reason = "complete"
 
-        # Truncate to maximum allowed length
+        # Apply overlong filtering.
+        # TODO(Charlie): should this also apply when the end reason is max_turns in Harbor?
+        # Revisit. We would like to reuse `utils.py`'s implementation for overlong filtering.
+        if self.generator_cfg.apply_overlong_filtering and stop_reason == "context_length":
+            loss_mask = [0] * len(loss_mask)
+
+        # Truncate to maximum allowed length.
+        # NOTE(Charlie): though it shouldn't happen since it'd reach `ContextLengthExceededError`
+        # from Harbor first. We do it anyway to be safe.
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
 

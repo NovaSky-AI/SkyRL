@@ -5,6 +5,10 @@
 
 </div>
 
+> [!IMPORTANT]
+> **Note:** SkyRL is undergoing a repo reorganization into the `SkyRL/skyrl` folder, which unifies the skyrl libraries (`skyrl-train`, `skyrl-tx`) into a single package. The existing packages below are fully functional but will be migrated to new paths shortly. We expect to finish by end of February, and in the meantime, please try to develop on top of the new `SkyRL/skyrl` folder. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
+
+
 # Overview
 
  With a focus on modularity, `skyrl-train` makes it easy to prototype new training algorithms, environments, and execution plans—without compromising usability or speed. 

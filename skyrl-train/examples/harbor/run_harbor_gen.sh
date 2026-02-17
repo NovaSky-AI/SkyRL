@@ -8,19 +8,23 @@ set -ex
 # export MODAL_TOKEN_ID=YOUR_KEY_HERE
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
-# Prepare dataset (downloads from HuggingFace and extracts tasks automatically)
-# Output dir auto-derived from dataset name.
-TRAIN_DATASET="open-thoughts/OpenThoughts-Agent-v1-RL"
+# Prepare dataset first (downloads from HuggingFace and extracts tasks):
+# python examples/harbor/prepare_harbor_dataset.py --dataset open-thoughts/CodeContests
+
 DATA_DIR="$HOME/data/harbor"
-
-python examples/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
-
-TRAIN_DATA="['$DATA_DIR/${TRAIN_DATASET##*/}']"
+TRAIN_DATA="['$DATA_DIR/CodeContests']"
 
 CHAT_TEMPLATE_PATH="$(dirname "$0")/../../skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
 TRIALS_DIR="$HOME/trials_run"
 
+#----------------
+# Infrastructure setup
+#----------------
 NUM_GPUS=4
+ENABLE_RATE_LIMITING=true  # Enable rate/concurrency limiting for trajectory submissions
+TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported). null or omit to disable rate limiting
+MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
+
 
 uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.main_harbor_generate \
   data.train_data=$TRAIN_DATA \
@@ -49,4 +53,7 @@ uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.mai
   trainer.train_batch_size=$NUM_GPUS \
   trainer.policy_mini_batch_size=$NUM_GPUS \
   trainer.logger=console \
+  +generator.rate_limit.enabled=$ENABLE_RATE_LIMITING \
+  +generator.rate_limit.trajectories_per_second=$TRAJECTORIES_PER_SECOND \
+  +generator.rate_limit.max_concurrency=$MAX_CONCURRENCY \
   $@
