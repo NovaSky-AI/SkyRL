@@ -93,7 +93,7 @@ def test_prepare_model_pass_batch_loss_fn_config():
             logprobs=types.TensorData(data=[]),
         ),
     )
-    config = {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3, "entropy_coef": 0.01}
+    config = {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3}
 
     # With loss_fn_config
     requests_with_config = {
@@ -101,13 +101,13 @@ def test_prepare_model_pass_batch_loss_fn_config():
             "model1",
             types.ForwardBackwardInput(
                 data=[datum],
-                loss_fn="importance_sampling",
+                loss_fn="ppo",
                 loss_fn_config=config,
             ),
         ),
     }
     batch = prepare_model_pass_batch(requests_with_config)
-    assert batch.all_loss_fns == ["importance_sampling"]
+    assert batch.all_loss_fns == ["ppo"]
     assert batch.all_loss_fn_configs == [config]
 
     # Without loss_fn_config (default None)
