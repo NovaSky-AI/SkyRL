@@ -41,7 +41,8 @@ from tx.layers.lora import clear_lora_adapter, init_lora_adapter
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
-from tx.tinker.loss_fns import LOSS_FUNCTIONS
+from tx.tinker.loss_fns import LOSS_FUNCTIONS, LossFnConfig
+from tx.tinker.types import LOSS_TYPES
 from tx.utils.models import (
     get_dtype,
     get_model_class,
@@ -52,8 +53,12 @@ from tx.utils.models import (
     insert_adapter_state,
     round_up_seq_len,
     resolve_model_path,
+    get_adapter_idx,
 )
 from tx.utils.log import logger
+
+_DEFAULT_PPO_CLIP_LOW_THRESHOLD = 0.8
+_DEFAULT_PPO_CLIP_HIGH_THRESHOLD = 1.2
 
 
 class JaxBackendConfig(BaseModel, extra="forbid"):
@@ -81,7 +86,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     )
     gradient_checkpointing: bool = Field(
         default=False,
-        description="Whether to use gradient checkpointing (full recomputation strategy)",
+        description="Per-layer activation checkpointing: recompute activations during backward to save memory",
     )
     loss_chunk_size: int = Field(
         default=1024,
@@ -126,15 +131,22 @@ class AccumulatedGradients:
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
-        return jax.tree.map(
-            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
-            self.grad_sum,
-        )
+
+        def compute_mean(path, g):
+            idx = get_adapter_idx(path, adapter_index)
+            return jnp.zeros_like(g).at[idx].set(g[idx] / count.astype(g.dtype))
+
+        return jax.tree.map_with_path(compute_mean, self.grad_sum)
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
+
+        def reset_grad(path, g):
+            idx = get_adapter_idx(path, adapter_index)
+            return g.at[idx].set(0.0)
+
         return AccumulatedGradients(
-            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            grad_sum=jax.tree.map_with_path(reset_grad, self.grad_sum),
             counts=self.counts.at[adapter_index].set(0),
         )
 
@@ -207,12 +219,46 @@ class JaxBackendImpl(AbstractBackend):
             f"max_lora_adapters={config.max_lora_adapters}, max_lora_rank={config.max_lora_rank}"
         )
 
+        if config.train_micro_batch_size <= 0:
+            logger.warning(
+                '"train_micro_batch_size" is not set. This can lead to OOMs. '
+                'Consider setting "train_micro_batch_size" via --backend-config to limit memory usage during training. '
+                "In the future, we plan to add a heuristic to set this automatically: "
+                "https://github.com/NovaSky-AI/SkyRL/issues/1048"
+            )
+        if config.sample_max_num_sequences <= 0:
+            logger.warning(
+                '"sample_max_num_sequences" is not set. This can lead to OOMs. '
+                'Consider setting "sample_max_num_sequences" via --backend-config to limit memory usage during sampling. '
+                "In the future, we plan to add a heuristic to set this automatically: "
+                "https://github.com/NovaSky-AI/SkyRL/issues/1048"
+            )
+
         self._create_loss_and_grad_fn()
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
         mb = self.config.train_micro_batch_size
         return total if mb <= 0 else max(1, min(mb, total))
+
+    @staticmethod
+    def _build_loss_fn_config(
+        all_loss_fn_configs: list[dict[str, float] | None],
+    ) -> LossFnConfig:
+        """Build per-example loss config arrays."""
+        configs = [config or {} for config in all_loss_fn_configs]
+        clip_low_threshold = np.asarray(
+            [float(config.get("clip_low_threshold", _DEFAULT_PPO_CLIP_LOW_THRESHOLD)) for config in configs],
+            dtype=np.float32,
+        )
+        clip_high_threshold = np.asarray(
+            [float(config.get("clip_high_threshold", _DEFAULT_PPO_CLIP_HIGH_THRESHOLD)) for config in configs],
+            dtype=np.float32,
+        )
+        return LossFnConfig(
+            clip_low_threshold=clip_low_threshold,
+            clip_high_threshold=clip_high_threshold,
+        )
 
     @contextmanager
     def _jit_timing_context(self, seq_len: int, mode: str):
@@ -251,13 +297,9 @@ class JaxBackendImpl(AbstractBackend):
                 input_ids,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
+                is_training=True,
             )
             return model.compute_logprobs(output.last_hidden_state, target_ids, adapter_indices)
-
-        if self.config.gradient_checkpointing:
-            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
-            # policy=None corresponds to full activation recomputation
-            _model_forward = jax.checkpoint(_model_forward, policy=None)
 
         def loss_for_lora(
             lora_params: nnx.State,
@@ -270,6 +312,7 @@ class JaxBackendImpl(AbstractBackend):
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
+            loss_fn_config: LossFnConfig,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
             target_logprobs = _model_forward(
                 self.graphdef,
@@ -281,7 +324,14 @@ class JaxBackendImpl(AbstractBackend):
                 target_ids,
             )
 
-            def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
+            def compute_loss_per_example(
+                loss_fn_type,
+                target_logprobs,
+                loss_mask,
+                sampling_logprobs,
+                advantages,
+                loss_fn_config,
+            ):
                 return jax.lax.switch(
                     loss_fn_type,
                     LOSS_FUNCTIONS,
@@ -289,6 +339,7 @@ class JaxBackendImpl(AbstractBackend):
                     loss_mask,
                     sampling_logprobs,
                     advantages,
+                    loss_fn_config,
                 )
 
             per_token_losses = jax.vmap(compute_loss_per_example)(
@@ -297,6 +348,7 @@ class JaxBackendImpl(AbstractBackend):
                 loss_mask,
                 sampling_logprobs,
                 advantages,
+                loss_fn_config,
             )
 
             per_seq_loss = per_token_losses.sum(axis=-1) / jnp.maximum(loss_mask.sum(axis=-1), 1e-9)
@@ -318,6 +370,7 @@ class JaxBackendImpl(AbstractBackend):
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
+            loss_fn_config: LossFnConfig,
         ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             _, (target_logprobs, per_token_losses) = loss_for_lora(
                 lora_params,
@@ -330,6 +383,7 @@ class JaxBackendImpl(AbstractBackend):
                 loss_fn_types,
                 sampling_logprobs,
                 advantages,
+                loss_fn_config,
             )
             return accumulated_grads, per_token_losses, target_logprobs
 
@@ -345,6 +399,7 @@ class JaxBackendImpl(AbstractBackend):
             loss_fn_types: jax.Array,
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
+            loss_fn_config: LossFnConfig,
         ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             """Fused forward-backward-accumulate operation."""
             # Forward-backward
@@ -359,6 +414,7 @@ class JaxBackendImpl(AbstractBackend):
                 loss_fn_types,
                 sampling_logprobs,
                 advantages,
+                loss_fn_config,
             )
             # Accumulate gradients
             new_accumulated_grads = accumulated_grads.add(lora_grads, adapter_indices)
@@ -387,9 +443,14 @@ class JaxBackendImpl(AbstractBackend):
 
             # JIT the fused function
             # Input order: input_ids, attention_mask, adapter_indices, target_ids,
-            #              loss_mask, loss_fn_types, sampling_logprobs, advantages
+            #              loss_mask, loss_fn_types, sampling_logprobs, advantages,
+            #              loss_fn_config
             # All batch arrays are sharded along batch dimension
             batch_sharded_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+            loss_fn_config_shardings = LossFnConfig(
+                clip_low_threshold=batch_sharded_1d,
+                clip_high_threshold=batch_sharded_1d,
+            )
             input_shardings = (
                 batch_sharded_2d,  # input_ids
                 batch_sharded_2d,  # attention_mask
@@ -402,13 +463,17 @@ class JaxBackendImpl(AbstractBackend):
             )
             self._forward_backward_and_accumulate = jax.jit(
                 forward_backward_and_accumulate,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings)
+                + input_shardings
+                + (loss_fn_config_shardings,),
                 out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
                 donate_argnames=("accumulated_grads",),
             )
             self._forward = jax.jit(
                 forward_only,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings) + input_shardings,
+                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings)
+                + input_shardings
+                + (loss_fn_config_shardings,),
                 out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
             )
 
@@ -458,8 +523,8 @@ class JaxBackendImpl(AbstractBackend):
 
         # Create optimizer
         with jax.set_mesh(self.mesh):
-            tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
-            self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
+            optimizer = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
+            self.optimizers[model_id] = nnx.Optimizer(self.model, optimizer, wrt=self.model.is_lora_param)
 
         # Configure adapter
         init_lora_adapter(self.model, adapter_index, lora_config)
@@ -510,7 +575,8 @@ class JaxBackendImpl(AbstractBackend):
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
         all_advantages = prepared_batch.all_advantages
-        all_loss_fn_types = prepared_batch.all_loss_fn_types
+        all_loss_fn_types = [LOSS_TYPES[name] for name in prepared_batch.all_loss_fns]
+        all_loss_fn_configs = prepared_batch.all_loss_fn_configs
         request_batch_slices = prepared_batch.request_batch_slices
 
         # Convert model_ids to adapter_indices
@@ -523,6 +589,7 @@ class JaxBackendImpl(AbstractBackend):
         target_ids = pad_batch(all_targets, max_len, np.int32)
         adapter_indices = np.array(all_adapter_indices, dtype=np.int32)
         loss_fn_types = np.array(all_loss_fn_types, dtype=np.int32)
+        loss_fn_config = self._build_loss_fn_config(all_loss_fn_configs)
 
         # Create attention mask (1 for real tokens, 0 for padding)
         attention_mask = pad_batch([[1] * len(seq) for seq in all_input_ids], max_len, np.int32)
@@ -558,6 +625,8 @@ class JaxBackendImpl(AbstractBackend):
                     mb_advantages,
                     mb_adapter_indices,
                     mb_loss_fn_types,
+                    mb_clip_low_threshold,
+                    mb_clip_high_threshold,
                 ) = jax.device_put(
                     (
                         pad_to_fsdp(input_ids[mb_start:mb_end], fsdp_size),
@@ -568,8 +637,14 @@ class JaxBackendImpl(AbstractBackend):
                         pad_to_fsdp(advantages[mb_start:mb_end], fsdp_size),
                         pad_to_fsdp(adapter_indices[mb_start:mb_end], fsdp_size),
                         pad_to_fsdp(loss_fn_types[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(loss_fn_config.clip_low_threshold[mb_start:mb_end], fsdp_size),
+                        pad_to_fsdp(loss_fn_config.clip_high_threshold[mb_start:mb_end], fsdp_size),
                     ),
-                    (sharding_2d,) * 6 + (sharding_1d,) * 2,
+                    (sharding_2d,) * 6 + (sharding_1d,) * 4,
+                )
+                mb_loss_fn_config = LossFnConfig(
+                    clip_low_threshold=mb_clip_low_threshold,
+                    clip_high_threshold=mb_clip_high_threshold,
                 )
 
                 self.accumulated_grads, per_token_losses, target_logprobs = model_pass_fn(
@@ -584,6 +659,7 @@ class JaxBackendImpl(AbstractBackend):
                     mb_loss_fn_types,
                     mb_sampling_logprobs,
                     mb_advantages,
+                    mb_loss_fn_config,
                 )
                 # Slice back to original size (remove FSDP padding)
                 token_losses_device.append(per_token_losses[: mb_end - mb_start])
@@ -828,7 +904,7 @@ class JaxBackendImpl(AbstractBackend):
         self._insert_checkpoint_data(model_id, checkpoint)
         logger.info(f"Loaded training checkpoint from {checkpoint_path}")
 
-    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
         """Save sampler checkpoint as tar.gz using save_lora_checkpoint."""
         lora_model = self.models[model_id]
         save_lora_checkpoint(
@@ -961,8 +1037,15 @@ class JaxBackend(JaxBackendImpl):
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
         if jax.process_count() > 1:
-            clean = {k: v.model_dump() if isinstance(v, BaseModel) else v for k, v in kwargs.items()}
-            _broadcast_command(RpcPayload(method=method, kwargs=clean))
+            hints = get_type_hints(getattr(JaxBackendImpl, method))
+
+            # TODO: Remove AnyPath special case once https://github.com/drivendataorg/cloudpathlib/issues/537 is released
+            def serialize(k, v):
+                if hints.get(k) is AnyPath:
+                    return str(v)
+                return TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
+
+            _broadcast_command(RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}))
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
@@ -986,8 +1069,11 @@ class JaxBackend(JaxBackendImpl):
     def load_checkpoint(self, checkpoint_path: AnyPath, model_id: str) -> None:
         self._broadcast_and_call("load_checkpoint", checkpoint_path=checkpoint_path, model_id=model_id)
 
-    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str) -> None:
-        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id)
+    def save_sampler_checkpoint(self, output_path: AnyPath, model_id: str, persist: bool = True) -> None:
+        # Write probe so workers can detect shared filesystem
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.with_name(output_path.name + ".probe").write_text("write_probe")
+        self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id, persist=persist)
 
 
 def run_worker(coordinator_address: str, num_processes: int, process_id: int):

@@ -13,6 +13,7 @@ from skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.generators.base import GeneratorInterface
 from skyrl_train.config import SkyRLConfig, get_config_as_yaml_str
@@ -268,6 +269,7 @@ class BasePPOExp:
             InferenceEngineInterface: The inference engine client.
         """
         if _SKYRL_USE_NEW_INFERENCE:
+            logger.info("Initializing new inference client")
             return self._get_new_inference_client()
         else:
             return self._get_legacy_inference_client()
@@ -342,7 +344,7 @@ class BasePPOExp:
 
         else:
             # Case: Neither - build servers and router internally
-            cli_args = self._build_vllm_cli_args()
+            cli_args = build_vllm_cli_args(self.cfg)
 
             self._server_group = ServerGroup(
                 cli_args=cli_args,
@@ -365,40 +367,6 @@ class BasePPOExp:
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
         )
-
-    def _build_vllm_cli_args(self):
-        """Build CLI args for vLLM server from config."""
-        from argparse import Namespace
-
-        cfg = self.cfg
-        ie_cfg = cfg.generator.inference_engine
-        args = Namespace(
-            model=cfg.trainer.policy.model.path,
-            tensor_parallel_size=ie_cfg.tensor_parallel_size,
-            pipeline_parallel_size=ie_cfg.pipeline_parallel_size,
-            dtype=ie_cfg.model_dtype,
-            data_parallel_size=ie_cfg.data_parallel_size,
-            seed=cfg.trainer.seed,
-            gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
-            enable_prefix_caching=ie_cfg.enable_prefix_caching,
-            enforce_eager=ie_cfg.enforce_eager,
-            max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
-            max_num_seqs=ie_cfg.max_num_seqs,
-            enable_sleep_mode=cfg.trainer.placement.colocate_all,
-        )
-
-        # Add LoRA params if enabled
-        if cfg.trainer.policy.model.lora.rank > 0:
-            args.enable_lora = True
-            args.max_lora_rank = cfg.trainer.policy.model.lora.rank
-            args.max_loras = 1
-            args.fully_sharded_loras = ie_cfg.fully_sharded_loras
-
-        # Add any extra engine_init_kwargs
-        for key, value in ie_cfg.engine_init_kwargs.items():
-            setattr(args, key, value)
-
-        return args
 
     def _setup_trainer(self):
         """Setup and return the trainer.

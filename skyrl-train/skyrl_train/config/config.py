@@ -169,11 +169,11 @@ class PlacementConfig(BaseConfig):
     colocate_all: bool = True
     colocate_policy_ref: bool = True
     policy_num_nodes: int = 1
-    policy_num_gpus_per_node: int = 4
+    policy_num_gpus_per_node: int = 1
     critic_num_nodes: int = 1
-    critic_num_gpus_per_node: int = 4
+    critic_num_gpus_per_node: int = 1
     ref_num_nodes: int = 1
-    ref_num_gpus_per_node: int = 4
+    ref_num_gpus_per_node: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +256,21 @@ class CISPOConfig(BaseConfig):
     cispo_eps_clip_high: float = 5.0
 
 
+# see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
+@dataclass
+class OffPolicyCorrectionConfig(BaseConfig):
+    tis_ratio_type: Optional[str] = None
+    token_tis_ratio_clip_high: float = 2.0
+    sequence_tis_ratio_clip_high: float = 5.0
+    sequence_mask_metric: Optional[str] = None
+    geo_mask_high: float = 1.01
+    geo_mask_low: float = 0.99
+    product_mask_high: float = 2.0
+    product_mask_low: float = 0.5
+    outlier_token_is_threshold_low: Optional[float] = None
+    outlier_token_is_threshold_high: Optional[float] = None
+
+
 @dataclass
 class AlgorithmConfig(BaseConfig):
     advantage_estimator: str = "grpo"
@@ -282,6 +297,7 @@ class AlgorithmConfig(BaseConfig):
     clip_ratio_c: float = 3.0
     tis_imp_ratio_cap: float = -1.0
     use_tis: bool = False
+    off_policy_correction: OffPolicyCorrectionConfig = field(default_factory=OffPolicyCorrectionConfig)
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     value_clip: float = 0.2
     dynamic_sampling: DynamicSamplingConfig = field(default_factory=DynamicSamplingConfig)
@@ -440,6 +456,7 @@ class TrainerConfig(BaseConfig):
     seed: int = 42
     resume_mode: Optional[str] = "latest"
     resume_path: Optional[str] = None
+    log_path: str = "/tmp/skyrl-logs"
     ckpt_path: str = field(default_factory=lambda: f"{os.getenv('HOME')}/ckpts/")
     max_ckpts_to_keep: int = -1
     ckpt_interval: int = 10

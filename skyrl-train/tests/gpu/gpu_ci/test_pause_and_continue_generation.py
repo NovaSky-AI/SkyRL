@@ -55,7 +55,7 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
             "top_logprobs": 1,
             "return_tokens_as_token_ids": True,
         }
-        client, _ = init_inference_engines(
+        client, _, router, server_group = init_inference_engines(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.inference_engine.async_engine,
@@ -197,7 +197,7 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
         # Request token logprobs (vLLM SamplingParams expects an int for how many to return)
         "logprobs": 1,
     }
-    client, _ = init_inference_engines(
+    client, _, router, server_group = init_inference_engines(
         cfg=cfg,
         use_local=True,
         async_engine=cfg.generator.inference_engine.async_engine,
@@ -282,7 +282,7 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
         "ignore_eos": True,
         "stream": False,
     }
-    client, _ = init_inference_engines(
+    client, _, router, server_group = init_inference_engines(
         cfg=cfg,
         use_local=True,
         async_engine=cfg.generator.inference_engine.async_engine,

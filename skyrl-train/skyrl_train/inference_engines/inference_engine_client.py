@@ -397,6 +397,12 @@ class InferenceEngineClient(InferenceEngineInterface):
                 {"json": cur_request_json, "headers": headers}
             )
 
+            # 1.2.1. Check for error response from engine (e.g., context length exceeded).
+            # Error responses have "error" key instead of "choices", so return them directly
+            # for the HTTP endpoint to handle with proper status codes.
+            if "error" in partial_response or partial_response.get("object", "") == "error":
+                return partial_response
+
             # 1.3. Parse partial response and in-place update accumulators.
             (
                 finish_reason,

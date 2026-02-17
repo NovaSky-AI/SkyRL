@@ -71,7 +71,7 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         cfg.trainer.strategy = strategy
         cfg.generator.inference_engine.backend = backend
 
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             model=MODEL,
             cfg=cfg,
             use_local=True,
@@ -151,7 +151,7 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, back
         cfg.generator.inference_engine.backend = backend
 
         # Initialize inference engine (uses 1 GPU)
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             model=MODEL,
             cfg=cfg,
             use_local=True,

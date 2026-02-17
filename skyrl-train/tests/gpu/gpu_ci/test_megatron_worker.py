@@ -138,7 +138,7 @@ def test_megatron_policy_weight_sync(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             model=MODEL_NAME,
             cfg=cfg,
             use_local=True,
@@ -465,6 +465,11 @@ async def test_megatron_train(
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
+        # test off policy correction config propagates correctly
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "sequence"
+        cfg.trainer.algorithm.off_policy_correction.sequence_mask_metric = "geometric"
+        cfg.trainer.algorithm.off_policy_correction.geo_mask_high = 1.02
+        cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = gpus_per_node
@@ -499,9 +504,11 @@ async def test_megatron_train(
         assert isinstance(result, dict), "Result should be a dictionary of training stats"
         assert "policy_loss" in result
         assert "policy_lr" in result
-        assert "ppo_clip_ratio" in result
+        assert "loss_metrics/clip_ratio" in result
         assert "policy_entropy" in result
         for k, v in result.items():
+            if k == "loss_fn_outputs":
+                continue
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
@@ -539,7 +546,22 @@ async def test_megatron_train(
     print("\n\n")
     print("fsdp results: ", results_fsdp[0])
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl", "final_loss"]
+    keys_to_compare = [
+        "policy_loss",
+        "policy_lr",
+        "loss_metrics/clip_ratio",
+        "policy_entropy",
+        "policy_kl",
+        "final_loss",
+    ]
+    if ep > 1:
+        keys_to_compare.extend(
+            [
+                "loss_metrics/is_ratio_mean",
+                "loss_metrics/outlier_seq_masked_ratio",
+                "loss_metrics/geo_sequence_mask_masked_ratio",
+            ]
+        )
     for i, result in enumerate(results_fsdp):
         for k in keys_to_compare:
             if k == "policy_entropy":
@@ -608,9 +630,11 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
         assert isinstance(result, dict), "Result should be a dictionary of training stats"
         assert "policy_loss" in result
         assert "policy_lr" in result
-        assert "ppo_clip_ratio" in result
+        assert "loss_metrics/clip_ratio" in result
         assert "policy_entropy" in result
         for k, v in result.items():
+            if k == "loss_fn_outputs":
+                continue
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
@@ -649,7 +673,13 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     print("\n\n")
     print("megatron results dp: ", results_megatron_dp)
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl"]
+    keys_to_compare = [
+        "policy_loss",
+        "policy_lr",
+        "loss_metrics/clip_ratio",
+        "policy_entropy",
+        "policy_kl",
+    ]
     for i, result in enumerate(results_megatron_dp):
         for k in keys_to_compare:
             assert isinstance(result[k], (int, float)), f"{k} should be an int or float"

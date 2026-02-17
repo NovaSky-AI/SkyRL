@@ -6,7 +6,7 @@ from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
 
 from omegaconf import OmegaConf
 
@@ -55,13 +55,16 @@ from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
-    masked_mean,
     ppo_critic_loss,
 )
+from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.utils import configure_ray_worker_logging
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 
 _SET_AFFINITY = False
+
+if TYPE_CHECKING:
+    from skyrl_train.inference_engines.remote_inference_client import RemoteInferenceClient
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -92,6 +95,11 @@ class DistributedTorchRayActor:
         self.record_memory = record_memory
         if record_memory:
             torch.cuda.memory._record_memory_history()
+
+        # Redirect worker output to log file (infra logs shouldn't pollute driver stdout)
+        from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
+
+        redirect_actor_output_to_file()
         configure_ray_worker_logging()
 
     def get_node_local_rank(self):
@@ -286,7 +294,9 @@ class Worker(DistributedTorchRayActor):
             io.remove(record_memory_path)
         torch.cuda.memory._dump_snapshot(record_memory_path)
 
-    async def init_weight_sync_state(self, inference_engine_client: InferenceEngineClient):
+    async def init_weight_sync_state(
+        self, inference_engine_client: "Union[InferenceEngineClient, RemoteInferenceClient]"
+    ):
         """Initialize state for weight syncing with Inference Engine Client
 
         Creates init info and sender, then sends init info to inference engines
@@ -798,7 +808,7 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
-            policy_loss, clip_ratio = current_loss_fn(
+            policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -832,11 +842,10 @@ class PolicyWorkerBase(Worker):
                 else:
                     valid_len = action_log_probs.shape[1]
 
-                start = max(action_log_probs.shape[1] - valid_len, 0)
                 loss_fn_outputs.append(
                     {
-                        "logprobs": action_log_probs[i, start:].detach().cpu().tolist(),
-                        "elementwise_loss": elementwise_loss[i, start:].detach().cpu().tolist(),
+                        "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
+                        "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
                     }
                 )
 
@@ -876,22 +885,43 @@ class PolicyWorkerBase(Worker):
             loss = policy_loss + kl_loss_term - entropy_loss_term
             self.strategy.backward(loss, self.model, self.optimizer)
 
+            # Build per-sequence loss_fn_outputs with logprobs.
+            batch_size = action_log_probs.shape[0]
+            seq_len = action_log_probs.shape[1]
+
+            if action_mask is not None:
+                valid_lens = action_mask.sum(dim=1).int().tolist()
+            elif loss_mask is not None:
+                valid_lens = loss_mask.sum(dim=1).int().tolist()
+            else:
+                valid_lens = [seq_len] * batch_size
+
+            detached_log_probs = action_log_probs.detach().cpu()
+            loss_fn_outputs = []
+            for i, valid_len in enumerate(valid_lens):
+                loss_fn_outputs.append(
+                    {
+                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                    }
+                )
+
             status = {
                 "final_loss": loss.item(),
                 "policy_loss": policy_loss.item(),
-                "ppo_clip_ratio": clip_ratio,
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
+                "loss_fn_outputs": loss_fn_outputs,
             }
+            for k, v in loss_metrics.items():
+                status["loss_metrics/" + k] = v
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
-        # Extract loss_fn_outputs before all_reduce (it's not a tensor/scalar)
         loss_fn_outputs = status.pop("loss_fn_outputs", None)
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         # Add back loss_fn_outputs after all_reduce
         if loss_fn_outputs is not None:
@@ -922,12 +952,6 @@ class PolicyWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """
@@ -1115,7 +1139,7 @@ class CriticWorkerBase(Worker):
         }
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
@@ -1142,12 +1166,6 @@ class CriticWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """
