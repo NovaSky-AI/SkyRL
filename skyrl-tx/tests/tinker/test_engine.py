@@ -1,6 +1,7 @@
 from cloudpathlib import AnyPath
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlmodel import Session, SQLModel
 
 from tx.tinker.engine import TinkerEngine, prepare_model_pass_batch
@@ -82,57 +83,40 @@ def test_cleanup_stale_sessions():
     assert not engine.backend.has_model(model_id)
 
 
-def test_prepare_model_pass_batch_loss_fn_config():
-    """Test that prepare_model_pass_batch extracts loss_fn_config from requests."""
+@pytest.mark.parametrize(
+    ("loss_fn", "loss_fn_config", "advantages", "logprobs"),
+    [
+        pytest.param(
+            "ppo",
+            {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3},
+            [],
+            [],
+            id="ppo_with_loss_fn_config",
+        ),
+        pytest.param("cross_entropy", None, [], [], id="cross_entropy_default_config"),
+        pytest.param(
+            "cispo",
+            None,
+            [0.1, 0.2, 0.3],
+            [-1.1, -1.0, -0.9],
+            id="cispo",
+        ),
+    ],
+)
+def test_prepare_model_pass_batch_loss_fn_and_config(
+    loss_fn: str,
+    loss_fn_config: dict[str, float] | None,
+    advantages: list[float],
+    logprobs: list[float],
+):
+    """Test that prepare_model_pass_batch preserves loss_fn and loss_fn_config values."""
     datum = types.Datum(
         model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3])]),
         loss_fn_inputs=types.LossFnInputs(
             target_tokens=types.TensorData(data=[2, 3, 4]),
             weights=types.TensorData(data=[1.0, 1.0, 1.0]),
-            advantages=types.TensorData(data=[]),
-            logprobs=types.TensorData(data=[]),
-        ),
-    )
-    config = {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3}
-
-    # With loss_fn_config
-    requests_with_config = {
-        "req1": (
-            "model1",
-            types.ForwardBackwardInput(
-                data=[datum],
-                loss_fn="ppo",
-                loss_fn_config=config,
-            ),
-        ),
-    }
-    batch = prepare_model_pass_batch(requests_with_config)
-    assert batch.all_loss_fns == ["ppo"]
-    assert batch.all_loss_fn_configs == [config]
-
-    # Without loss_fn_config (default None)
-    requests_without_config = {
-        "req2": (
-            "model1",
-            types.ForwardBackwardInput(
-                data=[datum],
-                loss_fn="cross_entropy",
-            ),
-        ),
-    }
-    batch_no_config = prepare_model_pass_batch(requests_without_config)
-    assert batch_no_config.all_loss_fns == ["cross_entropy"]
-    assert batch_no_config.all_loss_fn_configs == [None]
-
-
-def test_prepare_model_pass_batch_accepts_cispo():
-    datum = types.Datum(
-        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3])]),
-        loss_fn_inputs=types.LossFnInputs(
-            target_tokens=types.TensorData(data=[2, 3, 4]),
-            weights=types.TensorData(data=[1.0, 1.0, 1.0]),
-            advantages=types.TensorData(data=[0.1, 0.2, 0.3]),
-            logprobs=types.TensorData(data=[-1.1, -1.0, -0.9]),
+            advantages=types.TensorData(data=advantages),
+            logprobs=types.TensorData(data=logprobs),
         ),
     )
 
@@ -141,10 +125,12 @@ def test_prepare_model_pass_batch_accepts_cispo():
             "model1",
             types.ForwardBackwardInput(
                 data=[datum],
-                loss_fn="cispo",
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
             ),
         ),
     }
 
     batch = prepare_model_pass_batch(requests)
-    assert batch.all_loss_fns == ["cispo"]
+    assert batch.all_loss_fns == [loss_fn]
+    assert batch.all_loss_fn_configs == [loss_fn_config]
