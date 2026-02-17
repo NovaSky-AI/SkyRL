@@ -99,7 +99,7 @@ def test_deepseekv3_connector_identity_expansion_rate():
 
         def copy_non_connector(path, v1, v4):
             normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-            if any("connector" in str(p) for p in normalized_path):
+            if any(name in normalized_path for name in ("attn_connector", "mlp_connector")):
                 return v1
             return v4
 

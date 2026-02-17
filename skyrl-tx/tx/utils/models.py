@@ -18,6 +18,7 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
+from tx.layers.connectors import is_connector_path
 from tx.models.configs import ModelConfig
 from tx.utils.log import logger
 from tx.utils.storage import download_and_unpack, pack_and_upload
@@ -165,7 +166,7 @@ def load_safetensors(
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         # Skip connector parameters
-        if any("connector" in str(p) for p in path):
+        if is_connector_path(path):
             continue
         if key not in tensors:
             continue

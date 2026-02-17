@@ -315,7 +315,8 @@ class Qwen3DecoderLayer(nnx.Module):
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
-        hidden_states = self.input_layernorm(self.attn_connector.pre(hidden_states, adapter_indices))
+        hidden_states, residual_norm = self.attn_connector.pre(hidden_states, adapter_indices)
+        hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
             attention_mask=attention_mask,
@@ -323,12 +324,13 @@ class Qwen3DecoderLayer(nnx.Module):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = self.attn_connector.post(residual, hidden_states, adapter_indices)
+        hidden_states = self.attn_connector.post(residual, hidden_states, residual_norm, adapter_indices)
 
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(self.mlp_connector.pre(hidden_states, adapter_indices))
+        hidden_states, residual_norm = self.mlp_connector.pre(hidden_states, adapter_indices)
+        hidden_states = self.post_attention_layernorm(hidden_states)
         mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
-        hidden_states = self.mlp_connector.post(residual, mlp_output, adapter_indices)
+        hidden_states = self.mlp_connector.post(residual, mlp_output, residual_norm, adapter_indices)
 
         return hidden_states, updated_cache
 
@@ -429,9 +431,9 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
     def is_lora_param(self, path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to LoRA weights."""
         is_lora = any(name in path for name in ("lora_A", "lora_B"))
-        if self.config.train_connectors:
-            return is_lora or any(name in path for name in ("attn_connector", "mlp_connector"))
-        return is_lora
+        # Connector must be trainable
+        is_connector = self.config.train_connectors and any(name in path for name in ("attn_connector", "mlp_connector"))
+        return is_lora or is_connector
 
     def __call__(
         self,

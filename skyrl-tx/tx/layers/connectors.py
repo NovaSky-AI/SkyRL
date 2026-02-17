@@ -1,9 +1,16 @@
+from typing import Any
+
 from flax import nnx
 import jax
 from jax import numpy as jnp
 
 from tx.layers.util import Param, sinkhorn_knopp
 from tx.layers.layernorm import RMSNorm
+
+
+def is_connector_path(path: tuple[Any, ...]) -> bool:
+    normalized_path = tuple(p.key if hasattr(p, "key") else p.name if hasattr(p, "name") else p for p in path)
+    return any(name in normalized_path for name in ("attn_connector", "mlp_connector"))
 
 
 class LoRAConnector(nnx.Module):
@@ -67,61 +74,62 @@ class LoRAConnector(nnx.Module):
         return adapter_indices.astype(jnp.int32)
 
     def _get_params(self, adapter_indices: jax.Array):
-        sg = (lambda x: x) if self.trainable else jax.lax.stop_gradient
-        input_norm_weight = sg(self.input_norm_weight[...])[adapter_indices]
-        alpha_pre = sg(self.alpha_pre[...])[adapter_indices]
-        alpha_post = sg(self.alpha_post[...])[adapter_indices]
-        alpha_res = sg(self.alpha_res[...])[adapter_indices]
-        phi_pre = sg(self.phi_pre[...])[adapter_indices]
-        phi_post = sg(self.phi_post[...])[adapter_indices]
-        phi_res = sg(self.phi_res[...])[adapter_indices]
-        b_pre = sg(self.b_pre[...])[adapter_indices]
-        b_post = sg(self.b_post[...])[adapter_indices]
-        b_res = sg(self.b_res[...])[adapter_indices]
-        return (
-            input_norm_weight,
-            alpha_pre,
-            alpha_post,
-            alpha_res,
-            phi_pre,
-            phi_post,
-            phi_res,
-            b_pre,
-            b_post,
-            b_res,
+        """Stop gradients when the connectors are not trainable."""
+        handle_grad = (
+            (lambda p: p[...][adapter_indices])
+            if self.trainable
+            else (lambda p: jax.lax.stop_gradient(p[...])[adapter_indices])
         )
+        params = [self.input_norm_weight, self.alpha_pre, self.alpha_post, self.alpha_res,
+                  self.phi_pre, self.phi_post, self.phi_res, self.b_pre, self.b_post, self.b_res]
+        return [handle_grad(p) for p in params]
 
     def _norm(self, x_flat: jax.Array, adapter_indices: jax.Array) -> jax.Array:
+        """Separate norm from layernorm.RMSNorm due to adapter indexing and trainability"""
         input_norm_weight, *_ = self._get_params(adapter_indices)
         rms = jnp.sqrt(jnp.mean(x_flat**2, axis=-1, keepdims=True) + self.eps)
         return (input_norm_weight[:, None, :] * x_flat) / rms
 
-    def pre(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+    def pre(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> tuple[jax.Array, jax.Array]:
         B, T, n, C = x.shape
+        if self.expansion_rate == 1:
+            # Single-stream fast path: pre is identity on the residual stream.
+            return x[..., 0, :], x.reshape(B, T, n * C)
+
         adapter_indices = self._get_adapter_indices(B, adapter_indices)
         x_flat = x.reshape(B, T, n * C)
         x_norm = self._norm(x_flat, adapter_indices)
 
         (_, alpha_pre, _, _, phi_pre, _, _, b_pre, _, _) = self._get_params(adapter_indices)
-        tilde_H_pre = alpha_pre[:, None, None] * jnp.einsum("btc,bcn->btn", x_norm, phi_pre) + b_pre[:, None, :]
+        pre_logits = x_norm @ phi_pre
+        tilde_H_pre = alpha_pre[:, None, None] * pre_logits + b_pre[:, None, :]
 
         H_pre = jax.nn.sigmoid(tilde_H_pre)
         x_agg = (H_pre[..., None] * x).sum(axis=-2)
-        return x_agg
 
-    def post(self, residual: jax.Array, output: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
+        # Return residual norm for future use by post()
+        return x_agg, x_norm
+
+    def post(
+        self,
+        residual: jax.Array,
+        output: jax.Array,
+        residual_norm: jax.Array,
+        adapter_indices: jax.Array | None = None
+    ) -> jax.Array:
         B, T, n, C = residual.shape
+        if self.expansion_rate == 1:
+            # Single-stream fast path: plain residual connection.
+            return residual + output[..., None, :]
+
         adapter_indices = self._get_adapter_indices(B, adapter_indices)
-        residual_flat = residual.reshape(B, T, n * C)
-        residual_norm = self._norm(residual_flat, adapter_indices)
 
         (_, _, alpha_post, alpha_res, _, phi_post, phi_res, _, b_post, b_res) = self._get_params(adapter_indices)
 
-        tilde_H_post = alpha_post[:, None, None] * jnp.einsum("btc,bcn->btn", residual_norm, phi_post) + b_post[:, None, :]
-        tilde_H_res = (
-            alpha_res[:, None, None, None] * jnp.einsum("btc,bcn->btn", residual_norm, phi_res).reshape(B, T, n, n)
-            + b_res[:, None, :, :]
-        )
+        post_logits = residual_norm @ phi_post
+        tilde_H_post = alpha_post[:, None, None] * post_logits + b_post[:, None, :]
+        res_logits = residual_norm @ phi_res
+        tilde_H_res = alpha_res[:, None, None, None] * res_logits.reshape(B, T, n, n) + b_res[:, None, :, :]
 
         H_post = 2.0 * jax.nn.sigmoid(tilde_H_post)
         M = sinkhorn_knopp(tilde_H_res, self.sinkhorn_iters)

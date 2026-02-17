@@ -3,6 +3,7 @@ import jax
 from jax import numpy as jnp
 
 from tx.utils.models import filter_lora, get_adapter_idx
+from tx.layers.connectors import is_connector_path
 from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
@@ -334,7 +335,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
 
     def init_adapter(path, value):
         effective_rank = lora_config.rank
-        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
+        normalized_path = tuple(p.key if hasattr(p, "key") else p.name if hasattr(p, "name") else str(p) for p in path)
 
         # Apply rank normalization for MoE expert layers
         # Following Thinking Machines' approach: divide rank by num_experts
@@ -347,29 +348,28 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
 
         idx = get_adapter_idx(path, adapter_index)
 
-        key_name = path[-2].key
-        if "connector" in normalized_path:
-            n = value.shape[1] if value.ndim >= 2 else None
+        key_name = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
+        if is_connector_path(path):
+            connector_slot = value[idx]
             if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
-                return value.at[adapter_index].set(0.0)
+                return value.at[idx].set(jnp.zeros_like(connector_slot))
             if key_name == "input_norm_weight":
-                return value.at[adapter_index].set(1.0)
+                return value.at[idx].set(jnp.ones_like(connector_slot))
             if key_name in {"phi_pre", "phi_post", "phi_res"}:
-                shape = value[adapter_index].shape
-                new_phi = nnx.initializers.normal(stddev=0.02)(rngs.params(), shape, value.dtype)
-                return value.at[adapter_index].set(new_phi)
+                new_phi = nnx.initializers.normal(stddev=0.02)(rngs.params(), connector_slot.shape, value.dtype)
+                return value.at[idx].set(new_phi)
             if key_name == "b_pre":
-                assert n is not None
+                n = connector_slot.shape[-1]
                 target_h_pre = jnp.array(1.0 / n, dtype=value.dtype)
                 clamped = jnp.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
                 inv_sigmoid = jnp.log(clamped) - jnp.log(1.0 - clamped)
-                return value.at[adapter_index].set(jnp.full((n,), inv_sigmoid, dtype=value.dtype))
+                return value.at[idx].set(jnp.full(connector_slot.shape, inv_sigmoid, dtype=value.dtype))
             if key_name == "b_post":
-                assert n is not None
-                return value.at[adapter_index].set(jnp.zeros((n,), dtype=value.dtype))
+                return value.at[idx].set(jnp.zeros_like(connector_slot))
             if key_name == "b_res":
-                assert n is not None
-                return value.at[adapter_index].set(10.0 * jnp.eye(n, dtype=value.dtype))
+                n = connector_slot.shape[-1]
+                eye = 10.0 * jnp.eye(n, dtype=value.dtype)
+                return value.at[idx].set(jnp.broadcast_to(eye, connector_slot.shape))
             return value
 
         if key_name == "lora_ranks":
@@ -400,14 +400,12 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     state = nnx.state(model)
 
     def clear_adapter(path, value):
-        key = path[-2].key
-        # TODO: make follow pattern
-        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-        if "connector" in normalized_path:
-            return value.at[adapter_index].set(0.0)
+        key = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
+        idx = get_adapter_idx(path, adapter_index)
+        if is_connector_path(path):
+            return value.at[idx].set(0.0)
         if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
             return value
-        idx = get_adapter_idx(path, adapter_index)
         return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
 
     updated_state = jax.tree.map_with_path(clear_adapter, state)

@@ -25,10 +25,11 @@ def test_connector_shapes(mesh, expansion_rate: int):
         adapter_indices = jnp.array([1, 2], dtype=jnp.int32)
 
         x = jnp.ones((batch, seq, expansion_rate, hidden_dim))
-        pre_out = conn.pre(x, adapter_indices)
-        post_out = conn.post(x, pre_out, adapter_indices)
+        pre_out, residual_norm = conn.pre(x, adapter_indices)
+        post_out = conn.post(x, pre_out, residual_norm, adapter_indices)
 
         assert pre_out.shape == (batch, seq, hidden_dim)
+        assert residual_norm.shape == (batch, seq, expansion_rate * hidden_dim)
         assert post_out.shape == (batch, seq, expansion_rate, hidden_dim)
 
 
