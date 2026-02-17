@@ -10,7 +10,8 @@
 #   1. Install system dependencies
 #   2. Install Python and SkyPilot
 #   3. Configure cloud credentials
-#   4. Install and start GitHub Actions runner
+#   4. Configure swap (OOM prevention)
+#   5. Install and start GitHub Actions runner
 
 set -e
 
@@ -127,7 +128,21 @@ fi
 log "Verifying cloud access..."
 sky check || warn "Some clouds may not be configured"
 
-# 4. Install GitHub Actions runner
+# 4. Configure swap (prevents OOM from crashing the instance)
+log "Configuring 4GB swap..."
+if [ ! -f /swapfile ]; then
+    sudo fallocate -l 4G /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    grep -q swapfile /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+    log "Swap configured (4GB)"
+else
+    log "Swap file already exists, ensuring it's active"
+    sudo swapon /swapfile 2>/dev/null || true
+fi
+
+# 5. Install GitHub Actions runner
 log "Installing GitHub Actions runner..."
 RUNNER_DIR="$HOME/actions-runner"
 mkdir -p "$RUNNER_DIR"
@@ -148,12 +163,12 @@ rm actions-runner-linux-x64.tar.gz
     --unattended \
     --replace
 
-# 5. Install and start as service
+# 6. Install and start as service
 log "Installing runner as service..."
 sudo ./svc.sh install
 sudo ./svc.sh start
 
-# 6. Configure systemd watchdog for auto-restart
+# 7. Configure systemd watchdog for auto-restart
 log "Configuring systemd watchdog..."
 SERVICE_NAME=$(systemctl list-units --type=service --all | grep "actions.runner" | awk '{print $1}' | head -1)
 if [ -n "$SERVICE_NAME" ]; then
@@ -172,7 +187,7 @@ WATCHDOG_EOF
     log "Watchdog configured: auto-restart enabled"
 fi
 
-# 7. Install health check cron job
+# 8. Install health check cron job
 log "Installing health check cron job..."
 HEALTH_SCRIPT="/opt/runner-health-check.sh"
 sudo curl -sf -o "$HEALTH_SCRIPT" \

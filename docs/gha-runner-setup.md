@@ -4,15 +4,18 @@ Self-hosted runners for long training jobs (24+ hours) that exceed GitHub's 6-ho
 
 ## Runner Pool
 
-| Runner | Instance ID | IP |
-|--------|-------------|-----|
-| fleet-runner-1 | i-04a15158610df980f | (dynamic) |
-| fleet-runner-2 | i-0f80c703294413a4c | 3.84.8.224 |
-| fleet-runner-3 | i-09321b67952c1a208 | (dynamic) |
-| fleet-runner-4 | i-0f2ccaa840ef29450 | 18.207.190.182 |
-| fleet-runner-5 | i-05ecd98e74949dc87 | 35.170.187.109 |
+| Runner | Instance ID | Type | RAM | Disk | Swap |
+|--------|-------------|------|-----|------|------|
+| fleet-runner-1 | i-04a15158610df980f | t3.medium | 4GB | 50GB | 4GB |
+| fleet-runner-2 | i-0f80c703294413a4c | t3.xlarge | 16GB | 50GB | 4GB |
+| fleet-runner-3 | i-09321b67952c1a208 | t3.xlarge | 16GB | 50GB | 4GB |
+| fleet-runner-4 | i-0f2ccaa840ef29450 | t3.medium | 4GB | 50GB | 4GB |
+| fleet-runner-5 | i-05ecd98e74949dc87 | t3.xlarge | 16GB | 50GB | 4GB |
 
-**Cost:** ~$30/month per runner (t3.medium)
+> **Note:** Runners 1 and 4 are still t3.medium. They should be upgraded to t3.xlarge
+> when idle (stop instance, change type, start instance).
+
+**Cost:** ~$120/month per t3.xlarge runner, ~$30/month per t3.medium runner
 
 [View runner status](https://github.com/fleet-ai/SkyRL/settings/actions/runners)
 
@@ -43,7 +46,7 @@ Credentials are configured during workflow runs from GitHub secrets.
 
 ```bash
 # 1. Launch EC2 (copy config from existing runner)
-aws ec2 run-instances --image-id ami-0c7217cdde317cfec --instance-type t3.medium --key-name gha-runner-key --security-group-ids sg-00fefd8181d51909d --subnet-id subnet-03879810067f57f85 --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":50,"VolumeType":"gp3"}}]' --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=fleet-runner-N}]'
+aws ec2 run-instances --image-id ami-0c7217cdde317cfec --instance-type t3.xlarge --key-name gha-runner-key --security-group-ids sg-00fefd8181d51909d --subnet-id subnet-03879810067f57f85 --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":50,"VolumeType":"gp3"}}]' --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=fleet-runner-N}]'
 
 # 2. Get token
 gh api -X POST repos/fleet-ai/SkyRL/actions/runners/registration-token --jq '.token'
