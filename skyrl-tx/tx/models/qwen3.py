@@ -278,10 +278,7 @@ class Qwen3MoeSparseMoeBlock(nnx.Module):
 
 class Qwen3DecoderLayer(nnx.Module):
 
-    def __init__(self, config: Qwen3Config, layer_idx: int, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.layer_idx = layer_idx
-        self.num_layers = config.num_hidden_layers
-        self.expansion_rate = config.expansion_rate
+    def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.self_attn = Qwen3Attention(config, dtype=dtype, rngs=rngs)
         if getattr(config, "num_experts", None):
             self.mlp = Qwen3MoeSparseMoeBlock(config, dtype=dtype, rngs=rngs)
@@ -317,10 +314,6 @@ class Qwen3DecoderLayer(nnx.Module):
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-        n = self.expansion_rate
-        if self.layer_idx == 0:
-            hidden_states = jnp.repeat(hidden_states[..., None, :], n, axis=-2)
-
         residual = hidden_states
         hidden_states = self.input_layernorm(self.attn_connector.pre(hidden_states, adapter_indices))
         hidden_states, updated_cache = self.self_attn(
@@ -336,9 +329,6 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states = self.post_attention_layernorm(self.mlp_connector.pre(hidden_states, adapter_indices))
         mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
         hidden_states = self.mlp_connector.post(residual, mlp_output, adapter_indices)
-
-        if self.layer_idx == self.num_layers - 1:
-            hidden_states = hidden_states.sum(axis=-2)
 
         return hidden_states, updated_cache
 
@@ -382,6 +372,7 @@ class Qwen3Model(nnx.Module):
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
+        hidden_states = jnp.repeat(hidden_states[..., None, :], self.config.expansion_rate, axis=-2)
 
         hidden_states, all_hidden_states, new_kv_cache = self.layers(
             hidden_states,
@@ -393,6 +384,10 @@ class Qwen3Model(nnx.Module):
             gradient_checkpointing=self.config.gradient_checkpointing,
             is_training=is_training,
         )
+
+        hidden_states = hidden_states.sum(axis=-2)
+        if output_hidden_states:
+            all_hidden_states = [hs.sum(axis=-2) for hs in all_hidden_states]
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:

@@ -436,9 +436,6 @@ class DeepseekV3DecoderLayer(nnx.Module):
         self.self_attn = DeepseekV3Attention(config, dtype=dtype, rngs=rngs)
         self.mlp = mlp_cls(config, dtype=dtype, rngs=rngs)
 
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-
         self.attn_connector = LoRAConnector(
             config.hidden_size,
             config.expansion_rate,
@@ -465,10 +462,6 @@ class DeepseekV3DecoderLayer(nnx.Module):
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-        n = self.expansion_rate
-        if self.layer_idx == 0:
-            hidden_states = jnp.repeat(hidden_states[..., None, :], n, axis=-2)
-
         residual = hidden_states
         hidden_states = self.input_layernorm(self.attn_connector.pre(hidden_states, adapter_indices))
         hidden_states, updated_cache = self.self_attn(
@@ -484,9 +477,6 @@ class DeepseekV3DecoderLayer(nnx.Module):
         hidden_states = self.post_attention_layernorm(self.mlp_connector.pre(hidden_states, adapter_indices))
         mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
         hidden_states = self.mlp_connector.post(residual, mlp_output, adapter_indices)
-
-        if self.layer_idx == self.num_layers - 1:
-            hidden_states = hidden_states.sum(axis=-2)
 
         return hidden_states, updated_cache
 
@@ -540,6 +530,7 @@ class DeepseekV3Model(nnx.Module):
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
+        hidden_states = jnp.repeat(hidden_states[..., None, :], self.config.expansion_rate, axis=-2)
 
         # Forward through all layers
         hidden_states, all_hidden_states, kv_cache = self.layers(
@@ -552,6 +543,10 @@ class DeepseekV3Model(nnx.Module):
             gradient_checkpointing=self.config.gradient_checkpointing,
             is_training=is_training,
         )
+
+        hidden_states = hidden_states.sum(axis=-2)
+        if output_hidden_states:
+            all_hidden_states = [hs.sum(axis=-2) for hs in all_hidden_states]
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
