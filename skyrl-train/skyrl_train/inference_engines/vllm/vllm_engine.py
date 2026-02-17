@@ -86,28 +86,29 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
             if kwargs.get("served_model_name") is None:
                 kwargs["served_model_name"] = original_model_path
 
-        setup_envvars_for_vllm(kwargs, bundle_indices)
-        vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
-        if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
-            # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
-            os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        try:
+            setup_envvars_for_vllm(kwargs, bundle_indices)
+            vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
+            if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
+                # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
+                os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
-        # Store common attributes
-        self._tp_size = kwargs.get("tensor_parallel_size", 1)
-        self._pp_size = kwargs.get("pipeline_parallel_size", 1)
-        self._dp_size = kwargs.get("data_parallel_size", 1)
-        self._is_lora = kwargs.get("enable_lora", False)
+            # Store common attributes
+            self._tp_size = kwargs.get("tensor_parallel_size", 1)
+            self._pp_size = kwargs.get("pipeline_parallel_size", 1)
+            self._dp_size = kwargs.get("data_parallel_size", 1)
+            self._is_lora = kwargs.get("enable_lora", False)
 
-        # Let subclass create the appropriate engine
-        self.llm = self._create_engine(*args, **kwargs)
+            # Let subclass create the appropriate engine
+            self.llm = self._create_engine(*args, **kwargs)
 
-        # Weight loader is created by subclass after engine initialization
-        self._weight_loader = None
-
-        # Clean up temp directory now that model is loaded into GPU memory
-        if self._cloud_model_ctx is not None:
-            self._cloud_model_ctx.__exit__(None, None, None)
-            self._cloud_model_ctx = None
+            # Weight loader is created by subclass after engine initialization
+            self._weight_loader = None
+        finally:
+            # Clean up temp directory now that model is loaded into GPU memory
+            if self._cloud_model_ctx is not None:
+                self._cloud_model_ctx.__exit__(None, None, None)
+                self._cloud_model_ctx = None
 
     def tp_size(self):
         return self._tp_size

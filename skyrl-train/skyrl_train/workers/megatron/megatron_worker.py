@@ -199,6 +199,14 @@ class MegatronWorker:
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
+        override_config_kwargs = {
+            "bos_token_id": tokenizer.bos_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+            "pad_token_id": tokenizer.pad_token_id,
+        }
+        override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
+        update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
+
         # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"

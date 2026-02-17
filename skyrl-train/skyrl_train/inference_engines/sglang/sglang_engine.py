@@ -257,36 +257,37 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             local_model_path = self._cloud_model_ctx.__enter__()
             kwargs["model_path"] = local_model_path
 
-        setup_envvars_for_sglang(kwargs, bundle_indices)
+        try:
+            setup_envvars_for_sglang(kwargs, bundle_indices)
 
-        # Store common attributes
-        self._tp_size = kwargs.get("tp_size", 1)
-        if self._tp_size > 1:
-            raise ValueError(
-                "As of now, we don't support tensor parallel inference engine with SGLang. "
-                "Please set `inference_engine_tensor_parallel_size` to 1."
-            )
-        self.tokenizer = kwargs.pop("tokenizer", None)
+            # Store common attributes
+            self._tp_size = kwargs.get("tp_size", 1)
+            if self._tp_size > 1:
+                raise ValueError(
+                    "As of now, we don't support tensor parallel inference engine with SGLang. "
+                    "Please set `inference_engine_tensor_parallel_size` to 1."
+                )
+            self.tokenizer = kwargs.pop("tokenizer", None)
 
-        # Unused kwargs
-        _ = kwargs.pop("num_gpus", 1)
+            # Unused kwargs
+            _ = kwargs.pop("num_gpus", 1)
 
-        # Add custom weight loader
-        kwargs["custom_weight_loader"] = CUSTOM_WEIGHT_LOADER_PATH
+            # Add custom weight loader
+            kwargs["custom_weight_loader"] = CUSTOM_WEIGHT_LOADER_PATH
 
-        # Always use token-in-token-out SGLang engine
-        # NOTE(Charlie): unlike vLLM, SGLang cannot do token-in-token-out and
-        # token-in-text-out in the same engine config.
-        kwargs["skip_tokenizer_init"] = True
+            # Always use token-in-token-out SGLang engine
+            # NOTE(Charlie): unlike vLLM, SGLang cannot do token-in-token-out and
+            # token-in-text-out in the same engine config.
+            kwargs["skip_tokenizer_init"] = True
 
-        # Create the SGLang engine (signal handler issue is now fixed by patching)
-        self.engine = Engine(**kwargs)
-        logger.info(f"Created SGLang engine with kwargs: {kwargs}")
-
-        # Clean up temp directory now that model is loaded into GPU memory
-        if self._cloud_model_ctx is not None:
-            self._cloud_model_ctx.__exit__(None, None, None)
-            self._cloud_model_ctx = None
+            # Create the SGLang engine (signal handler issue is now fixed by patching)
+            self.engine = Engine(**kwargs)
+            logger.info(f"Created SGLang engine with kwargs: {kwargs}")
+        finally:
+            # Clean up temp directory now that model is loaded into GPU memory
+            if self._cloud_model_ctx is not None:
+                self._cloud_model_ctx.__exit__(None, None, None)
+                self._cloud_model_ctx = None
 
         # Create weight loader for coordinating weight updates
         self._weight_loader = SGLangWeightLoader(self.engine, self._tp_size)
