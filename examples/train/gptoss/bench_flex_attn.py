@@ -1,7 +1,7 @@
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention, GptOssRotaryEmbedding
-from skyrl_train.patches.gptoss.patch_transformers import patch_GptOssAttention
+from skyrl.backends.skyrl_train.patches.gptoss.patch_transformers import patch_GptOssAttention
 from transformers import AutoConfig
-from skyrl_train.utils.profiler import CudaTimer
+from skyrl.backends.skyrl_train.utils.profiler import CudaTimer
 import ray
 import torch
 import random

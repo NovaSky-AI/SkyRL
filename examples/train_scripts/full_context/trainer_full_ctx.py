@@ -1,7 +1,7 @@
-from skyrl_train.trainer import RayPPOTrainer
+from skyrl.train.trainer import RayPPOTrainer
 from loguru import logger
 import random
-from skyrl_train.utils.utils import Timer
+from skyrl.train.utils.utils import Timer
 
 
 class FullCtxTrainer(RayPPOTrainer):

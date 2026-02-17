@@ -1,13 +1,13 @@
 import hydra
 from typing import Union
 from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.utils import initialize_ray
 import ray
-from integrations.verifiers.verifiers_generator import VerifiersGenerator
+from ..verifiers_generator import VerifiersGenerator
 from transformers import PreTrainedTokenizer
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.config import SkyRLConfig
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.train.config import SkyRLConfig
 
 
 class VerifiersEntrypoint(BasePPOExp):

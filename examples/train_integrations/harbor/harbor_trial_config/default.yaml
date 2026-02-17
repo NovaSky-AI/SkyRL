@@ -30,6 +30,9 @@ agent:
   # aider, swe-agent, openhands, etc.
   name: terminus-2
 
+  # The time given a single Trial to run. If fails, the Trial raises an AgentTimeoutError.
+  override_timeout_sec: 1200
+
   # Agent-specific settings passed to the agent constructor
   kwargs:
     # Maximum number of agent episodes/iterations
@@ -85,7 +88,10 @@ environment:
   suppress_override_warnings: true
 
   # Environment-specific settings
-  # kwargs: {}
+  kwargs:
+    # sandbox_timeout_secs: 1800 # Modal-specific. Timeout of the sandbox after which it is automatically stopped.
+    auto_stop_interval_mins: 30 # Daytona-specific. Minutes of inactivity before the sandbox is automatically stopped.
+
 
 # Verifier configuration
 # See: harbor.models.trial.config.VerifierConfig

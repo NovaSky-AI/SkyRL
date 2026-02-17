@@ -1,17 +1,18 @@
 import hydra
 from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.utils import initialize_ray
 import ray
 from skyrl_gym.envs import register
+from ..env import OpenEnv
 
 
 @ray.remote(num_cpus=1)
 def skyrl_entrypoint(cfg: DictConfig):
-    # Register the multiply environment inside the entrypoint task (no need to modify the skyrl-gym package).
+    # Register the openenv environment inside the entrypoint task (no need to modify the skyrl-gym package).
     register(
         id="openenv",
-        entry_point="integrations.openenv.env:OpenEnv",
+        entry_point=OpenEnv,
     )
     exp = BasePPOExp(cfg)
     exp.run()

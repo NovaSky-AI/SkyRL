@@ -8,7 +8,7 @@ set -x
 DATA_DIR="$HOME/data/multiply"
 NUM_GPUS=4
 
-uv run --isolated --extra vllm -m examples.multiply.main_multiply \
+uv run --isolated --extra fsdp -m examples.train.multiply.main_multiply \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

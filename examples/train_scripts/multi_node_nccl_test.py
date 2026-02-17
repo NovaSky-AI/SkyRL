@@ -8,8 +8,8 @@ import sys
 import ray
 import torch
 import torch.distributed as dist
-from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl.train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from ray.util.placement_group import placement_group
 from omegaconf import OmegaConf
 from loguru import logger

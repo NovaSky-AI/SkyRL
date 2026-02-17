@@ -33,6 +33,7 @@ class HarborGenerateExp(BasePPOExp):
             harbor_cfg=cfg.harbor_trial_config,  # Pass harbor config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            max_seq_len=cfg.trainer.algorithm.max_seq_len,
         )
 
     def _setup_generator(self):

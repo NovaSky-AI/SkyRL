@@ -1,13 +1,13 @@
 from typing import Optional, Union
 from omegaconf import DictConfig
-from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
+from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from openai import AsyncOpenAI
 import httpx
 from verifiers import load_environment
 from verifiers.types import GenerateOutputs, ProcessedOutputs, RolloutInput
-from skyrl_train.generators.utils import get_rollout_metrics
+from skyrl.train.generators.utils import get_rollout_metrics
 
-from skyrl_train.config import GeneratorConfig
+from skyrl.train.config import GeneratorConfig
 
 
 class VerifiersGenerator(GeneratorInterface):

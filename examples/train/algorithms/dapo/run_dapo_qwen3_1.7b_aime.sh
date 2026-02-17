@@ -41,7 +41,7 @@ EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
 LR=1e-6
 
-uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo \
+uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \

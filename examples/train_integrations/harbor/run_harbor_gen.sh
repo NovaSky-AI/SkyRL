@@ -8,23 +8,20 @@ set -ex
 # export MODAL_TOKEN_ID=YOUR_KEY_HERE
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
-# Prepare dataset (downloads from HuggingFace and extracts tasks automatically)
-# Output dir auto-derived from dataset name.
-TRAIN_DATASET="open-thoughts/OpenThoughts-Agent-v1-RL"
+# Prepare dataset first (downloads from HuggingFace and extracts tasks):
+# uv run examples/train_integrations/harbor/prepare_harbor_dataset.py --dataset open-thoughts/OpenThoughts-Agent-v1-RL
+
 DATA_DIR="$HOME/data/harbor"
+TRAIN_DATA="['$DATA_DIR/OpenThoughts-Agent-v1-RL']"
 
-python examples/harbor/prepare_harbor_dataset.py --dataset $TRAIN_DATASET
-
-TRAIN_DATA="['$DATA_DIR/${TRAIN_DATASET##*/}']"
-
-CHAT_TEMPLATE_PATH="$(dirname "$0")/../../skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+CHAT_TEMPLATE_PATH="$(dirname "$0")/../../../skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
 TRIALS_DIR="$HOME/trials_run"
 
 NUM_GPUS=4
 
-uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.main_harbor_generate \
+uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor_generate \
   data.train_data=$TRAIN_DATA \
-  hydra.searchpath=['file://examples/harbor'] \
+  hydra.searchpath=['file://examples/train_integrations/harbor'] \
   +harbor_trial_config=default \
   ++harbor_trial_config.trials_dir=$TRIALS_DIR \
   ++harbor_trial_config.trial_name="dummy" \

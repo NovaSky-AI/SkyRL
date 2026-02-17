@@ -58,7 +58,7 @@ LORA_ALPHA=128
 TIS_IMP_RATIO_CAP=2.0
 USE_TIS=true
 
-uv run --isolated --extra mcore -m examples.algorithms.dapo.main_dapo \
+uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \

@@ -1,11 +1,11 @@
 """
-uv run --isolated --extra vllm -m scripts.full_context.main_full_ctx
+uv run --isolated --extra fsdp -m examples.train_scripts.full_context.main_full_ctx
 """
 
 import hydra
 from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.utils import initialize_ray
 import ray
 from .trainer_full_ctx import FullCtxTrainer
 

@@ -12,13 +12,13 @@ from minisweagent.config import get_config_path
 from .mini_swe_utils import evaluate_trajectory, get_sb_environment
 
 from omegaconf import DictConfig
-from skyrl_train.config import GeneratorConfig, SkyRLGymConfig
-from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
-from skyrl_train.generators.base import TrajectoryID, TrainingPhase, BatchMetadata
-from skyrl_train.inference_engines.base import ConversationType
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.generators.utils import (
+from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
+from skyrl.train.generators.base import TrajectoryID, TrainingPhase, BatchMetadata
+from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl.train.generators.utils import (
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
 )

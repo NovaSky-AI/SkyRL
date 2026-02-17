@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo
+uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo
 """
 
 import ray
@@ -7,11 +7,11 @@ import hydra
 import torch
 from typing import List
 from omegaconf import DictConfig
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 
-from skyrl_train.generators.base import GeneratorOutput
+from skyrl.train.generators.base import GeneratorOutput
 
 
 class DAPOTrainer(RayPPOTrainer):

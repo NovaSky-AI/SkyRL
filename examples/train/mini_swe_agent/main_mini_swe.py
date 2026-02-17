@@ -1,7 +1,7 @@
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
-from skyrl_train.utils import initialize_ray
+from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.utils import initialize_ray
 import ray
 
 from .mini_swe_generator import MiniSweAgentGenerator
