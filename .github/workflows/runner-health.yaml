@@ -194,25 +194,74 @@ jobs:
           ')
 
           # Get list of runners currently executing a job (busy runners)
-          BUSY_RUNNERS=$(gh api repos/${{ github.repository }}/actions/runners --paginate --jq '.runners[] | select(.busy == true) | .name' 2>/dev/null || true)
-          if [ -n "$BUSY_RUNNERS" ]; then
-            echo "Busy runners (will not stop/start):"
-            echo "$BUSY_RUNNERS"
+          # Note: requires admin:org or repo admin token; GITHUB_TOKEN may not have access
+          BUSY_RUNNERS_RAW=$(gh api repos/${{ github.repository }}/actions/runners --paginate --jq '.runners[] | select(.busy == true) | .name' 2>/dev/null)
+          if [ $? -eq 0 ] && echo "$BUSY_RUNNERS_RAW" | head -1 | grep -qv '"message"'; then
+            BUSY_RUNNERS="$BUSY_RUNNERS_RAW"
+            if [ -n "$BUSY_RUNNERS" ]; then
+              echo "Busy runners (will not stop/start):"
+              echo "$BUSY_RUNNERS"
+            fi
+          else
+            BUSY_RUNNERS=""
+            echo "Warning: Could not fetch runner status (token lacks admin permission), skipping busy check"
           fi
 
           DETAILS=$(cat /tmp/unhealthy_details.json)
           COUNT=$(echo "$DETAILS" | jq 'length')
 
-          RECOVERED_NAMES=""
-          RECOVERED_COUNT=0
-          FAILED_NAMES=""
-          FAILED_COUNT=0
-          SKIPPED_NAMES=""
-          SKIPPED_COUNT=0
           UPDATED_ATTEMPTS="$PREV_ATTEMPTS"
+          mkdir -p /tmp/recovery-results
 
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Auto-Recovery" >> $GITHUB_STEP_SUMMARY
+
+          # Function to recover a single instance (runs in background)
+          recover_instance() {
+            local INSTANCE_ID="$1"
+            local INSTANCE_NAME="$2"
+            local INSTANCE_STATE="$3"
+            local ATTEMPTS="$4"
+            local RESULT_FILE="/tmp/recovery-results/$INSTANCE_ID"
+
+            echo "[$INSTANCE_NAME] Starting recovery (attempt $((ATTEMPTS + 1))/$MAX_ATTEMPTS)..."
+
+            # Recovery strategy: stop/start (reboot doesn't fix impaired instances)
+            if [ "$INSTANCE_STATE" = "stopped" ]; then
+              echo "[$INSTANCE_NAME] Instance already stopped, starting..."
+              aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
+            elif [ "$INSTANCE_STATE" = "running" ]; then
+              echo "[$INSTANCE_NAME] Stopping instance..."
+              aws ec2 stop-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
+              echo "[$INSTANCE_NAME] Waiting for instance to stop..."
+              aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID" 2>/dev/null
+              echo "[$INSTANCE_NAME] Starting instance..."
+              aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
+            elif [ "$INSTANCE_STATE" = "stopping" ]; then
+              echo "[$INSTANCE_NAME] Instance is stopping, waiting..."
+              aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID" 2>/dev/null
+              echo "[$INSTANCE_NAME] Starting instance..."
+              aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
+            else
+              echo "[$INSTANCE_NAME] Unexpected state '$INSTANCE_STATE', attempting start..."
+              aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
+            fi
+
+            # Wait for instance to be running and pass status checks (up to 10 min)
+            echo "[$INSTANCE_NAME] Waiting for instance to pass status checks..."
+            if timeout 600 aws ec2 wait instance-status-ok --instance-ids "$INSTANCE_ID" 2>/dev/null; then
+              echo "recovered" > "$RESULT_FILE"
+              echo "[$INSTANCE_NAME] Recovered successfully"
+            else
+              echo "failed" > "$RESULT_FILE"
+              echo "[$INSTANCE_NAME] Recovery failed"
+            fi
+          }
+
+          # Phase 1: Determine which instances to recover vs skip
+          RECOVER_PIDS=""
+          SKIPPED_NAMES=""
+          SKIPPED_COUNT=0
 
           for i in $(seq 0 $((COUNT - 1))); do
             INSTANCE_ID=$(echo "$DETAILS" | jq -r ".[$i].id")
@@ -266,41 +315,41 @@ jobs:
 
             echo "🔄 **$INSTANCE_NAME**: Attempting recovery (attempt $((ATTEMPTS + 1))/$MAX_ATTEMPTS)..." >> $GITHUB_STEP_SUMMARY
 
-            # Recovery strategy: stop/start (reboot doesn't fix impaired instances)
-            if [ "$INSTANCE_STATE" = "stopped" ]; then
-              echo "  Instance already stopped, starting..."
-              aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
-            elif [ "$INSTANCE_STATE" = "running" ]; then
-              echo "  Stopping instance..."
-              aws ec2 stop-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
-              echo "  Waiting for instance to stop..."
-              aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID" 2>/dev/null
-              echo "  Starting instance..."
-              aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
-            elif [ "$INSTANCE_STATE" = "stopping" ]; then
-              echo "  Instance is stopping, waiting..."
-              aws ec2 wait instance-stopped --instance-ids "$INSTANCE_ID" 2>/dev/null
-              echo "  Starting instance..."
-              aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
-            else
-              echo "  Unexpected state '$INSTANCE_STATE', attempting start..."
-              aws ec2 start-instances --instance-ids "$INSTANCE_ID" > /dev/null 2>&1
-            fi
+            # Store attempt count for result collection
+            echo "$ATTEMPTS" > "/tmp/recovery-results/${INSTANCE_ID}.attempts"
+            echo "$INSTANCE_NAME" > "/tmp/recovery-results/${INSTANCE_ID}.name"
 
-            # Wait for instance to be running and pass status checks (up to 10 min)
-            echo "  Waiting for instance to pass status checks..."
-            if timeout 600 aws ec2 wait instance-status-ok --instance-ids "$INSTANCE_ID" 2>/dev/null; then
+            # Launch recovery in parallel
+            recover_instance "$INSTANCE_ID" "$INSTANCE_NAME" "$INSTANCE_STATE" "$ATTEMPTS" &
+            RECOVER_PIDS="$RECOVER_PIDS $!:$INSTANCE_ID"
+          done
+
+          # Phase 2: Wait for all parallel recoveries to complete
+          echo "Waiting for all recovery jobs to complete..."
+          wait
+
+          # Phase 3: Collect results
+          RECOVERED_NAMES=""
+          RECOVERED_COUNT=0
+          FAILED_NAMES=""
+          FAILED_COUNT=0
+
+          for entry in $RECOVER_PIDS; do
+            INSTANCE_ID=$(echo "$entry" | cut -d: -f2)
+            INSTANCE_NAME=$(cat "/tmp/recovery-results/${INSTANCE_ID}.name")
+            ATTEMPTS=$(cat "/tmp/recovery-results/${INSTANCE_ID}.attempts")
+            RESULT=$(cat "/tmp/recovery-results/$INSTANCE_ID" 2>/dev/null || echo "failed")
+
+            if [ "$RESULT" = "recovered" ]; then
               echo "✅ **$INSTANCE_NAME**: Recovered successfully" >> $GITHUB_STEP_SUMMARY
               RECOVERED_NAMES="$RECOVERED_NAMES $INSTANCE_NAME"
               RECOVERED_COUNT=$((RECOVERED_COUNT + 1))
-              # Clear attempt tracking on success
               UPDATED_ATTEMPTS=$(echo "$UPDATED_ATTEMPTS" | jq --arg id "$INSTANCE_ID" 'del(.[$id])')
             else
               NEW_COUNT=$((ATTEMPTS + 1))
               echo "❌ **$INSTANCE_NAME**: Recovery failed (attempt $NEW_COUNT/$MAX_ATTEMPTS)" >> $GITHUB_STEP_SUMMARY
               FAILED_NAMES="$FAILED_NAMES $INSTANCE_NAME"
               FAILED_COUNT=$((FAILED_COUNT + 1))
-              # Record attempt count and timestamp
               UPDATED_ATTEMPTS=$(echo "$UPDATED_ATTEMPTS" | jq --arg id "$INSTANCE_ID" --argjson n "$NEW_COUNT" --arg ts "$NOW_ISO" '.[$id] = {"count": $n, "last_attempt": $ts}')
             fi
           done
