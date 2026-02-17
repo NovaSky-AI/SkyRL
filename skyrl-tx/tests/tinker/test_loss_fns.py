@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tx.tinker.loss_fns import cispo_loss
+from tx.tinker.loss_fns import LossFnConfig, cispo_loss
 
 
 def test_cispo_loss_clipping_and_masking():
@@ -10,8 +10,12 @@ def test_cispo_loss_clipping_and_masking():
     sampling_logprobs = jnp.array([0.0, 0.0, 0.0], dtype=jnp.float32)
     advantages = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
     loss_mask = jnp.array([1.0, 1.0, 0.0], dtype=jnp.float32)
+    loss_fn_config = LossFnConfig(
+        clip_low_threshold=jnp.array(0.8, dtype=jnp.float32),
+        clip_high_threshold=jnp.array(1.2, dtype=jnp.float32),
+    )
 
-    actual = np.asarray(cispo_loss(target_logprobs, loss_mask, sampling_logprobs, advantages))
+    actual = np.asarray(cispo_loss(target_logprobs, loss_mask, sampling_logprobs, advantages, loss_fn_config))
 
     ratios = np.exp(np.asarray(target_logprobs - sampling_logprobs))
     clipped_ratios = np.clip(ratios, 0.8, 1.2)
@@ -25,9 +29,13 @@ def test_cispo_stops_gradient_through_clipped_ratio():
     sampling_logprobs = jnp.array([0.1, -0.2], dtype=jnp.float32)
     advantages = jnp.array([1.3, -0.7], dtype=jnp.float32)
     loss_mask = jnp.ones((2,), dtype=jnp.float32)
+    loss_fn_config = LossFnConfig(
+        clip_low_threshold=jnp.array(0.8, dtype=jnp.float32),
+        clip_high_threshold=jnp.array(1.2, dtype=jnp.float32),
+    )
 
     def total_loss(target_logprobs):
-        return cispo_loss(target_logprobs, loss_mask, sampling_logprobs, advantages).sum()
+        return cispo_loss(target_logprobs, loss_mask, sampling_logprobs, advantages, loss_fn_config).sum()
 
     target_logprobs = jnp.array([0.0, 0.2], dtype=jnp.float32)
     grad = np.asarray(jax.grad(total_loss)(target_logprobs))
