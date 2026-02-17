@@ -303,10 +303,11 @@ class ForwardBackwardInput(BaseModel):
         "cross_entropy": set(),
         "importance_sampling": set(),
         "ppo": {"clip_low_threshold", "clip_high_threshold"},
+        "cispo": {"clip_low_threshold", "clip_high_threshold"},
     }
 
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo"]
     loss_fn_config: dict[str, float] | None = None
 
     @model_validator(mode="after")
