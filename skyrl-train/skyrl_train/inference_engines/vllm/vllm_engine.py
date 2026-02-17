@@ -74,6 +74,12 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
+        # Redirect infrastructure output to log file before any engine initialization.
+        # Done here in the base class so all subclasses get it automatically.
+        from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
+
+        redirect_actor_output_to_file()
+
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
@@ -295,13 +301,16 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
-        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
 
-        # TODO (erictang000): potentially enable log requests for a debugging mode
+        # Logging kwargs
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+        enable_log_requests = kwargs.pop("enable_log_requests", False)
+        max_log_len = kwargs.pop("max_log_len", None)
+
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-            engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+            engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
         else:
-            engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
+            engine_args = vllm.AsyncEngineArgs(disable_log_requests=not enable_log_requests, **kwargs)
 
         # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
         stat_loggers = None
@@ -331,13 +340,20 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             models = OpenAIServingModels(engine, model_config, base_model_paths)
             legacy_kwargs["model_config"] = model_config
 
-        # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
-        # support OAI-style tool calling; and `request_logger` for better debugging.
+        # Build request logger for debugging (off by default).
+        # Enable via: +generator.engine_init_kwargs.enable_log_requests=true
+        # Optionally limit logged chars: +generator.engine_init_kwargs.max_log_len=256
+        request_logger = None
+        if enable_log_requests:
+            from vllm.entrypoints.logger import RequestLogger
+
+            request_logger = RequestLogger(max_log_len=max_log_len)
+
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
             models=models,
             response_role="assistant",
-            request_logger=None,
+            request_logger=request_logger,
             chat_template=openai_kwargs.pop("chat_template", None),  # used to template /chat/completions requests
             chat_template_content_format="auto",
             **legacy_kwargs,
@@ -349,7 +365,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
             models=models,
-            request_logger=None,
+            request_logger=request_logger,
             **legacy_kwargs,
         )
         return engine

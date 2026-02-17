@@ -5,6 +5,7 @@ import sys
 import logging
 import math
 import socket
+from datetime import datetime
 from omegaconf import DictConfig, OmegaConf
 from typing import Union
 
@@ -21,10 +22,12 @@ from ray.util.placement_group import (
 from skyrl_train.config.config import SkyRLConfig
 from skyrl_train.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
-    SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_PYTHONPATH_EXPORT,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
     _SKYRL_USE_NEW_INFERENCE,
 )
+from pathlib import Path
 
 
 class Timer:
@@ -270,18 +273,21 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
         f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
     )
 
-    # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-    # per batch can be variable based on the prompt length. This is used to normalize the loss for
-    # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
-    # fixed max response budget.
-    if isinstance(cfg, DictConfig):
-        new_cfg = OmegaConf.create(cfg.trainer.algorithm)
-        new_cfg.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-        cfg.trainer.algorithm = new_cfg
-    else:
-        cfg.trainer.algorithm.max_seq_len = (
-            cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-        )
+    if cfg.trainer.algorithm.max_seq_len is None:
+        # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
+        # per batch can be variable based on the prompt length. This is used to normalize the loss for
+        # seq_mean_token_sum_norm loss reduction.
+        # TODO(Charlie): This calculation is not correct for multi-turn and users should use `max_seq_len` instead.
+        # Should we just force users to set max_seq_len if loss reduction is seq_mean_token_sum_norm, regardless of
+        # multi-turn or not?
+        if isinstance(cfg, DictConfig):
+            new_cfg = OmegaConf.create(cfg.trainer.algorithm)
+            new_cfg.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+            cfg.trainer.algorithm = new_cfg
+        else:
+            cfg.trainer.algorithm.max_seq_len = (
+                cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+            )
 
     # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:
@@ -677,9 +683,14 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
 
 def configure_ray_worker_logging() -> None:
     """
-    In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
-    This method forces color and formatting (e.g., bold) and routes stdlib `logging`
-    through Loguru so third-party logs match formatting
+    Configure logging for Ray workers.
+
+    This method:
+    1. Forces color and formatting for Loguru (even without TTY)
+    2. Routes stdlib logging through Loguru
+
+    Note: This does NOT redirect stdout/stderr. For infra actors (vLLM, workers),
+    call redirect_actor_output_to_file() separately in their __init__.
     """
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -722,8 +733,31 @@ def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
     """
     from .ppo_utils import sync_registries
 
+    # When SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1, show all logs on stdout (no file redirect)
+    verbose_logging = SKYRL_DUMP_INFRA_LOG_TO_STDOUT
+
+    # Suppress Ray backend logs unless in verbose mode
+    if not verbose_logging:
+        os.environ["RAY_BACKEND_LOG_LEVEL"] = "fatal"
+
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+
+    # Set up log file for infrastructure logs (skip when dumping to stdout)
+    if not verbose_logging:
+        log_path = Path(cfg.trainer.log_path).resolve()
+        log_path.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+        log_file = str(log_path / f"infra-{timestamp}.log")
+        os.environ["SKYRL_LOG_FILE"] = log_file
+        # Pass log file path to workers so they can redirect their output
+        env_vars["SKYRL_LOG_FILE"] = log_file
+
+    # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
+    # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
+    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+
+    if not verbose_logging:
+        logger.info(f"Infrastructure logs will be written to: {log_file}")
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()

@@ -97,7 +97,7 @@ torch = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
-harbor = { git = "https://github.com/laude-institute/harbor", rev = "5921cc40e8f6b5b0df0a3dc6354e0e679447eb54" }
+harbor = { git = "https://github.com/laude-institute/harbor", rev = "29ed63699ef16e5d7817dd4fd26d557d6a861b9a" }
 torchvision = [
     { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },

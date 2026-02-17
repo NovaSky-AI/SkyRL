@@ -94,6 +94,11 @@ class DistributedTorchRayActor:
         self.record_memory = record_memory
         if record_memory:
             torch.cuda.memory._record_memory_history()
+
+        # Redirect worker output to log file (infra logs shouldn't pollute driver stdout)
+        from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
+
+        redirect_actor_output_to_file()
         configure_ray_worker_logging()
 
     def get_node_local_rank(self):
@@ -832,11 +837,10 @@ class PolicyWorkerBase(Worker):
                 else:
                     valid_len = action_log_probs.shape[1]
 
-                start = max(action_log_probs.shape[1] - valid_len, 0)
                 loss_fn_outputs.append(
                     {
-                        "logprobs": action_log_probs[i, start:].detach().cpu().tolist(),
-                        "elementwise_loss": elementwise_loss[i, start:].detach().cpu().tolist(),
+                        "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
+                        "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
                     }
                 )
 
@@ -876,12 +880,33 @@ class PolicyWorkerBase(Worker):
             loss = policy_loss + kl_loss_term - entropy_loss_term
             self.strategy.backward(loss, self.model, self.optimizer)
 
+            # Build per-sequence loss_fn_outputs with logprobs.
+            batch_size = action_log_probs.shape[0]
+            seq_len = action_log_probs.shape[1]
+
+            if action_mask is not None:
+                valid_lens = action_mask.sum(dim=1).int().tolist()
+            elif loss_mask is not None:
+                valid_lens = loss_mask.sum(dim=1).int().tolist()
+            else:
+                valid_lens = [seq_len] * batch_size
+
+            detached_log_probs = action_log_probs.detach().cpu()
+            loss_fn_outputs = []
+            for i, valid_len in enumerate(valid_lens):
+                loss_fn_outputs.append(
+                    {
+                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                    }
+                )
+
             status = {
                 "final_loss": loss.item(),
                 "policy_loss": policy_loss.item(),
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
+                "loss_fn_outputs": loss_fn_outputs,
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v

@@ -16,9 +16,9 @@ from tx.tinker import types
 class KVCache:
     """Key-value cache for all layers, each entry in the list corresponds to one layer."""
 
-    keys: list[jax.Array]
-    values: list[jax.Array]
-    cache_position: jax.Array  # Per-sequence positions of shape [B] for left-aligned decoding
+    keys: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
+    values: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
+    cache_position: jax.Array  # Per-sequence positions of shape (batch,)
 
     @staticmethod
     def update(
@@ -97,6 +97,9 @@ class DecodeState:
     last_positions: jax.Array
     logits: jax.Array
     stop_pos: jax.Array  # Position where stop token was found
+    step: jax.Array  # Current decode step (scalar int32)
+    generated_tokens: jax.Array  # [B, max_new_tokens]
+    generated_logprobs: jax.Array  # [B, max_new_tokens]
 
 
 @dataclass
@@ -197,15 +200,18 @@ class GeneratorMixin:
             last_logits = model.compute_logits(last_hidden, adapter_indices)[:, 0, :]
             prompt_logprobs_array = None
 
-        # Pad KV cache and attention mask
-        kv_cache = outputs.kv_cache.pad_to_length(max_length)
-
         # Pad KV cache and attention mask to max_length
-        kv_cache = kv_cache.pad_to_length(max_length)
+        kv_cache = outputs.kv_cache.pad_to_length(max_length)
         decode_attention_mask = jnp.pad(attention_mask, ((0, 0), (0, max_length - attention_mask.shape[1])))
 
-        def decode_fn(s: DecodeState, step: jax.Array) -> tuple[DecodeState, tuple[jax.Array, jax.Array]]:
-            """Decode one token step. Returns (state, (token, logprob)) for scan accumulation."""
+        def cond_fn(s: DecodeState) -> jax.Array:
+            """Continue while any sequence is still generating."""
+            all_stopped = jnp.all(s.stop_pos != -1)
+            return (s.step < max_new_tokens) & ~all_stopped
+
+        def body_fn(s: DecodeState) -> DecodeState:
+            """Decode one token step, writing outputs into pre-allocated buffers."""
+            step = s.step
             # Sample next token
             split_keys = jax.vmap(jax.random.split)(s.rngs)
             rngs, sample_keys = split_keys[:, 0], split_keys[:, 1]
@@ -243,32 +249,35 @@ class GeneratorMixin:
             )
             # Compute logits for the next token
             next_logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)[:, 0, :]
-            next_state = DecodeState(
+            return DecodeState(
                 kv_cache=outputs.kv_cache,
                 rngs=rngs,
                 attention_mask=next_attention_mask,
                 last_positions=s.last_positions + 1,
                 logits=next_logits,
                 stop_pos=stop_pos,
+                step=step + 1,
+                generated_tokens=s.generated_tokens.at[:, step].set(next_token.squeeze(-1)),
+                generated_logprobs=s.generated_logprobs.at[:, step].set(sampled_logprob.squeeze(-1)),
             )
-            return next_state, (next_token, sampled_logprob)
 
+        batch_size = input_ids.shape[0]
         initial_state = DecodeState(
             kv_cache=kv_cache,
             rngs=rngs,
             attention_mask=decode_attention_mask,
             last_positions=last_token_idx[:, None],
             logits=last_logits,
-            stop_pos=jnp.full((input_ids.shape[0],), -1),
+            stop_pos=jnp.full((batch_size,), -1),
+            step=jnp.int32(0),
+            generated_tokens=jnp.zeros((batch_size, max_new_tokens), dtype=jnp.int32),
+            generated_logprobs=jnp.zeros((batch_size, max_new_tokens), dtype=jnp.float32),
         )
 
-        final_state, (tokens_stacked, logprobs_stacked) = jax.lax.scan(
-            decode_fn, initial_state, xs=jnp.arange(max_new_tokens)
-        )
+        final_state = jax.lax.while_loop(cond_fn, body_fn, initial_state)
 
-        # Post-process: transpose scan outputs from [Steps, Batch, 1] to [Batch, Steps]
-        new_tokens = jnp.swapaxes(tokens_stacked, 0, 1).squeeze(-1)
-        new_logprobs = jnp.swapaxes(logprobs_stacked, 0, 1).squeeze(-1)
+        new_tokens = final_state.generated_tokens
+        new_logprobs = final_state.generated_logprobs
 
         return new_tokens, new_logprobs, final_state.stop_pos, prompt_logprobs_array
 

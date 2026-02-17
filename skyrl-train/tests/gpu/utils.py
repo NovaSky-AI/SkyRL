@@ -61,10 +61,25 @@ def make_dummy_tensorbatch(seq_len=10, num_actions=4) -> TensorBatch:
     return data
 
 
-def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> TrainingInputBatch:
-    """Create a dummy TrainingInputBatch"""
+def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4, action_lengths=None) -> TrainingInputBatch:
+    """Create a dummy TrainingInputBatch.
+
+    Args:
+        action_lengths: Optional list of per-sample valid action lengths.
+            If provided, loss_mask and response_mask will be right-padded per
+            sample (1s then 0s). Length must equal batch_size. Each value must
+            be <= num_actions.
+    """
 
     torch.manual_seed(42)
+
+    loss_mask = torch.ones((batch_size, num_actions), dtype=int, device="cpu")
+    response_mask = torch.ones((batch_size, num_actions), dtype=int, device="cpu")
+    if action_lengths is not None:
+        assert len(action_lengths) == batch_size
+        for i, valid_len in enumerate(action_lengths):
+            loss_mask[i, valid_len:] = 0
+            response_mask[i, valid_len:] = 0
 
     # Add all the required fields for training
     data = TrainingInputBatch(
@@ -76,8 +91,8 @@ def make_dummy_training_batch(batch_size=2, seq_len=10, num_actions=4) -> Traini
             "values": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
             "returns": 0.5 * torch.ones((batch_size, num_actions), device="cpu"),
             "advantages": 0.6 * torch.ones((batch_size, num_actions), device="cpu"),
-            "loss_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
-            "response_mask": torch.ones((batch_size, num_actions), dtype=int, device="cpu"),
+            "loss_mask": loss_mask,
+            "response_mask": response_mask,
             "rollout_logprobs": 0.2 * torch.ones((batch_size, num_actions), device="cpu"),
         }
     )
