@@ -63,11 +63,17 @@ def ppo_loss(
 
 
 def cispo_loss(
-    target_logprobs: jax.Array, loss_mask: jax.Array, sampling_logprobs: jax.Array, advantages: jax.Array
+    target_logprobs: jax.Array,
+    loss_mask: jax.Array,
+    sampling_logprobs: jax.Array,
+    advantages: jax.Array,
+    loss_fn_config: LossFnConfig,
 ) -> jax.Array:
     "CISPO clipped-ratio policy gradient loss."
     prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
-    clipped_ratio = jnp.clip(prob_ratio, 0.8, 1.2)
+    clip_low_threshold = loss_fn_config.clip_low_threshold
+    clip_high_threshold = loss_fn_config.clip_high_threshold
+    clipped_ratio = jnp.clip(prob_ratio, clip_low_threshold, clip_high_threshold)
     cispo_objective = jax.lax.stop_gradient(clipped_ratio) * target_logprobs * advantages
     return -safe_loss_mask(cispo_objective, loss_mask)
 

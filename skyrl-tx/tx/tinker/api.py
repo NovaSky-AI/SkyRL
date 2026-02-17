@@ -303,6 +303,7 @@ class ForwardBackwardInput(BaseModel):
         "cross_entropy": set(),
         "importance_sampling": set(),
         "ppo": {"clip_low_threshold", "clip_high_threshold"},
+        "cispo": {"clip_low_threshold", "clip_high_threshold"},
     }
 
     data: list[Datum]
