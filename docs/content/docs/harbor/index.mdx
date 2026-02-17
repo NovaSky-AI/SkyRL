@@ -181,9 +181,7 @@ When a trajectory hits `ContextLengthExceededError`, its reward is set to 0. Wha
 
 ### Instance-Level Masking
 
-After all trajectories in a batch complete, `_mask_failed_instances_and_compute_metrics()` scans the results. If **any** trajectory for a given prompt fails (timeout or error), **all** trajectories for that prompt are zeroed out (`loss_mask=[0]`).
-
-This prevents biased advantage estimation. In GRPO, advantages are computed by normalizing rewards within a group of `n_samples_per_prompt` trajectories for the same prompt. A partial group (e.g., 6 of 8 trajectories) would skew the normalization.
+After all trajectories in a batch complete, `_mask_failed_instances_and_compute_metrics()` scans the results. If **any** trajectory for a given prompt fails (timeout or error), **all** trajectories for that prompt are zeroed out (`loss_mask=[0]`) as a conservative approach.
 
 ### Rate Limiting
 
@@ -327,7 +325,7 @@ uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/OpenThoughts-TB-dev
 ```
 
-The output directory defaults to `~/data/harbor/<repo-name>`, derived from the dataset name.
+The output directory defaults to `~/data/harbor/<repo-name>`, derived from the dataset name. You can override with `--output_dir ~/my-custom-path`.
 
 <Callout type="info">
 You must run `prepare_harbor_dataset.py` before launching training. The launch scripts (e.g. `run_codecontest.sh`) assume datasets are already prepared at `~/data/harbor/`.
