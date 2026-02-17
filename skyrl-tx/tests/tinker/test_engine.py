@@ -96,7 +96,7 @@ def test_cleanup_stale_sessions():
         pytest.param("cross_entropy", None, [], [], id="cross_entropy_default_config"),
         pytest.param(
             "cispo",
-            None,
+            {"clip_low_threshold": 0.7, "clip_high_threshold": 1.3},
             [0.1, 0.2, 0.3],
             [-1.1, -1.0, -0.9],
             id="cispo",
