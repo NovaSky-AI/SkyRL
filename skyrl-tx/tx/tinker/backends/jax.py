@@ -42,6 +42,7 @@ from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.tinker.backends.utils import pad, pad_batch, pad_to_fsdp
 from tx.tinker.loss_fns import LOSS_FUNCTIONS
+from tx.tinker.types import LOSS_TYPES
 from tx.utils.models import (
     get_dtype,
     get_model_class,
@@ -52,6 +53,7 @@ from tx.utils.models import (
     insert_adapter_state,
     round_up_seq_len,
     resolve_model_path,
+    get_adapter_idx,
 )
 from tx.utils.log import logger
 
@@ -126,15 +128,22 @@ class AccumulatedGradients:
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
-        return jax.tree.map(
-            lambda g: jnp.zeros_like(g).at[adapter_index].set(g[adapter_index] / count.astype(g.dtype)),
-            self.grad_sum,
-        )
+
+        def compute_mean(path, g):
+            idx = get_adapter_idx(path, adapter_index)
+            return jnp.zeros_like(g).at[idx].set(g[idx] / count.astype(g.dtype))
+
+        return jax.tree.map_with_path(compute_mean, self.grad_sum)
 
     def reset_adapter(self, adapter_index: jax.Array) -> "AccumulatedGradients":
         """Reset gradients and count for a specific adapter."""
+
+        def reset_grad(path, g):
+            idx = get_adapter_idx(path, adapter_index)
+            return g.at[idx].set(0.0)
+
         return AccumulatedGradients(
-            grad_sum=jax.tree.map(lambda g: g.at[adapter_index].set(0.0), self.grad_sum),
+            grad_sum=jax.tree.map_with_path(reset_grad, self.grad_sum),
             counts=self.counts.at[adapter_index].set(0),
         )
 
@@ -473,8 +482,8 @@ class JaxBackendImpl(AbstractBackend):
 
         # Create optimizer
         with jax.set_mesh(self.mesh):
-            tx = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
-            self.optimizers[model_id] = nnx.Optimizer(self.model, tx, wrt=self.model.is_lora_param)
+            optimizer = optax.inject_hyperparams(optax.adamw)(learning_rate=0.0)
+            self.optimizers[model_id] = nnx.Optimizer(self.model, optimizer, wrt=self.model.is_lora_param)
 
         # Configure adapter
         init_lora_adapter(self.model, adapter_index, lora_config)
@@ -525,7 +534,7 @@ class JaxBackendImpl(AbstractBackend):
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
         all_advantages = prepared_batch.all_advantages
-        all_loss_fn_types = prepared_batch.all_loss_fn_types
+        all_loss_fn_types = [LOSS_TYPES[name] for name in prepared_batch.all_loss_fns]
         request_batch_slices = prepared_batch.request_batch_slices
 
         # Convert model_ids to adapter_indices

@@ -1,0 +1,54 @@
+---
+title: "Tinker API"
+---
+
+SkyRL implements the [Tinker API](https://tinker-docs.thinkingmachines.ai/), a simple training and sampling API introduced by Thinking Machines Lab that cleanly separates algorithm logic from infrastructure logic. This means any training script written against the Tinker API can run locally on your own hardware using SkyRL's backends (FSDP2, Megatron, vLLM) with zero code changes.
+
+## What is Tinker?
+
+Tinker is a minimal but powerful API for post-training LLMs. It exposes a small set of operations:
+
+| Operation | Description |
+|-----------|-------------|
+| `forward_backward()` | Run a forward and backward pass |
+| `forward()` | Run a forward-only pass (no gradients) |
+| `optim_step()` | Apply an optimizer step using accumulated gradients |
+| `sample()` | Generate rollouts from the model weights |
+| `save_checkpoint()` / `load_checkpoint()` | Persist and restore full training state |
+
+That's it! The Tinker API pushes infrastructure concerns (worker management, batching, weight transfer, and more) below the API surface, while providing full control to researchers and practitioners to flexibly implement algorithmic logic on top.
+
+## Why Tinker on SkyRL?
+
+SkyRL brings the Tinker API to your own hardware. By utilizing the fully Tinker API compatible surface, users can run Tinker scripts with **zero code change** on SkyRL's existing high-performance post-training stack with:
+
+- **FSDP2 and Megatron** for training dense and MoE models from 0.5B to 200B+ parameters
+- **LoRA and full-parameter** training with configurable rank, alpha, and target modules
+- **Colocated or widely-distributed inference** for small-scale iteration and large-scale deployment
+
+
+## Supported Features
+
+| Feature | Status |
+|---------|--------|
+| Supervised fine-tuning (`cross_entropy` loss) | Supported |
+| RL training (`importance_sampling` loss) | Supported |
+| Forward-only pass (logprobs without gradients) | Supported |
+| Sampling with logprobs | Supported |
+| LoRA adapters | Supported |
+| Full-parameter fine-tuning | Supported |
+| FSDP2 strategy | Supported |
+| Megatron strategy | Supported |
+| Multi-tenant LoRA | Not yet supported |
+| Multi-model sampling | Not yet supported |
+| Multi-model training | Not yet supported |
+| Vision models | Not yet supported |
+
+For more details, see the [Limitations & Roadmap](./limitations) page.
+
+## Next Steps
+
+- [Quickstart](./quickstart) - Start a SkyRL Tinker server and run your first training script
+- [Architecture](./architecture) - Understand how SkyRL implements the Tinker API
+- [Cookbook Scripts](./cookbook) - Run the official tinker-cookbook recipes on SkyRL
+- [Limitations & Roadmap](./limitations) - Known limitations and future plans

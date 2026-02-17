@@ -62,7 +62,17 @@ async def lifespan(app: FastAPI):
         logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters
-    cmd = ["uv", "run", "--extra", "tinker", "--extra", app.state.engine_config.backend, "-m", "tx.tinker.engine"]
+    cmd = [
+        "uv",
+        "run",
+        "--isolated",
+        "--extra",
+        "tinker",
+        "--extra",
+        app.state.engine_config.backend,
+        "-m",
+        "tx.tinker.engine",
+    ]
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = await asyncio.create_subprocess_exec(*cmd)
@@ -168,6 +178,7 @@ async def create_checkpoint(
     try:
         await session.flush()
     except IntegrityError:
+        await session.rollback()
         # Determine which constraint failed by checking if the model exists
         statement = select(ModelDB).where(ModelDB.model_id == model_id)
         result = await session.exec(statement)

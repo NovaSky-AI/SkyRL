@@ -23,8 +23,19 @@ from tx.tinker.db_models import (
 from tx.tinker import types
 from tx.tinker.config import EngineConfig, add_model
 from tx.tinker.backends.utils import log_timing
-from tx.tinker.types import LOSS_TYPES
 from tx.utils.log import logger
+
+
+def _model_not_found_error(model_id: str) -> types.ErrorResponse:
+    """Log and return an ErrorResponse for a request targeting a model that isn't loaded."""
+    logger.info(
+        f"Ignoring request for model '{model_id}' — model not loaded. "
+        "This is most likely an outstanding request from a previous server."
+    )
+    return types.ErrorResponse(
+        error=f"Model {model_id} not loaded (likely stale request from previous server)",
+        status="failed",
+    )
 
 
 def prepare_sample_batch(
@@ -109,13 +120,15 @@ def prepare_model_pass_batch(
     all_model_ids = []
     all_sampling_logprobs = []
     all_advantages = []
-    all_loss_fn_types = []
+    all_loss_fns = []
     all_loss_fn_configs = []
     request_batch_slices = []
 
     for request_id, (model_id, request_data) in requests.items():
-        loss_fn_type = LOSS_TYPES[request_data.loss_fn]
-
+        if request_data.loss_fn not in types.LOSS_TYPES:
+            raise ValueError(
+                f"Unknown loss function '{request_data.loss_fn}'. Must be one of: {list(types.LOSS_TYPES.keys())}"
+            )
         request_start = len(all_input_ids)
         for item in request_data.data:
             tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
@@ -126,7 +139,7 @@ def prepare_model_pass_batch(
             all_sampling_logprobs.append(loss_fn_inputs.logprobs.data)
             all_advantages.append(loss_fn_inputs.advantages.data)
             all_model_ids.append(model_id)
-            all_loss_fn_types.append(loss_fn_type)
+            all_loss_fns.append(request_data.loss_fn)
             all_loss_fn_configs.append(request_data.loss_fn_config)
 
         request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
@@ -138,7 +151,7 @@ def prepare_model_pass_batch(
         all_sampling_logprobs=all_sampling_logprobs,
         all_advantages=all_advantages,
         all_model_ids=all_model_ids,
-        all_loss_fn_types=all_loss_fn_types,
+        all_loss_fns=all_loss_fns,
         all_loss_fn_configs=all_loss_fn_configs,
         request_batch_slices=request_batch_slices,
     )
@@ -150,13 +163,17 @@ def get_backend_classes(backend_name: str):
         from tx.tinker.backends.jax import JaxBackend, JaxBackendConfig
 
         return JaxBackend, JaxBackendConfig
-    elif backend_name == "skyrl_train":
-        from tx.tinker.backends.skyrl_train import SkyRLTrainBackend, SkyRLTrainBackendConfig
+    elif backend_name == "fsdp":
+        from tx.tinker.backends.skyrl_train import SkyRLTrainBackend, FSDPBackendConfig
 
-        return SkyRLTrainBackend, SkyRLTrainBackendConfig
+        return SkyRLTrainBackend, FSDPBackendConfig
+    elif backend_name == "megatron":
+        from tx.tinker.backends.skyrl_train import SkyRLTrainBackend, MegatronBackendConfig
+
+        return SkyRLTrainBackend, MegatronBackendConfig
     else:
         raise ValueError(
-            f"Unknown backend: {backend_name}. Available backends: jax, skyrl_train. "
+            f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "
             f"Make sure the backend's dependencies are installed (e.g., pip install skyrl-tx[jax])"
         )
 
@@ -237,23 +254,42 @@ class TinkerEngine:
         or FAILED based on whether an exception occurred.
         """
         with Session(self.db_engine) as session:
-            checkpoint_db = session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type))
-            if checkpoint_db is None:
+            # Fail fast if API didn't create the checkpoint row first.
+            if session.get(CheckpointDB, (model_id, checkpoint_id, checkpoint_type)) is None:
                 raise ValueError(
                     f"Checkpoint entry not found for model '{model_id}', checkpoint '{checkpoint_id}', type '{checkpoint_type}'"
                 )
 
-            try:
-                yield checkpoint_db
-                checkpoint_db.status = CheckpointStatus.COMPLETED
-            except Exception as e:
-                logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
-                checkpoint_db.status = CheckpointStatus.FAILED
-                checkpoint_db.error_message = str(e)
-                raise
-            finally:
-                checkpoint_db.completed_at = datetime.now(timezone.utc)
-                session.add(checkpoint_db)
+        status = CheckpointStatus.FAILED
+        error_message = "checkpoint operation interrupted"
+        try:
+            # Run potentially slow checkpoint I/O without an open DB transaction.
+            yield
+            status = CheckpointStatus.COMPLETED
+            error_message = None
+        except Exception as e:
+            logger.exception(f"Error saving checkpoint for model {model_id}, checkpoint {checkpoint_id}: {e}")
+            error_message = str(e)
+            raise
+        finally:
+            # Persist final status in a short write transaction.
+            with Session(self.db_engine) as session:
+                result = session.exec(
+                    update(CheckpointDB)
+                    .where(CheckpointDB.model_id == model_id)
+                    .where(CheckpointDB.checkpoint_id == checkpoint_id)
+                    .where(CheckpointDB.checkpoint_type == checkpoint_type)
+                    .values(
+                        status=status,
+                        error_message=error_message,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                )
+                if not result.rowcount:
+                    logger.warning(
+                        f"Checkpoint row disappeared before status update: "
+                        f"model_id={model_id}, checkpoint_id={checkpoint_id}, checkpoint_type={checkpoint_type}"
+                    )
                 session.commit()
 
     def find_batchable_model_passes(
@@ -422,34 +458,48 @@ class TinkerEngine:
                 )
             ).all()
 
-            sessions_with_failed_unloads = set()
-            for model in models_to_process:
-                if self.backend.has_model(model.model_id):
-                    try:
-                        self.backend.delete_model(model.model_id)
-                        model.status = "unloaded"
-                        unloaded_count += 1
-                        logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
-                        sessions_with_failed_unloads.add(model.session_id)
-                else:
-                    # Model not in backend but status not unloaded - fix DB state
-                    model.status = "unloaded"
+        # Unload models outside DB transactions to minimize lock time.
+        sessions_with_failed_unloads: set[str] = set()
+        unloaded_model_ids: set[str] = set()
+        for model in models_to_process:
+            if self.backend.has_model(model.model_id):
+                try:
+                    self.backend.delete_model(model.model_id)
+                    unloaded_model_ids.add(model.model_id)
+                    unloaded_count += 1
+                    logger.info(f"Auto-unloaded stale model {model.model_id} from session {model.session_id}")
+                except Exception as e:
+                    logger.error(f"Failed to auto-unload model {model.model_id}: {e}")
+                    sessions_with_failed_unloads.add(model.session_id)
+            else:
+                # Model already missing in backend; only DB state needs cleanup.
+                unloaded_model_ids.add(model.model_id)
 
-            for sess in stale_sessions:
-                if sess.session_id not in sessions_with_failed_unloads:
-                    sess.status = "expired"
-                    logger.info(f"Expired stale session {sess.session_id} (last heartbeat: {sess.last_heartbeat_at})")
+        sessions_to_expire = [s.session_id for s in stale_sessions if s.session_id not in sessions_with_failed_unloads]
 
+        # Apply DB status updates in one short write transaction.
+        with Session(self.db_engine) as session:
+            if unloaded_model_ids:
+                _ = session.exec(
+                    update(ModelDB).where(ModelDB.model_id.in_(unloaded_model_ids)).values(status="unloaded")
+                )
+            if sessions_to_expire:
+                _ = session.exec(
+                    update(SessionDB).where(SessionDB.session_id.in_(sessions_to_expire)).values(status="expired")
+                )
             session.commit()
+
+        for session_id in sessions_to_expire:
+            logger.info(f"Expired stale session {session_id}")
 
         return unloaded_count
 
-    def process_optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
+    def process_optim_step(
+        self, model_id: str, request_data: types.OptimStepInput
+    ) -> types.OptimStepOutput | types.ErrorResponse:
         """Process an optim_step request and apply accumulated gradients."""
         if not self.backend.has_model(model_id):
-            raise ValueError(f"Model {model_id} not loaded")
+            return _model_not_found_error(model_id)
 
         return self.backend.optim_step(model_id, request_data)
 
@@ -468,10 +518,12 @@ class TinkerEngine:
         prepared = prepare_sample_batch(requests, self.config.checkpoints_base)
         return self.backend.sample(prepared)
 
-    def process_load_weights(self, model_id: str, request_data: types.LoadWeightsInput) -> types.LoadWeightsOutput:
+    def process_load_weights(
+        self, model_id: str, request_data: types.LoadWeightsInput
+    ) -> types.LoadWeightsOutput | types.ErrorResponse:
         """Loads a clean, trimmed training checkpoint."""
         if not self.backend.has_model(model_id):
-            raise ValueError("Model not loaded. Create the model before loading a checkpoint.")
+            return _model_not_found_error(model_id)
 
         checkpoint_path = (
             self.config.checkpoints_base / request_data.source_model_id / f"{request_data.checkpoint_id}.tar.gz"
@@ -481,13 +533,15 @@ class TinkerEngine:
 
         return types.LoadWeightsOutput(type="load_weights")
 
-    def process_save_weights(self, model_id: str, request_data: types.SaveWeightsInput) -> types.SaveWeightsOutput:
+    def process_save_weights(
+        self, model_id: str, request_data: types.SaveWeightsInput
+    ) -> types.SaveWeightsOutput | types.ErrorResponse:
         """
         Saves a clean training checkpoint by converting the trimmed NNX graph
         to a pure dictionary before serialization, following official Flax docs.
         """
         if not self.backend.has_model(model_id):
-            raise ValueError(f"Model {model_id} not loaded")
+            return _model_not_found_error(model_id)
 
         checkpoint_id = request_data.path
         output_path = self.config.checkpoints_base / model_id / f"{checkpoint_id}.tar.gz"
@@ -503,10 +557,10 @@ class TinkerEngine:
 
     def process_save_weights_for_sampler(
         self, model_id: str, request_data: types.SaveWeightsForSamplerInput
-    ) -> types.SaveWeightsForSamplerOutput:
+    ) -> types.SaveWeightsForSamplerOutput | types.ErrorResponse:
         """Process a save_weights_for_sampler request and save model weights."""
         if not self.backend.has_model(model_id):
-            raise ValueError(f"Model {model_id} not loaded")
+            return _model_not_found_error(model_id)
 
         # Make sure the user cannot store checkpoints in places like ../../<important file>
         checkpoint_id = Path(request_data.path).name
