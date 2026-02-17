@@ -5,7 +5,6 @@ import jax
 from jax import numpy as jnp
 
 from tx.layers.util import Param, sinkhorn_knopp
-from tx.layers.layernorm import RMSNorm
 
 
 def is_connector_path(path: tuple[Any, ...]) -> bool:
