@@ -91,10 +91,9 @@ class HarborGenerator(GeneratorInterface):
         else:
             self.custom_chat_template_content = None
 
-        # Initialize rate limiter
-        rate_limit_config = harbor_cfg.get("rate_limit", None)
+        # Initialize rate limiter from generator config (not part of Harbor TrialConfig)
+        rate_limit_config = generator_cfg.get("rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
-        self._harbor_trial_config_template.pop("rate_limit", None)
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         tasks = []

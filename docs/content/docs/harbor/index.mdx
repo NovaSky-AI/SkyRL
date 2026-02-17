@@ -113,7 +113,7 @@ When `HarborGenerator` is created, it:
 1. Builds a `base_url` from the vLLM HTTP endpoint host and port.
 2. Converts the Harbor YAML config into a Python dict (the **config template**).
 3. Injects the model name (`hosted_vllm/{served_model_name}`) and API base URL (`{base_url}/v1`) into the template. These stay constant across all trials.
-4. Creates a rate limiter from the `rate_limit` config, then strips `rate_limit` from the template (since it is SkyRL-specific and not a valid Harbor `TrialConfig` field).
+4. Creates a rate limiter from the `generator.rate_limit` config (passed via Hydra `+generator.rate_limit.*` overrides, separate from the Harbor TrialConfig).
 
 ### Per-Batch Generation
 
@@ -183,12 +183,20 @@ This prevents biased advantage estimation. In GRPO, advantages are computed by n
 
 ### Rate Limiting
 
-The generator includes built-in rate limiting to avoid overloading sandbox providers:
+The generator includes built-in rate limiting to avoid overloading sandbox providers (some impose rate limit on sandbox creation):
 
-- **`trajectories_per_second`**: Throttles trial submission rate (default: 5/sec).
-- **`max_concurrency`**: Caps parallel `trial.run()` calls (default: 512).
+- **`trajectories_per_second`**: Throttles trial submission rate (e.g., 5/sec).
+- **`max_concurrency`**: Caps parallel `trial.run()` calls (e.g., 512).
 
-These are configured in the `rate_limit` section of the Harbor config YAML and consumed by `HarborGenerator` only.
+These are configured via Hydra overrides on the `generator` config (not in the Harbor TrialConfig YAML). For example:
+
+```bash
++generator.rate_limit.enabled=true \
++generator.rate_limit.trajectories_per_second=5 \
++generator.rate_limit.max_concurrency=512
+```
+
+If `+generator.rate_limit` is omitted entirely, no rate limiting is applied.
 
 ## TrialConfig and Key Knobs
 
@@ -225,8 +233,8 @@ agent:
 | `trainer.algorithm.advantage_estimator` | SkyRL config | Advantage method: `grpo`, `rloo`, `reinforce_pp`, etc. |
 | `trainer.train_batch_size` | SkyRL config | Number of unique prompts per training batch |
 | `environment.type` | Harbor config | Sandbox provider: `daytona`, `docker`, `modal`, `e2b`, `gke` |
-| `rate_limit.max_concurrency` | Harbor config | Parallel trial cap; tune based on sandbox provider capacity |
-| `rate_limit.trajectories_per_second` | Harbor config | Submission rate; prevents overloading the sandbox provider |
+| `+generator.rate_limit.max_concurrency` | Launch script | Parallel trial cap; tune based on sandbox provider capacity |
+| `+generator.rate_limit.trajectories_per_second` | Launch script | Submission rate; prevents overloading the sandbox provider |
 | `timeout_multiplier` | Harbor config | Scales all default timeouts; increase for harder tasks |
 
 ### Environment and Verifier
@@ -295,16 +303,13 @@ For the full specification of Harbor's task format and all supported fields in `
 Most publicly available Harbor datasets are hosted on HuggingFace Hub. The `prepare_harbor_dataset.py` script handles downloading and extracting them into the task directory layout that `HarborTaskDataset` expects.
 
 The script handles two dataset formats automatically:
-- **Parquet-based datasets** (e.g., `OpenThoughts-Agent-v1-RL`, `CodeContests`): Tasks are stored as tar archives in a parquet file with `path` and `task_binary` columns. The script extracts each archive into its own task directory.
+- **Parquet-based datasets** (e.g., `CodeContests`): Tasks are stored as tar archives in a parquet file with `path` and `task_binary` columns. The script extracts each archive into its own task directory.
 - **Direct task directories** (e.g., `OpenThoughts-TB-dev`): The dataset already contains task directories. The script creates a symlink to the downloaded snapshot.
 
 ```bash
 cd SkyRL
 
 # Download and extract training datasets
-uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
-    --dataset open-thoughts/OpenThoughts-Agent-v1-RL
-
 uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset open-thoughts/CodeContests
 
@@ -322,7 +327,7 @@ uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
 ```
 
 <Callout type="info">
-You must run `prepare_harbor_dataset.py` before launching training. The launch scripts (`run_otagent.sh`, `run_codecontest.sh`) assume datasets are already prepared at `~/data/harbor/`.
+You must run `prepare_harbor_dataset.py` before launching training. The launch scripts (e.g. `run_codecontest.sh`) assume datasets are already prepared at `~/data/harbor/`.
 </Callout>
 
 ## Running Training
@@ -340,7 +345,7 @@ You must run `prepare_harbor_dataset.py` before launching training. The launch s
 cd SkyRL
 
 # Full RL training
-bash examples/train_integrations/harbor/run_otagent.sh
+bash examples/train_integrations/harbor/run_codecontest.sh
 
 # Generation-only debugging (no training, useful for testing the integration)
 bash examples/train_integrations/harbor/run_harbor_gen.sh
@@ -362,7 +367,10 @@ uv run --isolated --extra fsdp --extra harbor \
   generator.n_samples_per_prompt=8 \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.train_batch_size=64 \
-  generator.enable_http_endpoint=true
+  generator.enable_http_endpoint=true \
+  +generator.rate_limit.enabled=true \
+  +generator.rate_limit.trajectories_per_second=5 \
+  +generator.rate_limit.max_concurrency=512
 ```
 
 ### Metrics

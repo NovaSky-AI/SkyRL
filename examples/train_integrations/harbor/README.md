@@ -15,7 +15,6 @@ examples/train_integrations/harbor/
     main_harbor.py                 # Full training entrypoint
     main_harbor_generate.py        # Generation-only debug entrypoint
   run_codecontest.sh               # Code contest training (Qwen3-8B)
-  run_otagent.sh                   # OpenThoughts-Agent training
   run_harbor_gen.sh                # Debug generation-only
 ```
 

@@ -7,8 +7,6 @@ tar-archived task directories (columns: path, task_binary).
 Output directory defaults to ~/data/harbor/<repo-name>.
 
 Usage:
-    uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
-        --dataset open-thoughts/OpenThoughts-Agent-v1-RL
 
     uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
         --dataset open-thoughts/CodeContests
