@@ -6,6 +6,10 @@ on:
     - cron: '*/15 * * * *'
   workflow_dispatch:
 
+concurrency:
+  group: runner-health-check
+  cancel-in-progress: false
+
 permissions:
   contents: read
   actions: read
