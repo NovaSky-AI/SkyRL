@@ -5,18 +5,19 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
+from omegaconf import DictConfig
 
 import numpy as np
 import ray
 import torch
 from jaxtyping import Float
 from loguru import logger
-from omegaconf import DictConfig
 from ray import ObjectRef
 from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
@@ -52,9 +53,9 @@ from skyrl_train.utils.ppo_utils import (
     FixedKLController,
     compute_approx_kl,
     get_kl_controller,
-    masked_mean,
     normalize_advantages_dict,
 )
+from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -77,7 +78,7 @@ from skyrl_train.workers.worker_utils import reduce_metrics
 class RayPPOTrainer:
     def __init__(
         self,
-        cfg: DictConfig,
+        cfg: Union[SkyRLConfig, DictConfig],
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],
@@ -133,9 +134,12 @@ class RayPPOTrainer:
         this to customize dataloader behavior. For instance, fully async training
         needs a batch size of 1, among other features.
         Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
+        When train_dataset is None (e.g. Tinker backend provides data externally),
+        the dataloader is not built.
         """
-        self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
-        self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
+        if self.train_dataset is not None:
+            self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
+            self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
 
     @torch.no_grad()
     async def eval(self) -> Dict[str, float]:
@@ -501,6 +505,12 @@ class RayPPOTrainer:
             critic_steps_per_train_batch = (
                 cfg.trainer.train_batch_size // cfg.trainer.critic_mini_batch_size * cfg.trainer.update_epochs_per_batch
             )
+        policy_num_training_steps = (
+            self.total_training_steps * policy_steps_per_train_batch if self.total_training_steps is not None else None
+        )
+        critic_num_training_steps = (
+            self.total_training_steps * critic_steps_per_train_batch if self.total_training_steps is not None else None
+        )
         if not cfg.trainer.placement.colocate_all:
             refs = []
             if ref_model is not None:
@@ -508,14 +518,14 @@ class RayPPOTrainer:
             refs.extend(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
+                    num_training_steps=policy_num_training_steps,
                 )
             )
             if cfg.trainer.critic.model.path:
                 refs.extend(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
+                        num_training_steps=critic_num_training_steps,
                     )
                 )
             ray.get(refs)
@@ -527,7 +537,7 @@ class RayPPOTrainer:
             ray.get(
                 policy_model.async_init_model(
                     cfg.trainer.policy.model.path,
-                    num_training_steps=self.total_training_steps * policy_steps_per_train_batch,
+                    num_training_steps=policy_num_training_steps,
                 )
             )
             ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id))
@@ -536,7 +546,7 @@ class RayPPOTrainer:
                 ray.get(
                     critic_model.async_init_model(
                         cfg.trainer.critic.model.path,
-                        num_training_steps=self.total_training_steps * critic_steps_per_train_batch,
+                        num_training_steps=critic_num_training_steps,
                     )
                 )
                 critic_model.offload_to_cpu()
@@ -603,12 +613,17 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
         )
-        # sanity check for tis
-        if self.cfg.trainer.algorithm.use_tis:
+
+        # sanity check for off_policy_correction
+        off_policy_correction = self.cfg.trainer.algorithm.off_policy_correction
+        tis_ratio_type = off_policy_correction.tis_ratio_type
+        sequence_mask_metric = off_policy_correction.sequence_mask_metric
+        if tis_ratio_type is not None or sequence_mask_metric is not None:
             assert (
                 rollout_logprobs_tensor is not None
-            ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
+            ), "expected non-null rollout logprobs tensor when off_policy_correction is enabled"
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -1066,6 +1081,8 @@ class RayPPOTrainer:
                     all_metrics["grad_norm"].append(grad_norm)
 
         # Reduce metrics across all mini-batches and epochs
+        # pop out loss_fn_outputs since it's not a scalar metric and to avoid logging it
+        all_metrics.pop("loss_fn_outputs", None)
         reduced_metrics = reduce_metrics(all_metrics)
         return reduced_metrics
 
@@ -1073,26 +1090,17 @@ class RayPPOTrainer:
         """
         Run the training step for the policy and critic models.
 
-        For Megatron strategy: uses ppo_train (training loop inside worker)
-        For FSDP strategy: uses forward_backward + optim_step (training loop in trainer)
+        Uses forward_backward + optim_step for both FSDP and Megatron strategies.
         """
         data.metadata["global_step"] = self.global_step
         critic_status = None
 
-        if self.cfg.trainer.strategy == "megatron":
-            # Megatron: training loop inside worker via ppo_train
-            if self.has_critic:
-                with Timer("critic_train", self.all_timings):
-                    critic_status = self.dispatch.ppo_train("critic", data)
-            with Timer("policy_train", self.all_timings):
-                policy_status = self.dispatch.ppo_train("policy", data)
-        else:
-            # FSDP: training loop in trainer via forward_backward + optim_step
-            if self.has_critic:
-                with Timer("critic_train", self.all_timings):
-                    critic_status = self._execute_training_step("critic", data)
-            with Timer("policy_train", self.all_timings):
-                policy_status = self._execute_training_step("policy", data)
+        # Unified training interface for both FSDP and Megatron
+        if self.has_critic:
+            with Timer("critic_train", self.all_timings):
+                critic_status = self._execute_training_step("critic", data)
+        with Timer("policy_train", self.all_timings):
+            policy_status = self._execute_training_step("policy", data)
 
         # Update metrics
         if critic_status is not None:

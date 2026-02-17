@@ -10,7 +10,6 @@ import pytest
 import ray
 from typing import Optional
 from ray.util.placement_group import PlacementGroup
-from omegaconf import DictConfig
 from transformers import AutoTokenizer
 
 from tests.gpu.utils import (
@@ -20,6 +19,8 @@ from tests.gpu.utils import (
     are_responses_similar,
     get_test_actor_config,
 )
+
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray, get_ray_pg_ready_with_timeout
@@ -38,7 +39,7 @@ def _check_gpus(num_gpus: int):
         pytest.skip(f"Expert parallel tests require >= {num_gpus} GPUs, found {len(available)}: {available}")
 
 
-def _get_test_cfg() -> DictConfig:
+def _get_test_cfg() -> SkyRLConfig:
     cfg = get_test_actor_config()
 
     # Use MoE policy model
@@ -84,7 +85,7 @@ async def _run_single_generation(client: InferenceEngineClient, prompts, samplin
 
 
 def init_ray_inference_engines(
-    backend: str, tp_size: int, shared_pg: Optional[PlacementGroup], config: DictConfig
+    backend: str, tp_size: int, shared_pg: Optional[PlacementGroup], config: SkyRLConfig
 ) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)

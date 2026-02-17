@@ -5,6 +5,10 @@
 
 </div>
 
+> [!IMPORTANT]
+> **Note:** SkyRL is undergoing a repo reorganization into the `SkyRL/skyrl` folder, which unifies the skyrl libraries (`skyrl-train`, `skyrl-tx`) into a single package. The existing packages below are fully functional but will be migrated to new paths shortly. We expect to finish by end of February, and in the meantime, please try to develop on top of the new `SkyRL/skyrl` folder. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
+
+
 # Overview
 
  With a focus on modularity, `skyrl-train` makes it easy to prototype new training algorithms, environments, and execution plans—without compromising usability or speed. 
@@ -27,7 +31,7 @@ The `skyrl-train` package supports:
 - Synchronous RL, [async one-off pipelining](https://docs.skyrl.ai/docs/tutorials/one_step_off_async), or [fully async RL with in-flight weight updates](https://docs.skyrl.ai/docs/tutorials/fully_async)
 - Simple batched rollouts or Asynchronous rollouts for multi-turn conversations
 - Weight sync via NCCL, gloo, or checkpoint-and-load
-- Integration with `skyrl-gym`, [verifiers](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/integrations/verifiers), [OpenEnv](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/integrations/openenv), [Harbor/Terminal-Bench](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/terminal_bench), and more!
+- Integration with `skyrl-gym`, [verifiers](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/integrations/verifiers), [OpenEnv](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/integrations/openenv), [Harbor/Terminal-Bench](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/harbor), and more!
 - Sequence packing and Flash Attention 2
 - Algorithmic support for RLOO, REINFORCE, GSPO, CISPO, SAPO
 - Step-wise training for fully on policy multi-turn RL

@@ -10,25 +10,22 @@ multiple models share the same GPU (colocate_all=True or colocate_policy_ref=Tru
 
 import ray
 import pytest
-import hydra
-from omegaconf import DictConfig
 from ray.util.placement_group import placement_group
 
 from tests.gpu.utils import make_dummy_training_batch, get_rank_0_memory
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
-from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.workers.worker_dispatch import WorkerDispatch, GPUState
+from tests.gpu.utils import import_worker
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, RefWorker, CriticWorker
 from skyrl_train.workers.worker import PPORayActorGroup
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_config() -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+def get_test_config() -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.generator.inference_engine_tensor_parallel_size = 1
@@ -45,7 +42,7 @@ def get_test_config() -> DictConfig:
 def init_colocated_actor_group(
     worker_cls,
     shared_pg,
-    cfg: DictConfig,
+    cfg: SkyRLConfig,
 ) -> PPORayActorGroup:
     """Initialize an actor group that shares a placement group with others."""
     return PPORayActorGroup(
@@ -294,18 +291,24 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_set_lr(ray_init_fixture):
+@pytest.mark.parametrize(
+    ("strategy"),
+    ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)],
+    ids=["fsdp2", "megatron"],
+)
+async def test_dispatch_set_lr(ray_init_fixture, strategy):
     """
     Test that WorkerDispatch.set_lr updates the optimizer's learning rate.
     """
     cfg = get_test_config()
+    cfg.trainer.strategy = strategy
 
     try:
         # Create placement group and policy actor
         pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
-        policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
+        policy_group = init_colocated_actor_group(import_worker(strategy, "policy"), pg, cfg)
         ray.get(policy_group.async_init_model(MODEL_NAME))
 
         dispatch = WorkerDispatch(cfg, policy_actor_group=policy_group)

@@ -118,7 +118,8 @@ class Datum(BaseModel):
 
 class ForwardBackwardInput(BaseModel):
     data: list[Datum]
-    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo"]
+    loss_fn: Literal["cross_entropy", "importance_sampling", "ppo", "cispo"]
+    loss_fn_config: dict[str, float] | None = None
 
 
 class ForwardBackwardOutput(BaseModel):
@@ -137,7 +138,7 @@ class OptimStepInput(BaseModel):
 
 
 class OptimStepOutput(BaseModel):
-    pass
+    metrics: dict[str, float] | None = None
 
 
 class SaveWeightsForSamplerInput(BaseModel):
@@ -232,7 +233,8 @@ class PreparedModelPassBatch(BaseModel):
 
     # Per-example scalars
     all_model_ids: list[str]
-    all_loss_fn_types: list[int]
+    all_loss_fns: list[str]
+    all_loss_fn_configs: list[dict[str, float] | None]
 
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
     request_batch_slices: list[tuple[str, str, int, int]]
@@ -256,3 +258,12 @@ class PreparedSampleBatch(BaseModel):
 
     # Mapping from samples back to requests: (request_id, model_id, start_idx, end_idx, prompt_logprobs_requested)
     request_batch_slices: list[tuple[str, str, int, int, bool]]
+
+
+# Loss function type mappings (used for validation and backend dispatch)
+LOSS_TYPES = {
+    "cross_entropy": 0,
+    "importance_sampling": 1,
+    "ppo": 2,
+    "cispo": 3,
+}

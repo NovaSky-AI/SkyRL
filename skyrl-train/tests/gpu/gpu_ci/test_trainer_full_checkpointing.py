@@ -14,20 +14,18 @@ uv run --isolated --extra dev --extra mcore pytest tests/gpu/gpu_ci/test_trainer
 
 import ray
 import pytest
-import hydra
 import torch
 import os
 import shutil
 import tempfile
-from omegaconf import DictConfig
 from torch.utils.data import Dataset
 from unittest.mock import MagicMock
 from transformers import AutoTokenizer
 
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer
 from tests.gpu.utils import import_worker, ray_init_for_tests
-from skyrl_train.entrypoints.main_base import config_dir
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_GPUS = 2
@@ -49,11 +47,9 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> DictConfig:
+def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLConfig:
     """Create minimal trainer config for testing"""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.critic.model.path = MODEL_NAME  # Enable critic for testing
     cfg.trainer.strategy = strategy
@@ -98,7 +94,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> D
     return cfg
 
 
-def create_minimal_trainer(cfg: DictConfig):
+def create_minimal_trainer(cfg: SkyRLConfig):
     """Create a minimal trainer setup for testing"""
     # Create minimal tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -218,9 +214,9 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
 
         # Check key configuration values are preserved
         assert (
-            loaded_trainer_state["config"]["trainer"]["train_batch_size"] == cfg.trainer.train_batch_size
+            loaded_trainer_state["config"].trainer.train_batch_size == cfg.trainer.train_batch_size
         ), "train_batch_size not preserved in checkpoint"
-        assert loaded_trainer_state["config"]["trainer"]["strategy"] == strategy, "strategy not preserved in checkpoint"
+        assert loaded_trainer_state["config"].trainer.strategy == strategy, "strategy not preserved in checkpoint"
         assert loaded_trainer_state["global_step"] == saved_global_step, "global_step not preserved in checkpoint"
 
         # Cleanup first trainer

@@ -1,0 +1,110 @@
+---
+title: "Cookbook Scripts"
+---
+
+The [tinker-cookbook](https://github.com/thinking-machines-lab/tinker-cookbook) is a library provided by Thinking Machines with ready-to-run training recipes. This page describes how to run a few example recipes on SkyRL, and provides example curves from our experiments.
+
+## Setup
+
+Follow the [Quickstart](./quickstart) to install SkyRL, then clone the cookbook:
+
+```bash
+git clone https://github.com/thinking-machines-lab/tinker-cookbook.git
+cd tinker-cookbook
+```
+
+## Start the Server
+
+Before launching a training script, start the Tinker server from the `SkyRL/` directory:
+
+```bash
+uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
+    --base-model "Qwen/Qwen3-0.6B" --backend fsdp
+```
+
+The same server command can be reused across all recipes below. For more detail on configuration options for the training backend, see [Configuration](./configuration).
+
+## Recipes
+
+All of the cookbook recipes default to LoRA training (e.g., with `lora_rank=32`), but full-parameter fine-tuning (FFT) is supported on SkyRL by setting `lora_rank=0`. Per [Thinking Machines' learning rate guide](https://tinker-docs.thinkingmachines.ai/supervised-learning/sl-hyperparams), use a ~10x lower learning rate when switching to FFT. 
+
+### Supervised Learning Loop (`sl_loop`)
+
+Fine-tunes a model on the [No Robots](https://huggingface.co/datasets/HuggingFaceH4/no_robots) dataset using cross-entropy loss with a linear learning rate decay.
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
+    python -m tinker_cookbook.recipes.sl_loop \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B" \
+    train_on_what=LAST_ASSISTANT_MESSAGE
+```
+
+<div style={{width: "75%", margin: "0 auto"}}>
+![SL NLL over steps](/images/tinker/nll_over_steps.png)
+</div>
+
+For full-parameter fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
+    python -m tinker_cookbook.recipes.sl_loop \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B" \
+    train_on_what=LAST_ASSISTANT_MESSAGE \
+    lora_rank=0 learning_rate=1e-5
+```
+
+### RL Training Loop (`rl_loop`)
+
+Trains a model on [GSM8K](https://huggingface.co/datasets/openai/gsm8k) math problems using GRPO-style reward centering with importance sampling.
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
+    python -m tinker_cookbook.recipes.rl_loop \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B"
+```
+
+<div style={{width: "75%", margin: "0 auto"}}>
+![RL reward over steps](/images/tinker/reward_over_steps.png)
+</div>
+
+For full-parameter fine-tuning (no LoRA), set `lora_rank=0` and lower the learning rate:
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
+    python -m tinker_cookbook.recipes.rl_loop \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B" \
+    lora_rank=0 learning_rate=4e-6
+```
+
+Note: `rl_loop` uses ephemeral weight sync by default, syncing weights to the inference engine without writing to disk. See [Weight Sync](./architecture#weight-sync) for details on ephemeral vs persistent modes.
+
+### Math RL (`math_rl`)
+
+RL training specifically for mathematical reasoning.
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
+    python -m tinker_cookbook.recipes.math_rl.train \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B"
+```
+
+<div style={{width: "75%", margin: "0 auto"}}>
+![Math RL correct over steps](/images/tinker/correct_over_steps.png)
+</div>
+
+### Code RL (`code_rl`)
+
+RL training for code generation tasks. Uses the same `importance_sampling` loss with code execution-based rewards.
+
+```bash
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets --with torch \
+    python -m tinker_cookbook.recipes.code_rl.train \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B" \
+    lora_rank=0 learning_rate=1e-6
+```

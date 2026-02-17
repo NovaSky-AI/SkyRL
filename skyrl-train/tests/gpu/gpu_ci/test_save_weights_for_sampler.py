@@ -9,11 +9,9 @@ uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_save_wei
 
 import asyncio
 
-import hydra
 import pytest
 import ray
-from omegaconf import DictConfig
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -29,26 +27,22 @@ from tests.gpu.utils import (
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_config() -> DictConfig:
+def get_test_config() -> SkyRLConfig:
     """Get base config with test-specific overrides."""
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
+    cfg = SkyRLConfig()
+    cfg.trainer.policy.model.path = MODEL
+    cfg.trainer.critic.model.path = ""
+    cfg.trainer.placement.policy_num_gpus_per_node = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
+    cfg.generator.async_engine = True
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.run_engines_locally = True
+    cfg.trainer.use_sample_packing = False
+    cfg.trainer.logger = "console"
 
-        cfg.trainer.policy.model.path = MODEL
-        cfg.trainer.critic.model.path = ""
-        # Use 1 GPU - multi-GPU aspects are tested elsewhere
-        cfg.trainer.placement.policy_num_gpus_per_node = 1
-        cfg.generator.inference_engine_tensor_parallel_size = 1
-        cfg.generator.async_engine = True
-        cfg.generator.num_inference_engines = 1
-        cfg.generator.run_engines_locally = True
-        cfg.trainer.use_sample_packing = False
-        cfg.trainer.logger = "console"
+    validate_cfg(cfg)
 
-        # Validate config (sets max_seq_len and other derived fields)
-        validate_cfg(cfg)
-
-        return cfg
+    return cfg
 
 
 @pytest.mark.parametrize(
@@ -77,7 +71,7 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         cfg.trainer.strategy = strategy
         cfg.generator.backend = backend
 
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             model=MODEL,
             cfg=cfg,
             use_local=True,
@@ -155,7 +149,7 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, back
         cfg.generator.backend = backend
 
         # Initialize inference engine (uses 1 GPU)
-        client, pg = init_inference_engines(
+        client, pg, router, server_group = init_inference_engines(
             model=MODEL,
             cfg=cfg,
             use_local=True,

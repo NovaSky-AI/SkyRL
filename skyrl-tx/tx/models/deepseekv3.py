@@ -7,6 +7,7 @@ from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.rotary_embedding import get_rope
 from tx.layers.util import Param, prepare_routing, shard_map_ep
 from tx.layers.layernorm import RMSNorm
+from tx.layers.stacked import MultiStackedDecoderLayers, StackedDecoderLayers
 from tx.models.configs import DeepseekV3Config
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -37,12 +38,13 @@ class DeepseekV3Attention(nnx.Module):
             self.q_proj = LoRALinear(
                 in_features=config.hidden_size,
                 out_features=self.num_heads * self.qk_head_dim,
+                sharding=("fsdp", tp_shard),
                 max_lora_adapters=config.max_lora_adapters,
                 max_lora_rank=config.max_lora_rank,
                 dtype=dtype,
                 param_dtype=dtype,
                 use_bias=False,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", tp_shard)),
+                kernel_init=nnx.initializers.lecun_normal(),
                 rngs=rngs,
             )
             self.q_a_proj = None
@@ -53,36 +55,39 @@ class DeepseekV3Attention(nnx.Module):
             self.q_a_proj = LoRALinear(
                 in_features=config.hidden_size,
                 out_features=self.q_lora_rank,
+                sharding=("fsdp", None),
                 max_lora_adapters=config.max_lora_adapters,
                 max_lora_rank=config.max_lora_rank,
                 dtype=dtype,
                 param_dtype=dtype,
                 use_bias=config.attention_bias,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", None)),
+                kernel_init=nnx.initializers.lecun_normal(),
                 rngs=rngs,
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
             self.q_b_proj = LoRALinear(
                 in_features=self.q_lora_rank,
                 out_features=self.num_heads * self.qk_head_dim,
+                sharding=(None, tp_shard),
                 max_lora_adapters=config.max_lora_adapters,
                 max_lora_rank=config.max_lora_rank,
                 dtype=dtype,
                 param_dtype=dtype,
                 use_bias=False,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
+                kernel_init=nnx.initializers.lecun_normal(),
                 rngs=rngs,
             )
 
         self.kv_a_proj_with_mqa = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.kv_lora_rank + self.qk_rope_head_dim,
+            sharding=("fsdp", None),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=config.attention_bias,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", None)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
@@ -90,24 +95,26 @@ class DeepseekV3Attention(nnx.Module):
         self.kv_b_proj = LoRALinear(
             in_features=self.kv_lora_rank,
             out_features=self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            sharding=(None, tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
         self.o_proj = LoRALinear(
             in_features=self.num_heads * self.v_head_dim,
             out_features=config.hidden_size,
+            sharding=(tp_shard, "fsdp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=config.attention_bias,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (tp_shard, "fsdp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
@@ -189,10 +196,11 @@ class DeepseekV3MLP(nnx.Module):
         self.gate_proj = LoRALinear(
             config.hidden_size,
             intermediate_size,
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -200,10 +208,11 @@ class DeepseekV3MLP(nnx.Module):
         self.up_proj = LoRALinear(
             config.hidden_size,
             intermediate_size,
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -211,10 +220,11 @@ class DeepseekV3MLP(nnx.Module):
         self.down_proj = LoRALinear(
             intermediate_size,
             config.hidden_size,
+            sharding=("tp", "fsdp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", "fsdp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -260,30 +270,33 @@ class DeepseekV3NaiveMoe(nnx.Module):
             config.n_routed_experts,
             config.hidden_size,
             config.moe_intermediate_size,
+            sharding=("ep", "fsdp", "tp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "fsdp", "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
             config.n_routed_experts,
             config.hidden_size,
             config.moe_intermediate_size,
+            sharding=("ep", "fsdp", "tp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "fsdp", "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
             config.n_routed_experts,
             config.moe_intermediate_size,
             config.hidden_size,
+            sharding=("ep", "tp", "fsdp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "tp", "fsdp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
@@ -393,28 +406,32 @@ class DeepseekV3MoE(nnx.Module):
 
         router_logits = self.gate(hidden_states_flat)
         top_k_weights, top_k_index = self._compute_routing(router_logits)
+        # _compute_routing uses float32 for softmax stability; cast back to model dtype
+        # to maintain consistent dtypes through jax.lax.scan in forward_layers
+        top_k_weights = top_k_weights.astype(hidden_states.dtype)
 
         expert_output = self.experts(hidden_states_flat, top_k_index, top_k_weights, adapter_indices_flat)
-        shared_output = self.shared_experts(
-            hidden_states_flat.reshape(batch_size, seq_len, hidden_size), adapter_indices
-        ).reshape(-1, hidden_size)
+        shared_output = self.shared_experts(hidden_states_flat, adapter_indices_flat)
         expert_output = expert_output + shared_output
 
         return expert_output.reshape(batch_size, seq_len, hidden_size)
 
 
 class DeepseekV3DecoderLayer(nnx.Module):
+    """Decoder layer supporting both dense MLP and sparse MoE."""
 
-    def __init__(self, config: DeepseekV3Config, layer_idx: int, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+    def __init__(
+        self,
+        config: DeepseekV3Config,
+        *,
+        mlp_cls: type[DeepseekV3MLP] | type[DeepseekV3MoE],
+        dtype: jnp.dtype,
+        rngs: nnx.Rngs,
+    ) -> None:
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.self_attn = DeepseekV3Attention(config, dtype=dtype, rngs=rngs)
-
-        # Use dense MLP for initial layers, MoE for the rest
-        if layer_idx >= config.first_k_dense_replace:
-            self.mlp = DeepseekV3MoE(config, dtype=dtype, rngs=rngs)
-        else:
-            self.mlp = DeepseekV3MLP(config, dtype=dtype, rngs=rngs)
+        self.mlp = mlp_cls(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -452,19 +469,29 @@ class DeepseekV3Model(nnx.Module):
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
+            sharding=("tp", None),
             dtype=dtype,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
+            embedding_init=nnx.initializers.normal(),
             rngs=rngs,
         )
-        self.layers = nnx.List(
-            [
-                DeepseekV3DecoderLayer(config, layer_idx=i, dtype=dtype, rngs=rngs)
-                for i in range(config.num_hidden_layers)
-            ]
-        )
+
+        # Create stacked layers: dense layers followed by MoE layers
+        num_dense_layers = config.first_k_dense_replace
+        num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
+
+        def create_dense_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
+            return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MLP, dtype=dtype, rngs=rngs)
+
+        def create_moe_layer(rngs: nnx.Rngs) -> DeepseekV3DecoderLayer:
+            return DeepseekV3DecoderLayer(config, mlp_cls=DeepseekV3MoE, dtype=dtype, rngs=rngs)
+
+        dense_layers = StackedDecoderLayers(create_dense_layer, num_dense_layers, rngs)
+        moe_layers = StackedDecoderLayers(create_moe_layer, num_moe_layers, rngs)
+        self.layers = MultiStackedDecoderLayers(dense_layers, moe_layers)
+
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -476,28 +503,25 @@ class DeepseekV3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
+        # Forward through all layers
+        hidden_states, all_hidden_states, kv_cache = self.layers(
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+            is_training=is_training,
+        )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -505,7 +529,7 @@ class DeepseekV3Model(nnx.Module):
 
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
+            kv_cache=kv_cache,
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
@@ -520,10 +544,11 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
             self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
+                sharding=(None, "tp"),
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+                kernel_init=nnx.initializers.lecun_normal(),
                 max_lora_adapters=config.max_lora_adapters,
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
@@ -547,6 +572,7 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -558,6 +584,7 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            is_training=is_training,
         )
 
         return CausalLMOutput(
@@ -565,3 +592,6 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
         )
+
+
+Glm4MoeLiteForCausalLM = DeepseekV3ForCausalLM

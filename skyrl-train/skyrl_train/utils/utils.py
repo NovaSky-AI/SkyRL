@@ -5,11 +5,13 @@ import sys
 import logging
 import math
 import socket
+from datetime import datetime
+from omegaconf import DictConfig, OmegaConf
+from typing import Union
 
 import ray
 import torch
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
 from ray.util.placement_group import (
     placement_group,
     PlacementGroupSchedulingStrategy,
@@ -17,7 +19,15 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from skyrl_train.env_vars import SKYRL_LD_LIBRARY_PATH_EXPORT, SKYRL_RAY_PG_TIMEOUT_IN_S, SKYRL_PYTHONPATH_EXPORT
+from skyrl_train.config.config import SkyRLConfig
+from skyrl_train.env_vars import (
+    SKYRL_LD_LIBRARY_PATH_EXPORT,
+    SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
+    SKYRL_PYTHONPATH_EXPORT,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+    _SKYRL_USE_NEW_INFERENCE,
+)
+from pathlib import Path
 
 
 class Timer:
@@ -46,7 +56,7 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
-def validate_batch_sizes(cfg: DictConfig):
+def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Validate configured batch sizes.
 
@@ -179,7 +189,7 @@ def validate_batch_sizes(cfg: DictConfig):
     )
 
 
-def validate_megatron_cfg(cfg: DictConfig):
+def validate_megatron_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # not yet supported + tested features
     assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
     assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
@@ -204,7 +214,7 @@ def validate_megatron_cfg(cfg: DictConfig):
         )
 
 
-def validate_cfg(cfg: DictConfig):
+def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
@@ -263,37 +273,69 @@ def validate_cfg(cfg: DictConfig):
         f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
     )
 
-    # add field to algorithm config needed for loss functions
-    # create a new config to make it modifiable
-    algorithm_config = OmegaConf.create(cfg.trainer.algorithm)
-    # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-    # per batch can be variable based on the prompt length. This is used to normalize the loss for
-    # seq_mean_token_sum_norm loss reduction. Potentially revisit this if we update to use a
-    # fixed max response budget.
-    algorithm_config.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-
-    cfg.trainer.algorithm = algorithm_config
-
-    if cfg.trainer.algorithm.use_tis:
-        if cfg.trainer.algorithm.tis_imp_ratio_cap <= 0:
-            raise ValueError(
-                f"If `trainer.algorithm.use_tis` is `True` then `cfg.trainer.algorithm.tis_imp_ratio_cap` "
-                f"should be > 0, got {cfg.trainer.algorithm.tis_imp_ratio_cap }"
+    if cfg.trainer.algorithm.max_seq_len is None:
+        # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
+        # per batch can be variable based on the prompt length. This is used to normalize the loss for
+        # seq_mean_token_sum_norm loss reduction.
+        # TODO(Charlie): This calculation is not correct for multi-turn and users should use `max_seq_len` instead.
+        # Should we just force users to set max_seq_len if loss reduction is seq_mean_token_sum_norm, regardless of
+        # multi-turn or not?
+        if isinstance(cfg, DictConfig):
+            new_cfg = OmegaConf.create(cfg.trainer.algorithm)
+            new_cfg.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+            cfg.trainer.algorithm = new_cfg
+        else:
+            cfg.trainer.algorithm.max_seq_len = (
+                cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
             )
+
+    # TODO (erictang000): remove this after deprecation period
+    if cfg.trainer.algorithm.use_tis:
+        logger.warning(
+            f"`trainer.algorithm.use_tis` is deprecated. Setting `trainer.algorithm.off_policy_correction` to `token` instead."
+            f"with `token_tis_ratio_clip_high`={cfg.trainer.algorithm.tis_imp_ratio_cap}"
+        )
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "token"
+        cfg.trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high = cfg.trainer.algorithm.tis_imp_ratio_cap
+
+    # off_policy_correction config validation
+    off_policy_correction = cfg.trainer.algorithm.off_policy_correction
+    tis_ratio_type = off_policy_correction.tis_ratio_type
+    sequence_mask_metric = off_policy_correction.sequence_mask_metric
+
+    uses_off_policy_correction = tis_ratio_type is not None or sequence_mask_metric is not None
+
+    if uses_off_policy_correction:
+        # Validate tis_ratio_type
+        if tis_ratio_type:
+            assert tis_ratio_type in [
+                "token",
+                "sequence",
+            ], f"`tis_ratio_type` must be 'None', 'token', or 'sequence', got {tis_ratio_type}"
+
+        # Validate sequence_mask_metric
+        if sequence_mask_metric:
+            assert sequence_mask_metric in [
+                "product",
+                "geometric",
+            ], f"`sequence_mask_metric` must be 'product', or 'geometric', got {sequence_mask_metric}"
+
+        # Ensure logprobs are enabled for rollout correction
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
-                "`generator.sampling_params.logprobs` is `None` but `trainer.algorithm.use_tis` is `True`."
+                "`generator.sampling_params.logprobs` is `None` but off_policy_correction is enabled."
                 " Setting `logprobs` to `True`."
             )
-            # just set to 0 for better user exp
             cfg.generator.sampling_params.logprobs = 0
 
         if cfg.generator.backend == "sglang":
-            raise NotImplementedError("`trainer.algorithm.use_tis` doesn't support Sglang backend, please use vLLM")
-        assert cfg.trainer.algorithm.policy_loss_type in [
-            "regular",
-            "dual_clip",
-        ], "TIS is only implemented for regular and dual_clip policy loss types"
+            raise NotImplementedError(
+                "`trainer.algorithm.off_policy_correction` doesn't support Sglang backend, please use vLLM"
+            )
+        if cfg.trainer.algorithm.policy_loss_type in ["clip_cov", "kl_cov"]:
+            raise NotImplementedError(
+                "`trainer.algorithm.off_policy_correction` doesn't support clip_cov or kl_cov policy loss types"
+            )
 
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
@@ -332,11 +374,11 @@ def validate_cfg(cfg: DictConfig):
             )
 
 
-def validate_generator_cfg(cfg: DictConfig):
+def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     """Validates the correctness of generator-related config.
 
     Args:
-        cfg (DictConfig): config to validate
+        cfg (SkyRLConfig): config to validate
 
     Raises:
         NotImplementedError: if feature is not supported, such as sglang for multiturn generation
@@ -452,6 +494,46 @@ def validate_generator_cfg(cfg: DictConfig):
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
 
+    # Validate new inference config options
+    _validate_new_inference_cfg(cfg)
+
+
+def _validate_new_inference_cfg(cfg: DictConfig):
+    """Validates config options for the new inference layer.
+
+    This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
+
+    Config combinations:
+    - Colocated + external URLs → ERROR (requires driver-managed servers for PG sharing)
+    - Neither set → Build servers internally
+    - external_server_urls only → Create router over external servers
+    - external_proxy_url only → Use proxy for both data + control plane
+    - Both set → Fully external (proxy for data plane, servers for control plane)
+
+    Args:
+        cfg: The config to validate.
+
+    Raises:
+        ValueError: If colocated mode is used with external URLs.
+    """
+    if not _SKYRL_USE_NEW_INFERENCE:
+        # Only validate when using the new inference path
+        return
+
+    is_colocated = cfg.trainer.placement.colocate_all
+    has_external_proxy = cfg.generator.get("external_proxy_url") is not None
+    has_external_servers = cfg.generator.get("external_server_urls") is not None
+
+    # Colocated mode cannot use external endpoints
+    if is_colocated and (has_external_proxy or has_external_servers):
+        raise ValueError(
+            "Cannot use external_proxy_url or external_server_urls with colocate_all=true. "
+            "Colocated mode requires driver-managed inference servers to share placement groups "
+            "between trainer and inference workers. Please either:\n"
+            "  1. Set colocate_all=false to use external inference servers, or\n"
+            "  2. Remove external_proxy_url and external_server_urls to build servers internally."
+        )
+
 
 @ray.remote
 def get_all_env_variables():
@@ -491,7 +573,7 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
-def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
+def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
 
@@ -577,9 +659,11 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
-    if os.environ.get("DAYTONA_API_KEY"):
-        logger.info("Exporting daytona api key to ray runtime env")
-        env_vars["DAYTONA_API_KEY"] = os.environ["DAYTONA_API_KEY"]
+    # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
+    for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
+        if value := os.environ.get(var_name):
+            logger.info(f"Exporting {var_name} to ray runtime env")
+            env_vars[var_name] = value
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
@@ -599,9 +683,14 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
 
 def configure_ray_worker_logging() -> None:
     """
-    In Ray workers, stderr/stdout are not TTYs, so Loguru disables color.
-    This method forces color and formatting (e.g., bold) and routes stdlib `logging`
-    through Loguru so third-party logs match formatting
+    Configure logging for Ray workers.
+
+    This method:
+    1. Forces color and formatting for Loguru (even without TTY)
+    2. Routes stdlib logging through Loguru
+
+    Note: This does NOT redirect stdout/stderr. For infra actors (vLLM, workers),
+    call redirect_actor_output_to_file() separately in their __init__.
     """
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
 
@@ -635,7 +724,7 @@ def configure_ray_worker_logging() -> None:
     logging.root.setLevel(level)
 
 
-def initialize_ray(cfg: DictConfig):
+def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
     """
     Initialize Ray cluster with prepared runtime environment.
 
@@ -644,8 +733,31 @@ def initialize_ray(cfg: DictConfig):
     """
     from .ppo_utils import sync_registries
 
+    # When SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1, show all logs on stdout (no file redirect)
+    verbose_logging = SKYRL_DUMP_INFRA_LOG_TO_STDOUT
+
+    # Suppress Ray backend logs unless in verbose mode
+    if not verbose_logging:
+        os.environ["RAY_BACKEND_LOG_LEVEL"] = "fatal"
+
     env_vars = prepare_runtime_environment(cfg)
-    ray.init(runtime_env={"env_vars": env_vars})
+
+    # Set up log file for infrastructure logs (skip when dumping to stdout)
+    if not verbose_logging:
+        log_path = Path(cfg.trainer.log_path).resolve()
+        log_path.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+        log_file = str(log_path / f"infra-{timestamp}.log")
+        os.environ["SKYRL_LOG_FILE"] = log_file
+        # Pass log file path to workers so they can redirect their output
+        env_vars["SKYRL_LOG_FILE"] = log_file
+
+    # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
+    # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
+    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+
+    if not verbose_logging:
+        logger.info(f"Infrastructure logs will be written to: {log_file}")
 
     # create the named ray actors for the registries to make available to all workers
     sync_registries()
@@ -678,7 +790,6 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-
     # use info actor to get the GPU id
     info_actors = []
     for i in range(num_bundles):

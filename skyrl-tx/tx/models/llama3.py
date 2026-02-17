@@ -4,10 +4,11 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
+from tx.layers.attention import dot_product_attention
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
-from tx.layers.attention import dot_product_attention
+from tx.layers.stacked import StackedDecoderLayers
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -31,48 +32,52 @@ class Llama3Attention(nnx.Module):
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
         self.k_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
         self.v_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
         self.o_proj = LoRALinear(
             in_features=self.num_heads * self.head_dim,
             out_features=config.hidden_size,
+            sharding=(tp_shard, "fsdp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (tp_shard, None)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
@@ -115,10 +120,11 @@ class Llama3MLP(nnx.Module):
         self.gate_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -126,10 +132,11 @@ class Llama3MLP(nnx.Module):
         self.up_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -137,10 +144,11 @@ class Llama3MLP(nnx.Module):
         self.down_proj = LoRALinear(
             config.intermediate_size,
             config.hidden_size,
+            sharding=("tp", "fsdp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", None)),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -196,16 +204,19 @@ class Llama3Model(nnx.Module):
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
+            sharding=("tp", None),
             dtype=dtype,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
+            embedding_init=nnx.initializers.normal(),
             rngs=rngs,
         )
-        self.layers = nnx.List(
-            [Llama3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
-        )
+
+        def create_layer(rngs: nnx.Rngs) -> Llama3DecoderLayer:
+            return Llama3DecoderLayer(config, dtype=dtype, rngs=rngs)
+
+        self.layers = StackedDecoderLayers(create_layer, config.num_hidden_layers, rngs)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -217,28 +228,24 @@ class Llama3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
+        hidden_states, all_hidden_states, new_kv_cache = self.layers(
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+            is_training=is_training,
+        )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -246,7 +253,7 @@ class Llama3Model(nnx.Module):
 
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
+            kv_cache=new_kv_cache,
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
@@ -263,10 +270,11 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
             self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
+                sharding=(None, "tp"),
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+                kernel_init=nnx.initializers.lecun_normal(),
                 max_lora_adapters=config.max_lora_adapters,
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
@@ -290,6 +298,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -301,6 +310,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            is_training=is_training,
         )
 
         return CausalLMOutput(

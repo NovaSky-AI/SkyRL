@@ -7,14 +7,11 @@ from typing import Dict, Any
 from unittest.mock import AsyncMock, MagicMock
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
-from omegaconf import OmegaConf
-
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from skyrl_gym.envs import register
 from skyrl_train.generators.utils import get_custom_chat_template
-from skyrl_train.config.utils import get_default_config
+from skyrl_train.config import GeneratorConfig, SamplingParams, ChatTemplateConfig, SkyRLGymConfig
 from skyrl_train.generators.utils import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
 from tests.cpu.generators.chat_templating_test_constants import (
@@ -28,7 +25,7 @@ from tests.cpu.generators.chat_templating_test_constants import (
 
 # Setup for formatting tests
 class CPUTestEnv(BaseTextEnv):
-    def __init__(self, env_config: DictConfig, extras: Dict[str, Any] = {}):
+    def __init__(self, env_config: Any, extras: Dict[str, Any] = {}):
         super().__init__()
         self.max_turns = 3
 
@@ -60,27 +57,39 @@ def _register_test_env_if_needed():
 
 def _build_generator(tokenizer, model_name: str, chat_template_config, extra_overrides: Dict[str, Any] | None = None):
     """Helper to create a SkyRLGymGenerator with common config/env settings."""
-    # Create default config and apply common generator overrides used across tests
-    default_cfg = get_default_config()
-    overrides = {
-        "sampling_params": {"max_generate_length": 200, "logprobs": None},
-        "max_input_length": 200,
-        "batched": False,
-        "max_turns": 3,
-        "zero_reward_on_non_stop": False,
-        "apply_overlong_filtering": False,
-        "use_conversation_multi_turn": True,
-        "chat_template": chat_template_config,
-        "append_eos_token_after_stop_str_in_multi_turn": True,
-    }
-    if extra_overrides:
-        overrides.update(extra_overrides)
-    OmegaConf.update(default_cfg, "generator", overrides)
+    # Build chat template config dataclass
+    if chat_template_config is None:
+        ct_cfg = ChatTemplateConfig()
+    elif isinstance(chat_template_config, dict):
+        ct_cfg = ChatTemplateConfig(
+            source=chat_template_config.get("source", "name"),
+            name_or_path=chat_template_config.get("name_or_path"),
+        )
+    else:
+        ct_cfg = chat_template_config
 
-    # Create skryl gym generator
-    generator_cfg = default_cfg.generator
-    env_cfg = default_cfg.environment.skyrl_gym
-    env_cfg.max_env_workers = 0
+    # Build sampling params, allowing extra_overrides to override
+    sp_kwargs = {"max_generate_length": 200, "logprobs": None}
+    if extra_overrides and "sampling_params" in extra_overrides:
+        sp_kwargs.update(extra_overrides.pop("sampling_params"))
+    sampling_params = SamplingParams(**sp_kwargs)
+
+    gen_kwargs = dict(
+        sampling_params=sampling_params,
+        max_input_length=200,
+        batched=False,
+        max_turns=3,
+        zero_reward_on_non_stop=False,
+        apply_overlong_filtering=False,
+        use_conversation_multi_turn=True,
+        chat_template=ct_cfg,
+        append_eos_token_after_stop_str_in_multi_turn=True,
+    )
+    if extra_overrides:
+        gen_kwargs.update(extra_overrides)
+
+    generator_cfg = GeneratorConfig(**gen_kwargs)
+    env_cfg = SkyRLGymConfig(max_env_workers=0)
     return SkyRLGymGenerator(
         generator_cfg=generator_cfg,
         skyrl_gym_cfg=env_cfg,
@@ -159,11 +168,11 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
     chat_template_config = None
     if "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_from_path":
         template_path = Path(__file__).parent / "qwen3_acc_without_thinking.jinja2"
-        chat_template_config = {"source": "file", "name_or_path": str(template_path)}
+        chat_template_config = ChatTemplateConfig(source="file", name_or_path=str(template_path))
     elif "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_builtin":
-        chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+        chat_template_config = ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking")
     else:
-        chat_template_config = {"source": "name", "name_or_path": None}
+        chat_template_config = ChatTemplateConfig(source="name", name_or_path=None)
     # Create a mock generator config
     generator = _build_generator(tokenizer, model_name, chat_template_config)
     generator.inference_engine_client = mock_llm
@@ -177,7 +186,7 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name, tokenizatio
     expected_chat_history = get_expected_chat_history(mock_response_text)
     if "Qwen3" in model_name and tokenization_codepath == "tito":
         keep_thinking_chat_template = get_custom_chat_template(
-            {"source": "name", "name_or_path": "qwen3_with_thinking"}
+            ChatTemplateConfig(source="name", name_or_path="qwen3_with_thinking")
         )
         assert expected_str == tokenizer.apply_chat_template(
             expected_chat_history, tokenize=False, chat_template=keep_thinking_chat_template
@@ -351,9 +360,9 @@ async def test_append_eos_after_stop_multi_turn(model_name, tokenization_codepat
         mock_llm.generate = AsyncMock(side_effect=mock_generate)
         chat_template_config = None
         if "Qwen3" in model_name and tokenization_codepath == "custom_chat_template_builtin":
-            chat_template_config = {"source": "name", "name_or_path": "qwen3_without_thinking"}
+            chat_template_config = ChatTemplateConfig(source="name", name_or_path="qwen3_without_thinking")
         else:
-            chat_template_config = {"source": "name", "name_or_path": None}
+            chat_template_config = ChatTemplateConfig(source="name", name_or_path=None)
         extra_overrides = {
             "sampling_params": {"max_generate_length": 200, "logprobs": None, "stop": [stop_tag]},
             "append_eos_token_after_stop_str_in_multi_turn": append_flag,

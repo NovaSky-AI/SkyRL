@@ -2,6 +2,7 @@ import math
 from skyrl_train.dataset.replay_buffer import Experience
 from typing import List, Dict
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.distributed.strategy import DistributedStrategy
 
 
 def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
@@ -11,9 +12,29 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
     reduced_metrics = dict()
     for k, v in metrics.items():
         assert len(v) > 0, f"No metrics for key {k}"
-        assert all(isinstance(x, (int, float)) for x in v), f"Metrics for key {k} are not all numbers"
-        reduced_metrics[k] = sum(v) / len(v)
+        if not all(isinstance(x, (int, float)) for x in v):
+            print(f"Metrics for key {k} are not all numbers: {v}")
+            continue
+        if k.endswith("_max"):
+            reduced_metrics[k] = max(v)
+        elif k.endswith("_min"):
+            reduced_metrics[k] = min(v)
+        else:
+            reduced_metrics[k] = sum(v) / len(v)
     return reduced_metrics
+
+
+def all_reduce_metrics(metrics: Dict[str, List[float]], strategy: DistributedStrategy) -> Dict[str, float]:
+    """All reduce metrics across all processes."""
+    min_metrics = {k: v for k, v in metrics.items() if k.endswith("_min")}
+    max_metrics = {k: v for k, v in metrics.items() if k.endswith("_max")}
+    mean_metrics = {k: v for k, v in metrics.items() if k not in min_metrics and k not in max_metrics}
+    status_mean = strategy.all_reduce(mean_metrics, op="mean")
+    status_min = strategy.all_reduce(min_metrics, op="min")
+    status_max = strategy.all_reduce(max_metrics, op="max")
+    status_mean.update(status_min)
+    status_mean.update(status_max)
+    return status_mean
 
 
 class BatchIterator:

@@ -353,6 +353,7 @@ def test_gradient_checkpointing():
         loss_fn_types = jnp.zeros((B,), dtype=jnp.int32)
         sampling_logprobs = jnp.zeros((B, T), dtype=jnp.float32)
         advantages = jnp.zeros((B, T), dtype=jnp.float32)
+        loss_fn_config = backend._build_loss_fn_config([None] * B)
 
         # Compute loss, using gradient checkpointing if enabled
         _, per_token_losses, _ = backend._forward_backward_and_accumulate(
@@ -367,6 +368,7 @@ def test_gradient_checkpointing():
             loss_fn_types,
             sampling_logprobs,
             advantages,
+            loss_fn_config,
         )
         losses.append(float(per_token_losses.mean()))
 
@@ -384,6 +386,51 @@ def make_sample_input(tokens: list[int], prompt_logprobs: bool = False, max_toke
         checkpoint_id="",  # Empty for base model sampling
         prompt_logprobs=prompt_logprobs,
     )
+
+
+def test_ppo_loss_fn_config_is_applied():
+    """Test that per-request loss_fn_config is passed through to PPO loss in JAX backend."""
+    backend = JaxBackend(BASE_MODEL, JaxBackendConfig(max_lora_adapters=2, max_lora_rank=8))
+    model_id = "ppo_adapter"
+    backend.create_model(model_id, LoraConfig(rank=8, alpha=16, seed=0))
+
+    datum = types.Datum(
+        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3, 4])]),
+        loss_fn_inputs=types.LossFnInputs(
+            target_tokens=types.TensorData(data=[2, 3, 4, 0]),
+            weights=types.TensorData(data=[1.0, 1.0, 1.0, 1.0]),
+            # Force very large probability ratios so clipping controls the loss.
+            logprobs=types.TensorData(data=[-100.0, -100.0, -100.0, -100.0]),
+            advantages=types.TensorData(data=[1.0, 1.0, 1.0, 1.0]),
+        ),
+    )
+
+    req_default = {
+        "req_default": (
+            model_id,
+            types.ForwardBackwardInput(data=[datum], loss_fn="ppo"),
+        )
+    }
+    req_tight_clip = {
+        "req_tight": (
+            model_id,
+            types.ForwardBackwardInput(
+                data=[datum],
+                loss_fn="ppo",
+                loss_fn_config={"clip_low_threshold": 0.99, "clip_high_threshold": 1.01},
+            ),
+        )
+    }
+    default_out = backend.forward(prepare_model_pass_batch(req_default))["req_default"]
+    tight_out = backend.forward(prepare_model_pass_batch(req_tight_clip))["req_tight"]
+
+    default_losses = np.array(default_out.loss_fn_outputs[0]["elementwise_loss"]["data"], dtype=np.float32)
+    tight_losses = np.array(tight_out.loss_fn_outputs[0]["elementwise_loss"]["data"], dtype=np.float32)
+
+    # Default PPO clip thresholds are 0.8..1.2.
+    # Configured clip thresholds 0.99..1.01 should cap losses at -1.01.
+    np.testing.assert_allclose(default_losses, -1.2, atol=1e-4)
+    np.testing.assert_allclose(tight_losses, -1.01, atol=1e-4)
 
 
 def test_sample_max_num_sequences():
@@ -581,6 +628,7 @@ def test_mixed_train_unembed_adapters():
         loss_fn_types = jnp.zeros((batch_size,), dtype=jnp.int32)
         sampling_logprobs = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
         advantages = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
+        loss_fn_config = backend._build_loss_fn_config([None] * batch_size)
         adapter_indices = jnp.array([normal_idx, unembed_idx], dtype=jnp.int32)
 
         _, losses, logprobs = backend._forward(
@@ -595,6 +643,7 @@ def test_mixed_train_unembed_adapters():
             loss_fn_types,
             sampling_logprobs,
             advantages,
+            loss_fn_config,
         )
         return np.asarray(losses), np.asarray(logprobs)
 

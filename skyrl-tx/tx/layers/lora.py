@@ -2,7 +2,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
-from tx.utils.models import filter_lora
+from tx.utils.models import filter_lora, get_adapter_idx
 from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
@@ -88,11 +88,12 @@ class LoRAMixin:
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
             raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
-        (batch_size, seq_len, *dims) = x.shape
-        assert adapter_indices.shape[0] == batch_size
+        assert adapter_indices.shape[0] == x.shape[0]
 
-        x_flat = x.reshape(-1, *dims)
-        adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
+        # Flatten x: (tokens, features) for linear, (tokens,) for embed, in the latter case feature_shape is ()
+        feature_shape = x.shape[base_output.ndim - 1 :]
+        x_flat = x.reshape(-1, *feature_shape)
+        adapter_indices_expanded = jnp.repeat(adapter_indices, x_flat.shape[0] // adapter_indices.shape[0])
 
         # Sort tokens to prepare for ragged_dot
         x_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
@@ -104,9 +105,10 @@ class LoRAMixin:
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
-        lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
-        lora_output = lora_output * self.lora_scaling[...][adapter_indices, None, None]
-        return base_output + lora_output.reshape(base_output.shape)
+        lora_output = lora_output_sorted[unsort_indices].reshape(base_output.shape)
+        scaling = self.lora_scaling[...][adapter_indices_expanded]
+        lora_output = lora_output * scaling.reshape(base_output.shape[:-1] + (1,))
+        return base_output + lora_output
 
 
 class LoRAEmbed(LoRAMixin, nnx.Embed):
@@ -117,6 +119,7 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
         num_embeddings: int,
         features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -131,13 +134,9 @@ class LoRAEmbed(LoRAMixin, nnx.Embed):
             features=features,
             dtype=dtype,
             param_dtype=param_dtype,
-            embedding_init=embedding_init,
+            embedding_init=nnx.with_partitioning(embedding_init, sharding),
             rngs=rngs,
         )
-        assert (
-            self.embedding[...].sharding is not None
-        ), "LoRAEmbed layer needs sharding, you can specify it by using nnx.with_partitioning on the embedding_init"
-        sharding = self.embedding[...].sharding.spec
 
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
@@ -181,6 +180,7 @@ class LoRALinear(LoRAMixin, nnx.Linear):
         in_features: int,
         out_features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -200,14 +200,11 @@ class LoRALinear(LoRAMixin, nnx.Linear):
             use_bias=use_bias,
             dtype=dtype,
             param_dtype=param_dtype,
-            kernel_init=kernel_init,
-            bias_init=bias_init,
+            kernel_init=nnx.with_partitioning(kernel_init, sharding),
+            bias_init=nnx.with_partitioning(bias_init, (sharding[-1],)),
             rngs=rngs,
         )
-        assert (
-            self.kernel[...].sharding is not None
-        ), "LoRALinear layer needs sharding, you can specify it by using nnx.with_partitioning on the kernel_init"
-        sharding = self.kernel[...].sharding.spec
+
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
@@ -233,6 +230,7 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         in_features: int,
         out_features: int,
         *,
+        sharding: tuple[str | None, ...],
         max_lora_adapters: int = 0,
         max_lora_rank: int = 8,
         dtype: jnp.dtype = jnp.float32,
@@ -243,10 +241,15 @@ class LoRAExpert(LoRAMixin, nnx.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        self.weight = Param(num_experts, in_features, out_features, dtype=dtype, kernel_init=kernel_init, rngs=rngs)
+        self.weight = Param(
+            num_experts,
+            in_features,
+            out_features,
+            dtype=dtype,
+            kernel_init=nnx.with_partitioning(kernel_init, sharding),
+            rngs=rngs,
+        )
 
-        assert self.weight[...].sharding is not None, "LoRAExpert layer needs sharding"
-        sharding = self.weight[...].sharding.spec
         self.init_lora(
             max_lora_adapters=max_lora_adapters,
             max_lora_rank=max_lora_rank,
@@ -344,21 +347,22 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
+        idx = get_adapter_idx(path, adapter_index)
+
         key_name = path[-2].key
         if key_name == "lora_ranks":
-            return value.at[adapter_index].set(effective_rank)
+            return value.at[idx].set(effective_rank)
         if key_name == "lora_scaling":
-            # Set scaling to 0.0 if rank is 0
-            return value.at[adapter_index].set(lora_config.alpha / effective_rank if effective_rank > 0 else 0.0)
+            scaling = lora_config.alpha / effective_rank if effective_rank > 0 else 0.0
+            return value.at[idx].set(scaling)
         if key_name == "lora_A":
             # Reinitialize with he_uniform, then zero columns beyond rank
-            shape = value[adapter_index].shape
-            new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
+            new_A = nnx.initializers.he_uniform()(rngs.params(), value[idx].shape, value.dtype)
             new_A = new_A.at[..., effective_rank:].set(0.0)
-            return value.at[adapter_index].set(new_A)
+            return value.at[idx].set(new_A)
         if key_name == "lora_B":
             # Explicitly zero lora_B
-            return value.at[adapter_index].set(0.0)
+            return value.at[idx].set(0.0)
         return value
 
     updated_state = jax.tree.map_with_path(init_adapter, state)
@@ -375,11 +379,10 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
 
     def clear_adapter(path, value):
         key = path[-2].key
-        if key == "lora_ranks":
-            return value.at[adapter_index].set(0)
-        if key in ("lora_scaling", "lora_A", "lora_B"):
-            return value.at[adapter_index].set(0.0)
-        return value
+        if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
+            return value
+        idx = get_adapter_idx(path, adapter_index)
+        return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
 
     updated_state = jax.tree.map_with_path(clear_adapter, state)
     nnx.update(model, updated_state)

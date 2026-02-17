@@ -3,15 +3,16 @@ import jax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
+from tx.layers.attention import dot_product_attention
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.util import prepare_routing, shard_map_ep
 from tx.layers.rotary_embedding import apply_rope
-from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.layers.layernorm import RMSNorm
-from tx.layers.attention import dot_product_attention
+from tx.layers.stacked import StackedDecoderLayers
 from tx.models.configs import Qwen3Config
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
+from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
 
 class Qwen3Attention(nnx.Module):
@@ -32,45 +33,49 @@ class Qwen3Attention(nnx.Module):
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.k_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.v_proj = LoRALinear(
             in_features=config.hidden_size,
             out_features=self.num_kv_heads * self.head_dim,
+            sharding=("fsdp", tp_shard),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", tp_shard)),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.o_proj = LoRALinear(
             in_features=self.num_heads * self.head_dim,
             out_features=config.hidden_size,
+            sharding=(tp_shard, "fsdp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
             use_bias=False,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (tp_shard, "fsdp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
@@ -116,10 +121,11 @@ class Qwen3MLP(nnx.Module):
         self.gate_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -127,10 +133,11 @@ class Qwen3MLP(nnx.Module):
         self.up_proj = LoRALinear(
             config.hidden_size,
             config.intermediate_size,
+            sharding=("fsdp", "tp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("fsdp", "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -138,10 +145,11 @@ class Qwen3MLP(nnx.Module):
         self.down_proj = LoRALinear(
             config.intermediate_size,
             config.hidden_size,
+            sharding=("tp", "fsdp"),
             use_bias=False,
             dtype=dtype,
             param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("tp", "fsdp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             rngs=rngs,
@@ -161,30 +169,33 @@ class Qwen3Experts(nnx.Module):
             config.num_experts,
             config.hidden_size,
             config.moe_intermediate_size,
+            sharding=("ep", "fsdp", "tp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "fsdp", "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.up_proj = LoRAExpert(
             config.num_experts,
             config.hidden_size,
             config.moe_intermediate_size,
+            sharding=("ep", "fsdp", "tp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "fsdp", "tp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.down_proj = LoRAExpert(
             config.num_experts,
             config.moe_intermediate_size,
             config.hidden_size,
+            sharding=("ep", "tp", "fsdp"),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), ("ep", "tp", "fsdp")),
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
@@ -311,16 +322,19 @@ class Qwen3Model(nnx.Module):
         self.embed_tokens = LoRAEmbed(
             num_embeddings=config.vocab_size,
             features=config.hidden_size,
+            sharding=("tp", None),
             dtype=dtype,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             param_dtype=dtype,
-            embedding_init=nnx.with_partitioning(nnx.initializers.normal(), ("tp", None)),
+            embedding_init=nnx.initializers.normal(),
             rngs=rngs,
         )
-        self.layers = nnx.List(
-            [Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
-        )
+
+        def create_layer(rngs: nnx.Rngs) -> Qwen3DecoderLayer:
+            return Qwen3DecoderLayer(config, dtype=dtype, rngs=rngs)
+
+        self.layers = StackedDecoderLayers(create_layer, config.num_hidden_layers, rngs)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -332,28 +346,24 @@ class Qwen3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
+        hidden_states, all_hidden_states, new_kv_cache = self.layers(
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+            is_training=is_training,
+        )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -361,7 +371,7 @@ class Qwen3Model(nnx.Module):
 
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
+            kv_cache=new_kv_cache,
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
@@ -378,10 +388,11 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
             self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
+                sharding=(None, "tp"),
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, "tp")),
+                kernel_init=nnx.initializers.lecun_normal(),
                 max_lora_adapters=config.max_lora_adapters,
                 max_lora_rank=config.max_lora_rank,
                 rngs=rngs,
@@ -405,6 +416,7 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -416,6 +428,7 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            is_training=is_training,
         )
 
         return CausalLMOutput(

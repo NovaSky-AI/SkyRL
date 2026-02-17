@@ -1,0 +1,54 @@
+# @package megatron_config.policy
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+context_parallel_size: 1
+expert_model_parallel_size: 1
+expert_tensor_parallel_size: null
+
+# pass-through config to Megatron's `DistributedDataParallelConfig` object
+# https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/distributed/distributed_data_parallel_config.py#L8
+ddp_config:
+  grad_reduce_in_fp32: true
+  overlap_grad_reduce: false
+  overlap_param_gather: false
+  average_in_collective: true
+
+# pass-through kwargs to the HuggingFace model config (i.e. for overriding vocab size, etc)
+model_config_kwargs: {}
+
+torch_profiler_config:
+  enable: false
+  ranks: []
+  save_path: null
+
+lora_config:
+  # see: https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/apidocs/bridge/bridge.peft.lora.html for details - currently "lora" and "canonical_lora" are supported
+  lora_type: "lora"
+
+# pass-through kwargs to Megatron's `OptimizerConfig` object
+# any overlapping arguments with those we attempt to resolve in trainer.policy.optimizer_config will be overridden by the values here
+# https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/optimizer/optimizer_config.py#L12
+optimizer_config_kwargs:
+  # set these all to true (and optimizer_offload_fraction=1.0) for optimizer cpu offloading
+  overlap_cpu_optimizer_d2h_h2d: false
+  # NOTE: `use_precision_aware_optimizer=true` can cause checkpointing to fail. 
+  # See: https://github.com/nvidia/megatron-lm/issues/1820.
+  # We recommend leaving this as `false`
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+  optimizer_offload_fraction: 0.0
+
+# pass-through kwargs to the Megatron's `TransformerConfig` object
+# https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
+transformer_config_kwargs:
+  # Recompute config - used for gradient/activation checkpointing
+  # for details see: https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py#L33
+  # for the most aggresive memory savings, set recompute_granularity to "full", recompute_method to "uniform", and recompute_num_layers to 1
+  recompute_granularity: full
+  recompute_modules: ["core_attn"]
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+# flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
+# this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
+empty_cuda_cache: true

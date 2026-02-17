@@ -9,12 +9,13 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import ray
-from omegaconf import DictConfig
 from ray import ObjectRef
 
+from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
@@ -39,7 +40,7 @@ class WorkerDispatch:
 
     def __init__(
         self,
-        cfg: DictConfig,
+        cfg: Union[SkyRLConfig, DictConfig],
         policy_actor_group: PPORayActorGroup,
         critic_actor_group: Optional[PPORayActorGroup] = None,
         ref_actor_group: Optional[PPORayActorGroup] = None,
@@ -280,16 +281,6 @@ class WorkerDispatch:
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         ray.get(self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate))
-
-    # TODO(tgriggs): Remove this when Megatron supports forward_backward and optim_step.
-    def ppo_train(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
-        """Run full PPO training loop (for Megatron)."""
-        self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
-
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "ppo_train", data)
-        statuses = ray.get(refs)
-
-        return statuses[0].metadata["train_status"]
 
     def _save_memory_snapshot(self, model: str, tag: str) -> None:
         """Save memory snapshot on workers."""

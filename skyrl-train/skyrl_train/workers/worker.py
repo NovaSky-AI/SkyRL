@@ -6,14 +6,14 @@ from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
+from omegaconf import DictConfig, OmegaConf
 
 import ray
 import torch
 import torch.distributed
 import torch.nn as nn
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
     PlacementGroup,
@@ -25,6 +25,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
 
+from skyrl_train.config import SkyRLConfig, AlgorithmConfig
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -38,6 +39,7 @@ from skyrl_train.distributed.ulysses import (
     set_ulysses_sequence_parallel_group,
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl_train.utils import (
     get_ray_pg_ready_with_timeout,
@@ -52,13 +54,16 @@ from skyrl_train.utils.io import io
 from skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
-    masked_mean,
     ppo_critic_loss,
 )
+from skyrl_train.utils.torch_utils import masked_mean
 from skyrl_train.utils.utils import configure_ray_worker_logging
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 
 _SET_AFFINITY = False
+
+if TYPE_CHECKING:
+    from skyrl_train.inference_engines.remote_inference_client import RemoteInferenceClient
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -89,6 +94,11 @@ class DistributedTorchRayActor:
         self.record_memory = record_memory
         if record_memory:
             torch.cuda.memory._record_memory_history()
+
+        # Redirect worker output to log file (infra logs shouldn't pollute driver stdout)
+        from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
+
+        redirect_actor_output_to_file()
         configure_ray_worker_logging()
 
     def get_node_local_rank(self):
@@ -207,7 +217,7 @@ class DistributedTorchRayActor:
 
 
 class Worker(DistributedTorchRayActor):
-    def __init__(self, cfg: DictConfig, *args, **kwargs):
+    def __init__(self, cfg: Union[SkyRLConfig, DictConfig], *args, **kwargs):
         from skyrl_train.weight_sync import get_transfer_strategy_cls
 
         super().__init__(*args, **kwargs)
@@ -285,7 +295,9 @@ class Worker(DistributedTorchRayActor):
             io.remove(record_memory_path)
         torch.cuda.memory._dump_snapshot(record_memory_path)
 
-    async def init_weight_sync_state(self, inference_engine_client: InferenceEngineClient):
+    async def init_weight_sync_state(
+        self, inference_engine_client: "Union[InferenceEngineClient, RemoteInferenceClient]"
+    ):
         """Initialize state for weight syncing with Inference Engine Client
 
         Creates init info and sender, then sends init info to inference engines
@@ -297,8 +309,14 @@ class Worker(DistributedTorchRayActor):
 
         assert inference_engine_client is not None
 
-        # Create init info on all ranks (it's deterministic from cfg)
-        init_info = self._transfer_strategy_cls.create_init_info(self.cfg)
+        # For new inference path, fetch world_size from servers
+        # For legacy path, calculate from config
+        inference_world_size = None
+        if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
+            inference_world_size = await inference_engine_client.get_world_size()
+
+        # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
+        init_info = self._transfer_strategy_cls.create_init_info(self.cfg, inference_world_size=inference_world_size)
 
         # Create sender on all ranks
         # Strategy implementations may have different logic for different ranks
@@ -639,23 +657,6 @@ class PolicyWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
-
-    def _normalize_mini_batch_size(self):
-        """
-        Initialize micro batch tracking for gradient accumulation.
-
-        The worker no longer needs to know mini batch size - it processes whatever
-        batch it receives, breaking it into micro batches. Gradient scaling happens
-        at optim_step time based on how many micro batches were accumulated.
-
-        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
-        requires mini-batch normalization in its override. The name is kept for
-        backwards compatibility with Megatron which still does actual normalization.
-        """
-        if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
-            raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
-
-        # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
     def forward_backward(
@@ -780,7 +781,13 @@ class PolicyWorkerBase(Worker):
         loss_config = self.cfg.trainer.algorithm
         if loss_fn_config is not None:
             # Create a copy of the config and apply overrides
-            loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
+            # TODO: Fix nested overrides
+            if isinstance(loss_config, DictConfig):
+                loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
+            else:
+                assert isinstance(loss_config, AlgorithmConfig)
+                new_loss_config = OmegaConf.merge(OmegaConf.create(loss_config), OmegaConf.create(loss_fn_config))
+                loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -796,7 +803,7 @@ class PolicyWorkerBase(Worker):
             )
             # loss function
             # TODO: recompute advantages
-            policy_loss, clip_ratio = current_loss_fn(
+            policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
@@ -830,11 +837,10 @@ class PolicyWorkerBase(Worker):
                 else:
                     valid_len = action_log_probs.shape[1]
 
-                start = max(action_log_probs.shape[1] - valid_len, 0)
                 loss_fn_outputs.append(
                     {
-                        "logprobs": action_log_probs[i, start:].detach().cpu().tolist(),
-                        "elementwise_loss": elementwise_loss[i, start:].detach().cpu().tolist(),
+                        "logprobs": action_log_probs[i, :valid_len].detach().cpu().tolist(),
+                        "elementwise_loss": elementwise_loss[i, :valid_len].detach().cpu().tolist(),
                     }
                 )
 
@@ -874,22 +880,43 @@ class PolicyWorkerBase(Worker):
             loss = policy_loss + kl_loss_term - entropy_loss_term
             self.strategy.backward(loss, self.model, self.optimizer)
 
+            # Build per-sequence loss_fn_outputs with logprobs.
+            batch_size = action_log_probs.shape[0]
+            seq_len = action_log_probs.shape[1]
+
+            if action_mask is not None:
+                valid_lens = action_mask.sum(dim=1).int().tolist()
+            elif loss_mask is not None:
+                valid_lens = loss_mask.sum(dim=1).int().tolist()
+            else:
+                valid_lens = [seq_len] * batch_size
+
+            detached_log_probs = action_log_probs.detach().cpu()
+            loss_fn_outputs = []
+            for i, valid_len in enumerate(valid_lens):
+                loss_fn_outputs.append(
+                    {
+                        "logprobs": detached_log_probs[i, :valid_len].tolist(),
+                    }
+                )
+
             status = {
                 "final_loss": loss.item(),
                 "policy_loss": policy_loss.item(),
-                "ppo_clip_ratio": clip_ratio,
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
+                "loss_fn_outputs": loss_fn_outputs,
             }
+            for k, v in loss_metrics.items():
+                status["loss_metrics/" + k] = v
             if self.cfg.trainer.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
-        # Extract loss_fn_outputs before all_reduce (it's not a tensor/scalar)
         loss_fn_outputs = status.pop("loss_fn_outputs", None)
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         # Add back loss_fn_outputs after all_reduce
         if loss_fn_outputs is not None:
@@ -920,12 +947,6 @@ class PolicyWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """
@@ -1017,23 +1038,6 @@ class CriticWorkerBase(Worker):
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
-
-    def _normalize_mini_batch_size(self):
-        """
-        Initialize micro batch tracking for gradient accumulation.
-
-        The worker no longer needs to know mini batch size - it processes whatever
-        batch it receives, breaking it into micro batches. Gradient scaling happens
-        at optim_step time based on how many micro batches were accumulated.
-
-        TODO: Rename to _init_gradient_accumulation_state once Megatron no longer
-        requires mini-batch normalization in its override. The name is kept for
-        backwards compatibility with Megatron which still does actual normalization.
-        """
-        if not hasattr(self, "mesh_rank") or self.mesh_rank is None:
-            raise RuntimeError("mesh_rank must be initialized before calling _normalize_mini_batch_size()")
-
-        # Track micro batches for gradient scaling at optim_step
         self._micro_batches_accumulated = 0
 
     def forward_backward(self, data: TrainingInputBatch) -> Dict[str, float]:
@@ -1130,7 +1134,7 @@ class CriticWorkerBase(Worker):
         }
 
         # All-reduce metrics across DP workers
-        status = self.strategy.all_reduce(status)
+        status = all_reduce_metrics(status, self.strategy)
 
         return status
 
@@ -1157,12 +1161,6 @@ class CriticWorkerBase(Worker):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item()
         return grad_norm
-
-    def all_reduce_metrics(self, status: Dict[str, float]) -> Dict[str, float]:
-        """
-        All-reduce metrics across data parallel workers.
-        """
-        return self.strategy.all_reduce(status)
 
     def get_lr(self) -> float:
         """

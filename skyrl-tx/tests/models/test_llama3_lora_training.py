@@ -10,6 +10,7 @@ from tx.models.llama3 import Llama3ForCausalLM
 from tx.utils.models import get_dtype, load_safetensors
 from tx.layers.lora import init_lora_adapter
 from tx.tinker.types import LoraConfig
+from tests.models.lora_test_utils import get_adapter_params, get_out_of_rank_params, verify_params_unchanged
 
 
 def test_lora_training():
@@ -18,7 +19,7 @@ def test_lora_training():
     config = Llama3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
-    mesh = jax.make_mesh((1, 1), ("dp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
+    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
     with jax.set_mesh(mesh):
         model = Llama3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
         load_safetensors(checkpoint_path, config, model)
@@ -45,21 +46,6 @@ def test_lora_training():
         # that we want to compute gradients for
         graphdef, lora_params, non_lora_params = nnx.split(model, model.is_lora_param, ...)
 
-        # Helper to extract adapter params at specific index
-        def get_adapter_params(params, adapter_idx):
-            return jax.tree.map(lambda p: p[adapter_idx].copy(), params)
-
-        # Helper to extract out-of-rank params for an adapter
-        def get_out_of_rank_params(params, adapter_idx, rank):
-            def slice_param(path, p):
-                if "lora_A" in str(path):
-                    return p[adapter_idx, :, rank:].copy()
-                elif "lora_B" in str(path):
-                    return p[adapter_idx, rank:, :].copy()
-                return p
-
-            return jax.tree.map_with_path(slice_param, params)
-
         # Save initial states
         initial_adapter_2_params = get_adapter_params(lora_params, 2)
         initial_adapter_0_out_of_rank = get_out_of_rank_params(lora_params, 0, 16)
@@ -78,12 +64,6 @@ def test_lora_training():
             optimizer.update(lora_params, lora_grads)
 
             print(f"Step {step}: loss = {float(loss):.4f}")
-
-        def verify_params_unchanged(initial_params, final_params, error_msg_prefix):
-            for (path, initial), (_, final) in zip(
-                jax.tree.leaves_with_path(initial_params), jax.tree.leaves_with_path(final_params)
-            ):
-                assert jnp.allclose(initial, final), f"{error_msg_prefix} for {path}"
 
         # Verify adapter 2 (unused) was not modified
         final_adapter_2_params = get_adapter_params(lora_params, 2)
