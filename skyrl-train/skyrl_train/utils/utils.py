@@ -663,6 +663,9 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
     for azure_var in ("AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_ACCOUNT_NAME", "AZURE_CLIENT_ID"):
         if os.environ.get(azure_var):
             env_vars[azure_var] = os.environ[azure_var]
+            logger.info(f"Exporting {azure_var} to ray runtime env (length={len(os.environ[azure_var])})")
+        else:
+            logger.warning(f"{azure_var} not found in os.environ, skipping")
 
     # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
     for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
