@@ -108,6 +108,24 @@ check_disk_space() {
     return 0
 }
 
+cleanup_disk() {
+    log "Disk usage high, running cleanup..."
+    local before=$(df "$RUNNER_DIR" | tail -1 | awk '{print $5}')
+    # Clean old SkyPilot logs (keep last 2 days)
+    find ~/.sky/logs -type f -mtime +2 -delete 2>/dev/null || true
+    find ~/.sky/logs -type d -empty -delete 2>/dev/null || true
+    # Clean pip cache
+    pip cache purge 2>/dev/null || true
+    # Clean apt cache
+    sudo apt-get clean 2>/dev/null || true
+    # Clean tmp files older than 1 day
+    find /tmp -type f -mtime +1 -not -name "runner_*" -delete 2>/dev/null || true
+    # Clean old journal logs
+    sudo journalctl --vacuum-time=2d 2>/dev/null || true
+    local after=$(df "$RUNNER_DIR" | tail -1 | awk '{print $5}')
+    log "Disk cleanup: $before -> $after"
+}
+
 restart_runner() {
     local service_name=$(systemctl list-units --type=service --all | grep "actions.runner" | awk '{print $1}' | head -1)
     log "Restarting runner service: $service_name"
@@ -146,11 +164,17 @@ main() {
         issues+=("github_disconnected")
     fi
 
-    # Check 4: Disk space
+    # Check 4: Disk space — auto-cleanup if above 90%
     if ! check_disk_space; then
         log "ALERT: Disk usage above 90%"
         issues+=("disk_full")
-        notify_slack "Disk usage above 90% - cleanup needed" "warning"
+        cleanup_disk
+        if ! check_disk_space; then
+            notify_slack "Disk usage still above 90% after cleanup - manual intervention needed" "warning"
+        else
+            log "Disk cleanup resolved the issue"
+            notify_slack "Disk usage was above 90%, auto-cleanup freed space" "white_check_mark"
+        fi
     fi
 
     # Handle issues

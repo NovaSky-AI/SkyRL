@@ -161,6 +161,32 @@ jobs:
           echo "Cleaning up cluster ${{ steps.cluster.outputs.name }}..."
           sky down "${{ steps.cluster.outputs.name }}" -y || true
 
+      - name: Cleanup Runner Disk
+        if: always()
+        run: |
+          echo "Disk usage before cleanup:"
+          df -h . | tail -1
+          # Clean old SkyPilot logs (keep last 3 days)
+          find ~/.sky/logs -type f -mtime +3 -delete 2>/dev/null || true
+          find ~/.sky/logs -type d -empty -delete 2>/dev/null || true
+          # Clean old SkyPilot cluster metadata for downed clusters
+          sky status --refresh 2>/dev/null || true
+          # Clean pip cache
+          pip cache purge 2>/dev/null || true
+          # Clean apt cache
+          sudo apt-get clean 2>/dev/null || true
+          # Clean old GHA runner work directories (keep current run)
+          WORK_DIR="${GITHUB_WORKSPACE%/*}"
+          if [ -d "$WORK_DIR" ]; then
+            for dir in "$WORK_DIR"/*/; do
+              [ "$dir" = "${GITHUB_WORKSPACE}/" ] && continue
+              echo "Removing old work dir: $dir"
+              rm -rf "$dir" 2>/dev/null || true
+            done
+          fi
+          echo "Disk usage after cleanup:"
+          df -h . | tail -1
+
       - name: Notify Slack - Completed
         if: steps.launch.outputs.status == 'SUCCEEDED' && inputs.disable_slack != true
         uses: slackapi/slack-github-action@v2.0.0
