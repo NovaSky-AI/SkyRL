@@ -325,8 +325,7 @@ class ForwardBackwardInput(BaseModel):
                     f"Allowed keys: {sorted(allowed_keys)}."
                 )
             raise ValueError(
-                f"loss_fn='{self.loss_fn}' does not accept loss_fn_config keys. "
-                f"Received: {invalid_keys}."
+                f"loss_fn='{self.loss_fn}' does not accept loss_fn_config keys. " f"Received: {invalid_keys}."
             )
         return self
 
