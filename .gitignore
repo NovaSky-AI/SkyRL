@@ -45,9 +45,6 @@ tensorboard_log/
 # SQLite database files
 *.db
 
-# uv lock files
-uv.lock
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -76,7 +73,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-uv.lock
 
 # PyInstaller
 *.manifest
@@ -128,7 +124,6 @@ outputs/
 
 # Local artifacts
 tinker.db
-uv.lock
 
 # Alembic - don't track pycache
 tx/tinker/alembic/__pycache__/

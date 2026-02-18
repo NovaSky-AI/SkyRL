@@ -2,8 +2,10 @@ import asyncio
 import os
 import ray
 import torch
-from typing import Any, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Union
 import time
+import copy
 import requests
 import importlib
 from loguru import logger
@@ -358,103 +360,162 @@ def ray_init_for_tests():
 async def run_inference(client, prompts, sampling_params, tokenizer=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     if isinstance(client, RemoteInferenceClient):
-        # convert to prompt token ids
+        # convert to prompt token ids for RemoteInferenceClient
         assert tokenizer is not None
-        prompt_token_ids = tokenizer.apply_chat_template(prompts, add_generation_prompt=True)
+        prompt_token_ids = tokenizer.apply_chat_template(
+            prompts,
+            add_generation_prompt=True,
+            tokenize=True,
+        )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     return await client.generate(engine_input)
 
 
-# TODO: this is kind of messy. All these information are inside cfg but we are passing them in
-# again. Make a global get_test_config function that is parametrized.
-def init_inference_engines(
-    cfg: SkyRLConfig,
-    model: str,
-    use_local: bool,
-    async_engine: bool,
-    tp_size: int,
-    colocate_all: bool,
-    backend: str,
-    gpu_memory_utilization: float = 0.6,
-    num_inference_engines: int = 1,
-    sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
-    enable_lora: bool = False,
-    max_num_seqs: int = 1024,
-    engine_init_kwargs: Dict[str, Any] = {},
-):
-    assert use_local, "This test does not yet support remote engines."
-    assert backend in ["vllm", "sglang"]
-    if not ray.is_initialized():
-        initialize_ray(cfg)
-    if colocate_all:
-        pg = placement_group(
-            [{"GPU": 1, "CPU": 1}]
-            * tp_size
-            * cfg.generator.inference_engine_pipeline_parallel_size
-            * cfg.generator.inference_engine_data_parallel_size
-            * num_inference_engines,
-            strategy="PACK",
-        )
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
-        sleep = True
-    else:
-        pg, sleep = None, False
+@dataclass
+class InferenceEngineState:
+    """Manages inference engine lifecycle with clean resource cleanup."""
 
-    # Extract served_model_name from config if set
-    served_model_name = cfg.generator.served_model_name
+    client: Union[InferenceEngineClient, RemoteInferenceClient]
+    pg: Optional[Any]  # placement group
+    router: Optional[InferenceRouter]
+    server_group: Optional[ServerGroup]
 
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    def close(self):
+        """Shutdown router and server_group if they exist."""
+        if self.router is not None:
+            self.router.shutdown()
+        if self.server_group is not None:
+            self.server_group.shutdown()
 
-    # Return both router and server group if created to keep references alive
-    router = None
-    server_group = None
+    def __enter__(self):
+        return self
 
-    if _SKYRL_USE_NEW_INFERENCE:
-        # init with internal router and servers
-        server_group = ServerGroup(
-            cli_args=build_vllm_cli_args(cfg),
-            num_servers=num_inference_engines * cfg.generator.inference_engine_data_parallel_size,
-            placement_group=pg if colocate_all else None,
-            enable_dp=cfg.generator.inference_engine_data_parallel_size > 1,
-        )
-        server_infos = server_group.start()
-        server_urls = [info.url for info in server_infos]
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
-        router = InferenceRouter(server_urls=server_urls)
-        proxy_url = router.start()
-        logger.info(
-            f"HTTP Inference: Built servers and router internally - "
-            f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={colocate_all}"
-        )
-        client = RemoteInferenceClient(proxy_url=proxy_url, server_urls=server_urls, model_name=model)
-    else:
-        eps = create_ray_wrapped_inference_engines(
-            num_inference_engines=num_inference_engines,
-            tensor_parallel_size=tp_size,
-            model_dtype="bfloat16",
-            pretrain=model,
-            seed=42,
-            vllm_v1_disable_multiproc=True,
-            enable_prefix_caching=True,
-            enforce_eager=True,
-            shared_pg=pg,
-            gpu_memory_utilization=gpu_memory_utilization,
-            inference_engine_enable_sleep=sleep,
-            async_engine=async_engine,
-            max_num_batched_tokens=8192,
-            max_num_seqs=max_num_seqs,
-            tokenizer=tokenizer,
-            backend=backend,
-            sleep_level=sleep_level,
-            enable_lora=enable_lora,
-            engine_init_kwargs=engine_init_kwargs,
-            served_model_name=served_model_name,
-        )
-        client = InferenceEngineClient(eps, tokenizer, cfg)
+    @classmethod
+    def create(
+        cls,
+        cfg: SkyRLConfig,
+        # optional overrides
+        model: Optional[str] = None,
+        use_local: Optional[bool] = None,
+        async_engine: Optional[bool] = None,
+        tp_size: Optional[int] = None,
+        colocate_all: Optional[bool] = None,
+        backend: Optional[str] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        num_inference_engines: Optional[int] = None,
+        sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
+        enable_lora: bool = False,
+        max_num_seqs: Optional[int] = None,
+        engine_init_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> "InferenceEngineState":
+        """
+        Instantiates inference engines in SkyRL with the provided configuration and overrides
+        """
+        # create a cfg copy and apply overrides
+        cfg = copy.deepcopy(cfg)
+        if model is not None:
+            cfg.trainer.policy.model.path = model
+        if backend is not None:
+            cfg.generator.backend = backend
+        if use_local is not None:
+            cfg.generator.run_engines_locally = use_local
+        if async_engine is not None:
+            cfg.generator.async_engine = async_engine
+        if tp_size is not None:
+            cfg.generator.inference_engine_tensor_parallel_size = tp_size
+        if colocate_all is not None:
+            cfg.trainer.placement.colocate_all = colocate_all
+        if gpu_memory_utilization is not None:
+            cfg.generator.gpu_memory_utilization = gpu_memory_utilization
+        if num_inference_engines is not None:
+            cfg.generator.num_inference_engines = num_inference_engines
+        if max_num_seqs is not None:
+            cfg.generator.max_num_seqs = max_num_seqs
+        if engine_init_kwargs is not None:
+            cfg.generator.engine_init_kwargs = engine_init_kwargs
 
-    if sleep:
-        asyncio.run(client.wake_up())
-    return client, pg, router, server_group
+        assert cfg.generator.run_engines_locally, "This test does not yet support remote engines."
+
+        if not ray.is_initialized():
+            initialize_ray(cfg)
+        if cfg.trainer.placement.colocate_all:
+            pg = placement_group(
+                [{"GPU": 1, "CPU": 1}]
+                * cfg.generator.inference_engine_tensor_parallel_size
+                * cfg.generator.inference_engine_pipeline_parallel_size
+                * cfg.generator.inference_engine_data_parallel_size
+                * cfg.generator.num_inference_engines,
+                strategy="PACK",
+            )
+            get_ray_pg_ready_with_timeout(pg, timeout=30)
+            sleep = True
+        else:
+            pg, sleep = None, False
+
+        # Extract served_model_name from config if set
+        served_model_name = cfg.generator.served_model_name
+
+        tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
+
+        # Return both router and server group if created to keep references alive
+        router = None
+        server_group = None
+
+        if _SKYRL_USE_NEW_INFERENCE:
+            # init with internal router and servers
+            if enable_lora:
+                raise ValueError("LoRA is not supported with new inference backend")
+            # NOTE: In the case of the new inference backend, server is up by default, so we don't need
+            # any special handling for sleep
+            server_group = ServerGroup(
+                cli_args=build_vllm_cli_args(cfg),
+                num_servers=cfg.generator.num_inference_engines * cfg.generator.inference_engine_data_parallel_size,
+                placement_group=pg if cfg.trainer.placement.colocate_all else None,
+                enable_dp=cfg.generator.inference_engine_data_parallel_size > 1,
+            )
+            server_infos = server_group.start()
+            server_urls = [info.url for info in server_infos]
+
+            router = InferenceRouter(server_urls=server_urls)
+            proxy_url = router.start()
+            logger.info(
+                f"HTTP Inference: Built servers and router internally - "
+                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={cfg.trainer.placement.colocate_all}"
+            )
+            client = RemoteInferenceClient(
+                proxy_url=proxy_url, server_urls=server_urls, model_name=cfg.trainer.policy.model.path
+            )
+        else:
+            eps = create_ray_wrapped_inference_engines(
+                num_inference_engines=cfg.generator.num_inference_engines,
+                tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+                model_dtype="bfloat16",
+                pretrain=cfg.trainer.policy.model.path,
+                seed=42,
+                vllm_v1_disable_multiproc=True,
+                enable_prefix_caching=cfg.generator.enable_prefix_caching,
+                enforce_eager=cfg.generator.enforce_eager,
+                shared_pg=pg,
+                gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
+                inference_engine_enable_sleep=sleep,
+                async_engine=cfg.generator.async_engine,
+                max_num_batched_tokens=8192,
+                max_num_seqs=cfg.generator.max_num_seqs,
+                tokenizer=tokenizer,
+                backend=cfg.generator.backend,
+                sleep_level=sleep_level,
+                enable_lora=enable_lora,
+                engine_init_kwargs=cfg.generator.engine_init_kwargs,
+                served_model_name=served_model_name,
+            )
+            client = InferenceEngineClient(eps, tokenizer, cfg)
+            if sleep:
+                asyncio.run(client.wake_up())
+        return cls(client=client, pg=pg, router=router, server_group=server_group)
 
 
 def init_remote_inference_servers(
