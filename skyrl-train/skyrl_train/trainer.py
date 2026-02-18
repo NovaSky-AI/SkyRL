@@ -1078,7 +1078,7 @@ class RayPPOTrainer:
                 # Optimizer step after each mini batch
                 grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
-                    all_metrics["grad_norm"].append(grad_norm)
+                    all_metrics["skyrl.ai/grad_norm"].append(grad_norm)
 
         # Reduce metrics across all mini-batches and epochs
         # pop out loss_fn_outputs since it's not a scalar metric and to avoid logging it

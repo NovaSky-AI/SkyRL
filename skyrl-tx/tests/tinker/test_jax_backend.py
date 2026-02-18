@@ -346,14 +346,14 @@ def test_optim_step_returns_metrics():
         OptimStepInput(adam_params=api.AdamParams(learning_rate=learning_rate).to_types()),
     )
     assert step_output.metrics is not None
-    assert step_output.metrics["learning_rate"] == learning_rate
-    assert step_output.metrics["grad_norm"] > 0
+    assert step_output.metrics["skyrl.ai/learning_rate"] == learning_rate
+    assert step_output.metrics["skyrl.ai/grad_norm"] > 0
 
     no_grad_output = backend.optim_step(
         model_id,
         OptimStepInput(adam_params=api.AdamParams(learning_rate=2e-4).to_types()),
     )
-    assert no_grad_output.metrics == {"learning_rate": 2e-4}
+    assert no_grad_output.metrics == {"skyrl.ai/learning_rate": 2e-4}
 
 
 def test_gradient_checkpointing():
