@@ -760,9 +760,7 @@ class JaxBackendImpl(AbstractBackend):
 
         grad_norm = float(jax.device_get(grad_norm))
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), grad_norm={grad_norm}")
-        return types.OptimStepOutput(
-            metrics={"skyrl.ai/grad_norm": grad_norm, "skyrl.ai/learning_rate": learning_rate}
-        )
+        return types.OptimStepOutput(metrics={"skyrl.ai/grad_norm": grad_norm, "skyrl.ai/learning_rate": learning_rate})
 
     def sample(
         self,
