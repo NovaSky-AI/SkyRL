@@ -1,5 +1,5 @@
 from skyrl_train.config.config import (
-    SkyRLConfig,
+    SkyRLTrainConfig,
     DataConfig,
     TrainerConfig,
     PolicyConfig,
@@ -38,7 +38,7 @@ from skyrl_train.config.config import (
 )
 
 __all__ = [
-    "SkyRLConfig",
+    "SkyRLTrainConfig",
     "DataConfig",
     "TrainerConfig",
     "PolicyConfig",

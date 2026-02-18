@@ -8,7 +8,7 @@ import torch
 from dataclasses import dataclass
 from typing import List
 
-from skyrl_train.config import SkyRLConfig, AlgorithmConfig, make_config
+from skyrl_train.config import SkyRLTrainConfig, AlgorithmConfig, make_config
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray, validate_cfg
 from skyrl_train.entrypoints.main_base import (
@@ -31,7 +31,7 @@ class DAPOAlgorithmConfig(AlgorithmConfig):
 DAPOFlashRLConfig = make_config(algorithm_cls=DAPOAlgorithmConfig)
 
 
-def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: SkyRLConfig, colocate_pg, tokenizer):
+def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: SkyRLTrainConfig, colocate_pg, tokenizer):
     from examples.flash_rl.flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
 
     ie_cfg = cfg.generator.inference_engine

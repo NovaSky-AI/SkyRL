@@ -186,7 +186,7 @@ We will create a new entrypoint for training with the ``multiply`` environment b
    :caption: Environment registration at `examples/multiply/main_multiply.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/main_multiply.py>`_
 
    @ray.remote(num_cpus=1)
-   def skyrl_entrypoint(cfg: SkyRLConfig):
+   def skyrl_entrypoint(cfg: SkyRLTrainConfig):
       # Register the multiply environment
       # this needs to be done inside the entrypoint task
       register(
@@ -199,7 +199,7 @@ We will create a new entrypoint for training with the ``multiply`` environment b
       exp.run()
 
    def main() -> None:
-      cfg = SkyRLConfig.from_cli_overrides(sys.argv[1:])
+      cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
       # validate the arguments
       validate_cfg(cfg)
 

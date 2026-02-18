@@ -17,7 +17,7 @@ from ray.util.placement_group import (
     placement_group_table,
 )
 
-from skyrl_train.config.config import SkyRLConfig
+from skyrl_train.config.config import SkyRLTrainConfig
 from skyrl_train.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
@@ -54,7 +54,7 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
-def validate_batch_sizes(cfg: SkyRLConfig):
+def validate_batch_sizes(cfg: SkyRLTrainConfig):
     """
     Validate configured batch sizes.
 
@@ -187,7 +187,7 @@ def validate_batch_sizes(cfg: SkyRLConfig):
     )
 
 
-def validate_megatron_cfg(cfg: SkyRLConfig):
+def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
     assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
@@ -213,7 +213,7 @@ def validate_megatron_cfg(cfg: SkyRLConfig):
         )
 
 
-def validate_cfg(cfg: SkyRLConfig):
+def validate_cfg(cfg: SkyRLTrainConfig):
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from .ppo_utils import AdvantageEstimatorRegistry, PolicyLossRegistry, repopulate_all_registries
@@ -366,11 +366,11 @@ def validate_cfg(cfg: SkyRLConfig):
             )
 
 
-def validate_generator_cfg(cfg: SkyRLConfig):
+def validate_generator_cfg(cfg: SkyRLTrainConfig):
     """Validates the correctness of generator-related config.
 
     Args:
-        cfg (SkyRLConfig): config to validate
+        cfg (SkyRLTrainConfig): config to validate
 
     Raises:
         NotImplementedError: if feature is not supported, such as sglang for multiturn generation
@@ -491,7 +491,7 @@ def validate_generator_cfg(cfg: SkyRLConfig):
     _validate_new_inference_cfg(cfg)
 
 
-def _validate_new_inference_cfg(cfg: SkyRLConfig):
+def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
     """Validates config options for the new inference layer.
 
     This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
@@ -566,7 +566,7 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
-def prepare_runtime_environment(cfg: SkyRLConfig) -> dict[str, str]:
+def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
 
@@ -717,7 +717,7 @@ def configure_ray_worker_logging() -> None:
     logging.root.setLevel(level)
 
 
-def initialize_ray(cfg: SkyRLConfig):
+def initialize_ray(cfg: SkyRLTrainConfig):
     """
     Initialize Ray cluster with prepared runtime environment.
 

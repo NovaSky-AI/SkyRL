@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 from ray.util.placement_group import placement_group
 
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.training_batch import TrainingInputBatch
 from skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -33,9 +33,9 @@ from skyrl_train.utils.utils import initialize_ray, validate_cfg
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 
 
-def get_sft_config() -> SkyRLConfig:
+def get_sft_config() -> SkyRLTrainConfig:
     """Get config with SFT-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
 
     # Use a small model for testing
     cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"

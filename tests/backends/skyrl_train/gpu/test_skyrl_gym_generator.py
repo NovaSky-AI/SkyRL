@@ -7,7 +7,7 @@ import pytest
 import ray
 from skyrl.train.utils.utils import initialize_ray
 from tests.backends.skyrl_train.gpu.gpu_ci.test_skyrl_gym_generator import run_generator_end_to_end
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 
 
 # TODO: Make this test lightweight. It currently requires a ~20GB dataset download. Then, transfer the test to gpu_ci.
@@ -16,7 +16,7 @@ async def test_generator_multi_turn_text2sql():
     """
     Test the generator with multiple turns of text2sql
     """
-    initialize_ray(SkyRLConfig())
+    initialize_ray(SkyRLTrainConfig())
     try:
         await run_generator_end_to_end(
             use_async_engine=True,

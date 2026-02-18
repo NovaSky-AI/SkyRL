@@ -16,7 +16,7 @@ from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeou
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.generators.base import GeneratorInterface
-from skyrl.train.config import SkyRLConfig, get_config_as_yaml_str
+from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from pathlib import Path
 import ray
 import sys
@@ -37,7 +37,9 @@ config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
 
 
-def create_ray_wrapped_inference_engines_from_config(cfg: SkyRLConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase):
+def create_ray_wrapped_inference_engines_from_config(
+    cfg: SkyRLTrainConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase
+):
     from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
         create_ray_wrapped_inference_engines,
     )
@@ -95,7 +97,7 @@ def create_ray_wrapped_inference_engines_from_config(cfg: SkyRLConfig, colocate_
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
-def create_remote_inference_engines_from_config(cfg: SkyRLConfig, tokenizer: PreTrainedTokenizerBase):
+def create_remote_inference_engines_from_config(cfg: SkyRLTrainConfig, tokenizer: PreTrainedTokenizerBase):
     # TODO(tgriggs): We may want a separate config for the model name in case
     # it's different from the name used in the OpenAI API
     ie_cfg = cfg.generator.inference_engine
@@ -112,12 +114,12 @@ def create_remote_inference_engines_from_config(cfg: SkyRLConfig, tokenizer: Pre
 
 
 class BasePPOExp:
-    def __init__(self, cfg: SkyRLConfig):
+    def __init__(self, cfg: SkyRLTrainConfig):
         """
         Initializes a PPO experiment.
 
         Args:
-            cfg: The fully resolved SkyRLConfig instance.
+            cfg: The fully resolved SkyRLTrainConfig instance.
         """
         self.cfg = cfg
         self.tokenizer = self.get_tokenizer()
@@ -130,7 +132,7 @@ class BasePPOExp:
         self._inference_router = None
 
     @staticmethod
-    def get_cfg_as_str(cfg: SkyRLConfig) -> str:
+    def get_cfg_as_str(cfg: SkyRLTrainConfig) -> str:
         return get_config_as_yaml_str(cfg)
 
     def get_tokenizer(self, padding_side="left"):
@@ -423,7 +425,7 @@ class BasePPOExp:
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)
     exp.run()
@@ -431,7 +433,7 @@ def skyrl_entrypoint(cfg: SkyRLConfig):
 
 def main() -> None:
     # Parse CLI args and build typed config
-    cfg = SkyRLConfig.from_cli_overrides(sys.argv[1:])
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
 
     # validate the arguments
     validate_cfg(cfg)

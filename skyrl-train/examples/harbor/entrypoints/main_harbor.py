@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from skyrl_train.entrypoints.main_base import BasePPOExp
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
 from examples.harbor.harbor_generator import HarborGenerator
@@ -30,8 +30,8 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 
 @dataclass
-class HarborSkyRLConfig(SkyRLConfig):
-    """SkyRLConfig with Harbor trial configuration."""
+class HarborSkyRLConfig(SkyRLTrainConfig):
+    """SkyRLTrainConfig with Harbor trial configuration."""
 
     harbor_trial_config: Dict[str, Any] = field(default_factory=dict)
 

@@ -6,13 +6,13 @@ import ray
 from integrations.verifiers.verifiers_generator import VerifiersGenerator
 from transformers import PreTrainedTokenizer
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 
 
 class VerifiersEntrypoint(BasePPOExp):
     def get_generator(
         self,
-        cfg: SkyRLConfig,
+        cfg: SkyRLTrainConfig,
         tokenizer: PreTrainedTokenizer,
         inference_engine_client: InferenceEngineClient,
     ):
@@ -24,13 +24,13 @@ class VerifiersEntrypoint(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp = VerifiersEntrypoint(cfg)
     exp.run()
 
 
 def main() -> None:
-    cfg = SkyRLConfig.from_cli_overrides(sys.argv[1:])
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # Validate config args.
     validate_cfg(cfg)
 

@@ -22,7 +22,7 @@ import ray
 import torch
 import torch.distributed as dist
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.weight_sync import (
     WeightChunk,
     CudaIpcTransferStrategy,
@@ -44,7 +44,7 @@ def make_cfg(
 
     Assumes no intra-engine parallelism (tp=pp=dp=1).
     """
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.generator.weight_sync_backend = weight_sync_backend
     cfg.generator.model_dtype = model_dtype
     cfg.generator.num_inference_engines = num_inference_engines

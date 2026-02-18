@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, DictConfig
 
 from skyrl_train.config.config import (
     BaseConfig,
-    SkyRLConfig,
+    SkyRLTrainConfig,
     build_nested_dataclass,
     _resolve_dataclass_type,
 )
@@ -49,14 +49,14 @@ def test_build_nested_dataclass():
 
 def test_build_nested_dataclass_full_config():
     d = {"trainer": {"policy": {"model": {"path": "path/to/model"}}}}
-    cfg = build_nested_dataclass(SkyRLConfig, d)
+    cfg = build_nested_dataclass(SkyRLTrainConfig, d)
     assert cfg.trainer.policy.model.path == "path/to/model"
 
 
 def test_build_nested_dataclass_invalid_config():
     d = {"path": "path/to/model"}
     with pytest.raises(ValueError):
-        build_nested_dataclass(SkyRLConfig, d)
+        build_nested_dataclass(SkyRLTrainConfig, d)
 
 
 def test_build_config_from_dict_config():
@@ -90,31 +90,31 @@ def test_cli_overrides():
         "trainer.seed=123",
         "generator.inference_engine.engine_init_kwargs.field=value",
     ]
-    cfg = SkyRLConfig.from_cli_overrides(overrides)
+    cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
     assert cfg.trainer.policy.model.path == "path/to/model"
     assert cfg.trainer.seed == 123
     assert cfg.generator.inference_engine.engine_init_kwargs["field"] == "value"
 
 
 def test_cli_overrides_empty_args():
-    cfg = SkyRLConfig.from_cli_overrides([])
+    cfg = SkyRLTrainConfig.from_cli_overrides([])
     assert cfg.trainer.policy.model.path == "Qwen/Qwen2.5-1.5B-Instruct"
     assert cfg.trainer.seed == 42
 
 
 def test_cli_overrides_plus_prefix_rejected():
     with pytest.raises(ValueError, match="The '\\+' prefix"):
-        SkyRLConfig.from_cli_overrides(["+new_field=value"])
+        SkyRLTrainConfig.from_cli_overrides(["+new_field=value"])
 
 
 def test_cli_overrides_invalid_field():
     with pytest.raises(ValueError, match="Invalid fields"):
-        SkyRLConfig.from_cli_overrides(["trainer.nonexistent_field=value"])
+        SkyRLTrainConfig.from_cli_overrides(["trainer.nonexistent_field=value"])
 
 
 def test_temperature_propagation():
     """Test that temperature is copied from generator to algorithm config in __post_init__."""
-    cfg = SkyRLConfig.from_cli_overrides(["generator.sampling_params.temperature=0.7"])
+    cfg = SkyRLTrainConfig.from_cli_overrides(["generator.sampling_params.temperature=0.7"])
     assert cfg.generator.sampling_params.temperature == 0.7
     assert cfg.trainer.algorithm.temperature == 0.7
 
@@ -126,7 +126,7 @@ def test_legacy_config_translation():
     # Use legacy-style paths (flat under generator instead of nested in inference_engine)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        cfg = SkyRLConfig.from_cli_overrides(["generator.backend=sglang"])
+        cfg = SkyRLTrainConfig.from_cli_overrides(["generator.backend=sglang"])
 
         # Should have issued a deprecation warning (filter for DeprecationWarning only)
         deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
@@ -154,7 +154,7 @@ def test_legacy_config_translation():
     full_legacy_cfg_as_overrides = traverse_and_convert(full_legacy_cfg)
 
     # should pass without error
-    translated_cfg = SkyRLConfig.from_cli_overrides(full_legacy_cfg_as_overrides)
+    translated_cfg = SkyRLTrainConfig.from_cli_overrides(full_legacy_cfg_as_overrides)
     assert translated_cfg.generator.inference_engine.backend == "sglang"
 
 
@@ -165,6 +165,6 @@ def test_legacy_config_field_rename():
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
         # Old field name: num_inference_engines -> new: num_engines
-        cfg = SkyRLConfig.from_cli_overrides(["generator.num_inference_engines=4"])
+        cfg = SkyRLTrainConfig.from_cli_overrides(["generator.num_inference_engines=4"])
 
     assert cfg.generator.inference_engine.num_engines == 4

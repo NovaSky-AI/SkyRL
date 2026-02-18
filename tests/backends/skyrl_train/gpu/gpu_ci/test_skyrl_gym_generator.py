@@ -15,7 +15,7 @@ from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any, Dict
 from loguru import logger
-from skyrl.train.config import SkyRLConfig, SamplingParams
+from skyrl.train.config import SkyRLTrainConfig, SamplingParams
 
 OBSERVATION_PROMPT = "give me another solution"
 
@@ -32,7 +32,7 @@ def get_test_config(
     temperature,
     get_logprobs,
 ):
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
     cfg.generator.sampling_params = SamplingParams(
         max_generate_length=max_generate_length,
@@ -254,7 +254,7 @@ async def test_generator_single_turn_gsm8k(
     """
     Test the generator with a single turn of GSM8K
     """
-    initialize_ray(SkyRLConfig())
+    initialize_ray(SkyRLTrainConfig())
     try:
         await run_generator_end_to_end(
             use_async_engine=use_async_engine,
@@ -274,7 +274,7 @@ async def test_generator_multi_turn_search():
     """
     Test the generator with multiple turns of search
     """
-    initialize_ray(SkyRLConfig())
+    initialize_ray(SkyRLTrainConfig())
     try:
         await run_generator_end_to_end(
             use_async_engine=True,
@@ -305,7 +305,7 @@ async def test_generator_formatting_use_conversation_multi_turn(model_name):
     """
     Test generator formatting when using conversation formatting for multi-turn
     """
-    initialize_ray(SkyRLConfig())
+    initialize_ray(SkyRLTrainConfig())
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         generator_output = await run_generator_end_to_end(
@@ -381,7 +381,7 @@ async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
     """
     Test generator formatting when not using conversation formatting for multi-turn
     """
-    initialize_ray(SkyRLConfig())
+    initialize_ray(SkyRLTrainConfig())
     try:
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         generator_output = await run_generator_end_to_end(
@@ -446,7 +446,7 @@ async def test_generator_multi_turn_gsm8k_step_wise():
     """
     Test the generator with the multi-turn GSM8K environment for step-wise training
     """
-    initialize_ray(SkyRLConfig())
+    initialize_ray(SkyRLTrainConfig())
     try:
         generator_output: GeneratorOutput = await run_generator_end_to_end(
             use_async_engine=True,

@@ -9,7 +9,7 @@ import ray
 from loguru import logger
 from typing import Any
 
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp
 from skyrl_train.utils.utils import validate_generator_cfg, initialize_ray
 from skyrl_train.evaluate import evaluate
@@ -43,13 +43,13 @@ class EvalOnlyEntrypoint(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def eval_entrypoint(cfg: SkyRLConfig) -> dict:
+def eval_entrypoint(cfg: SkyRLTrainConfig) -> dict:
     exp = EvalOnlyEntrypoint(cfg)
     return asyncio.run(exp.run())
 
 
 def main() -> None:
-    cfg = SkyRLConfig.from_cli_overrides(sys.argv[1:])
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     validate_generator_cfg(cfg)
     initialize_ray(cfg)
     metrics = ray.get(eval_entrypoint.remote(cfg))

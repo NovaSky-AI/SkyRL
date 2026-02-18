@@ -8,15 +8,15 @@ import pytest
 
 from tests.backends.skyrl_train.gpu.utils import init_worker_with_type, make_dummy_training_batch
 from skyrl.train.utils.utils import print_mem, validate_cfg
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 
-def get_test_actor_config() -> SkyRLConfig:
-    cfg = SkyRLConfig()
+def get_test_actor_config() -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.logger = "console"
     cfg.generator.inference_engine_tensor_parallel_size = 2
@@ -25,7 +25,7 @@ def get_test_actor_config() -> SkyRLConfig:
 
 
 @pytest.fixture
-def cfg() -> SkyRLConfig:
+def cfg() -> SkyRLTrainConfig:
     return get_test_actor_config()
 
 

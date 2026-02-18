@@ -4,7 +4,7 @@ uv run --isolated --extra vllm -m scripts.full_context.main_full_ctx
 
 import sys
 
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl_train.utils import initialize_ray
 import ray
@@ -36,14 +36,14 @@ class FullCtxPPOExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     # make sure that the training loop is not run on the head node.
     exp = FullCtxPPOExp(cfg)
     exp.run()
 
 
 def main() -> None:
-    cfg = SkyRLConfig.from_cli_overrides(sys.argv[1:])
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # validate the arguments
     validate_cfg(cfg)
 

@@ -16,7 +16,7 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
@@ -77,7 +77,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 class RayPPOTrainer:
     def __init__(
         self,
-        cfg: SkyRLConfig,
+        cfg: SkyRLTrainConfig,
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],

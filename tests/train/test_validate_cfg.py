@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from skyrl.train.config import (
-    SkyRLConfig,
+    SkyRLTrainConfig,
     AlgorithmConfig,
     GeneratorConfig,
     SamplingParams,
@@ -18,8 +18,8 @@ from skyrl.train.config import (
 from skyrl.train.utils.utils import validate_cfg
 
 
-def _make_valid_cfg(**algorithm_overrides) -> SkyRLConfig:
-    """Create a minimal SkyRLConfig that passes validate_cfg.
+def _make_valid_cfg(**algorithm_overrides) -> SkyRLTrainConfig:
+    """Create a minimal SkyRLTrainConfig that passes validate_cfg.
 
     All defaults are chosen so that the full validate_cfg pipeline passes
     without needing GPUs, real model paths, etc.
@@ -57,13 +57,13 @@ def _make_valid_cfg(**algorithm_overrides) -> SkyRLConfig:
             tensor_parallel_size=1,
         ),
     )
-    cfg = SkyRLConfig(trainer=trainer_cfg, generator=generator_cfg)
+    cfg = SkyRLTrainConfig(trainer=trainer_cfg, generator=generator_cfg)
     cfg.trainer.placement.colocate_all = False
     return cfg
 
 
 def _maybe_to_dictconfig(cfg, use_dictconfig):
-    """Optionally convert a SkyRLConfig to DictConfig for parametrized tests."""
+    """Optionally convert a SkyRLTrainConfig to DictConfig for parametrized tests."""
     if use_dictconfig:
         return OmegaConf.structured(cfg)
     return cfg

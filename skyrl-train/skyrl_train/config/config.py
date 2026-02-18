@@ -1,8 +1,8 @@
 """
 Typed configuration dataclasses for SkyRL.
 
-These mirror the YAML configuration structure 1:1. The top-level SkyRLConfig
-can be constructed from a Hydra DictConfig via SkyRLConfig.from_dict_config().
+These mirror the YAML configuration structure 1:1. The top-level SkyRLTrainConfig
+can be constructed from a Hydra DictConfig via SkyRLTrainConfig.from_dict_config().
 """
 
 import os
@@ -565,7 +565,7 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
 
 
 @dataclass
-class SkyRLConfig(BaseConfig):
+class SkyRLTrainConfig(BaseConfig):
     data: DataConfig = field(default_factory=DataConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
@@ -577,8 +577,8 @@ class SkyRLConfig(BaseConfig):
         self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
 
     @classmethod
-    def from_cli_overrides(cls, args: List[str]) -> "SkyRLConfig":
-        """Construct a SkyRLConfig from CLI arguments.
+    def from_cli_overrides(cls, args: List[str]) -> "SkyRLTrainConfig":
+        """Construct a SkyRLTrainConfig from CLI arguments.
 
         Parses CLI arguments and builds a typed config. Dataclass field defaults
         are used for any values not specified on the command line.
@@ -591,7 +591,7 @@ class SkyRLConfig(BaseConfig):
                   Example: ['trainer.policy.model.path=Qwen/Qwen2.5-1.5B-Instruct', 'trainer.seed=123']
 
         Returns:
-            A fully constructed SkyRLConfig with CLI overrides applied.
+            A fully constructed SkyRLTrainConfig with CLI overrides applied.
 
         Raises:
             ValueError: If an argument uses the unsupported '+' prefix.
@@ -637,8 +637,8 @@ def make_config(
     algorithm_cls: Optional[Type[AlgorithmConfig]] = None,
     trainer_cls: Optional[Type[TrainerConfig]] = None,
     generator_cls: Optional[Type[GeneratorConfig]] = None,
-) -> Type[SkyRLConfig]:
-    """Create a SkyRLConfig subclass with custom nested config classes.
+) -> Type[SkyRLTrainConfig]:
+    """Create a SkyRLTrainConfig subclass with custom nested config classes.
 
     Convenience helper to avoid boilerplate when extending configs for custom
     algorithms or generators. For full IDE autocomplete on custom fields, use
@@ -652,7 +652,7 @@ def make_config(
         generator_cls: Custom GeneratorConfig subclass.
 
     Returns:
-        A SkyRLConfig subclass wired up with the custom config classes.
+        A SkyRLTrainConfig subclass wired up with the custom config classes.
 
     Example::
 
@@ -690,7 +690,7 @@ def make_config(
 
     ns["__annotations__"] = annotations
 
-    return dataclass(type("_CustomSkyRLConfig", (SkyRLConfig,), ns))
+    return dataclass(type("_CustomSkyRLTrainConfig", (SkyRLTrainConfig,), ns))
 
 
 def get_config_as_dict(cfg: Union[dict, BaseConfig]) -> dict:

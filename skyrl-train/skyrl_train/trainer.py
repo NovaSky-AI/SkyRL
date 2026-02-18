@@ -16,7 +16,7 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.dataset import PromptDataset
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
@@ -77,7 +77,7 @@ from skyrl_train.workers.worker_utils import reduce_metrics
 class RayPPOTrainer:
     def __init__(
         self,
-        cfg: SkyRLConfig,
+        cfg: SkyRLTrainConfig,
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],
@@ -968,6 +968,14 @@ class RayPPOTrainer:
         if training_input.get("rollout_logprobs", None) is not None:
             # calculates the difference in probs between inference and trainer components
             # only consider response tokens
+            print(
+                "Logprobs scale for rollout logprobs: ",
+                training_input["rollout_logprobs"][training_input["loss_mask"] > 0].abs().mean().item(),
+            )
+            print(
+                "Logprobs scale for action logprobs: ",
+                action_log_probs[training_input["loss_mask"] > 0].abs().mean().item(),
+            )
             logprobs_diff = (
                 training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
                 - action_log_probs[training_input["loss_mask"] > 0]

@@ -18,15 +18,15 @@ from tests.backends.skyrl_train.gpu.utils import (
     init_remote_inference_servers,
 )
 from transformers import AutoTokenizer
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_actor_config() -> SkyRLConfig:
+def get_test_actor_config() -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
     cfg.generator.sampling_params.temperature = 0.0

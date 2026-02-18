@@ -7,7 +7,7 @@ import sys
 import ray
 import torch
 from typing import Optional
-from skyrl_train.config import SkyRLConfig, AlgorithmConfig
+from skyrl_train.config import SkyRLTrainConfig, AlgorithmConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl_train.utils.ppo_utils import PolicyLossRegistry
@@ -36,13 +36,13 @@ PolicyLossRegistry.register("reinforce", compute_reinforce_policy_loss)
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp = BasePPOExp(cfg)
     exp.run()
 
 
 def main() -> None:
-    cfg = SkyRLConfig.from_cli_overrides(sys.argv[1:])
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # validate the arguments
     validate_cfg(cfg)
 

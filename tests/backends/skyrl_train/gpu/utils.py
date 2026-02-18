@@ -15,7 +15,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from functools import lru_cache
 import subprocess
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.dataset import PromptDataset
@@ -39,9 +39,9 @@ from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
 
-def get_test_actor_config() -> SkyRLConfig:
+def get_test_actor_config() -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
     cfg.trainer.logger = "console"
     return cfg
@@ -397,7 +397,7 @@ class InferenceEngineState:
     @classmethod
     def create(
         cls,
-        cfg: SkyRLConfig,
+        cfg: SkyRLTrainConfig,
         # optional overrides
         model: Optional[str] = None,
         use_local: Optional[bool] = None,
@@ -522,7 +522,7 @@ def init_remote_inference_servers(
     tp_size: int,
     backend: str,
     tokenizer: PreTrainedTokenizerBase,
-    config: SkyRLConfig,
+    config: SkyRLTrainConfig,
     model: str,
 ) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()

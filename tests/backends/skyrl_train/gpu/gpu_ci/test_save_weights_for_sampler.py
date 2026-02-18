@@ -10,7 +10,7 @@ uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_save_wei
 import asyncio
 
 import pytest
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl.train.utils.utils import validate_cfg
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -26,9 +26,9 @@ from tests.backends.skyrl_train.gpu.utils import (
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_config() -> SkyRLConfig:
+def get_test_config() -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 1

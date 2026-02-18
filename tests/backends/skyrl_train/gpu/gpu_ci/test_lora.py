@@ -13,15 +13,15 @@ from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     run_inference,
 )
-from skyrl.train.config import SkyRLConfig, SkyRLLoraConfig
+from skyrl.train.config import SkyRLTrainConfig, SkyRLLoraConfig
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_actor_config(enable_lora: bool = False) -> SkyRLConfig:
+def get_test_actor_config(enable_lora: bool = False) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 2

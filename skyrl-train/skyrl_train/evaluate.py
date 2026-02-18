@@ -24,7 +24,7 @@ from skyrl_train.utils.trainer_utils import (
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.logging_utils import log_example
 
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
@@ -33,7 +33,7 @@ from transformers import AutoTokenizer
 async def evaluate(
     eval_dataloader: StatefulDataLoader,
     generator: GeneratorInterface,
-    cfg: SkyRLConfig,
+    cfg: SkyRLTrainConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
 ) -> Dict[str, float]:
@@ -42,7 +42,7 @@ async def evaluate(
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
         generator (GeneratorInterface): generator to use
-        cfg (SkyRLConfig): config
+        cfg (SkyRLTrainConfig): config
         global_step (int | None): current global step, or
             `None` to indicate a non-training context (e.g., eval-only)
         tokenizer (AutoTokenizer): tokenizer to use
@@ -131,7 +131,7 @@ async def evaluate(
 async def evaluate_step_wise(
     eval_dataloader: StatefulDataLoader,
     generator: GeneratorInterface,
-    cfg: SkyRLConfig,
+    cfg: SkyRLTrainConfig,
     global_step: int | None,
     tokenizer: AutoTokenizer,
 ) -> Dict[str, float]:
@@ -142,7 +142,7 @@ async def evaluate_step_wise(
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
         generator (GeneratorInterface): generator to use
-        cfg (SkyRLConfig): config
+        cfg (SkyRLTrainConfig): config
         global_step (int | None): current global step, or
             `None` to indicate a non-training context (e.g., eval-only)
         tokenizer (AutoTokenizer): tokenizer to use

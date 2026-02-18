@@ -13,7 +13,7 @@ import pytest
 from ray.util.placement_group import placement_group
 
 from tests.gpu.utils import make_dummy_training_batch, get_rank_0_memory
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.workers.worker_dispatch import WorkerDispatch, GPUState
@@ -24,8 +24,8 @@ from skyrl_train.workers.worker import PPORayActorGroup
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_config() -> SkyRLConfig:
-    cfg = SkyRLConfig()
+def get_test_config() -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.generator.inference_engine.tensor_parallel_size = 1
@@ -42,7 +42,7 @@ def get_test_config() -> SkyRLConfig:
 def init_colocated_actor_group(
     worker_cls,
     shared_pg,
-    cfg: SkyRLConfig,
+    cfg: SkyRLTrainConfig,
 ) -> PPORayActorGroup:
     """Initialize an actor group that shares a placement group with others."""
     return PPORayActorGroup(

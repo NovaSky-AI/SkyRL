@@ -14,7 +14,7 @@ import shutil
 import json
 from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
@@ -41,8 +41,8 @@ def run_one_training_step(
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
-def get_test_actor_config(strategy: str) -> SkyRLConfig:
-    cfg = SkyRLConfig()
+def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.generator.inference_engine_tensor_parallel_size = NUM_GPUS

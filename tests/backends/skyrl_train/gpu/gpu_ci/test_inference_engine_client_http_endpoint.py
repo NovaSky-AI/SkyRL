@@ -28,7 +28,7 @@ from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
 import logging
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from tests.backends.skyrl_train.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState
@@ -60,7 +60,7 @@ pytestmark = pytest.mark.skipif(
 litellm.disable_aiohttp_transport = True
 
 
-def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> Dict[str, Any]:
+def _get_test_sampling_params(backend: str, cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str, Any]:
     assert endpoint in ["chat_completions", "completions"]
     sampling_params = get_sampling_params_for_backend(backend, cfg.generator.sampling_params)
     sampling_params["logprobs"] = True
@@ -70,9 +70,9 @@ def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> 
     return sampling_params
 
 
-def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig:
+def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines

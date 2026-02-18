@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.generators.base import GeneratorOutput
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 
 
 class DummyDataset:
@@ -24,7 +24,7 @@ class DummyDataset:
 
 
 def create_config(batch_size):
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.train_batch_size = batch_size
     cfg.trainer.eval_batch_size = batch_size
     cfg.trainer.resume_mode = "none"

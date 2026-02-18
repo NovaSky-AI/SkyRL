@@ -19,7 +19,7 @@ from tests.backends.skyrl_train.gpu.utils import (
 )
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from skyrl.train.config import (
-    SkyRLConfig,
+    SkyRLTrainConfig,
     SkyRLLoraConfig,
     MegatronTorchProfilerConfig,
 )
@@ -36,8 +36,8 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 
-def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLConfig:
-    cfg = SkyRLConfig()
+def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model_name
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2

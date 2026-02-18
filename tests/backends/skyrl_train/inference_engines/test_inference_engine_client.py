@@ -21,7 +21,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_e
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from skyrl.train.config import (
-    SkyRLConfig,
+    SkyRLTrainConfig,
     GeneratorConfig,
     PolicyConfig,
     ModelConfig,
@@ -415,7 +415,7 @@ def test_route_prompts_to_engines_validation_errors():
 
 
 def _make_min_cfg():
-    return SkyRLConfig(
+    return SkyRLTrainConfig(
         trainer=TrainerConfig(
             policy=PolicyConfig(model=ModelConfig(path="dummy-model")),
         ),

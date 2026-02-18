@@ -8,7 +8,7 @@ import sys
 import ray
 import torch
 import torch.distributed as dist
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from ray.util.placement_group import placement_group
@@ -80,7 +80,7 @@ class PyTorchDistActor:
 
 if __name__ == "__main__":
     # Initialize Ray
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"

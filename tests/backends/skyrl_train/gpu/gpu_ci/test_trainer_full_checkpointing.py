@@ -22,7 +22,7 @@ from torch.utils.data import Dataset
 from unittest.mock import MagicMock
 from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.trainer import RayPPOTrainer
 from tests.backends.skyrl_train.gpu.utils import import_worker, ray_init_for_tests
@@ -47,9 +47,9 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLConfig:
+def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLTrainConfig:
     """Create minimal trainer config for testing"""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.critic.model.path = MODEL_NAME  # Enable critic for testing
     cfg.trainer.strategy = strategy
@@ -94,7 +94,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> S
     return cfg
 
 
-def create_minimal_trainer(cfg: SkyRLConfig):
+def create_minimal_trainer(cfg: SkyRLTrainConfig):
     """Create a minimal trainer setup for testing"""
     # Create minimal tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)

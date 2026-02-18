@@ -7,7 +7,7 @@ import sys
 import ray
 import torch
 import numpy as np
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry
@@ -39,13 +39,13 @@ AdvantageEstimatorRegistry.register("simple_baseline", compute_simple_baseline_a
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp = BasePPOExp(cfg)
     exp.run()
 
 
 def main() -> None:
-    cfg = SkyRLConfig.from_cli_overrides(sys.argv[1:])
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # validate the arguments
     validate_cfg(cfg)
 

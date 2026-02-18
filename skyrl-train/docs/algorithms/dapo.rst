@@ -89,7 +89,7 @@ We provide an example of this in :code_link:`examples/algorithms/dapo/main_dapo.
         return DAPOTrainer(*args, **kwargs)
 
   @ray.remote(num_cpus=1)
-  def skyrl_entrypoint(cfg: SkyRLConfig):
+  def skyrl_entrypoint(cfg: SkyRLTrainConfig):
       exp = DAPOExp(cfg)
       exp.run()
 

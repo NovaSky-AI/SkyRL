@@ -20,7 +20,7 @@ import time
 import sys
 import tempfile
 from pathlib import Path
-from skyrl_train.config import SkyRLConfig
+from skyrl_train.config import SkyRLTrainConfig
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
 import psutil
@@ -180,7 +180,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=180, help="Timeout in seconds for server readiness")
     args = parser.parse_args()
 
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
     initialize_ray(cfg)
