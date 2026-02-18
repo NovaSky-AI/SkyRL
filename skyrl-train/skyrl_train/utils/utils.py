@@ -661,9 +661,9 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
 
     # Forward Azure storage env vars so Ray workers can authenticate
     for azure_var in ("AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_ACCOUNT_NAME", "AZURE_CLIENT_ID"):
-        if os.environ.get(azure_var):
-            env_vars[azure_var] = os.environ[azure_var]
-            logger.info(f"Exporting {azure_var} to ray runtime env (length={len(os.environ[azure_var])})")
+        if value := os.environ.get(azure_var):
+            env_vars[azure_var] = value
+            logger.info(f"Exporting {azure_var} to ray runtime env (length={len(value)})")
         else:
             logger.warning(f"{azure_var} not found in os.environ, skipping")
 
