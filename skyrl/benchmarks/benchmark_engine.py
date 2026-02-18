@@ -5,9 +5,9 @@ import time
 
 import jax
 
-from tx.tinker.engine import TinkerEngine
-from tx.tinker.config import EngineConfig, add_model
-from tx.tinker import types
+from skyrl.tinker.engine import TinkerEngine
+from skyrl.tinker.config import EngineConfig, add_model
+from skyrl.tinker import types
 
 
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:
@@ -42,12 +42,13 @@ def make_sample_input(prompt_tokens: list[int], max_tokens: int, checkpoint_id: 
 
 def build_engine(config: EngineConfig, num_adapters: int) -> TinkerEngine:
     engine = TinkerEngine(config)
+    max_lora_rank = int(config.backend_config.get("max_lora_rank", 32))
     for i in range(num_adapters):
         model_id = f"adapter_{i}"
         engine.process_single_request(
             types.RequestType.CREATE_MODEL,
             model_id,
-            {"lora_config": {"rank": config.backend_config["max_lora_rank"], "alpha": 32, "seed": i}},
+            {"lora_config": {"rank": max_lora_rank, "alpha": 32, "seed": i}},
         )
         # Mark as loaded so sampling uses in-memory weights
         engine.backend.models[model_id].loaded_checkpoint_id = model_id

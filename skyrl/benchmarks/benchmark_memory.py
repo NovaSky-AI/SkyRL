@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Benchmark GPU memory (GRAM) usage for skyrl-tx training and sampling.
+Benchmark GPU memory (GRAM) usage for SkyRL training and sampling.
 
 This script measures peak GPU memory consumption across different batch sizes
 and sequence lengths for both sampling (inference) and training (forward-backward)
@@ -22,31 +22,31 @@ Features:
 
 Usage:
     # Run full benchmark sweep
-    uv run --extra tinker python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python skyrl/benchmarks/benchmark_memory.py \\
         --experiment-name my_test --mode both --batch-sizes 4,8,16,32 --seq-lens 4096,8192
 
     # Test sampling only with specific config
-    uv run --extra tinker python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python skyrl/benchmarks/benchmark_memory.py \\
         --mode sample --batch-sizes 32,64 --seq-lens 8192 --tp-size 8
 
     # Launch server only for manual testing
-    uv run --extra tinker python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python skyrl/benchmarks/benchmark_memory.py \\
         --server-only --batch-sizes 8 --seq-lens 8192
 
     # Enable XLA graph dumps for debugging
-    uv run --extra tinker python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python skyrl/benchmarks/benchmark_memory.py \\
         --dump-xla --batch-sizes 4 --seq-lens 4096
 
     # Pass additional backend config options
-    uv run --extra tinker python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python skyrl/benchmarks/benchmark_memory.py \\
         --backend-config '{"loss_chunk_size": 512, "enforce_eager": true}'
 
     # Run with multiple measurement iterations for more accurate post-JIT timing
-    uv run --extra tinker python benchmarks/benchmark_memory.py \\
+    uv run --extra tinker python skyrl/benchmarks/benchmark_memory.py \\
         --num-measurement-iters 3 --batch-sizes 8 --seq-lens 4096
 
-Output directory (default: /tmp/skyrl_tx_memory_benchmark/):
-    tx_memory_benchmark_{experiment_name}_{timestamp}/
+Output directory (default: /tmp/skyrl_memory_benchmark/):
+    skyrl_memory_benchmark_{experiment_name}_{timestamp}/
         config.json         # Full benchmark configuration (JSON)
         results.csv         # Results table (mode, batch, seq, status, peak_mem, jit_time, post_jit_time)
         tinker.db           # SQLite database used by tinker API
@@ -110,7 +110,7 @@ class BenchmarkConfig:
     host: str = "localhost"
     port: int = 8001
     experiment_name: str | None = None
-    output_root: Path = field(default_factory=lambda: Path("/tmp/skyrl_tx_memory_benchmark"))
+    output_root: Path = field(default_factory=lambda: Path("/tmp/skyrl_memory_benchmark"))
     gpu_poll_interval: float = 1.0
 
     # JAX/XLA environment configuration
@@ -256,7 +256,7 @@ class ServerManager:
             "--extra",
             "gpu",
             "-m",
-            "tx.tinker.api",
+            "skyrl.tinker.api",
             "--host",
             self.config.host,
             "--port",
@@ -752,7 +752,7 @@ class ResultsReporter:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="TX Memory Optimization Benchmark",
+        description="SkyRL Memory Optimization Benchmark",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -831,7 +831,7 @@ def parse_args() -> argparse.Namespace:
     runtime_group.add_argument(
         "--output-root",
         type=Path,
-        default=Path("/tmp/skyrl_tx_memory_benchmark"),
+        default=Path("/tmp/skyrl_memory_benchmark"),
         help="Root directory for benchmark output",
     )
     runtime_group.add_argument(
@@ -873,13 +873,13 @@ def parse_args() -> argparse.Namespace:
 def setup_output_dir(experiment_name: str | None, output_root: Path) -> Path:
     """Create and return the output directory for this benchmark run.
 
-    Directory name format: tx_memory_benchmark_{experiment_name}_{timestamp}
+    Directory name format: skyrl_memory_benchmark_{experiment_name}_{timestamp}
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if experiment_name:
-        dir_name = f"tx_memory_benchmark_{experiment_name}_{timestamp}"
+        dir_name = f"skyrl_memory_benchmark_{experiment_name}_{timestamp}"
     else:
-        dir_name = f"tx_memory_benchmark_{timestamp}"
+        dir_name = f"skyrl_memory_benchmark_{timestamp}"
 
     output_dir = output_root / dir_name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -926,7 +926,7 @@ def main() -> int:
         json.dump(config_dict, f, indent=2)
 
     print("=" * 60)
-    print("TX Memory Optimization Benchmark")
+    print("SkyRL Memory Optimization Benchmark")
     print("=" * 60)
     print(config)
     print()
