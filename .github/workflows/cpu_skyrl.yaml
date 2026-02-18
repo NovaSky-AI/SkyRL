@@ -47,4 +47,5 @@ jobs:
         uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train
     - name: Run engine benchmarks
       run: |
-        uv run --extra tinker --extra dev python benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16
+        uv run --extra tinker --extra dev python skyrl/benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16
+
