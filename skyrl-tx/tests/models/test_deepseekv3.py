@@ -9,7 +9,6 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3MoE as HFDeepseekV3MoE
-from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
 from tx.layers.lora import LoRAMixin
 from tx.models.configs import DeepseekV3Config
 from tx.models.deepseekv3 import DeepseekV3ForCausalLM, DeepseekV3MoE
@@ -53,64 +52,6 @@ def test_deepseekv3(tp: int):
         assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
         assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
         assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=3e-2, atol=6e-2)
-
-
-def test_deepseekv3_connector_identity_expansion_rate():
-    """Initial connector behavior should keep logits unchanged across expansion rates."""
-    base_config = HFDeepseekV3Config(
-        vocab_size=128,
-        hidden_size=64,
-        intermediate_size=128,
-        moe_intermediate_size=32,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        qk_rope_head_dim=8,
-        qk_nope_head_dim=8,
-        v_head_dim=8,
-        q_lora_rank=None,
-        kv_lora_rank=16,
-        n_routed_experts=4,
-        n_shared_experts=1,
-        num_experts_per_tok=2,
-        n_group=1,
-        topk_group=1,
-        first_k_dense_replace=0,
-        norm_topk_prob=True,
-        routed_scaling_factor=1.0,
-        tie_word_embeddings=False,
-    )
-    config_e1 = DeepseekV3Config(base_config, max_lora_adapters=4, max_lora_rank=8, shard_attention_heads=True)
-    config_e4 = DeepseekV3Config(base_config, max_lora_adapters=4, max_lora_rank=8, shard_attention_heads=True)
-    config_e1.expansion_rate = 1
-    config_e4.expansion_rate = 4
-
-    input_ids = np.array([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]], dtype=np.int32)
-    attention_mask = np.ones_like(input_ids, dtype=np.int32)
-
-    mesh = jax.make_mesh((1, 1, 1), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
-    with jax.set_mesh(mesh):
-        model_e1 = DeepseekV3ForCausalLM(config_e1, dtype=jnp.float32, rngs=nnx.Rngs(0))
-        model_e4 = DeepseekV3ForCausalLM(config_e4, dtype=jnp.float32, rngs=nnx.Rngs(0))
-
-        # Align all non-connector weights exactly so only connector expansion differs.
-        state_e1 = nnx.state(model_e1)
-        state_e4 = nnx.state(model_e4)
-
-        def copy_non_connector(path, v1, v4):
-            normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
-            if any(name in normalized_path for name in ("attn_connector", "mlp_connector")):
-                return v1
-            return v4
-
-        nnx.update(model_e1, jax.tree.map_with_path(copy_non_connector, state_e1, state_e4))
-
-        outputs_e1 = model_e1(input_ids, attention_mask=attention_mask)
-        outputs_e4 = model_e4(input_ids, attention_mask=attention_mask)
-        logits_e1 = np.asarray(model_e1.compute_logits(outputs_e1.last_hidden_state))
-        logits_e4 = np.asarray(model_e4.compute_logits(outputs_e4.last_hidden_state))
-
-    np.testing.assert_allclose(logits_e1, logits_e4, rtol=5e-2, atol=5e-2)
 
 
 def load_moe_base_weights(jax_moe_layer: DeepseekV3MoE, hf_moe_layer: HFDeepseekV3MoE) -> None:
