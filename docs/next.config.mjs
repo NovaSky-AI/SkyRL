@@ -5,6 +5,7 @@ const withMDX = createMDX();
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
+  skipTrailingSlashRedirect: true,
   async redirects() {
     return [
       {

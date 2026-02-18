@@ -5,5 +5,12 @@ export function baseOptions(): BaseLayoutProps {
     nav: {
       title: 'SkyRL',
     },
+    links: [
+      {
+        text: 'API Reference',
+        url: '/api-ref/',
+        active: 'nested-url',
+      },
+    ],
   };
 }

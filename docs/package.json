@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "next build",
+    "build": "(cd ../skyrl-train && uv sync --extra docs && uv run mkdocs build -f mkdocs.embed.yaml -d ../docs/public/api-ref) && node_modules/.bin/next build",
     "dev": "next dev",
     "start": "next start",
     "types:check": "fumadocs-mdx && next typegen && tsc --noEmit"

@@ -17,6 +17,10 @@ docs/api/_autosummary/
 docs/generated/
 docs/_spelling/
 
+# MkDocs build output (generated during Vercel build)
+docs/public/api-ref/
+docs/public/api/
+
 # Documentation cache
 .doctrees/
 .cache/
