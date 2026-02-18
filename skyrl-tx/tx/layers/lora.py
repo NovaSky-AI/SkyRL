@@ -350,7 +350,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
 
         idx = get_adapter_idx(path, adapter_index)
 
-        key_name = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
+        key_name = path[-2].key
         if is_connector_path(path):
             connector_slot = value[idx]
             if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
@@ -402,7 +402,7 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     state = nnx.state(model)
 
     def clear_adapter(path, value):
-        key = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
+        key = path[-2].key
         idx = get_adapter_idx(path, adapter_index)
         if is_connector_path(path):
             return value.at[idx].set(0.0)
