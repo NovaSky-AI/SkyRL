@@ -11,7 +11,7 @@ import asyncio
 import ray
 from transformers import AutoTokenizer
 
-from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
+from tests.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState, run_inference
 from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
@@ -24,9 +24,9 @@ def get_test_actor_config() -> SkyRLConfig:
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.generator.inference_engine.async_engine = True
-    cfg.generator.inference_engine.num_engines = 1
-    cfg.generator.inference_engine.run_engines_locally = True
+    cfg.generator.async_engine = True
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.run_engines_locally = True
     return cfg
 
 
@@ -62,51 +62,40 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
-    try:
-        cfg = get_test_actor_config()
-        cfg.trainer.placement.colocate_all = colocate_all
-        cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
-        cfg.trainer.strategy = strategy
-        cfg.generator.inference_engine.backend = backend
-        cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg = get_test_actor_config()
+    cfg.trainer.placement.colocate_all = colocate_all
+    cfg.generator.weight_sync_backend = weight_sync_backend
+    cfg.trainer.strategy = strategy
+    cfg.generator.backend = backend
+    cfg.generator.inference_engine_tensor_parallel_size = tp_size
 
-        tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
-        # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg, router, server_group = init_inference_engines(
-            model=MODEL,
-            cfg=cfg,
-            use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            backend=backend,
-            sleep_level=2,  # since we explicitly sync weights
-        )
+    # If colocate is True, this will load the engine, sleep, and wake up the engine
+    with InferenceEngineState.create(
+        model=MODEL,
+        cfg=cfg,
+        use_local=True,
+        async_engine=cfg.generator.async_engine,
+        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        backend=backend,
+        sleep_level=2,  # since we explicitly sync weights
+    ) as engines:
+        client, pg = engines.client, engines.pg
         policy = init_worker_with_type(
             "policy",
             shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
             cfg=cfg,
         )
 
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
-        ray.get(
-            policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
-            )
-        )
-        sampling_params = get_sampling_params_for_backend(
-            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-        )
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
 
-        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
-    finally:
-        ray.shutdown()
-        if "router" in locals() and router is not None:
-            router.shutdown()
-        if "server_group" in locals() and server_group is not None:
-            server_group.shutdown()
+        print(f"Example output after weight sync: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

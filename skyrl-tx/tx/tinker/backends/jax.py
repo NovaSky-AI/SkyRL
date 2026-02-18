@@ -483,10 +483,12 @@ class JaxBackendImpl(AbstractBackend):
             lora_params: nnx.State,
             optimizer: nnx.Optimizer,
             adapter_index: jax.Array,
-        ) -> AccumulatedGradients:
+        ) -> tuple[AccumulatedGradients, jax.Array]:
             """Compute full gradients, apply optimizer update, and reset accumulated grads."""
-            optimizer.update(lora_params, accumulated_grads.get_mean(adapter_index))
-            return accumulated_grads.reset_adapter(adapter_index)
+            mean_grads = accumulated_grads.get_mean(adapter_index)
+            grad_norm = optax.global_norm(mean_grads)
+            optimizer.update(lora_params, mean_grads)
+            return accumulated_grads.reset_adapter(adapter_index), grad_norm
 
         if self.config.enforce_eager:
             self._compute_grads_and_update = compute_grads_and_update
@@ -732,15 +734,16 @@ class JaxBackendImpl(AbstractBackend):
         """Apply an optimizer step using accumulated gradients."""
         adapter_index = self.models[model_id].adapter_index
         optimizer = self.optimizers[model_id]
+        learning_rate = request_data.adam_params.learning_rate
 
         # Check if we have any gradients accumulated (count > 0)
         if self.accumulated_grads.counts[adapter_index] == 0:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
-            return types.OptimStepOutput()
+            return types.OptimStepOutput(metrics={"skyrl.ai/learning_rate": learning_rate})
 
         # Update hyperparameters from the request
         hp = optimizer.opt_state.hyperparams
-        hp["learning_rate"][...] = request_data.adam_params.learning_rate
+        hp["learning_rate"][...] = learning_rate
         hp["b1"][...] = request_data.adam_params.beta1
         hp["b2"][...] = request_data.adam_params.beta2
         hp["eps"][...] = request_data.adam_params.eps
@@ -748,15 +751,16 @@ class JaxBackendImpl(AbstractBackend):
 
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
         with jax.set_mesh(self.mesh):
-            self.accumulated_grads = self._compute_grads_and_update(
+            self.accumulated_grads, grad_norm = self._compute_grads_and_update(
                 self.accumulated_grads,
                 self.lora_params,
                 optimizer,
                 jnp.int32(adapter_index),
             )
 
-        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
-        return types.OptimStepOutput()
+        grad_norm = float(jax.device_get(grad_norm))
+        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), grad_norm={grad_norm}")
+        return types.OptimStepOutput(metrics={"skyrl.ai/grad_norm": grad_norm, "skyrl.ai/learning_rate": learning_rate})
 
     def sample(
         self,

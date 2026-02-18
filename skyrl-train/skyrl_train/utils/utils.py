@@ -318,9 +318,9 @@ def validate_cfg(cfg: SkyRLConfig):
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
                 "`generator.sampling_params.logprobs` is `None` but off_policy_correction is enabled."
-                " Setting `logprobs` to `True`."
+                " Setting `logprobs` to `1`."
             )
-            cfg.generator.sampling_params.logprobs = 0
+            cfg.generator.sampling_params.logprobs = 1
 
         if cfg.generator.inference_engine.backend == "sglang":
             raise NotImplementedError(
@@ -420,9 +420,9 @@ def validate_generator_cfg(cfg: SkyRLConfig):
 
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
-        if cfg.generator.sampling_params.logprobs > 0:
+        if cfg.generator.sampling_params.logprobs > 1:
             raise ValueError(
-                f"`logprobs` if set should be 0 i.e only for the chosen token, "
+                f"`logprobs` if set should be 0 or 1 (both return only the chosen token's logprob), "
                 f"got {cfg.generator.sampling_params.logprobs}"
             )
         if not ie_cfg.run_engines_locally:

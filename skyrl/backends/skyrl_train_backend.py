@@ -494,8 +494,8 @@ class SkyRLTrainBackend(AbstractBackend):
 
         metrics: dict[str, float] = {}
         if grad_norm is not None:
-            metrics["grad_norm"] = float(grad_norm)
-        metrics["learning_rate"] = adam_params.learning_rate
+            metrics["skyrl.ai/grad_norm"] = float(grad_norm)
+        metrics["skyrl.ai/learning_rate"] = adam_params.learning_rate
         return types.OptimStepOutput(metrics=metrics)
 
     def sample(

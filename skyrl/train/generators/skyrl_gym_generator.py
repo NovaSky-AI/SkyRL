@@ -599,8 +599,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             init_prompts.append(init_prompt)
             envs.append(env)
 
-        # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
-        engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
+        # for consistency, use token-in-token-out
+        prompt_token_ids = self.tokenizer.apply_chat_template(
+            init_prompts,
+            add_generation_prompt=True,
+            tokenize=True,
+        )
+        engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]
@@ -632,11 +637,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        prompt_token_ids = self.tokenizer.apply_chat_template(
-            init_prompts,
-            add_generation_prompt=True,
-            tokenize=True,
-        )
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.apply_overlong_filtering:

@@ -31,7 +31,7 @@ import logging
 from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
-from tests.gpu.utils import init_worker_with_type, get_test_prompts
+from tests.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import skyrl_train.inference_engines.inference_engine_client_http_endpoint as http_endpoint_module
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
@@ -40,9 +40,8 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
     shutdown_server,
 )
 from tests.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
-from tests.gpu.utils import init_inference_engines
 from concurrent.futures import ThreadPoolExecutor
-
+from skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from transformers import AutoTokenizer
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -50,6 +49,9 @@ MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
 TP_SIZE = 1
 SERVER_HOST = "127.0.0.1"
 
+pytestmark = pytest.mark.skipif(
+    _SKYRL_USE_NEW_INFERENCE, reason="This test is not applicable with new inference backend"
+)
 
 # Disable aiohttp transport in litellm to avoid unclosed connector warnings.
 # This makes litellm use httpx's default transport instead of aiohttp.
@@ -73,10 +75,10 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-    cfg.generator.inference_engine.async_engine = True
-    cfg.generator.inference_engine.num_engines = num_inference_engines
-    cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
-    cfg.generator.inference_engine.run_engines_locally = True
+    cfg.generator.async_engine = True
+    cfg.generator.num_inference_engines = num_inference_engines
+    cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
+    cfg.generator.run_engines_locally = True
     return cfg
 
 
@@ -226,20 +228,17 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         # 1. Build engine
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
+        cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
-        client, _, router, server_group = init_inference_engines(
-            cfg=cfg,
-            use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            backend="vllm",
+
+        engines = InferenceEngineState.create(
+            cfg,
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.inference_engine.num_engines,
-            sleep_level=1,  # since we do not explicitly sync weights
+            use_local=True,
+            sleep_level=1,
         )
+        client = engines.client
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
         server_thread, server_port = set_up_http_server(client)
@@ -294,19 +293,16 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
+        cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        client, pg, router, server_group = init_inference_engines(
+        engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=2,  # since we explicitly sync weights
         )
+        client, pg = engines.client, engines.pg
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
         server_thread, server_port = set_up_http_server(client)
@@ -317,16 +313,12 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             "policy",
             shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
             cfg=cfg,
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
-        ray.get(
-            policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
-            )
-        )
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
         # 2. Do tests
         num_samples = 20
@@ -467,7 +459,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-        cfg.generator.inference_engine.backend = backend
+        cfg.generator.backend = backend
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
         client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL_QWEN2_5)
@@ -546,20 +538,17 @@ def test_structured_generation(ray_init_fixture):
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
+        cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
-        client, _, router, server_group = init_inference_engines(
+        engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
+        client = engines.client
 
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
@@ -612,21 +601,17 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
+        cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
-        client, _, router, server_group = init_inference_engines(
+        engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
-
+        client = engines.client
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}"
 
@@ -780,7 +765,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
+        cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         template_path = "skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
         engine_init_kwargs = {}
@@ -790,18 +775,19 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             repo_root = Path(__file__).parent.parent.parent.parent
             engine_init_kwargs["chat_template"] = str(repo_root / template_path)
 
-        client, _, router, server_group = init_inference_engines(
+        engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN3,
-            num_inference_engines=cfg.generator.inference_engine.num_engines,
+            num_inference_engines=cfg.generator.num_inference_engines,
             sleep_level=1,  # since we do not explicitly sync weights
             engine_init_kwargs=engine_init_kwargs,
         )
+        client = engines.client
 
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
@@ -877,22 +863,23 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         # 1. Set up engine with served_model_name
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
+        cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         # Set the served_model_name to be different from the model path
-        cfg.generator.inference_engine.served_model_name = SERVED_MODEL_NAME
+        cfg.generator.served_model_name = SERVED_MODEL_NAME
 
-        client, _, router, server_group = init_inference_engines(
+        engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+            async_engine=cfg.generator.async_engine,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.inference_engine.num_engines,
+            num_inference_engines=cfg.generator.num_inference_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
+        client = engines.client
 
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
@@ -968,7 +955,7 @@ def test_context_length_error_returns_400(ray_init_fixture):
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
-        client, _, router, server_group = init_inference_engines(
+        engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
             async_engine=cfg.generator.async_engine,
@@ -980,6 +967,7 @@ def test_context_length_error_returns_400(ray_init_fixture):
             sleep_level=1,
             engine_init_kwargs={"max_model_len": TEST_MAX_MODEL_LEN},
         )
+        client = engines.client
 
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"

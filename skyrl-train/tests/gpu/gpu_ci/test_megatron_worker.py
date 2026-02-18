@@ -12,7 +12,7 @@ from tests.gpu.utils import (
     init_worker_with_type,
     ray_init_for_tests,
     get_rank_0_memory,
-    init_inference_engines,
+    InferenceEngineState,
     run_inference,
     get_test_prompts,
     Timer,
@@ -126,10 +126,10 @@ def test_megatron_policy_weight_sync(
         if lora:
             cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
         cfg.trainer.placement.colocate_all = colocate_all
-        cfg.generator.inference_engine.weight_sync_backend = "nccl"
+        cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
-        cfg.generator.inference_engine.backend = "vllm"
-        cfg.generator.inference_engine.tensor_parallel_size = inference_tp
+        cfg.generator.backend = "vllm"
+        cfg.generator.inference_engine_tensor_parallel_size = inference_tp
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = megatron_tp
@@ -138,47 +138,38 @@ def test_megatron_policy_weight_sync(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg, router, server_group = init_inference_engines(
-            model=MODEL_NAME,
+        with InferenceEngineState.create(
             cfg=cfg,
+            model=MODEL_NAME,
             use_local=True,
-            async_engine=cfg.generator.inference_engine.async_engine,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             sleep_level=2,  # since we explicitly sync weights
-        )
+        ) as engines:
+            client, pg = engines.client, engines.pg
+            asyncio.run(client.sleep())
 
-        asyncio.run(client.sleep())
-
-        policy = init_worker_with_type(
-            "policy",
-            shared_pg=pg,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
-            cfg=cfg,
-        )
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        asyncio.run(client.wake_up(tags=["weights"]))
-        # TODO (erictang000): improve this timing
-        # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
-        # or ~20 seconds on 8xH100
-        # ~75 seconds on 8xH100 for Qwen3-30B-A3B
-        with Timer("sync_weights"):
-            ray.get(
-                policy.async_run_ray_method(
-                    "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
-                )
+            policy = init_worker_with_type(
+                "policy",
+                shared_pg=pg,
+                colocate_all=cfg.trainer.placement.colocate_all,
+                num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+                cfg=cfg,
             )
+            ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+            asyncio.run(client.wake_up(tags=["weights"]))
+            # TODO (erictang000): improve this timing
+            # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
+            # or ~20 seconds on 8xH100
+            # ~75 seconds on 8xH100 for Qwen3-30B-A3B
+            with Timer("sync_weights"):
+                ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
-        policy.offload_to_cpu()
-        asyncio.run(client.wake_up(tags=["kv_cache"]))
-        sampling_params = get_sampling_params_for_backend(
-            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-        )
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
+            policy.offload_to_cpu()
+            asyncio.run(client.wake_up(tags=["kv_cache"]))
+            sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+            outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
 
-        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
+            print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
         ray.shutdown()
 

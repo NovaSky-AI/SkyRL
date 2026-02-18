@@ -100,7 +100,6 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_token_ids = self.tokenizer.apply_chat_template(
                 prompts,
                 add_generation_prompt=True,
-                add_special_tokens=False,
                 return_dict=True,
                 tokenize=True,
             )["input_ids"]

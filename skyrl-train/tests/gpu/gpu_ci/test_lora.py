@@ -7,7 +7,7 @@ import pytest
 import asyncio
 import ray
 
-from tests.gpu.utils import init_worker_with_type, get_test_prompts, init_inference_engines, run_inference
+from tests.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState, run_inference
 from skyrl_train.config import SkyRLConfig, SkyRLLoraConfig
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
@@ -20,9 +20,9 @@ def get_test_actor_config(enable_lora: bool = False) -> SkyRLConfig:
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 2
-    cfg.generator.inference_engine.async_engine = True
-    cfg.generator.inference_engine.num_engines = 1
-    cfg.generator.inference_engine.run_engines_locally = True
+    cfg.generator.async_engine = True
+    cfg.generator.num_inference_engines = 1
+    cfg.generator.run_engines_locally = True
 
     # LoRA configuration
     if enable_lora:
@@ -57,40 +57,36 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     """
     cfg = get_test_actor_config(enable_lora=True)
     cfg.trainer.placement.colocate_all = colocate_all
-    cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
+    cfg.generator.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy
-    cfg.generator.inference_engine.backend = backend
-    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.backend = backend
+    cfg.generator.inference_engine_tensor_parallel_size = tp_size
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
-    client, pg, router, server_group = init_inference_engines(
-        model=MODEL,
+    with InferenceEngineState.create(
+        cfg,
         cfg=cfg,
+        model=MODEL,
         use_local=True,
-        async_engine=cfg.generator.inference_engine.async_engine,
-        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+        async_engine=cfg.generator.async_engine,
+        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         backend=backend,
         sleep_level=1,  # since we explicitly sync weights
         enable_lora=True,  # Enable LoRA for this test
-    )
+    ) as engines:
+        client, pg = engines.client, engines.pg
 
-    policy = init_worker_with_type(
-        "policy",
-        shared_pg=pg,
-        colocate_all=cfg.trainer.placement.colocate_all,
-        num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
-        cfg=cfg,
-    )
-    sampling_params = get_sampling_params_for_backend(
-        cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-    )
-    ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-    asyncio.run(client.reset_prefix_cache())
-    ray.get(
-        policy.async_run_ray_method(
-            "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+        policy = init_worker_with_type(
+            "policy",
+            shared_pg=pg,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+            cfg=cfg,
         )
-    )
-    outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
-    print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        asyncio.run(client.reset_prefix_cache())
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
+        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
