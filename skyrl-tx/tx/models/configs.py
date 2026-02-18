@@ -15,7 +15,7 @@ class ModelConfig(PretrainedConfig):
         max_lora_rank: Maximum rank for LoRA adapters
         shard_attention_heads: Whether to shard attention across tensor parallel devices
         loss_chunk_size: Chunk size for cross-entropy loss computation (0 = no chunking)
-        gradient_checkpointing: Whether to use gradient checkpointing for chunked loss
+        gradient_checkpointing: Recompute activations during backward to save memory
     """
 
     # Type hints for config attributes
