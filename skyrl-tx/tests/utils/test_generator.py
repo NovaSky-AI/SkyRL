@@ -24,7 +24,8 @@ class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):
         def lm_head(hidden_states, adapter_indices=None):
             # Scale logits by (1 + adapter_index) so different adapters give different log-softmax results
             if adapter_indices is not None:
-                scale = (1 + adapter_indices[:, None, None]).astype(jnp.float32)
+                scale = (1 + adapter_indices).astype(jnp.float32)
+                scale = scale.reshape((scale.shape[0],) + (1,) * (hidden_states.ndim - 1))
                 return hidden_states * scale
             return hidden_states
 

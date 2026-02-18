@@ -10,7 +10,6 @@ uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_save_wei
 import asyncio
 
 import pytest
-import ray
 from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.utils import validate_cfg
@@ -18,7 +17,7 @@ from skyrl_train.workers.worker_dispatch import WorkerDispatch
 
 from tests.gpu.utils import (
     get_test_prompts,
-    init_inference_engines,
+    InferenceEngineState,
     init_worker_with_type,
     make_dummy_training_batch,
     run_inference,
@@ -65,23 +64,22 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
     2. Sync: save_weights_for_sampler()
     3. Sample: inference engine generates with updated weights
     """
-    try:
-        cfg = get_test_config()
-        cfg.trainer.placement.colocate_all = colocate_all
-        cfg.trainer.strategy = strategy
-        cfg.generator.backend = backend
+    cfg = get_test_config()
+    cfg.trainer.placement.colocate_all = colocate_all
+    cfg.trainer.strategy = strategy
+    cfg.generator.backend = backend
 
-        client, pg = init_inference_engines(
-            model=MODEL,
-            cfg=cfg,
-            use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            backend=backend,
-            sleep_level=2,  # Full sleep since we explicitly sync weights
-        )
-
+    with InferenceEngineState.create(
+        cfg=cfg,
+        model=MODEL,
+        use_local=True,
+        async_engine=cfg.generator.async_engine,
+        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        backend=backend,
+        sleep_level=2,  # Full sleep since we explicitly sync weights
+    ) as engines:
+        client, pg = engines.client, engines.pg
         # Initialize policy worker
         policy_group = init_worker_with_type(
             "policy",
@@ -133,32 +131,26 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
 
         print(f"Example output: {outputs['responses'][0][:3]}...")
 
-    finally:
-        ray.shutdown()
-
 
 @pytest.mark.parametrize("backend", [pytest.param("vllm", marks=pytest.mark.vllm)])
 def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, backend):
     """
     Test that multiple training steps followed by one save_weights_for_sampler works correctly.
     """
-    try:
-        cfg = get_test_config()
-        cfg.trainer.placement.colocate_all = False
-        cfg.trainer.strategy = "fsdp2"
-        cfg.generator.backend = backend
+    cfg = get_test_config()
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.strategy = "fsdp2"
+    cfg.generator.backend = backend
 
-        # Initialize inference engine (uses 1 GPU)
-        client, pg = init_inference_engines(
-            model=MODEL,
-            cfg=cfg,
-            use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-            colocate_all=False,
-            backend=backend,
-            sleep_level=2,
-        )
+    # Initialize inference engine (uses 1 GPU)
+    with InferenceEngineState.create(
+        cfg=cfg,
+        model=MODEL,
+        use_local=True,
+        backend=backend,
+        sleep_level=2,
+    ) as engines:
+        client, pg = engines.client, engines.pg
 
         # Initialize policy worker (uses 1 GPU)
         policy_group = init_worker_with_type(
@@ -195,6 +187,3 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, back
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params))
         assert len(outputs["responses"]) == 2, "Should get 2 responses"
-
-    finally:
-        ray.shutdown()

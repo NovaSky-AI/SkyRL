@@ -76,10 +76,66 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
         for result in results:
             assert isinstance(result, dict), "Result should be a dictionary of training stats"
             assert "policy_loss" in result
-            assert "ppo_clip_ratio" in result
+            assert "loss_metrics/clip_ratio" in result
             assert "policy_entropy" in result
+            assert "loss_fn_outputs" in result, "RL path should return loss_fn_outputs"
+            loss_fn_outputs = result.pop("loss_fn_outputs")
+            assert isinstance(loss_fn_outputs, list)
+            for output in loss_fn_outputs:
+                assert "logprobs" in output, "Each output should have logprobs"
+                assert isinstance(output["logprobs"], list)
             for k, v in result.items():
                 assert isinstance(v, (int, float)), f"{k} should be an int or float"
+
+    finally:
+        ray.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
+    """
+    Verify that loss_fn_outputs logprobs are trimmed to the correct per-sample
+    valid length when samples have different response lengths (right-padded masks).
+
+    Uses variable action_lengths so each sample has a different number of valid
+    tokens, then checks that each output's logprobs length matches exactly.
+    """
+    cfg.trainer.use_sample_packing = False
+    cfg.trainer.strategy = "fsdp2"
+    validate_cfg(cfg)
+
+    num_actions = 6
+    # 4 samples total, 2 per DP rank. Each pair has different valid lengths.
+    action_lengths = [3, 6, 2, 5]
+
+    try:
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
+            cfg=cfg,
+        )
+
+        dp_size = actor_group.actor_infos[0].rank.dp_size
+        batch_size = dp_size * 2
+        dummy_batch = make_dummy_training_batch(
+            batch_size=batch_size, num_actions=num_actions, action_lengths=action_lengths
+        )
+
+        results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", data=dummy_batch))
+
+        # Collect all loss_fn_outputs across DP ranks (returned in rank order)
+        all_outputs = []
+        for result in results:
+            assert "loss_fn_outputs" in result
+            all_outputs.extend(result["loss_fn_outputs"])
+
+        assert len(all_outputs) == batch_size
+        for i, output in enumerate(all_outputs):
+            expected_len = action_lengths[i]
+            actual_len = len(output["logprobs"])
+            assert actual_len == expected_len, f"Sample {i}: expected {expected_len} logprobs, got {actual_len}"
 
     finally:
         ray.shutdown()

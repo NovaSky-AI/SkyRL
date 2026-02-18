@@ -1,13 +1,251 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["skyrl*"]
+
 [project]
 name = "skyrl"
-version = "0.1.0"
-description = "A Post-Training Stack for LLMs"
-authors = [
-    { name = "NovaSkyAI Team"}
-]
-license = { text = "MIT" }
+dynamic = ["version"]
+description = "Unified API for training and inference"
 readme = "README.md"
-requires-python = "==3.12.*"
+requires-python = ">=3.11"
+dependencies = [
+    "datasets>=4.0.0",
+    "pillow>=11.3.0",
+    "rich>=14.1.0",
+    "safetensors>=0.6.2",
+    "tokenizers>=0.21.2",
+    "transformers>=4.56.1,<5",
+    "typer>=0.17.4",
+    # "wandb>=0.22.0",
+    "peft",
+    "hf_transfer",
+    "cloudpathlib>=0.23.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "jax[cuda12]>=0.7.2; sys_platform == 'linux'",
+]
+
+tpu = [
+    "jax[tpu]>=0.7.2; sys_platform == 'linux'",
+]
+
+tinker = [
+    "tinker>=0.3.0",
+    "fastapi[standard]",
+    "sqlmodel",
+    "sqlalchemy[asyncio]",
+    "aiosqlite",
+    "asyncpg",
+    "psycopg2-binary",
+]
+
+aws = [
+    "cloudpathlib[s3]",
+]
+
+gcp = [
+    "cloudpathlib[gs]",
+]
+
+azure = [
+    "cloudpathlib[azure]",
+]
+
+# The extras "jax", "fsdp", and "megatron" are the dependencies the
+# engine needs for --backend="jax", --backend="fsdp", and --backend="megatron",
+# respectively.
+
+jax = [
+    "jax>=0.8,<1.0",
+    "jax[cuda12]>=0.7.2; sys_platform == 'linux'",
+    "flax>=0.12.2",
+    "optax>=0.2.5",
+]
+
+skyrl-train = [
+    "loguru",
+    "tqdm",
+    "ninja",
+    "tensorboard",
+    "func_timeout",
+    "transformers>=4.51.0",
+    "hydra-core==1.3.2",
+    "accelerate",
+    "torchdata",
+    "omegaconf",
+    "ray==2.51.1",
+    "peft",
+    "debugpy==1.8.0",
+    "hf_transfer",
+    "wandb",
+    "datasets>=4.0.0",
+    "tensordict",
+    "jaxtyping",
+    "skyrl-gym",
+    "flash-attn; sys_platform == 'linux'",
+    "polars",
+    "s3fs",
+    "fastapi",
+    "uvicorn",
+    "pybind11",
+    "setuptools",
+]
+
+fsdp = [
+    "skyrl[skyrl-train]",
+    "vllm==0.13.0; sys_platform == 'linux'",
+    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "torch==2.9.0; sys_platform == 'linux'",
+    "flashinfer-python; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision; sys_platform == 'linux'",
+]
+
+# megatron is pinned to python 3.12 due to ml-dtypes needing to be >= 0.5.0
+# potentially loosen this restriction if this error can be root caused.
+megatron = [
+    "skyrl[skyrl-train]; python_version == '3.12'",
+    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
+    "flash-attn==2.8.1; sys_platform == 'linux' and python_version == '3.12'",
+    "vllm==0.13.0; sys_platform == 'linux' and python_version == '3.12'",
+    "torch==2.9.0; sys_platform == 'linux' and python_version == '3.12'",
+    "flashinfer-python==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+    "torchvision; sys_platform == 'linux' and python_version == '3.12'",
+    "megatron-bridge; sys_platform == 'linux' and python_version == '3.12'",
+    "megatron-core==0.15.0; sys_platform == 'linux' and python_version == '3.12'",
+    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+    "nvidia-modelopt; sys_platform == 'linux' and python_version == '3.12'",
+]
+
+flashrl = [
+    "skyrl[skyrl-train]",
+    # NOTE: Custom vLLM wheel must be installed separately.
+    # See examples/flash_rl/README.md for installation instructions.
+    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "torch==2.7.0; sys_platform == 'linux'",
+    "flashinfer-python; sys_platform == 'linux'",
+    "torchvision; sys_platform == 'linux'",
+]
+miniswe = [
+    "skyrl[skyrl-train]",
+    # NOTE (sumanthrh): Needs to be a commit after https://github.com/SWE-agent/mini-swe-agent/commit/4f5d445e99d13b5482478c23508bf2fbf7c0670c
+    "mini-swe-agent>=1.12.0",
+    "litellm",
+]
+harbor = [
+    "harbor; python_version >= '3.12'",
+]
+
+dev = [
+    "mkdocs",
+    "mkdocs-material",
+    "pytest",
+    "pytest-forked",
+    "pytest-asyncio",
+    "pre-commit",
+    "litellm",
+    "torch",
+    "ty",
+    "cloudpathlib[s3]",
+    "alembic",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "skyrl.__version__"}
+
+[project.scripts]
+# The following is for supporting the skyrl-train dependency
+
+[tool.uv]
+# Resolve for both Linux (production) and macOS (dev)
+required-environments = [
+    "sys_platform == 'linux'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+constraint-dependencies = [
+    "flashinfer-jit-cache==0.5.3",
+]
+# each backend should have separate dependencies that can potentially clash
+# megatron also clashes with the jax dependency from gpu and tpu extras
+conflicts = [
+    [
+        { extra = "jax" },
+        { extra = "megatron" },
+        { extra = "fsdp" },
+        { extra = "flashrl" },
+    ],
+    [
+        { extra = "megatron" },
+        { extra = "gpu" },
+        { extra = "tpu" },
+        { extra = "flashrl" },
+        { extra = "miniswe" },
+    ]
+]
+# disable build isolation for megatron related dependencies
+no-build-isolation-package = [
+    "transformer-engine-torch",
+    "transformer-engine",
+    "nv-grouped-gemm",
+]
+# override unnecessary dependencies and pin versions to override Megatron-Bridge
+# unppinned dependencies
+override-dependencies = [
+    "nvidia-resiliency-ext; sys_platform == 'never'",
+    "mamba-ssm; sys_platform == 'never'",
+    "causal-conv1d; sys_platform == 'never'",
+    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
+    "megatron-core==0.15.0; sys_platform == 'linux'",
+]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = [{requirement = "torch", match-runtime = true}]
+transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
+transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
+
+[tool.uv.extra-build-variables]
+flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer-cu128"
+url = "https://flashinfer.ai/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+skyrl-gym = { path = "./skyrl-gym", editable = true }
+# flashinfer wheels are only available from the custom cu128 index
+flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
+# Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config)
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+]
+torchvision = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
+]
+# pin megatron bridge commit to fix for MoE + LoRA merging. Update this when an official release is cut
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "04e370eedf8cc44a812189a19f2171d90555c07a", marker = "sys_platform == 'linux'"}
+harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
 
 [tool.black]
 line-length = 120
@@ -50,6 +288,12 @@ extend-ignore = [
     "W505",
     # W605 invalid escape sequence 'x' (conflict with latex within docs)
     "W605",
+]
+
+[tool.ruff]
+exclude = [
+    "skyrl-agent/",
+    "examples/",
 ]
 
 [tool.ruff.lint]
