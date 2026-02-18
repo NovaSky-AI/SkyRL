@@ -56,13 +56,22 @@ class LoRAConnector(nnx.Module):
             rngs=rngs,
         )
 
+        # Initialize biases for identity-like behavior:
+        # H_pre = 1/n (uniform aggregation), H_post = 1 (full distribution), M = I (identity mixing)
+
+        # H_pre = sigmoid(b_pre) = 1/n  =>  b_pre = logit(1/n)
         target_h_pre = jnp.array(1.0 / n, dtype=dtype)
         clamped = jnp.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
         inv_sigmoid = jnp.log(clamped) - jnp.log(1.0 - clamped)
         self.b_pre = nnx.Param(jnp.full((max_lora_adapters, n), inv_sigmoid, dtype=dtype))
+
+        # H_post = 2 * sigmoid(b_post) = 1  =>  b_post = 0
         self.b_post = nnx.Param(jnp.zeros((max_lora_adapters, n), dtype=dtype))
+
+        # Large identity matrix -> heavily biases Sinkhorn() to product an identity matrix
         self.b_res = nnx.Param(jnp.broadcast_to(10.0 * jnp.eye(n, dtype=dtype), (max_lora_adapters, n, n)))
 
+        # Alpha = 0 so phi matrices don't contribute initially
         self.alpha_pre = nnx.Param(jnp.zeros((max_lora_adapters,), dtype=dtype))
         self.alpha_post = nnx.Param(jnp.zeros((max_lora_adapters,), dtype=dtype))
         self.alpha_res = nnx.Param(jnp.zeros((max_lora_adapters,), dtype=dtype))
@@ -76,12 +85,10 @@ class LoRAConnector(nnx.Module):
     def _sinkhorn_knopp(M: jax.Array, iters: int = 20) -> jax.Array:
         """Project a matrix onto the set of doubly stochastic matrices."""
         M = jnp.exp(M)
-
         def step(_, mat):
             mat = mat / mat.sum(axis=-1, keepdims=True)
             mat = mat / mat.sum(axis=-2, keepdims=True)
             return mat
-
         return jax.lax.fori_loop(0, iters, step, M)
 
     def _norm(self, x_flat: jax.Array, adapter_indices: jax.Array) -> jax.Array:

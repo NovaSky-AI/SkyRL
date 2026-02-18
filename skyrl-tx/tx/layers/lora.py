@@ -337,7 +337,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
 
     def init_adapter(path, value):
         effective_rank = lora_config.rank
-        normalized_path = tuple(p.key if hasattr(p, "key") else p.name if hasattr(p, "name") else str(p) for p in path)
+        normalized_path = tuple(p.key if hasattr(p, "key") else p.name for p in path)
 
         # Apply rank normalization for MoE expert layers
         # Following Thinking Machines' approach: divide rank by num_experts

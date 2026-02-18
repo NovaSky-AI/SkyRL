@@ -63,16 +63,6 @@ def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx
     return nnx.Param(kernel_init(rngs.param(), shape, dtype))
 
 
-def sinkhorn_knopp(M: jax.Array, iters: int = 20) -> jax.Array:
-    """Sinkhorn-Knopp algorithm to project a matrix onto the set of doubly stochastic matrices."""
-    M = jnp.exp(M)
-    def step(_, M):
-        M = M / M.sum(axis=-1, keepdims=True)
-        M = M / M.sum(axis=-2, keepdims=True)
-        return M
-    return lax.fori_loop(0, iters, step, M)
-
-
 def prepare_routing(
     tokens: jax.Array, indices: jax.Array, num_groups: int, adapter_indices: jax.Array | None = None
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None]:
