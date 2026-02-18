@@ -19,9 +19,9 @@ MAX_LORA_ADAPTERS = 4
 LORA_RANK = 8
 
 
-def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS):
+def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS, **config_overrides):
     """Create a JaxBackend."""
-    config = JaxBackendConfig(max_lora_adapters=max_lora_adapters, max_lora_rank=32)
+    config = JaxBackendConfig(max_lora_adapters=max_lora_adapters, max_lora_rank=32, **config_overrides)
     return JaxBackend(BASE_MODEL, config)
 
 
@@ -102,23 +102,49 @@ def test_max_adapters_after_delete():
 
 def test_clear_lora_adapter():
     """Test that clear_lora_adapter zeros out adapter state."""
-    backend = create_backend()
+    backend = create_backend(expansion_rate=4)
     model_id = "test_model"
     adapter_idx = create_model(backend, model_id)
 
     # Verify adapter has non-zero rank after creation
     model = backend.model
     lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+    connector = model.model.layers[0].attn_connector
     assert lora_layer.lora_ranks[adapter_idx] > 0
+
+    # Mutate connector state to ensure clear_lora_adapter actively resets it.
+    connector.alpha_pre[...] = connector.alpha_pre[...].at[adapter_idx].set(1.0)
+    connector.input_norm_weight[...] = connector.input_norm_weight[...].at[adapter_idx].set(0.0)
+    connector.b_pre[...] = connector.b_pre[...].at[adapter_idx].set(0.0)
+    connector.b_res[...] = connector.b_res[...].at[adapter_idx].set(0.0)
+    connector.phi_pre[...] = connector.phi_pre[...].at[adapter_idx].set(1.0)
 
     # Delete the model (calls clear_lora_adapter internally)
     backend.delete_model(model_id)
 
-    # Verify adapter state is zeroed
+    # Verify LoRA adapter state is zeroed
     assert lora_layer.lora_ranks[adapter_idx] == 0
     assert lora_layer.lora_scaling[adapter_idx] == 0.0
     assert (lora_layer.lora_A[adapter_idx] == 0.0).all()
     assert (lora_layer.lora_B[adapter_idx] == 0.0).all()
+
+    # Verify connector state is reset to identity-style defaults.
+    n = connector.b_pre[adapter_idx].shape[-1]
+    target_h_pre = np.array(1.0 / n, dtype=np.float32)
+    clamped = np.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
+    expected_b_pre = np.log(clamped) - np.log(1.0 - clamped)
+
+    np.testing.assert_allclose(np.asarray(connector.alpha_pre[adapter_idx]), 0.0)
+    np.testing.assert_allclose(np.asarray(connector.input_norm_weight[adapter_idx]), 1.0)
+    np.testing.assert_allclose(np.asarray(connector.b_pre[adapter_idx]), expected_b_pre, rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(connector.b_post[adapter_idx]), 0.0)
+    np.testing.assert_allclose(np.asarray(connector.phi_pre[adapter_idx]), 0.0)
+    np.testing.assert_allclose(
+        np.asarray(connector.b_res[adapter_idx]),
+        10.0 * np.eye(n, dtype=np.float32),
+        rtol=1e-3,
+        atol=1e-2,
+    )
 
 
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:

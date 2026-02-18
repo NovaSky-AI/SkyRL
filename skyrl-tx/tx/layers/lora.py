@@ -404,7 +404,28 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
     def clear_adapter(path, value):
         key = path[-2].key
         idx = get_adapter_idx(path, adapter_index)
+
+        # Connector parameters are reset to identity-style defaults so the adapter slot
+        # remains behaviorally neutral for mHC before being reinitialized.
         if is_connector_path(path):
+            connector_slot = value[idx]
+            if key in {"alpha_pre", "alpha_post", "alpha_res", "b_post"}:
+                return value.at[idx].set(jnp.zeros_like(connector_slot))
+            if key in {"phi_pre", "phi_post", "phi_res"}:
+                # Keep clear deterministic and neutral: alpha=0 makes phi inactive.
+                return value.at[idx].set(jnp.zeros_like(connector_slot))
+            if key == "input_norm_weight":
+                return value.at[idx].set(jnp.ones_like(connector_slot))
+            if key == "b_pre":
+                n = connector_slot.shape[-1]
+                target_h_pre = jnp.array(1.0 / n, dtype=value.dtype)
+                clamped = jnp.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
+                inv_sigmoid = jnp.log(clamped) - jnp.log(1.0 - clamped)
+                return value.at[idx].set(jnp.full(connector_slot.shape, inv_sigmoid, dtype=value.dtype))
+            if key == "b_res":
+                n = connector_slot.shape[-1]
+                eye = 10.0 * jnp.eye(n, dtype=value.dtype)
+                return value.at[idx].set(jnp.broadcast_to(eye, connector_slot.shape))
             return value.at[idx].set(0.0)
         if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
             return value
