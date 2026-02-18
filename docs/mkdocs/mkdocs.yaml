@@ -1,0 +1,76 @@
+# MkDocs config for API reference, embedded at /api-ref/ in the Fumadocs site.
+site_name: SkyRL API Reference
+site_url: https://docs.skyrl.ai/api-ref/
+repo_url: https://github.com/NovaSky-AI/SkyRL
+edit_uri: edit/main/docs/mkdocs/content/
+
+theme:
+  name: material
+  custom_dir: overrides
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: white
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: blue
+      toggle:
+        icon: material/brightness-2
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.instant
+    - navigation.top
+    - search.highlight
+    - toc.follow
+
+docs_dir: content
+use_directory_urls: false
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [../../skyrl-train]
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_source: true
+            show_signature_annotations: true
+            members_order: source
+
+extra_css:
+  - stylesheets/custom.css
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
+
+nav:
+  - "\u2190 Back to Docs": /docs
+  - Overview: index.md
+  - SkyRL-Train:
+    - Data Interface: data.md
+    - Generator: generator.md
+    - Trainer: trainer.md
+    - Entrypoint: entrypoint.md
+    - Algorithm Registry: registry.md
+    - Environment Variables: env_vars.md
+  - SkyRL-Gym:
+    - Environment: env.md
+    - Tools: tools.md

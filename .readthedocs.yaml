@@ -22,4 +22,4 @@ build:
 
 # Build documentation with MkDocs
 mkdocs:
-   configuration: skyrl-train/mkdocs.yaml
+   configuration: docs/mkdocs/mkdocs.yaml
