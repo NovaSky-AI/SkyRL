@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build:api-ref": "cd ../skyrl-train && uv sync --extra docs && uv run mkdocs build -f ../docs/mkdocs/mkdocs.yaml -d ../public/api-ref",
+    "build:api-ref": "cd .. && uv sync --extra dev --extra tinker && uv run mkdocs build -f docs/mkdocs/mkdocs.yaml -d ../public/api-ref",
     "build": "npm run build:api-ref && next build",
     "dev": "next dev",
     "start": "next start",

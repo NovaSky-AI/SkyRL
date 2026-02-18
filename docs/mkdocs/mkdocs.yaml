@@ -27,7 +27,7 @@ theme:
         name: Switch to light mode
   features:
     - content.code.copy
-    - navigation.instant
+    # navigation.instant disabled: breaks same-page anchor links (e.g. base class refs)
     - navigation.top
     - search.highlight
     - toc.follow
@@ -40,16 +40,13 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          paths: [../../skyrl-train]
+          paths: [../../skyrl-train, ../../skyrl-gym, ../..]
           options:
             docstring_style: google
             show_root_heading: true
             show_source: true
             show_signature_annotations: true
             members_order: source
-
-extra_css:
-  - stylesheets/custom.css
 
 markdown_extensions:
   - admonition
@@ -64,13 +61,21 @@ markdown_extensions:
 nav:
   - "\u2190 Back to Docs": /docs
   - Overview: index.md
-  - SkyRL-Train:
-    - Data Interface: data.md
-    - Generator: generator.md
-    - Trainer: trainer.md
-    - Entrypoint: entrypoint.md
-    - Algorithm Registry: registry.md
-    - Environment Variables: env_vars.md
+  - SkyRL:
+    - Backends:
+      - Abstract Backend: backends.md
+      - JAX Backend: jax_backend.md
+      - "SkyRL-Train Backend":
+        - Backend API: skyrl_train_backend.md
+        - Data Interface: data.md
+        - Generator: generator.md
+        - Trainer: trainer.md
+        - Entrypoint: entrypoint.md
+        - Algorithm Registry: registry.md
+        - Environment Variables: env_vars.md
+    - Tinker Engine: tinker.md
+    - Types: types.md
+    - TX Models: tx_models.md
   - SkyRL-Gym:
     - Environment: env.md
     - Tools: tools.md
