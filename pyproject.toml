@@ -122,7 +122,7 @@ megatron = [
     "megatron-core==0.15.0; sys_platform == 'linux' and python_version == '3.12'",
     "flashinfer-jit-cache==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
     "nvidia-modelopt; sys_platform == 'linux' and python_version == '3.12'",
-    "ml_dtypes>=0.5.0; python_version == '3.12'",
+    "ml_dtypes>=0.5.0; sys_platform == 'linux' and python_version == '3.12'",
 ]
 
 flashrl = [
@@ -210,7 +210,7 @@ override-dependencies = [
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.15.0; sys_platform == 'linux'",
-    "numpy>=1.24.0,<2.3",
+    "numpy>=1.24.0,<2.3; sys_platform == 'linux'"
 ]
 
 [tool.uv.extra-build-dependencies]
