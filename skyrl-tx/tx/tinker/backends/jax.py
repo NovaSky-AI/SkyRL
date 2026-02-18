@@ -88,6 +88,19 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=False,
         description="Per-layer activation checkpointing: recompute activations during backward to save memory",
     )
+    train_connectors: bool = Field(
+        default=False,
+        description=(
+            "EXPERIMENTAL: Whether connector parameters (attn_connector/mlp_connector) are trainable and saved in LoRA checkpoints."
+        ),
+    )
+    expansion_rate: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "EXPERIMENTAL: mHC expansion rate (number of residual streams). Set to 1 to disable expansion."
+        ),
+    )
     loss_chunk_size: int = Field(
         default=1024,
         description="Chunk size for cross-entropy loss computation. Reduces memory by avoiding full [B*T, V] logits materialization. Set to 0 to disable chunking.",
@@ -181,6 +194,8 @@ class JaxBackendImpl(AbstractBackend):
             shard_attention_heads=config.shard_attention_heads,
             loss_chunk_size=config.loss_chunk_size,
             gradient_checkpointing=config.gradient_checkpointing,
+            train_connectors=config.train_connectors,
+            expansion_rate=config.expansion_rate,
         )
 
         model_class = get_model_class(self.model_config)
