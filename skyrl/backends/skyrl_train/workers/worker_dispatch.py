@@ -9,12 +9,11 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import ray
 from ray import ObjectRef
 
-from omegaconf import DictConfig
 from skyrl.train.config import SkyRLConfig
 from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
@@ -40,7 +39,7 @@ class WorkerDispatch:
 
     def __init__(
         self,
-        cfg: Union[SkyRLConfig, DictConfig],
+        cfg: SkyRLConfig,
         policy_actor_group: PPORayActorGroup,
         critic_actor_group: Optional[PPORayActorGroup] = None,
         ref_actor_group: Optional[PPORayActorGroup] = None,
@@ -358,7 +357,10 @@ class WorkerDispatch:
         """Broadcast policy weights to inference engines."""
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", inference_engine_client
+                "pass_through",
+                "broadcast_to_inference_engines",
+                inference_engine_client,
+                inference_engine_client.inference_engine_cfg,
             )
         )
 

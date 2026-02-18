@@ -5,7 +5,6 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from omegaconf import DictConfig
 
 import numpy as np
 import ray
@@ -78,7 +77,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 class RayPPOTrainer:
     def __init__(
         self,
-        cfg: Union[SkyRLConfig, DictConfig],
+        cfg: SkyRLConfig,
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],
@@ -211,7 +210,9 @@ class RayPPOTrainer:
                     generator_input, uids = prepare_generator_input(
                         rand_prompts,
                         self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        get_sampling_params_for_backend(
+                            self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
+                        ),
                         self.cfg.environment.env_class,
                         "train",
                         self.global_step,
@@ -387,11 +388,12 @@ class RayPPOTrainer:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
             num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
             num_ref_gpus = cfg.trainer.placement.ref_num_gpus_per_node * cfg.trainer.placement.ref_num_nodes
+            ie_cfg = cfg.generator.inference_engine
             num_rollout_gpus = (
-                cfg.generator.num_inference_engines
-                * cfg.generator.inference_engine_tensor_parallel_size
-                * cfg.generator.inference_engine_pipeline_parallel_size
-                * cfg.generator.inference_engine_data_parallel_size
+                ie_cfg.num_engines
+                * ie_cfg.tensor_parallel_size
+                * ie_cfg.pipeline_parallel_size
+                * ie_cfg.data_parallel_size
             )
             assert (
                 num_policy_gpus == num_rollout_gpus
@@ -399,7 +401,7 @@ class RayPPOTrainer:
             pg = self.colocate_pg
 
             policy_model = PPORayActorGroup(
-                cfg,
+                cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
                 PolicyWorker,
@@ -414,7 +416,7 @@ class RayPPOTrainer:
                     num_policy_gpus == num_ref_gpus
                 ), "num_policy_gpus and num_ref_gpus must be the same when colocating policy and ref model"
                 ref_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
                     RefWorker,
@@ -431,7 +433,7 @@ class RayPPOTrainer:
                     num_policy_gpus == num_critic_gpus
                 ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
                 critic_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
                     CriticWorker,
@@ -461,7 +463,7 @@ class RayPPOTrainer:
                 get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
             policy_model = PPORayActorGroup(
-                cfg,
+                cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
                 PolicyWorker,
@@ -472,7 +474,7 @@ class RayPPOTrainer:
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
                     RefWorker,
@@ -486,7 +488,7 @@ class RayPPOTrainer:
 
             if cfg.trainer.critic.model.path:
                 critic_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
                     CriticWorker,
@@ -586,7 +588,10 @@ class RayPPOTrainer:
         TODO(tgriggs): Remove this method when migration is complete.
         """
         return self.policy_model.async_run_ray_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            "pass_through",
+            "broadcast_to_inference_engines",
+            self.inference_engine_client,
+            self.inference_engine_client.inference_engine_cfg,
         )
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:

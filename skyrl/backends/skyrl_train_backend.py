@@ -23,7 +23,7 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl.train.config.utils import get_default_config
+from skyrl.train.config.utils import get_legacy_config
 from skyrl.backends.skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
@@ -63,7 +63,7 @@ def _build_config(
     """
     from omegaconf import OmegaConf
 
-    cfg = get_default_config()
+    cfg = get_legacy_config()
     cfg.trainer.policy.model.path = base_model
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()

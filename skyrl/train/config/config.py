@@ -5,6 +5,7 @@ These mirror the YAML configuration structure 1:1. The top-level SkyRLConfig
 can be constructed from a Hydra DictConfig via SkyRLConfig.from_dict_config().
 """
 
+import os
 from abc import ABC
 import dataclasses
 from dataclasses import dataclass, field, asdict
@@ -280,6 +281,9 @@ class AlgorithmConfig(BaseConfig):
     kl_loss_coef: float = 0.001
     use_entropy_loss: bool = False
     entropy_loss_coef: float = 0.01
+    # Temperature for scaling logits in policy loss computation.
+    # This is typically set from generator.sampling_params.temperature during config validation.
+    temperature: float = 1.0
     advantage_batch_normalize: bool = False
     value_head_prefix: str = "value_head"
     policy_loss_type: str = "regular"
@@ -339,27 +343,25 @@ class ChatTemplateConfig(BaseConfig):
 
 
 # ---------------------------------------------------------------------------
-# Generator
+# Inference Engine
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class GeneratorConfig(BaseConfig):
-    model_name: str = ""
+class InferenceEngineConfig(BaseConfig):
+    """Configuration for inference engine instantiation and management."""
+
     model_dtype: str = "bfloat16"
     run_engines_locally: bool = True
-    num_inference_engines: int = 1
+    num_engines: int = 1
     backend: str = "vllm"
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
-    inference_engine_tensor_parallel_size: int = 1
-    inference_engine_pipeline_parallel_size: int = 1
-    inference_engine_expert_parallel_size: int = 1
-    inference_engine_data_parallel_size: int = 1
-    n_samples_per_prompt: int = 5
+    tensor_parallel_size: int = 4
+    pipeline_parallel_size: int = 1
+    expert_parallel_size: int = 1
+    data_parallel_size: int = 1
     async_engine: bool = True
-    batched: bool = False
-    max_input_length: int = 512
     vllm_v1_disable_multiproc: bool = True
     enable_prefix_caching: bool = True
     enable_chunked_prefill: bool = True
@@ -369,16 +371,33 @@ class GeneratorConfig(BaseConfig):
     enable_ray_prometheus_stats: bool = False
     gpu_memory_utilization: float = 0.8
     max_num_seqs: int = 1024
-    remote_inference_engine_urls: List[str] = field(default_factory=lambda: ["127.0.0.1:8001"])
+    remote_urls: List[str] = field(default_factory=lambda: [])
     enable_http_endpoint: bool = False
     http_endpoint_host: str = "127.0.0.1"
     http_endpoint_port: int = 8000
     served_model_name: Optional[str] = None
-    max_turns: int = 1
-    chat_template: ChatTemplateConfig = field(default_factory=ChatTemplateConfig)
-    chat_template_kwargs: Dict[str, Any] = field(default_factory=dict)
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     override_existing_update_group: str = "auto"
+    external_proxy_url: Optional[str] = None
+    external_server_urls: Optional[List[str]] = None
+
+
+# ---------------------------------------------------------------------------
+# Generator
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GeneratorConfig(BaseConfig):
+    """Configuration for generation behavior."""
+
+    inference_engine: InferenceEngineConfig = field(default_factory=InferenceEngineConfig)
+    n_samples_per_prompt: int = 5
+    batched: bool = False
+    max_turns: int = 1
+    max_input_length: int = 512
+    chat_template: ChatTemplateConfig = field(default_factory=ChatTemplateConfig)
+    chat_template_kwargs: Dict[str, Any] = field(default_factory=dict)
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     use_conversation_multi_turn: bool = True
     append_eos_token_after_stop_str_in_multi_turn: bool = True
@@ -389,9 +408,6 @@ class GeneratorConfig(BaseConfig):
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
-
-    external_proxy_url: Optional[str] = None
-    external_server_urls: Optional[List[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -441,11 +457,11 @@ class TrainerConfig(BaseConfig):
     resume_mode: Optional[str] = "latest"
     resume_path: Optional[str] = None
     log_path: str = "/tmp/skyrl-logs"
-    ckpt_path: str = ""
+    ckpt_path: str = field(default_factory=lambda: f"{os.getenv('HOME')}/ckpts/")
     max_ckpts_to_keep: int = -1
     ckpt_interval: int = 10
     hf_save_interval: int = -1
-    export_path: str = ""
+    export_path: str = field(default_factory=lambda: f"{os.getenv('HOME')}/exports/")
     bf16: bool = True
     epochs: int = 1
     update_epochs_per_batch: int = 1
@@ -469,19 +485,6 @@ class TrainerConfig(BaseConfig):
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
-
-
-# ---------------------------------------------------------------------------
-# Top-level config
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class SkyRLConfig(BaseConfig):
-    data: DataConfig = field(default_factory=DataConfig)
-    trainer: TrainerConfig = field(default_factory=TrainerConfig)
-    generator: GeneratorConfig = field(default_factory=GeneratorConfig)
-    environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
 
 def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
@@ -556,15 +559,145 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
     return datacls(**kwargs)
 
 
-def get_config_as_dict(cfg: Union[dict, BaseConfig, DictConfig]) -> dict:
+# ---------------------------------------------------------------------------
+# Top-level config
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SkyRLConfig(BaseConfig):
+    data: DataConfig = field(default_factory=DataConfig)
+    trainer: TrainerConfig = field(default_factory=TrainerConfig)
+    generator: GeneratorConfig = field(default_factory=GeneratorConfig)
+    environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
+
+    def __post_init__(self):
+        # Copy temperature from generator sampling params to algorithm config
+        # so workers can access it without needing the generator config
+        self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+    @classmethod
+    def from_cli_overrides(cls, args: List[str]) -> "SkyRLConfig":
+        """Construct a SkyRLConfig from CLI arguments.
+
+        Parses CLI arguments and builds a typed config. Dataclass field defaults
+        are used for any values not specified on the command line.
+
+        Supports both new-style config paths (e.g., generator.inference_engine.backend)
+        and legacy YAML-style paths (e.g., generator.backend) for backward compatibility.
+
+        Args:
+            args: List of CLI arguments in 'key.path=value' format.
+                  Example: ['trainer.policy.model.path=Qwen/Qwen2.5-1.5B-Instruct', 'trainer.seed=123']
+
+        Returns:
+            A fully constructed SkyRLConfig with CLI overrides applied.
+
+        Raises:
+            ValueError: If an argument uses the unsupported '+' prefix.
+        """
+        from skyrl.train.config.legacy import (
+            is_legacy_config,
+            translate_legacy_config,
+            warn_legacy_config,
+        )
+        from skyrl.train.config.utils import get_legacy_config
+
+        # Check for unsupported '+' prefix
+        for arg in args:
+            if arg.startswith("+"):
+                raise ValueError(
+                    f"The '+' prefix for adding new config fields is not supported: '{arg}'. "
+                    "To add custom config fields, subclass the relevant config dataclass."
+                )
+        overrides = OmegaConf.from_cli(args)
+
+        # Try new format first
+        try:
+            return cls.from_dict_config(overrides)
+        except ValueError:
+            # Fall back to legacy format: load base YAML, merge overrides, translate
+            try:
+                base_cfg = get_legacy_config()
+                merged = OmegaConf.merge(base_cfg, overrides)
+                merged_dict = OmegaConf.to_container(merged, resolve=True)
+
+                if is_legacy_config(merged_dict):
+                    warn_legacy_config()
+                    translated = translate_legacy_config(merged_dict)
+                    return build_nested_dataclass(cls, translated)
+            except Exception:
+                pass  # Legacy translation failed, re-raise original error
+
+            # Re-raise original error if not a legacy config issue
+            raise
+
+
+def make_config(
+    algorithm_cls: Optional[Type[AlgorithmConfig]] = None,
+    trainer_cls: Optional[Type[TrainerConfig]] = None,
+    generator_cls: Optional[Type[GeneratorConfig]] = None,
+) -> Type[SkyRLConfig]:
+    """Create a SkyRLConfig subclass with custom nested config classes.
+
+    Convenience helper to avoid boilerplate when extending configs for custom
+    algorithms or generators. For full IDE autocomplete on custom fields, use
+    explicit subclassing instead (see examples/algorithms/dapo/main_dapo.py).
+
+    Args:
+        algorithm_cls: Custom AlgorithmConfig subclass. If provided without
+            trainer_cls, a TrainerConfig subclass is automatically created.
+        trainer_cls: Custom TrainerConfig subclass. Takes precedence over
+            algorithm_cls for the trainer config.
+        generator_cls: Custom GeneratorConfig subclass.
+
+    Returns:
+        A SkyRLConfig subclass wired up with the custom config classes.
+
+    Example::
+
+        @dataclass
+        class MyAlgorithmConfig(AlgorithmConfig):
+            my_param: int = 42
+
+        MyConfig = make_config(algorithm_cls=MyAlgorithmConfig)
+        cfg = MyConfig.from_cli_overrides(sys.argv[1:])
+    """
+    effective_trainer_cls = trainer_cls
+
+    if algorithm_cls is not None and trainer_cls is None:
+        effective_trainer_cls = dataclass(
+            type(
+                f"_{algorithm_cls.__name__}TrainerConfig",
+                (TrainerConfig,),
+                {
+                    "__annotations__": {"algorithm": algorithm_cls},
+                    "algorithm": field(default_factory=algorithm_cls),
+                },
+            )
+        )
+
+    ns: Dict[str, Any] = {}
+    annotations: Dict[str, Any] = {}
+
+    if effective_trainer_cls is not None:
+        annotations["trainer"] = effective_trainer_cls
+        ns["trainer"] = field(default_factory=effective_trainer_cls)
+
+    if generator_cls is not None:
+        annotations["generator"] = generator_cls
+        ns["generator"] = field(default_factory=generator_cls)
+
+    ns["__annotations__"] = annotations
+
+    return dataclass(type("_CustomSkyRLConfig", (SkyRLConfig,), ns))
+
+
+def get_config_as_dict(cfg: Union[dict, BaseConfig]) -> dict:
     if isinstance(cfg, dict):
         return cfg
-    elif isinstance(cfg, DictConfig):
-        return OmegaConf.to_container(cfg, resolve=True)
     return asdict(cfg)
 
 
-def get_config_as_yaml_str(cfg: Union[BaseConfig, DictConfig]) -> str:
-    if isinstance(cfg, DictConfig):
-        return OmegaConf.to_yaml(cfg)
+def get_config_as_yaml_str(cfg: BaseConfig) -> str:
     return yaml.dump(asdict(cfg))

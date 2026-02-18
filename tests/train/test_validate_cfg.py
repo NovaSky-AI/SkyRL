@@ -7,7 +7,14 @@ uv run --isolated --extra skyrl-train --extra dev pytest tests/train/test_valida
 import pytest
 from omegaconf import OmegaConf
 
-from skyrl.train.config import SkyRLConfig, AlgorithmConfig, GeneratorConfig, SamplingParams, TrainerConfig
+from skyrl.train.config import (
+    SkyRLConfig,
+    AlgorithmConfig,
+    GeneratorConfig,
+    SamplingParams,
+    TrainerConfig,
+    InferenceEngineConfig,
+)
 from skyrl.train.utils.utils import validate_cfg
 
 
@@ -43,11 +50,16 @@ def _make_valid_cfg(**algorithm_overrides) -> SkyRLConfig:
         n_samples_per_prompt=1,
         max_turns=1,
         max_input_length=100,
-        enable_http_endpoint=False,
-        http_endpoint_host="127.0.0.1",
-        http_endpoint_port=8000,
+        inference_engine=InferenceEngineConfig(
+            enable_http_endpoint=False,
+            http_endpoint_host="127.0.0.1",
+            http_endpoint_port=8000,
+            tensor_parallel_size=1,
+        ),
     )
-    return SkyRLConfig(trainer=trainer_cfg, generator=generator_cfg)
+    cfg = SkyRLConfig(trainer=trainer_cfg, generator=generator_cfg)
+    cfg.trainer.placement.colocate_all = False
+    return cfg
 
 
 def _maybe_to_dictconfig(cfg, use_dictconfig):

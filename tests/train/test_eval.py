@@ -40,7 +40,7 @@ class DummyGenerator(GeneratorInterface):
 @pytest.mark.asyncio
 async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     cfg = dummy_config
-    cfg.generator.backend = "vllm"
+    cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.eval_sampling_params = SamplingParams(
         max_generate_length=20,
         temperature=0.0,

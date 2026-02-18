@@ -5,8 +5,7 @@ import sys
 import logging
 import math
 import socket
-from omegaconf import DictConfig, OmegaConf
-from typing import Union
+from datetime import datetime
 
 import ray
 import torch
@@ -55,7 +54,7 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
-def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
+def validate_batch_sizes(cfg: SkyRLConfig):
     """
     Validate configured batch sizes.
 
@@ -188,10 +187,12 @@ def validate_batch_sizes(cfg: Union[SkyRLConfig, DictConfig]):
     )
 
 
-def validate_megatron_cfg(cfg: Union[SkyRLConfig, DictConfig]):
+def validate_megatron_cfg(cfg: SkyRLConfig):
     # not yet supported + tested features
-    assert cfg.generator.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
-    assert cfg.generator.backend == "vllm", "only vllm is supported for with megatron"
+    assert (
+        cfg.generator.inference_engine.weight_sync_backend == "nccl"
+    ), "only nccl is supported for megatron weight sync"
+    assert cfg.generator.inference_engine.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
     if cfg.trainer.flash_attn:
@@ -213,7 +214,7 @@ def validate_megatron_cfg(cfg: Union[SkyRLConfig, DictConfig]):
         )
 
 
-def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
+def validate_cfg(cfg: SkyRLConfig):
     # Validate generation config separately
     validate_generator_cfg(cfg)
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -283,14 +284,9 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
         # TODO(Charlie): This calculation is not correct for multi-turn and users should use `max_seq_len` instead.
         # Should we just force users to set max_seq_len if loss reduction is seq_mean_token_sum_norm, regardless of
         # multi-turn or not?
-        if isinstance(cfg, DictConfig):
-            new_cfg = OmegaConf.create(cfg.trainer.algorithm)
-            new_cfg.max_seq_len = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-            cfg.trainer.algorithm = new_cfg
-        else:
-            cfg.trainer.algorithm.max_seq_len = (
-                cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-            )
+        cfg.trainer.algorithm.max_seq_len = (
+            cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+        )
 
     # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:
@@ -331,7 +327,7 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
             )
             cfg.generator.sampling_params.logprobs = 0
 
-        if cfg.generator.backend == "sglang":
+        if cfg.generator.inference_engine.backend == "sglang":
             raise NotImplementedError(
                 "`trainer.algorithm.off_policy_correction` doesn't support Sglang backend, please use vLLM"
             )
@@ -343,7 +339,7 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     if cfg.trainer.policy.model.lora.rank > 0:
         # LoRA enabled
         # Right now: assert generator backend must be vllm, training backend must be fsdp/fsdp2
-        assert cfg.generator.backend == "vllm", "LoRA enabled requires vLLM backend"
+        assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
         assert cfg.trainer.strategy in (
             "fsdp",
             "fsdp2",
@@ -353,11 +349,9 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     # Validate placement
     if cfg.trainer.placement.colocate_all:
         num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
+        ie_cfg = cfg.generator.inference_engine
         num_rollout_gpus = (
-            cfg.generator.num_inference_engines
-            * cfg.generator.inference_engine_tensor_parallel_size
-            * cfg.generator.inference_engine_pipeline_parallel_size
-            * cfg.generator.inference_engine_data_parallel_size
+            ie_cfg.num_engines * ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
         )
         assert num_policy_gpus == num_rollout_gpus, (
             f"num_policy_gpus ({num_policy_gpus}) and num_rollout_gpus ({num_rollout_gpus}) "
@@ -377,7 +371,7 @@ def validate_cfg(cfg: Union[SkyRLConfig, DictConfig]):
             )
 
 
-def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
+def validate_generator_cfg(cfg: SkyRLConfig):
     """Validates the correctness of generator-related config.
 
     Args:
@@ -398,12 +392,12 @@ def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
             "for multi-turn generation"
         )
 
-    if not cfg.generator.run_engines_locally:
-        assert cfg.generator.num_inference_engines == len(
-            cfg.generator.remote_inference_engine_urls
-        ), "num_inference_engines should be equal to the number of remote_inference_engine_urls"
+    if not cfg.generator.inference_engine.run_engines_locally:
+        assert cfg.generator.inference_engine.num_engines == len(
+            cfg.generator.inference_engine.remote_urls
+        ), "num_engines should be equal to the number of remote_urls"
 
-    if not cfg.generator.async_engine and cfg.generator.backend == "vllm":
+    if not cfg.generator.inference_engine.async_engine and cfg.generator.inference_engine.backend == "vllm":
         assert (
             cfg.generator.batched
         ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
@@ -412,22 +406,22 @@ def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     if cfg.trainer.logger == "wandb":
         assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
 
-    if cfg.generator.override_existing_update_group == "auto":
-        if cfg.generator.backend == "vllm" and not cfg.generator.run_engines_locally:
+    if cfg.generator.inference_engine.override_existing_update_group == "auto":
+        if cfg.generator.inference_engine.backend == "vllm" and not cfg.generator.inference_engine.run_engines_locally:
             # remote engines can be launched separately so we `enable` by default
-            cfg.generator.override_existing_update_group = "enable"
+            cfg.generator.inference_engine.override_existing_update_group = "enable"
         else:
             # for local engines or sglang, we disable
-            cfg.generator.override_existing_update_group = "disable"
+            cfg.generator.inference_engine.override_existing_update_group = "disable"
 
     # TODO: fix once we support these features with SGLang
-    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
-        assert cfg.generator.inference_engine_tensor_parallel_size == 1, (
+    if cfg.generator.inference_engine.backend == "sglang" and cfg.generator.inference_engine.run_engines_locally:
+        assert cfg.generator.inference_engine.tensor_parallel_size == 1, (
             "As of now, We do not support tensor parallel inference engine with SGLang when running engines locally. "
             "Please set `inference_engine_tensor_parallel_size` to 1."
         )
 
-    if cfg.generator.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
+    if cfg.generator.inference_engine.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
         raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
     if cfg.generator.sampling_params.logprobs is not None:
@@ -437,12 +431,12 @@ def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
                 f"`logprobs` if set should be 0 i.e only for the chosen token, "
                 f"got {cfg.generator.sampling_params.logprobs}"
             )
-        if not cfg.generator.run_engines_locally:
+        if not cfg.generator.inference_engine.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
-    if cfg.generator.backend == "sglang":
+    if cfg.generator.inference_engine.backend == "sglang":
         # Some sampling parameters are not supported in SGLang when `skip_tokenizer_init` is True.
         if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
             raise ValueError(
@@ -470,8 +464,8 @@ def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
                 "to match the chat template."
             )
 
-    if cfg.generator.enable_http_endpoint:
-        if cfg.generator.backend == "sglang":
+    if cfg.generator.inference_engine.enable_http_endpoint:
+        if cfg.generator.inference_engine.backend == "sglang":
             # TODO(Charlie): sglang_server.py not supported for /chat/completion yet because we have
             # skip_tokenizer_init=True in engine creation. Fix by getting tokens via return logprobs
             # instead. sglang_engine.py not supported yet because we still need to figure out how
@@ -480,14 +474,14 @@ def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
                 "generator.enable_http_endpoint is not supported for SGLang backend yet. "
                 'Please set generator.backend="vllm".'
             )
-        if not cfg.generator.async_engine:
+        if not cfg.generator.inference_engine.async_engine:
             raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
 
     # Validate inference engine parallelism.
-    ep_size = cfg.generator.inference_engine_expert_parallel_size
-    dp_size = cfg.generator.inference_engine_data_parallel_size
-    tp_size = cfg.generator.inference_engine_tensor_parallel_size
-    if cfg.generator.backend == "sglang":
+    ep_size = cfg.generator.inference_engine.expert_parallel_size
+    dp_size = cfg.generator.inference_engine.data_parallel_size
+    tp_size = cfg.generator.inference_engine.tensor_parallel_size
+    if cfg.generator.inference_engine.backend == "sglang":
         assert dp_size == 1, "Inference data parallelism is not yet supported for SGLang backend."
         assert ep_size == 1, "Inference expert parallelism is not yet supported for SGLang backend."
     if ep_size > 1:
@@ -501,7 +495,7 @@ def validate_generator_cfg(cfg: Union[SkyRLConfig, DictConfig]):
     _validate_new_inference_cfg(cfg)
 
 
-def _validate_new_inference_cfg(cfg: DictConfig):
+def _validate_new_inference_cfg(cfg: SkyRLConfig):
     """Validates config options for the new inference layer.
 
     This validation only applies when _SKYRL_USE_NEW_INFERENCE=1.
@@ -524,8 +518,8 @@ def _validate_new_inference_cfg(cfg: DictConfig):
         return
 
     is_colocated = cfg.trainer.placement.colocate_all
-    has_external_proxy = cfg.generator.get("external_proxy_url") is not None
-    has_external_servers = cfg.generator.get("external_server_urls") is not None
+    has_external_proxy = cfg.generator.inference_engine.external_proxy_url is not None
+    has_external_servers = cfg.generator.inference_engine.external_server_urls is not None
 
     # Colocated mode cannot use external endpoints
     if is_colocated and (has_external_proxy or has_external_servers):
@@ -576,7 +570,7 @@ def get_physical_gpu_id():
     return str(props.uuid)
 
 
-def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str, str]:
+def prepare_runtime_environment(cfg: SkyRLConfig) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
 
@@ -592,7 +586,7 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
     # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
-    if cfg.generator.weight_sync_backend == "nccl":
+    if cfg.generator.inference_engine.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
     if cfg.trainer.strategy == "megatron":
@@ -607,7 +601,7 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
-    if cfg.generator.backend == "vllm":
+    if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
         # NOTE (sumanthrh): In vllm >= 0.9.0, we need to explicitly allow for serialization via pickle
@@ -631,8 +625,8 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
 
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []
-    if hasattr(cfg.generator, "inference_engine_tensor_parallel_size"):
-        gpu_counts.append(cfg.generator.inference_engine_tensor_parallel_size)
+    if hasattr(cfg.generator.inference_engine, "tensor_parallel_size"):
+        gpu_counts.append(cfg.generator.inference_engine.tensor_parallel_size)
     if hasattr(cfg, "trainer") and hasattr(cfg.trainer, "placement"):
         placement = cfg.trainer.placement
         gpu_counts.extend(
@@ -727,15 +721,13 @@ def configure_ray_worker_logging() -> None:
     logging.root.setLevel(level)
 
 
-def initialize_ray(cfg: Union[SkyRLConfig, DictConfig]):
+def initialize_ray(cfg: SkyRLConfig):
     """
     Initialize Ray cluster with prepared runtime environment.
 
     Args:
         cfg: Training config
     """
-    from datetime import datetime
-
     from skyrl.backends.skyrl_train.utils.ppo_utils import sync_registries
 
     # When SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1, show all logs on stdout (no file redirect)
