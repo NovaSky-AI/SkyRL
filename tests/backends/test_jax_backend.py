@@ -414,7 +414,11 @@ def test_ppo_loss_fn_config_is_applied():
     req_tight_clip = {
         "req_tight": (
             model_id,
-            types.ForwardBackwardInput(data=[datum], loss_fn="ppo", loss_fn_config={"clip_ratio": 0.01}),
+            types.ForwardBackwardInput(
+                data=[datum],
+                loss_fn="ppo",
+                loss_fn_config={"clip_low_threshold": 0.99, "clip_high_threshold": 1.01},
+            ),
         )
     }
 
@@ -424,7 +428,8 @@ def test_ppo_loss_fn_config_is_applied():
     default_losses = np.array(default_out.loss_fn_outputs[0]["elementwise_loss"]["data"], dtype=np.float32)
     tight_losses = np.array(tight_out.loss_fn_outputs[0]["elementwise_loss"]["data"], dtype=np.float32)
 
-    # Default PPO clip ratio is 0.2 -> upper clip 1.2. Configured clip_ratio=0.01 -> upper clip 1.01.
+    # Default PPO clip thresholds are 0.8..1.2.
+    # Configured clip thresholds 0.99..1.01 should cap losses at -1.01.
     np.testing.assert_allclose(default_losses, -1.2, atol=1e-4)
     np.testing.assert_allclose(tight_losses, -1.01, atol=1e-4)
 
