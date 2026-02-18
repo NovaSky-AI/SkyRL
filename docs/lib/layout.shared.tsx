@@ -6,12 +6,5 @@ export function baseOptions(): BaseLayoutProps {
       title: 'SkyRL',
     },
     githubUrl: 'https://github.com/NovaSky-AI/SkyRL',
-    links: [
-      {
-        text: 'API Reference',
-        url: '/api-ref/',
-        active: 'nested-url',
-      },
-    ],
   };
 }
