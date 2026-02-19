@@ -3,6 +3,7 @@ import math
 import os
 import shutil
 from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -1223,7 +1224,7 @@ class RayPPOTrainer:
         # Save additional trainer state
         trainer_state = {
             "global_step": self.global_step,
-            "config": self.cfg,
+            "config": asdict(self.cfg),
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         with io.open_file(trainer_state_path, "wb") as f:
