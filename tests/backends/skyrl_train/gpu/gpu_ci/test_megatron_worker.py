@@ -116,7 +116,7 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 )
 @pytest.mark.megatron
 def test_megatron_policy_weight_sync(
-    colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+    ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
