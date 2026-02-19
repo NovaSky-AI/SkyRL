@@ -486,19 +486,40 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
 
     @staticmethod
     def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate metrics across episodes with per-env breakdown."""
+        """Aggregate metrics across episodes with per-env breakdown.
+
+        Handles two types of metrics:
+        1. Normal episode metrics: {env_key, turns, tool_calls, tool_errors}
+        2. Init failure metrics: {env_init_failed, env_init_failed/{env_key}}
+        """
         if not metrics:
             return {}
 
-        # Group by env_key
+        # Track init failures per env (from env_init_failed/{env_key} pattern)
+        env_init_failures: Dict[str, int] = {}
+        total_init_failures = 0
+
+        # Group normal metrics by env_key
         env_data: Dict[str, Dict[str, List[int]]] = {}
         for m in metrics:
-            env_key = m.get("env_key", "unknown")
-            if env_key not in env_data:
-                env_data[env_key] = {"turns": [], "tool_calls": [], "tool_errors": []}
-            env_data[env_key]["turns"].append(m.get("turns", 0))
-            env_data[env_key]["tool_calls"].append(m.get("tool_calls", 0))
-            env_data[env_key]["tool_errors"].append(m.get("tool_errors", 0))
+            # Check for init failure metrics (env_init_failed/{env_key} pattern)
+            for key, value in m.items():
+                if key.startswith("env_init_failed/"):
+                    env_key = key.split("/", 1)[1]
+                    env_init_failures[env_key] = env_init_failures.get(env_key, 0) + int(value)
+                    total_init_failures += int(value)
+                elif key == "env_init_failed":
+                    # Already counted via per-env key
+                    pass
+
+            # Normal episode metrics (has env_key field)
+            env_key = m.get("env_key")
+            if env_key:
+                if env_key not in env_data:
+                    env_data[env_key] = {"turns": [], "tool_calls": [], "tool_errors": []}
+                env_data[env_key]["turns"].append(m.get("turns", 0))
+                env_data[env_key]["tool_calls"].append(m.get("tool_calls", 0))
+                env_data[env_key]["tool_errors"].append(m.get("tool_errors", 0))
 
         result: Dict[str, Any] = {}
         total_turns = 0
@@ -546,6 +567,12 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
         result["total_tool_errors"] = total_tool_errors
         result["tool_error_rate"] = total_tool_errors / total_tool_calls if total_tool_calls > 0 else 0
         result["total_episodes"] = total_episodes
+
+        # Add init failure metrics (per-env and total)
+        for env_key, failures in env_init_failures.items():
+            result[f"{env_key}/env_init_failed"] = failures
+        if total_init_failures > 0:
+            result["total_env_init_failed"] = total_init_failures
 
         return result
 

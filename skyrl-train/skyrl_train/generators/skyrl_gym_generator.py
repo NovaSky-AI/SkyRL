@@ -240,6 +240,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         # Need copy here since the prompt is a list of messages and we are going to modify it.
         chat_history = copy.deepcopy(prompt)
 
+        # Extract env_key for logging (data_source in dataset maps to env_key)
+        env_key = env_extras.get("data_source", "unknown")
+
         # Try to create and initialize the environment. If it fails (e.g., Fleet health check failure),
         # return a zero-reward trajectory instead of crashing the entire training run.
         try:
@@ -247,7 +250,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             # init() returns the first prompt to be given to the model, and optional metadata dict
             chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
         except Exception as e:
-            logger.warning(f"Environment init failed for session {session_id}: {e}. Returning zero-reward trajectory.")
+            logger.warning(f"[env={env_key}] Environment init failed for session {session_id}: {e}. Returning zero-reward trajectory.")
             # Return a minimal failed trajectory with zero reward
             prompt_ids = self.tokenizer.apply_chat_template(
                 chat_history,
@@ -265,7 +268,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 loss_mask=[0],  # Don't learn from failed trajectories
                 prompt_ids=prompt_ids,
                 rollout_logprobs=[0.0],  # Match response_ids length for validation
-                env_metrics={"env_init_failed": 1.0},
+                env_metrics={"env_init_failed": 1.0, f"env_init_failed/{env_key}": 1.0},
             )
             # Return correct type for step-wise mode
             if self.generator_cfg.step_wise_trajectories:
