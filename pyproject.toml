@@ -198,8 +198,8 @@ no-build-isolation-package = [
     "nv-grouped-gemm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
-# unpinned dependencies. Also set ml_dtypes>=0.5.0 for python 3.12, since megatron-core 
-# declares numpy<2.0.0, which conflicts with ml_dtypes>=0.5.0
+# unpinned dependencies. Also set ml_dtypes>=0.5.0 for python 3.12, since megatron-core
+# declares numpy<2.0.0, which conflicts with ml_dtypes>=0.5.0 in uv's resolver.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "mamba-ssm; sys_platform == 'never'",
