@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from tx.models.configs import Qwen3Config
+from tx.layers.connectors import is_connector_path
 from tx.layers.lora import clear_lora_adapter, init_lora_adapter
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
@@ -498,12 +499,17 @@ class JaxBackendImpl(AbstractBackend):
             lora_params: nnx.State,
             optimizer: nnx.Optimizer,
             adapter_index: jax.Array,
-        ) -> tuple[AccumulatedGradients, jax.Array]:
+        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
             """Compute full gradients, apply optimizer update, and reset accumulated grads."""
             mean_grads = accumulated_grads.get_mean(adapter_index)
             grad_norm = optax.global_norm(mean_grads)
+            mhc_grads = jax.tree.map_with_path(
+                lambda path, g: g if is_connector_path(path) else jnp.zeros_like(g),
+                mean_grads,
+            )
+            mhc_grad_norm = optax.global_norm(mhc_grads)
             optimizer.update(lora_params, mean_grads)
-            return accumulated_grads.reset_adapter(adapter_index), grad_norm
+            return accumulated_grads.reset_adapter(adapter_index), grad_norm, mhc_grad_norm
 
         if self.config.enforce_eager:
             self._compute_grads_and_update = compute_grads_and_update
@@ -766,16 +772,27 @@ class JaxBackendImpl(AbstractBackend):
 
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
         with jax.set_mesh(self.mesh):
-            self.accumulated_grads, grad_norm = self._compute_grads_and_update(
+            self.accumulated_grads, grad_norm, mhc_grad_norm = self._compute_grads_and_update(
                 self.accumulated_grads,
                 self.lora_params,
                 optimizer,
                 jnp.int32(adapter_index),
             )
 
-        grad_norm = float(jax.device_get(grad_norm))
-        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), grad_norm={grad_norm}")
-        return types.OptimStepOutput(metrics={"skyrl.ai/grad_norm": grad_norm, "skyrl.ai/learning_rate": learning_rate})
+        grad_norm, mhc_grad_norm = jax.device_get((grad_norm, mhc_grad_norm))
+        grad_norm = float(grad_norm)
+        mhc_grad_norm = float(mhc_grad_norm)
+        logger.info(
+            f"Applied optimizer step for model {model_id} "
+            f"(adapter {adapter_index}), grad_norm={grad_norm}, mhc_grad_norm={mhc_grad_norm}"
+        )
+        return types.OptimStepOutput(
+            metrics={
+                "skyrl.ai/grad_norm": grad_norm,
+                "skyrl.ai/mhc_gradient_norm": mhc_grad_norm,
+                "skyrl.ai/learning_rate": learning_rate,
+            }
+        )
 
     def sample(
         self,

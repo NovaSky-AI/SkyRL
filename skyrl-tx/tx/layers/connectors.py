@@ -12,11 +12,23 @@ def is_connector_path(path: tuple[Any, ...]) -> bool:
     return any(name in normalized_path for name in ("attn_connector", "mlp_connector"))
 
 
+def _logit(x: jax.Array) -> jax.Array:
+    """Inverse sigmoid: logit(x) = log(x / (1-x))."""
+    x = jnp.clip(x, 1e-6, 1.0 - 1e-6)
+    return jnp.log(x) - jnp.log(1.0 - x)
+
+
+def default_b_pre(n: int, dtype: jnp.dtype = jnp.float32) -> jax.Array:
+    """H_pre = sigmoid(b_pre) = 1/n: uniform aggregation across streams."""
+    return _logit(jnp.array(1.0 / n, dtype=jnp.float32)).astype(dtype)
+
+
 class LoRAConnector(nnx.Module):
     """
     Implementation of Manifold constrained HyperConnections (https://arxiv.org/pdf/2512.24880)
 
-    Weights initialized with identity mapping; Default behaviour equates to residual networks.
+    Initialized as exact identity (standard residual): H_pre = 1/n, H_post = 1, M = I.
+    Training discovers stream specialization via input-dependent routing (alpha = 0.1).
     """
 
     def __init__(
@@ -40,41 +52,32 @@ class LoRAConnector(nnx.Module):
         n = expansion_rate
         C = hidden_dim
 
+        # Phi matrices are zero-initialized so that alpha * x @ 0 + bias = bias at init.
+        # Alpha = 0.1 balances gradient flow to phi against LoRA parameter gradients.
         self.input_norm_weight = nnx.Param(jnp.ones((max_lora_adapters, n * C), dtype=dtype))
         self.phi_pre = Param(
-            max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs
+            max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs
         )
         self.phi_post = Param(
-            max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.normal(stddev=0.02), rngs=rngs
+            max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs
         )
         self.phi_res = Param(
-            max_lora_adapters,
-            n * C,
-            n * n,
-            dtype=dtype,
-            kernel_init=nnx.initializers.normal(stddev=0.02),
-            rngs=rngs,
+            max_lora_adapters, n * C, n * n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs,
         )
 
-        # Initialize biases for identity-like behavior:
-        # H_pre = 1/n (uniform aggregation), H_post = 1 (full distribution), M = I (identity mixing)
+        # H_pre = sigmoid(b_pre) = 1/n: uniform aggregation across streams
+        self.b_pre = nnx.Param(jnp.full((max_lora_adapters, n), default_b_pre(n), dtype=dtype))
 
-        # H_pre = sigmoid(b_pre) = 1/n  =>  b_pre = logit(1/n)
-        target_h_pre = jnp.array(1.0 / n, dtype=dtype)
-        clamped = jnp.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
-        inv_sigmoid = jnp.log(clamped) - jnp.log(1.0 - clamped)
-        self.b_pre = nnx.Param(jnp.full((max_lora_adapters, n), inv_sigmoid, dtype=dtype))
-
-        # H_post = 2 * sigmoid(b_post) = 1  =>  b_post = 0
+        # H_post = 2 * sigmoid(b_post) = 1: standard residual for all streams at init.
+        # Training discovers stream specialization (memory vs update roles).
         self.b_post = nnx.Param(jnp.zeros((max_lora_adapters, n), dtype=dtype))
 
-        # Large identity matrix -> heavily biases Sinkhorn() to product an identity matrix
+        # M ~= I: strong identity mixing via Sinkhorn (minimal cross-stream leakage)
         self.b_res = nnx.Param(jnp.broadcast_to(10.0 * jnp.eye(n, dtype=dtype), (max_lora_adapters, n, n)))
 
-        # Alpha = 0 so phi matrices don't contribute initially
-        self.alpha_pre = nnx.Param(jnp.zeros((max_lora_adapters,), dtype=dtype))
-        self.alpha_post = nnx.Param(jnp.zeros((max_lora_adapters,), dtype=dtype))
-        self.alpha_res = nnx.Param(jnp.zeros((max_lora_adapters,), dtype=dtype))
+        self.alpha_pre = nnx.Param(jnp.full((max_lora_adapters,), 0.1, dtype=dtype))
+        self.alpha_post = nnx.Param(jnp.full((max_lora_adapters,), 0.1, dtype=dtype))
+        self.alpha_res = nnx.Param(jnp.full((max_lora_adapters,), 0.1, dtype=dtype))
 
     def _get_adapter_indices(self, batch_size: int, adapter_indices: jax.Array | None) -> jax.Array:
         if adapter_indices is None:
@@ -92,7 +95,7 @@ class LoRAConnector(nnx.Module):
         return jax.lax.fori_loop(0, iters, step, M)
 
     def _norm(self, x_flat: jax.Array, adapter_indices: jax.Array) -> jax.Array:
-        """Separate norm from layernorm.RMSNorm due to adapter indexing and trainability"""
+        """Separate norm from layernorm.RMSNorm due to adapter indexing and trainability."""
         input_norm_weight = self.input_norm_weight[adapter_indices]
         rms = jnp.sqrt(jnp.mean(x_flat**2, axis=-1, keepdims=True) + self.eps)
         return (input_norm_weight[:, None, :] * x_flat) / rms
