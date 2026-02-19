@@ -189,10 +189,9 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
 
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
-    assert (
-        cfg.generator.inference_engine.weight_sync_backend == "nccl"
-    ), "only nccl is supported for megatron weight sync"
-    assert cfg.generator.inference_engine.backend == "vllm", "only vllm is supported for with megatron"
+    ie_cfg = cfg.generator.inference_engine
+    assert ie_cfg.weight_sync_backend == "nccl", "only nccl is supported for megatron weight sync"
+    assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
 
     if cfg.trainer.flash_attn:
@@ -323,9 +322,9 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         if cfg.generator.sampling_params.logprobs is None:
             logger.warning(
                 "`generator.sampling_params.logprobs` is `None` but off_policy_correction is enabled."
-                " Setting `logprobs` to `True`."
+                " Setting `logprobs` to `1`."
             )
-            cfg.generator.sampling_params.logprobs = 0
+            cfg.generator.sampling_params.logprobs = 1
 
         if cfg.generator.inference_engine.backend == "sglang":
             raise NotImplementedError(
@@ -379,25 +378,24 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     Raises:
         NotImplementedError: if feature is not supported, such as sglang for multiturn generation
-        ValueError: when cfg.generator.sampling_params.logprobs > 0
+        ValueError: when cfg.generator.sampling_params.logprobs > 1
     """
+    ie_cfg = cfg.generator.inference_engine
 
     if cfg.generator.max_turns == 1:
         assert (
             cfg.generator.max_input_length == cfg.trainer.max_prompt_length
-        ), "generator.max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
+        ), "max_input_length should be set equal to trainer.max_prompt_length for single-turn generation"
     else:
         assert cfg.generator.max_input_length >= cfg.trainer.max_prompt_length, (
-            "generator.max_input_length should be set greater than or equal to trainer.max_prompt_length "
+            "max_input_length should be set greater than or equal to trainer.max_prompt_length "
             "for multi-turn generation"
         )
 
-    if not cfg.generator.inference_engine.run_engines_locally:
-        assert cfg.generator.inference_engine.num_engines == len(
-            cfg.generator.inference_engine.remote_urls
-        ), "num_engines should be equal to the number of remote_urls"
+    if not ie_cfg.run_engines_locally:
+        assert ie_cfg.num_engines == len(ie_cfg.remote_urls), "num_engines should be equal to the number of remote_urls"
 
-    if not cfg.generator.inference_engine.async_engine and cfg.generator.inference_engine.backend == "vllm":
+    if not ie_cfg.async_engine and ie_cfg.backend == "vllm":
         assert (
             cfg.generator.batched
         ), "if we are using the offline vLLM engine, we need to put generator in batched mode for faster generation"
@@ -406,37 +404,37 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.logger == "wandb":
         assert os.environ.get("WANDB_API_KEY"), "`WANDB_API_KEY` is required for `wandb` logger"
 
-    if cfg.generator.inference_engine.override_existing_update_group == "auto":
-        if cfg.generator.inference_engine.backend == "vllm" and not cfg.generator.inference_engine.run_engines_locally:
+    if ie_cfg.override_existing_update_group == "auto":
+        if ie_cfg.backend == "vllm" and not ie_cfg.run_engines_locally:
             # remote engines can be launched separately so we `enable` by default
-            cfg.generator.inference_engine.override_existing_update_group = "enable"
+            ie_cfg.override_existing_update_group = "enable"
         else:
             # for local engines or sglang, we disable
-            cfg.generator.inference_engine.override_existing_update_group = "disable"
+            ie_cfg.override_existing_update_group = "disable"
 
     # TODO: fix once we support these features with SGLang
-    if cfg.generator.inference_engine.backend == "sglang" and cfg.generator.inference_engine.run_engines_locally:
-        assert cfg.generator.inference_engine.tensor_parallel_size == 1, (
+    if ie_cfg.backend == "sglang" and ie_cfg.run_engines_locally:
+        assert ie_cfg.tensor_parallel_size == 1, (
             "As of now, We do not support tensor parallel inference engine with SGLang when running engines locally. "
-            "Please set `inference_engine_tensor_parallel_size` to 1."
+            "Please set `tensor_parallel_size` to 1."
         )
 
-    if cfg.generator.inference_engine.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
+    if ie_cfg.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
         raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
-        if cfg.generator.sampling_params.logprobs > 0:
+        if cfg.generator.sampling_params.logprobs > 1:
             raise ValueError(
-                f"`logprobs` if set should be 0 i.e only for the chosen token, "
+                f"`logprobs` if set should be 0 or 1 (both return only the chosen token's logprob), "
                 f"got {cfg.generator.sampling_params.logprobs}"
             )
-        if not cfg.generator.inference_engine.run_engines_locally:
+        if not ie_cfg.run_engines_locally:
             raise NotImplementedError("Remote inference mode doesn't support `sampling_params.logprobs`")
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
-    if cfg.generator.inference_engine.backend == "sglang":
+    if ie_cfg.backend == "sglang":
         # Some sampling parameters are not supported in SGLang when `skip_tokenizer_init` is True.
         if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
             raise ValueError(
@@ -464,24 +462,26 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 "to match the chat template."
             )
 
-    if cfg.generator.inference_engine.enable_http_endpoint:
-        if cfg.generator.inference_engine.backend == "sglang":
+    if ie_cfg.enable_http_endpoint:
+        if ie_cfg.backend == "sglang":
             # TODO(Charlie): sglang_server.py not supported for /chat/completion yet because we have
             # skip_tokenizer_init=True in engine creation. Fix by getting tokens via return logprobs
             # instead. sglang_engine.py not supported yet because we still need to figure out how
             # to make SGLang Python engine take OAI request.
             raise ValueError(
-                "generator.enable_http_endpoint is not supported for SGLang backend yet. "
-                'Please set generator.backend="vllm".'
+                "inference_engine.enable_http_endpoint is not supported for SGLang backend yet. "
+                'Please set inference_engine.backend="vllm".'
             )
-        if not cfg.generator.inference_engine.async_engine:
-            raise ValueError("generator.async_engine must be True when generator.enable_http_endpoint==True.")
+        if not ie_cfg.async_engine:
+            raise ValueError(
+                "inference_engine.async_engine must be True when inference_engine.enable_http_endpoint==True."
+            )
 
     # Validate inference engine parallelism.
-    ep_size = cfg.generator.inference_engine.expert_parallel_size
-    dp_size = cfg.generator.inference_engine.data_parallel_size
-    tp_size = cfg.generator.inference_engine.tensor_parallel_size
-    if cfg.generator.inference_engine.backend == "sglang":
+    ep_size = ie_cfg.expert_parallel_size
+    dp_size = ie_cfg.data_parallel_size
+    tp_size = ie_cfg.tensor_parallel_size
+    if ie_cfg.backend == "sglang":
         assert dp_size == 1, "Inference data parallelism is not yet supported for SGLang backend."
         assert ep_size == 1, "Inference expert parallelism is not yet supported for SGLang backend."
     if ep_size > 1:
@@ -625,7 +625,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
 
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []
-    if hasattr(cfg.generator.inference_engine, "tensor_parallel_size"):
+    if hasattr(cfg.generator, "inference_engine") and hasattr(cfg.generator.inference_engine, "tensor_parallel_size"):
         gpu_counts.append(cfg.generator.inference_engine.tensor_parallel_size)
     if hasattr(cfg, "trainer") and hasattr(cfg.trainer, "placement"):
         placement = cfg.trainer.placement

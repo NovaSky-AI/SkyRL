@@ -319,7 +319,11 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+            )
+        )
 
         # 2. Do tests
         num_samples = 20

@@ -39,8 +39,8 @@ class BaseConfig(ABC):
 
 @dataclass
 class DataConfig(BaseConfig):
-    train_data: List[str] = field(default_factory=list)
-    val_data: List[str] = field(default_factory=list)
+    train_data: List[str] = field(default_factory=lambda: [f"{os.environ['HOME']}/data/gsm8k/train.parquet"])
+    val_data: List[str] = field(default_factory=lambda: [f"{os.environ['HOME']}/data/gsm8k/validation.parquet"])
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ class PolicyConfig(BaseConfig):
 @dataclass
 class CriticConfig(BaseConfig):
     model: ModelConfig = field(default_factory=ModelConfig)
-    optimizer_config: OptimizerConfig = field(default_factory=OptimizerConfig)
+    optimizer_config: OptimizerConfig = field(default_factory=lambda: OptimizerConfig(lr=5e-6))
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
     sequence_parallel_size: int = 1
     model_config_kwargs: dict = field(default_factory=dict)
@@ -331,7 +331,7 @@ class SamplingParams(BaseConfig):
     top_p: float = 1.0
     min_p: float = 0.0
     top_k: int = -1
-    logprobs: Optional[int] = 0
+    logprobs: Optional[int] = 1
     stop: Optional[List[str]] = None
     additional_kwargs: Optional[Dict[str, Any]] = None
 
@@ -357,7 +357,7 @@ class InferenceEngineConfig(BaseConfig):
     backend: str = "vllm"
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
-    tensor_parallel_size: int = 4
+    tensor_parallel_size: int = 1
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1
     data_parallel_size: int = 1

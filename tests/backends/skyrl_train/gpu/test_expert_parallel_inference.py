@@ -198,7 +198,11 @@ def test_ep_weight_sync():
         # Sync weights to inference engines
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.wake_up(tags=["weights"]))
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+            )
+        )
         policy.offload_to_cpu()
         asyncio.run(client.wake_up(tags=["kv_cache"]))
         asyncio.run(client.reset_prefix_cache())

@@ -88,6 +88,10 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         )
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+            )
+        )
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

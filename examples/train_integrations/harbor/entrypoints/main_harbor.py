@@ -2,14 +2,39 @@
 Main entrypoint for training on Harbor tasks.
 """
 
+import sys
+
 import ray
-import hydra
-from omegaconf import DictConfig
-from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
+import yaml
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict
+
+from skyrl.train.entrypoints.main_base import BasePPOExp
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 from ..harbor_generator import HarborGenerator
 from ..dataset import HarborTaskDataset
+
+HARBOR_DEFAULT_CONFIG = Path(__file__).parent.parent / "harbor_trial_config" / "default.yaml"
+
+
+def _deep_merge(base: dict, overrides: dict) -> dict:
+    """Merge overrides into base dict recursively, modifying base in-place."""
+    for key, value in overrides.items():
+        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+@dataclass
+class HarborSkyRLConfig(SkyRLTrainConfig):
+    """SkyRLTrainConfig with Harbor trial configuration."""
+
+    harbor_trial_config: Dict[str, Any] = field(default_factory=dict)
 
 
 class HarborExp(BasePPOExp):
@@ -34,7 +59,6 @@ class HarborExp(BasePPOExp):
         prompts_dataset = HarborTaskDataset(
             data_files=self.cfg.data.train_data,
         )
-        # make sure the dataset is large enough to train on
         assert (
             len(prompts_dataset) >= self.cfg.trainer.train_batch_size
         ), f"dataset should be atleast as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
@@ -55,17 +79,21 @@ class HarborExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg):
     # make sure that the training loop is not run on the head node.
     exp = HarborExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
-    # validate the arguments
-    validate_cfg(cfg)
+def main() -> None:
+    cfg = HarborSkyRLConfig.from_cli_overrides(sys.argv[1:])
 
+    # Load harbor defaults and merge CLI overrides on top
+    with open(HARBOR_DEFAULT_CONFIG) as f:
+        defaults = yaml.safe_load(f)
+    cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
+
+    validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 

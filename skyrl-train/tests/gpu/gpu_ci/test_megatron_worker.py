@@ -162,7 +162,11 @@ def test_megatron_policy_weight_sync(
             # or ~20 seconds on 8xH100
             # ~75 seconds on 8xH100 for Qwen3-30B-A3B
             with Timer("sync_weights"):
-                ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+                ray.get(
+                    policy.async_run_ray_method(
+                        "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+                    )
+                )
 
             policy.offload_to_cpu()
             asyncio.run(client.wake_up(tags=["kv_cache"]))

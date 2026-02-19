@@ -89,11 +89,16 @@ def test_cli_overrides():
         "trainer.policy.model.path=path/to/model",
         "trainer.seed=123",
         "generator.inference_engine.engine_init_kwargs.field=value",
+        "generator.sampling_params.temperature=0.7",
     ]
     cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
     assert cfg.trainer.policy.model.path == "path/to/model"
     assert cfg.trainer.seed == 123
     assert cfg.generator.inference_engine.engine_init_kwargs["field"] == "value"
+    assert cfg.generator.sampling_params.temperature == 0.7
+
+    # check that temperature is propagated to algorithm config
+    assert cfg.trainer.algorithm.temperature == 0.7
 
 
 def test_cli_overrides_empty_args():

@@ -2,21 +2,21 @@
 uv run --isolated --extra fsdp -m examples.train.multiply.main_multiply
 """
 
+import sys
+
 import ray
-import hydra
-from omegaconf import DictConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils import initialize_ray
-from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl_gym.envs import register
-from .env import MultiplyEnv
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     # Register the multiply environment inside the entrypoint task (no need to modify the skyrl-gym package).
     register(
         id="multiply",
-        entry_point=MultiplyEnv,
+        entry_point="examples.train.multiply.env:MultiplyEnv",
     )
 
     # make sure that the training loop is not run on the head node.
@@ -24,8 +24,8 @@ def skyrl_entrypoint(cfg: DictConfig):
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # validate the arguments
     validate_cfg(cfg)
 

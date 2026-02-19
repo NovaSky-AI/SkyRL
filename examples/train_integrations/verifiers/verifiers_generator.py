@@ -1,5 +1,4 @@
-from typing import Optional, Union
-from omegaconf import DictConfig
+from typing import Optional
 from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from openai import AsyncOpenAI
 import httpx
@@ -13,7 +12,7 @@ from skyrl.train.config import GeneratorConfig
 class VerifiersGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: Union[GeneratorConfig, DictConfig],
+        generator_cfg: GeneratorConfig,
         tokenizer,
         model_name: str,
     ):
