@@ -414,6 +414,18 @@ class BasePPOExp:
         return trainer
 
     def run(self):
+        # Map SIGTERM to KeyboardInterrupt so that asyncio.run() properly
+        # cancels all tasks (and their finally blocks run) when Ray terminates
+        # this worker.  Without this, SIGTERM raises SystemExit which
+        # asyncio.run() does not catch, so cleanup callbacks (e.g. Harbor
+        # sandbox teardown) never execute.  See harbor#656 / SkyRL#1160.
+        import signal
+
+        def _handle_sigterm(signum, frame):
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+
         trainer = self._setup_trainer()
         # Start the training loop
         asyncio.run(trainer.train())

@@ -67,7 +67,16 @@ def main(cfg: DictConfig) -> None:
     validate_cfg(cfg)
 
     initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg))
+    ref = skyrl_entrypoint.remote(cfg)
+    try:
+        ray.get(ref)
+    except KeyboardInterrupt:
+        # Explicitly cancel the remote task so the worker receives
+        # KeyboardInterrupt, allowing asyncio.run() to cancel all async
+        # tasks (e.g. Harbor Trial.run()) and trigger their cleanup
+        # (sandbox teardown).  See harbor#656 / SkyRL#1160.
+        ray.cancel(ref, force=False)
+        raise
 
 
 if __name__ == "__main__":
