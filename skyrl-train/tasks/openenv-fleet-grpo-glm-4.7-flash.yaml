@@ -139,7 +139,8 @@ envs:
   S3_DATASET_BUCKET: "fleet-internal-datasets"
   S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
   S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
-  DATA_VERSION: "v0.3"
+  # Dataset version: "v3" (20,557 tasks) or "v4" (15,193 tasks, recommended)
+  DATA_VERSION: "v4"
 
 setup: |
   set -euo pipefail

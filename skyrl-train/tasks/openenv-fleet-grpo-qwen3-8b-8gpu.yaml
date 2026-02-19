@@ -54,6 +54,9 @@ envs:
   # Task selection: env_keys to filter (comma-separated, e.g., "github,booking,reddit")
   ENV_KEYS: ""
   # Modality: "tool_use" or "computer_use"
+  # Dataset version: "v3" (20,557 tasks) or "v4" (15,193 tasks, recommended)
+  DATA_VERSION: "v4"
+  # Modality: "tool_use" or "computer_use"
   MODALITY: "tool_use"
   # Training parameters
   MAX_TURNS: 50

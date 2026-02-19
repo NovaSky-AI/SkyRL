@@ -67,6 +67,8 @@ envs:
   FLEET_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
+  # Dataset version: "v3" (20,557 tasks) or "v4" (15,193 tasks, recommended)
+  DATA_VERSION: "v4"
   # Task selection: env_keys to filter (comma-separated, e.g., "github,booking,reddit")
   ENV_KEYS: ""
   # Modality: "tool_use" or "computer_use"
