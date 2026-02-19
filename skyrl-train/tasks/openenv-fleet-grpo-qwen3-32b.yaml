@@ -191,7 +191,7 @@ run: |
     generator.async_engine=true \
     generator.batched=false \
     generator.use_conversation_multi_turn=true \
-    generator.n_samples_per_prompt=4 \
+    generator.n_samples_per_prompt=8 \
     generator.eval_n_samples_per_prompt=3 \
     generator.gpu_memory_utilization=0.65 \
     trainer.logger="$LOGGER" \

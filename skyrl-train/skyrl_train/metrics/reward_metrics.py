@@ -7,6 +7,7 @@ This module provides shared metric calculation functions used by both:
 All metrics follow the same naming convention for WandB logging:
 - reward/{group}/pass_at_{n} - Pass@n metric for group
 - reward/{group}/variance_per_prompt - Mean within-prompt reward variance (GRPO learning signal)
+- reward/{group}/signal_ratio - Fraction of prompts with non-zero variance (% with signal)
 - reward/{group}/mean_positive_reward - Mean of positive rewards for group
 
 Rewards can be in two formats:
@@ -126,6 +127,49 @@ def compute_variance_per_prompt(
     return float(np.mean(variances)) if variances else 0.0
 
 
+def compute_signal_ratio(
+    rewards: Union[List[float], List[List[float]]],
+    uids: List[str],
+) -> float:
+    """Compute fraction of prompts with non-zero variance (GRPO signal ratio).
+
+    This metric shows what percentage of prompts have any learning signal at all.
+    A prompt has signal if at least one rollout differs from others (variance > 0).
+
+    Unlike variance_per_prompt (which averages variance magnitudes), this metric
+    counts how many prompts contribute ANY signal, making it easier to interpret:
+    - 100% = every prompt has at least one differing rollout
+    - 0% = all prompts have identical rewards across rollouts (no learning possible)
+
+    Args:
+        rewards: List of rewards (one per rollout). Can be scalar (List[float])
+                 or token-level (List[List[float]]) - will be flattened.
+        uids: List of unique IDs (one per rollout, same uid = same prompt)
+
+    Returns:
+        Float between 0.0 and 1.0 representing fraction of prompts with signal.
+        Returns 0.0 if no prompts or all prompts have single rollouts.
+    """
+    flat_rewards = flatten_rewards(rewards)
+    uid_to_rewards: Dict[str, List[float]] = defaultdict(list)
+    for uid, reward in zip(uids, flat_rewards):
+        uid_to_rewards[uid].append(reward)
+
+    if not uid_to_rewards:
+        return 0.0
+
+    # Count prompts with variance > 0 (need at least 2 samples)
+    prompts_with_signal = 0
+    prompts_total = 0
+    for r_list in uid_to_rewards.values():
+        if len(r_list) >= 2:
+            prompts_total += 1
+            if np.var(r_list) > 0:
+                prompts_with_signal += 1
+
+    return prompts_with_signal / prompts_total if prompts_total > 0 else 0.0
+
+
 def compute_reward_metrics(
     rewards: Union[List[float], List[List[float]]],
     uids: List[str],
@@ -143,18 +187,21 @@ def compute_reward_metrics(
         Dictionary with keys:
             - "pass_at_{n}": Pass@n metric
             - "variance_per_prompt": Mean within-prompt reward variance (GRPO learning signal)
+            - "signal_ratio": Fraction of prompts with non-zero variance (% with signal)
             - "mean_positive_reward": Mean of positive rewards only
     """
     # Flatten rewards once for efficiency (each sub-function would otherwise flatten again)
     flat_rewards = flatten_rewards(rewards)
     pass_at_n = compute_pass_at_n(flat_rewards, uids)
     variance = compute_variance_per_prompt(flat_rewards, uids)
+    signal_ratio = compute_signal_ratio(flat_rewards, uids)
     positive_rewards = [r for r in flat_rewards if r > 0]
     mean_positive = float(np.mean(positive_rewards)) if positive_rewards else 0.0
 
     return {
         f"pass_at_{n_samples_per_prompt}": pass_at_n,
         "variance_per_prompt": variance,
+        "signal_ratio": signal_ratio,
         "mean_positive_reward": mean_positive,
     }
 
