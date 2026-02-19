@@ -42,10 +42,10 @@ Next, let's set up the training configuration. You can find a complete example i
       trainer.ckpt_interval=10 \
 
       # Generator setup for spinning up InferenceEngines
-      generator.backend=vllm \
-      generator.num_inference_engines=4 \
-      generator.inference_engine_tensor_parallel_size=1 \
-      generator.weight_sync_backend=nccl \
+      generator.inference_engine.backend=vllm \
+      generator.inference_engine.num_engines=4 \
+      generator.inference_engine.tensor_parallel_size=1 \
+      generator.inference_engine.weight_sync_backend=nccl \
 
       # Environment class for the dataset
       # Can be specified here to apply to the full dataset, or at the per-prompt level during preprocessing
@@ -65,7 +65,7 @@ Depending on your hardware setup, you may want to adjust a few parameters:
 
 1. **GPU Configuration**: Set ``trainer.placement.policy_num_gpus_per_node`` to match your available GPU count. If you need to change the model size, you can also set ``trainer.policy.model.path`` to ``Qwen/Qwen2.5-0.5B-Instruct`` or ``Qwen/Qwen2.5-7B-Instruct``.
 
-2. **InferenceEngine Matching**: Ensure that ``num_inference_engines * inference_engine_tensor_parallel_size`` equals the total number of GPUs used for the policy model above.
+2. **InferenceEngine Matching**: Ensure that ``generator.inference_engine.num_engines * generator.inference_engine.tensor_parallel_size`` equals the total number of GPUs used for the policy model above.
 
 
 Launching Your Training Run

@@ -78,7 +78,7 @@ The registry system handles Ray actor synchronization when Ray is initialized. F
    sync_registries()
    
    @ray.remote(num_cpus=1)
-   def skyrl_entrypoint(cfg: DictConfig):
+   def skyrl_entrypoint(cfg: SkyRLTrainConfig):
         # Function is now available on all Ray processes
         available_functions = AdvantageEstimatorRegistry.list_available() # will include "my_function"
 
@@ -108,12 +108,12 @@ We show the outline of creating a custom trainer below, and you can find a full 
            return CustomTrainer(*args, **kwargs)
 
     @ray.remote(num_cpus=1)
-    def skyrl_entrypoint(cfg: DictConfig):
+    def skyrl_entrypoint(cfg: SkyRLTrainConfig):
         exp = CustomExp(cfg)
         exp.run()
 
-    @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-    def main(cfg: DictConfig) -> None:
+    def main() -> None:
+        cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
         # validate the arguments
         validate_cfg(cfg)
 

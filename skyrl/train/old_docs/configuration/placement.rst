@@ -19,17 +19,17 @@ A typical PPO training workflow involves 5 model-based components:
 Inference Engine Management
 ----------------------------
 
-The ``generator.run_engines_locally`` argument controls inference engine management. 
+The ``generator.inference_engine.run_engines_locally`` argument controls inference engine management. 
 
 If ``run_engines_locally=true``, then the inference engines are launched during the training run and managed by SkyRL.
 
-If ``run_engines_locally=false``, then the user can specify inference engine URLs managed externally (with the ``generator.remote_inference_engine_urls`` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines `here <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/remote_inference_engine>`_ for convenience.
+If ``run_engines_locally=false``, then the user can specify inference engine URLs managed externally (with the ``generator.inference_engine.remote_urls`` parameter). In this case, the user is responsible for setup and teardown. Note that SkyRL expects certain additional endpoints in the inference engine specifically related to weight syncing. We provide scripts for launching remote inference engines `here <https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/remote_inference_engine>`_ for convenience.
 
 
 Inference Engine Placement
 --------------------------
 
-The ``generator.colocate_all`` setting controls inference engine placement.
+The ``trainer.placement.colocate_all`` setting controls inference engine placement.
 
 **Colocated Engines (colocate_all = true)**
 
@@ -73,25 +73,25 @@ Finally, the configuration for specifying node and GPU counts for each model (al
 .. code-block:: yaml
 
     trainer:
-      # Training model resources
-      policy_num_nodes: 1
-      policy_num_gpus_per_node: 4
-      critic_num_nodes: 1
-      critic_num_gpus_per_node: 4
-      ref_num_nodes: 1
-      ref_num_gpus_per_node: 4
-      reward_num_nodes: 1
-      reward_num_gpus_per_node: 4
+      placement:
+        # Training model resources
+        policy_num_nodes: 1
+        policy_num_gpus_per_node: 4
+        critic_num_nodes: 1
+        critic_num_gpus_per_node: 4
+        ref_num_nodes: 1
+        ref_num_gpus_per_node: 4
 
     generator:
-      # InferenceEngine resources
-      num_inference_engines: 1
-      inference_engine_tensor_parallel_size: 4
-      inference_engine_expert_parallel_size: 1
-      inference_engine_data_parallel_size: 1
+      inference_engine:
+        # InferenceEngine resources
+        num_engines: 1
+        tensor_parallel_size: 4
+        expert_parallel_size: 1
+        data_parallel_size: 1
 
 .. note::
    **Resource Allocation Guidelines**
    
    - When ``colocate_all=true``, all training models should have identical node and GPU counts.
-   - When ``generator.run_engines_locally=true``, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.
+   - When ``generator.inference_engine.run_engines_locally=true``, the total number of GPUs used for Inference engines should match the total number of GPUs used for training models.
