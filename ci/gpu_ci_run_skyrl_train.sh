@@ -36,3 +36,6 @@ uv run --isolated --extra fsdp --extra dev \
 # Run tests for new inference layer
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py -m "vllm"
+
+# Run batched generation benchmarks (old vs new codepath, regression asserts)
+uv run --isolated --extra dev --extra vllm pytest -s tests/backends/skyrl_train/gpu/gpu_ci/benchmarks/test_benchmark_generation.py -m "vllm"

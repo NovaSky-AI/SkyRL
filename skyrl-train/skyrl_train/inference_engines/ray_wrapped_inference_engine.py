@@ -63,7 +63,10 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
     async def teardown(self):
-        return await self.inference_engine_actor.teardown.remote()
+        await self.inference_engine_actor.teardown.remote()
+        # Terminate the actor
+        # don't await on the ref since ray will raise a RayActorError on graceful termination
+        self.inference_engine_actor.__ray_terminate__.remote()
 
     async def reset_prefix_cache(self):
         return await self.inference_engine_actor.reset_prefix_cache.remote()
