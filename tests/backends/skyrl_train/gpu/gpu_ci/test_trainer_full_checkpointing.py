@@ -72,8 +72,8 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> S
     cfg.trainer.epochs = 1
     cfg.trainer.logger = "console"
     cfg.generator.n_samples_per_prompt = 1
-    cfg.generator.num_inference_engines = NUM_GPUS // 2
-    cfg.generator.inference_engine_tensor_parallel_size = 2
+    cfg.generator.inference_engine.num_engines = NUM_GPUS // 2
+    cfg.generator.inference_engine.tensor_parallel_size = 2
 
     # Megatron-specific
     if strategy == "megatron":

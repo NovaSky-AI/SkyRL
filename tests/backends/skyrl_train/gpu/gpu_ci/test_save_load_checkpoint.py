@@ -45,7 +45,7 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
-    cfg.generator.inference_engine_tensor_parallel_size = NUM_GPUS
+    cfg.generator.inference_engine.tensor_parallel_size = NUM_GPUS
     cfg.trainer.strategy = strategy
 
     cfg.trainer.ckpt_path = CKPT_PATH

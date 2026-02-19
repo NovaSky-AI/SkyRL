@@ -104,14 +104,16 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
     Tests generation with both remote and ray-wrapped engines for the specified backend.
     """
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     prompts = get_test_prompts(MODEL)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     try:
         llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         # Batched generation
         remote_batch_responses, batch_finish_reasons = asyncio.run(
@@ -147,14 +149,16 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
             remote_server_process.wait()
 
     # Set config parameters for new inference pathway
-    cfg.generator.inference_engine_tensor_parallel_size = tp_size
-    cfg.generator.inference_engine_pipeline_parallel_size = pp_size
-    cfg.generator.inference_engine_data_parallel_size = dp_size
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.pipeline_parallel_size = pp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
 
     # Get responses from Ray engine
     with InferenceEngineState.create(cfg) as engines:
         llm_client = engines.client
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         # Batched generation
         local_batch_responses, batch_finish_reasons = asyncio.run(
@@ -208,7 +212,7 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, pp
     """Test generation using prompt_token_ids for the specified backend."""
 
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     prompts = get_test_prompts(MODEL, 3)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -216,13 +220,15 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, pp
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"]
 
-    cfg.generator.inference_engine_tensor_parallel_size = tp_size
-    cfg.generator.inference_engine_pipeline_parallel_size = pp_size
-    cfg.generator.inference_engine_data_parallel_size = dp_size
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.pipeline_parallel_size = pp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
 
     with InferenceEngineState.create(cfg) as engines:
         llm_client = engines.client
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         # Test batch generation with tokens
         token_batch_responses, _ = asyncio.run(
@@ -256,7 +262,7 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, pp
 )
 def test_token_based_generation_consistency(ray_init_fixture, backend: str, tp_size: int, pp_size: int, dp_size: int):
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
 
     prompts = get_test_prompts(MODEL, 3)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -264,13 +270,15 @@ def test_token_based_generation_consistency(ray_init_fixture, backend: str, tp_s
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"]
 
-    cfg.generator.inference_engine_tensor_parallel_size = tp_size
-    cfg.generator.inference_engine_pipeline_parallel_size = pp_size
-    cfg.generator.inference_engine_data_parallel_size = dp_size
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.pipeline_parallel_size = pp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
 
     with InferenceEngineState.create(cfg) as engines:
         llm_client = engines.client
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         # Batch generation with tokens
         token_batch_responses, _ = asyncio.run(
@@ -302,7 +310,7 @@ def test_token_based_generation_consistency(ray_init_fixture, backend: str, tp_s
 def test_sample_api(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
     """Test the Tinker-compatible sample() API for generating multiple independent samples."""
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
+    cfg.generator.inference_engine.backend = backend
     cfg.generator.sampling_params.temperature = 0.7
 
     prompts = get_test_prompts(MODEL, 1)
@@ -311,12 +319,14 @@ def test_sample_api(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"][0]
 
-    cfg.generator.inference_engine_tensor_parallel_size = tp_size
-    cfg.generator.inference_engine_data_parallel_size = dp_size
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
 
     with InferenceEngineState.create(cfg) as engines:
         llm_client = engines.client
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         num_samples = 3
 

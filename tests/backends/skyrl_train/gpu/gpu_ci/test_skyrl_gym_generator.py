@@ -46,10 +46,10 @@ def get_test_config(
     cfg.generator.zero_reward_on_non_stop = False
     cfg.generator.use_conversation_multi_turn = use_conversation_multi_turn
     cfg.generator.apply_overlong_filtering = False
-    cfg.generator.backend = "vllm"
-    cfg.generator.enable_http_endpoint = False
-    cfg.generator.http_endpoint_host = "127.0.0.1"
-    cfg.generator.http_endpoint_port = 8000
+    cfg.generator.inference_engine.backend = "vllm"
+    cfg.generator.inference_engine.enable_http_endpoint = False
+    cfg.generator.inference_engine.http_endpoint_host = "127.0.0.1"
+    cfg.generator.inference_engine.http_endpoint_port = 8000
     cfg.generator.step_wise_trajectories = is_step_wise
 
     cfg.environment.skyrl_gym.search.log_requests = True

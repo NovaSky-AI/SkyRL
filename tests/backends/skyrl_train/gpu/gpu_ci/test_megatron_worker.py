@@ -126,10 +126,10 @@ def test_megatron_policy_weight_sync(
         if lora:
             cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
         cfg.trainer.placement.colocate_all = colocate_all
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
-        cfg.generator.backend = "vllm"
-        cfg.generator.inference_engine_tensor_parallel_size = inference_tp
+        cfg.generator.inference_engine.backend = "vllm"
+        cfg.generator.inference_engine.tensor_parallel_size = inference_tp
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = megatron_tp
@@ -152,7 +152,7 @@ def test_megatron_policy_weight_sync(
                 "policy",
                 shared_pg=pg,
                 colocate_all=cfg.trainer.placement.colocate_all,
-                num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+                num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
                 cfg=cfg,
             )
             ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
@@ -170,7 +170,9 @@ def test_megatron_policy_weight_sync(
 
             policy.offload_to_cpu()
             asyncio.run(client.wake_up(tags=["kv_cache"]))
-            sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+            sampling_params = get_sampling_params_for_backend(
+                cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+            )
             outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

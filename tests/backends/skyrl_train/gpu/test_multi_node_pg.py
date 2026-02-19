@@ -21,7 +21,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 def get_test_actor_config() -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
-    cfg.generator.weight_sync_backend = "nccl"
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
     return cfg
 
