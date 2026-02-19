@@ -67,6 +67,7 @@ nav:
       - JAX Backend: jax_backend.md
       - "SkyRL-Train Backend":
         - Backend API: skyrl_train_backend.md
+        - Configuration: config.md
         - Data Interface: data.md
         - Generator: generator.md
         - Trainer: trainer.md
