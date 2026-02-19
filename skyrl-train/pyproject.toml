@@ -121,12 +121,10 @@ dev = [
     "litellm",
 ]
 docs = [
-    "sphinx>=7.0.0",
-    "sphinx-rtd-theme>=2.0.0",
-    "sphinx-autodoc-typehints>=1.25.0",
-    "myst-parser>=2.0.0",
-    "sphinx-copybutton>=0.5.0",
-    "sphinx-autobuild>=2021.3.14"
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
+    "pymdown-extensions>=10.7"
 ]
 harbor = [
     "harbor",
