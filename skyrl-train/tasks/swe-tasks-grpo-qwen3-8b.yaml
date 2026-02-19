@@ -1,0 +1,157 @@
+# SWE Task GRPO Training via SkyPilot - Qwen3-8B
+# Usage: sky launch tasks/swe-tasks-grpo-qwen3-8b.yaml --env WANDB_API_KEY=<key>
+#
+# This task trains GRPO on swe-task-generator environments using Docker containers.
+# Docker images are pulled from Docker Hub (erranli/swe-task-*).
+# The agent learns to fix bugs by interacting with the codebase in a container.
+#
+# Model: Qwen/Qwen3-8B (8B parameters)
+# GPUs: Lambda only (bare metal with Docker pre-installed)
+
+name: swe-tasks-grpo-qwen3-8b
+
+resources:
+  disk_size: 200
+  ports: 6479
+  cloud: lambda
+  any_of:
+    - accelerators: B200:2
+    - accelerators: H100:2
+
+num_nodes: 1
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL.git
+  ref: swe-task-generator-integration
+
+envs:
+  WANDB_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  MAX_TURNS: 20
+  MAX_INPUT_LENGTH: 30720
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 20
+  # Path to swe-task-generator repo (will be cloned in setup)
+  SWE_TASK_GENERATOR_REPO: "https://github.com/fleet-ai/swe-task-generator.git"
+
+setup: |
+  set -euo pipefail
+
+  # Ensure current user can access Docker daemon
+  if ! docker ps >/dev/null 2>&1; then
+    sudo usermod -aG docker $USER
+    sudo chmod 666 /var/run/docker.sock
+  fi
+  docker ps  # Verify Docker access
+
+  cd skyrl-train
+
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+  uv sync --extra vllm --extra miniswe
+
+  # Clone swe-task-generator to get task instances
+  if [ ! -d "$HOME/swe-task-generator" ]; then
+    git clone $SWE_TASK_GENERATOR_REPO $HOME/swe-task-generator
+  fi
+
+  # Prepare dataset from task instances
+  uv pip install pyarrow datasets
+  python integrations/swe_tasks/prepare_dataset.py \
+    --tasks-dir $HOME/swe-task-generator/tasks \
+    --output-dir $HOME/data/swe_tasks
+
+  # Pre-pull Docker images for faster training startup
+  echo "Pre-pulling Docker images..."
+  docker pull erranli/swe-task-marshmallow-code-marshmallow-2894:latest || true
+  docker pull erranli/swe-task-marshmallow-code-marshmallow-2892:latest || true
+
+run: |
+  set -euo pipefail
+  cd skyrl-train
+  source .venv/bin/activate
+
+  TMP_DIR="$HOME/skyrl-tmp"
+  mkdir -p "$TMP_DIR"
+  export TMPDIR="$TMP_DIR"
+  export PYTORCH_ALLOC_CONF=expandable_segments:True
+  export MSWEA_COST_TRACKING=ignore_errors  # Qwen3-8B isn't in litellm's pricing DB
+
+  DATA_DIR="$HOME/data/swe_tasks"
+  CKPT_PATH="$HOME/ckpts/swe_tasks"
+  SWE_TASKS_TRAJ_DIR="$HOME/swe_tasks_trajs"
+
+  # Login to Weights & Biases
+  uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
+
+  # Ray cluster setup
+  export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+  export RAY_object_store_memory=10000000000
+  if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+    ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
+  fi
+
+  # Wait for Ray
+  for i in $(seq 1 24); do
+    if ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
+
+  TOTAL_GPUS=$SKYPILOT_NUM_GPUS_PER_NODE
+  echo "Running with $TOTAL_GPUS GPU(s)"
+
+  # When colocating, num_inference_engines * TP must equal TOTAL_GPUS
+  # Use TP=1 and engines=TOTAL_GPUS for maximum throughput
+  NUM_INFERENCE_ENGINES=$TOTAL_GPUS
+  TP_SIZE=1
+
+  # Run GRPO training
+  uv run --isolated --extra vllm --extra miniswe \
+    -m integrations.swe_tasks.entrypoints.main_swe_tasks \
+    data.train_data="['${DATA_DIR}/train.parquet']" \
+    data.val_data="['${DATA_DIR}/validation.parquet']" \
+    trainer.algorithm.advantage_estimator="grpo" \
+    trainer.policy.model.path="Qwen/Qwen3-8B" \
+    trainer.placement.colocate_all=true \
+    trainer.strategy=fsdp2 \
+    trainer.placement.policy_num_gpus_per_node=$TOTAL_GPUS \
+    trainer.placement.ref_num_gpus_per_node=$TOTAL_GPUS \
+    generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
+    generator.inference_engine_tensor_parallel_size=$TP_SIZE \
+    trainer.epochs=${NUM_EPOCHS} \
+    trainer.eval_batch_size=2 \
+    trainer.eval_before_train=true \
+    trainer.eval_interval=5 \
+    trainer.update_epochs_per_batch=1 \
+    trainer.train_batch_size=2 \
+    trainer.policy_mini_batch_size=2 \
+    trainer.micro_forward_batch_size_per_gpu=1 \
+    trainer.micro_train_batch_size_per_gpu=1 \
+    trainer.dump_data_batch=true \
+    trainer.ckpt_interval=10 \
+    trainer.max_prompt_length=4096 \
+    generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+    generator.max_input_length=$MAX_INPUT_LENGTH \
+    generator.max_turns=$MAX_TURNS \
+    trainer.policy.optimizer_config.lr=1.0e-6 \
+    trainer.algorithm.use_kl_loss=false \
+    generator.backend=$INFERENCE_BACKEND \
+    generator.run_engines_locally=True \
+    generator.enable_http_endpoint=True \
+    generator.http_endpoint_host='127.0.0.1' \
+    generator.http_endpoint_port=8001 \
+    generator.weight_sync_backend=nccl \
+    generator.async_engine=true \
+    generator.batched=true \
+    generator.n_samples_per_prompt=4 \
+    generator.gpu_memory_utilization=0.8 \
+    trainer.logger="$LOGGER" \
+    trainer.project_name="swe_tasks" \
+    trainer.run_name="swe_tasks_8B_$(head -c 4 /dev/urandom | xxd -p)" \
+    trainer.resume_mode=latest \
+    trainer.ckpt_path="$CKPT_PATH" \
+    +generator.swe_tasks_config_path="integrations/swe_tasks/swe_tasks.yaml" \
+    +generator.swe_tasks_traj_dir=$SWE_TASKS_TRAJ_DIR
