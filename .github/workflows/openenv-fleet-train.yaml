@@ -164,8 +164,34 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD -y"  # No -d flag, run attached to stream logs
 
           echo "Command: $LAUNCH_CMD"
-          eval "$LAUNCH_CMD"
-          echo "status=SUCCEEDED" >> $GITHUB_OUTPUT
+
+          # Retry logic: 4 attempts with 2-4-8 minute intervals
+          MAX_ATTEMPTS=4
+          RETRY_DELAYS=(120 240 480)  # 2, 4, 8 minutes in seconds
+
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "=== Attempt $attempt of $MAX_ATTEMPTS ==="
+            if eval "$LAUNCH_CMD"; then
+              echo "status=SUCCEEDED" >> $GITHUB_OUTPUT
+              echo "attempts=$attempt" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            if [ $attempt -lt $MAX_ATTEMPTS ]; then
+              # Clean up failed cluster before retry
+              echo "Attempt $attempt failed. Cleaning up before retry..."
+              sky down "${{ steps.cluster.outputs.name }}" -y || true
+
+              DELAY=${RETRY_DELAYS[$((attempt-1))]}
+              echo "Waiting $((DELAY/60)) minutes before retry..."
+              sleep $DELAY
+            fi
+          done
+
+          echo "All $MAX_ATTEMPTS provisioning attempts failed"
+          echo "status=FAILED" >> $GITHUB_OUTPUT
+          echo "attempts=$MAX_ATTEMPTS" >> $GITHUB_OUTPUT
+          exit 1
 
       - name: Cleanup Cluster
         if: always()
@@ -247,3 +273,4 @@ jobs:
           echo "| Cluster | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| WandB | \`${{ steps.cluster.outputs.wandb_run_name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | \`${{ steps.launch.outputs.status || 'FAILED' }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Provisioning Attempts | \`${{ steps.launch.outputs.attempts || '?' }}\` |" >> $GITHUB_STEP_SUMMARY
