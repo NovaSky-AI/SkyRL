@@ -106,10 +106,8 @@ fsdp = [
     "torchvision; sys_platform == 'linux'",
 ]
 
-# megatron is pinned to python 3.12. megatron-core==0.15.0 declares numpy<2.0.0,
-# which conflicts with ml_dtypes>=0.5.0 (needs numpy>=2.1.0 on 3.13+) in uv's
-# cross-version universal resolver. numpy is overridden in override-dependencies
-# with an upper bound of <2.3 to break this conflict while keeping numba happy (<=2.2).
+# megatron is pinned to python 3.12, relax this constraint once numpy >= 2.0.0 is supported
+# for megatron-core
 megatron = [
     "skyrl[skyrl-train]; python_version == '3.12'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
@@ -122,7 +120,6 @@ megatron = [
     "megatron-core==0.15.0; sys_platform == 'linux' and python_version == '3.12'",
     "flashinfer-jit-cache==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
     "nvidia-modelopt; sys_platform == 'linux' and python_version == '3.12'",
-    "ml_dtypes>=0.5.0; sys_platform == 'linux' and python_version == '3.12'",
 ]
 
 flashrl = [
@@ -201,16 +198,15 @@ no-build-isolation-package = [
     "nv-grouped-gemm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
-# unpinned dependencies. numpy override relaxes megatron-core's numpy<2.0.0 to
-# <2.3 so ml_dtypes>=0.5.0 can resolve (it needs numpy>=2.1.0 on python 3.13+
-# in uv's universal resolver), while keeping numba happy (needs numpy<=2.2).
+# unpinned dependencies. Also set ml_dtypes>=0.5.0 for python 3.12, since megatron-core
+# declares numpy<2.0.0, which conflicts with ml_dtypes>=0.5.0 in uv's resolver.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.15.0; sys_platform == 'linux'",
-    "numpy>=1.24.0,<2.3; sys_platform == 'linux'"
+    "ml_dtypes>=0.5.0; sys_platform == 'linux' and python_version == '3.12'",
 ]
 
 [tool.uv.extra-build-dependencies]
