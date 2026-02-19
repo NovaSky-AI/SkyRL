@@ -62,6 +62,8 @@ envs:
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
   ENV_KEYS: ""
+  # Difficulty filter: 1=easy, 2=medium, 3=hard (comma-separated, e.g., "1,2" for easy+medium)
+  DIFFICULTY: ""
   # Dataset version: "v3" (20,557 tasks) or "v4" (15,193 tasks, recommended)
   DATA_VERSION: "v4"
   # Modality: "tool_use" or "computer_use"
@@ -116,6 +118,7 @@ setup: |
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
   PREPARE_CMD="uv run python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
   [ -n "$ENV_KEYS" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
+  [ -n "$DIFFICULTY" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
   eval "$PREPARE_CMD"
 
 run: |

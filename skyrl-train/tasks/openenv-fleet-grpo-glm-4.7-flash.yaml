@@ -125,6 +125,8 @@ envs:
   # flash_attn stub package provides bert_padding (pure Python) for SkyRL training
   VLLM_ATTENTION_BACKEND: "FLASHINFER"
   ENV_KEYS: ""
+  # Difficulty filter: 1=easy, 2=medium, 3=hard (comma-separated, e.g., "1,2" for easy+medium)
+  DIFFICULTY: ""
   MODALITY: "tool_use"
   MAX_TURNS: 50
   # GLM-4.7-Flash supports 128K context natively
@@ -238,6 +240,7 @@ setup: |
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
   PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
   [ -n "$ENV_KEYS" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
+  [ -n "$DIFFICULTY" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
   eval "$PREPARE_CMD"
 
 run: |

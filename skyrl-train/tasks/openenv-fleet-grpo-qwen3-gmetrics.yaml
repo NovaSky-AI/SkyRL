@@ -40,6 +40,8 @@ envs:
   INFERENCE_BACKEND: "vllm"
   # Task selection: env_keys to filter (comma-separated, e.g., "github,booking,reddit")
   ENV_KEYS: ""
+  # Difficulty filter: 1=easy, 2=medium, 3=hard (comma-separated, e.g., "1,2" for easy+medium)
+  DIFFICULTY: ""
   # Modality: "tool_use" or "computer_use"
   MODALITY: "tool_use"
   # Training parameters
@@ -100,10 +102,11 @@ setup: |
   TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['tasks']))")
   echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
 
-  # Prepare dataset (with optional env filter)
+  # Prepare dataset (with optional env/difficulty filters)
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
   PREPARE_CMD="uv run python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
   [ -n "$ENV_KEYS" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
+  [ -n "$DIFFICULTY" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
   eval "$PREPARE_CMD"
 
 run: |

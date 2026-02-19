@@ -157,6 +157,7 @@ def prepare_fleet_dataset(
     modality: Optional[str] = "tool_use",
     eval_ratio: float = 0.20,  # v0.3.2: increased to 20% to include carlisle/outlook in eval
     env_filter: Optional[str] = None,
+    difficulty_filter: Optional[str] = None,  # v0.4.0: filter by difficulty (1=easy, 2=medium, 3=hard)
     max_tasks: Optional[int] = None,
     max_env_ratio: float = MAX_ENV_TRAIN_RATIO,  # v0.3.1: cap dominant environments
     max_eval_prompts: Optional[int] = MAX_EVAL_PROMPTS,  # v0.3.2: cap total eval prompts
@@ -173,6 +174,17 @@ def prepare_fleet_dataset(
         max_tasks: Optional maximum number of tasks to include
         max_env_ratio: Maximum fraction any single env can contribute to training (default: 0.20)
     """
+    # Log applied filters at the start
+    print("\n=== Dataset Filters ===")
+    print(f"  Source: {tasks_json}")
+    print(f"  Modality: {modality or 'all'}")
+    print(f"  Env filter: {env_filter or 'none'}")
+    print(f"  Difficulty filter: {difficulty_filter or 'all (1,2,3)'}")
+    print(f"  Max tasks: {max_tasks or 'unlimited'}")
+    print(f"  Max env ratio: {max_env_ratio:.0%}")
+    print(f"  Max eval prompts: {max_eval_prompts or 'unlimited'}")
+    print()
+
     print(f"Loading tasks from {tasks_json}...")
     tasks = load_tasks_from_json(tasks_json)
     print(f"Loaded {len(tasks)} tasks")
@@ -187,6 +199,12 @@ def prepare_fleet_dataset(
         env_list = [e.strip() for e in env_filter.split(",") if e.strip()]
         tasks = [t for t in tasks if t.get("env_key") in env_list or t.get("env_id") in env_list]
         print(f"After env filter ({env_list}): {len(tasks)} tasks")
+
+    # Filter by difficulty if specified - supports comma-separated list (e.g., "1,2" for easy+medium)
+    if difficulty_filter:
+        diff_list = [int(d.strip()) for d in difficulty_filter.split(",") if d.strip()]
+        tasks = [t for t in tasks if t.get("difficulty") in diff_list]
+        print(f"After difficulty filter ({diff_list}): {len(tasks)} tasks")
 
     # Limit tasks if specified
     if max_tasks and len(tasks) > max_tasks:
@@ -462,6 +480,12 @@ def main():
         help="Optional env_key filter (e.g., 'github', 'booking')",
     )
     parser.add_argument(
+        "--difficulty-filter",
+        type=str,
+        default=None,
+        help="Optional difficulty filter: 1=easy, 2=medium, 3=hard (e.g., '1,2' for easy+medium)",
+    )
+    parser.add_argument(
         "--max-tasks",
         type=int,
         default=None,
@@ -491,6 +515,7 @@ def main():
         modality=modality,
         eval_ratio=args.eval_ratio,
         env_filter=args.env_filter,
+        difficulty_filter=args.difficulty_filter,
         max_tasks=args.max_tasks,
         max_env_ratio=args.max_env_ratio,
         max_eval_prompts=args.max_eval_prompts,

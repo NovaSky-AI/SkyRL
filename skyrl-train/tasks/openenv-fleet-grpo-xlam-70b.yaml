@@ -46,6 +46,8 @@ envs:
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
   ENV_KEYS: ""
+  # Difficulty filter: 1=easy, 2=medium, 3=hard (comma-separated, e.g., "1,2" for easy+medium)
+  DIFFICULTY: ""
   MODALITY: "tool_use"
   MAX_TURNS: 50
   # xLAM uses Llama 3.1 with native 128K context - no YaRN needed
@@ -100,6 +102,7 @@ setup: |
   DATA_DIR="$HOME/data/fleet/${MODALITY}"
   PREPARE_CMD="uv run python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
   [ -n "$ENV_KEYS" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
+  [ -n "$DIFFICULTY" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
   eval "$PREPARE_CMD"
 
 run: |
