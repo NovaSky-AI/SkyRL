@@ -14,6 +14,17 @@ on:
         description: "Fleet environment filter (empty=all, or comma-separated: github,booking,reddit)"
         type: string
         default: ""
+      difficulty:
+        description: "Difficulty filter (1=easy, 2=medium, 3=hard)"
+        type: choice
+        options:
+          - all
+          - "1"
+          - "2"
+          - "3"
+          - "1,2"
+          - "2,3"
+        default: "all"
       max_tasks:
         description: "Max tasks (empty=all, or number for testing)"
         type: string
@@ -40,9 +51,9 @@ on:
           - openenv-fleet-grpo-glm-4.7-flash
         default: "openenv-fleet-grpo-qwen3-8b"
       data_version:
-        description: "Dataset version in S3 (e.g., v0.1, v0.2, v0.3)"
+        description: "Dataset version in S3 (v3=20,557 tasks, v4=15,169 tasks recommended)"
         type: string
-        default: "v0.3"
+        default: "v4"
       resume_run_name:
         description: "Resume from S3 checkpoint (W&B run name, e.g., fleet_tool_use_32b_d7167c1c)"
         type: string
@@ -147,6 +158,7 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           [ -n "${{ inputs.env_keys }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env ENV_KEYS=${{ inputs.env_keys }}"
+          [ "${{ inputs.difficulty }}" != "all" ] && LAUNCH_CMD="$LAUNCH_CMD --env DIFFICULTY=${{ inputs.difficulty }}"
           [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
           [ -n "${{ inputs.resume_run_name }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env RESUME_RUN_NAME=${{ inputs.resume_run_name }}"
           LAUNCH_CMD="$LAUNCH_CMD -y"  # No -d flag, run attached to stream logs
@@ -160,32 +172,6 @@ jobs:
         run: |
           echo "Cleaning up cluster ${{ steps.cluster.outputs.name }}..."
           sky down "${{ steps.cluster.outputs.name }}" -y || true
-
-      - name: Cleanup Runner Disk
-        if: always()
-        run: |
-          echo "Disk usage before cleanup:"
-          df -h . | tail -1
-          # Clean old SkyPilot logs (keep last 3 days)
-          find ~/.sky/logs -type f -mtime +3 -delete 2>/dev/null || true
-          find ~/.sky/logs -type d -empty -delete 2>/dev/null || true
-          # Clean old SkyPilot cluster metadata for downed clusters
-          sky status --refresh 2>/dev/null || true
-          # Clean pip cache
-          pip cache purge 2>/dev/null || true
-          # Clean apt cache
-          sudo apt-get clean 2>/dev/null || true
-          # Clean old GHA runner work directories (keep current run)
-          WORK_DIR="${GITHUB_WORKSPACE%/*}"
-          if [ -d "$WORK_DIR" ]; then
-            for dir in "$WORK_DIR"/*/; do
-              [ "$dir" = "${GITHUB_WORKSPACE}/" ] && continue
-              echo "Removing old work dir: $dir"
-              rm -rf "$dir" 2>/dev/null || true
-            done
-          fi
-          echo "Disk usage after cleanup:"
-          df -h . | tail -1
 
       - name: Notify Slack - Completed
         if: steps.launch.outputs.status == 'SUCCEEDED' && inputs.disable_slack != true
