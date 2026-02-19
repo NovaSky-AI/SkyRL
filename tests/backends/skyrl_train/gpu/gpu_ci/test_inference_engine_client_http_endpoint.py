@@ -768,7 +768,7 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        template_path = "skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+        template_path = "skyrl/train/utils/templates/qwen3_acc_thinking.jinja2"
         engine_init_kwargs = {}
         if use_custom_template:
             # use relative path to workspace root
