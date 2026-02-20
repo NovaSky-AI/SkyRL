@@ -173,3 +173,23 @@ def test_legacy_config_field_rename():
         cfg = SkyRLTrainConfig.from_cli_overrides(["generator.num_inference_engines=4"])
 
     assert cfg.generator.inference_engine.num_engines == 4
+
+
+def test_cross_field_defaults():
+    """Test that cross-field defaults are applied correctly."""
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "trainer.max_prompt_length=1024",
+            "trainer.policy.model.path=Qwen/Qwen2.5-1.5B-Instruct",
+            "trainer.rope_scaling={'type': 'linear'}",
+            "trainer.rope_theta=10000",
+        ]
+    )
+
+    assert cfg.generator.max_input_length == 1024  # same as `trainer.max_prompt_length`
+    assert cfg.trainer.ref.model.path == "Qwen/Qwen2.5-1.5B-Instruct"  # same as `trainer.policy.model.path`
+    assert (
+        cfg.generator.eval_sampling_params.max_generate_length == cfg.generator.sampling_params.max_generate_length
+    )  # same as `generator.sampling_params.max_generate_length`
+    assert cfg.generator.rope_scaling == cfg.trainer.rope_scaling
+    assert cfg.generator.rope_theta == cfg.trainer.rope_theta
