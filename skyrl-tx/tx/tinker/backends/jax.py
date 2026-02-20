@@ -770,7 +770,10 @@ class JaxBackendImpl(AbstractBackend):
         return types.OptimStepOutput(metrics={"skyrl.ai/grad_norm": grad_norm, "skyrl.ai/learning_rate": learning_rate})
 
     def _create_cp_sample_pass(self) -> None:
-        """Create a single CP sample pass"""
+        """
+        Create a single CP sample pass.
+        Wraps _prefill_and_decode in shard_map to enable cp axis.
+        """
         lora_specs = nnx.get_partition_spec(self.lora_params)
         non_lora_specs = nnx.get_partition_spec(self.non_lora_params)
         batch_sharded_1d = jax.P("fsdp")
@@ -816,6 +819,7 @@ class JaxBackendImpl(AbstractBackend):
             model = nnx.merge(self.graphdef, lora_params, non_lora_params)
             new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = model._prefill_and_decode(model, *decode_args)
             if prompt_logprobs_array is None:
+                # Satisfy shard_map output specs
                 prompt_logprobs_array = jnp.zeros((decode_args[0].shape[0], 0), dtype=jnp.float32)
             return new_tokens, new_logprobs, stop_pos, prompt_logprobs_array
 
