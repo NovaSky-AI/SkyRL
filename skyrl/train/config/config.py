@@ -686,8 +686,8 @@ class SkyRLTrainConfig(BaseConfig):
         self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
 
     @classmethod
-    def from_cli_overrides(cls, args: List[str]) -> "SkyRLTrainConfig":
-        """Construct a SkyRLTrainConfig from CLI arguments.
+    def from_cli_overrides(cls, args: Union[List[str], dict]) -> "SkyRLTrainConfig":
+        """Construct a SkyRLTrainConfig from CLI arguments or a dict of overrides.
 
         Parses CLI arguments and builds a typed config. Dataclass field defaults
         are used for any values not specified on the command line.
@@ -696,8 +696,10 @@ class SkyRLTrainConfig(BaseConfig):
         and legacy YAML-style paths (e.g., generator.backend) for backward compatibility.
 
         Args:
-            args: List of CLI arguments in 'key.path=value' format.
-                  Example: ['trainer.policy.model.path=Qwen/Qwen2.5-1.5B-Instruct', 'trainer.seed=123']
+            args: Either a list of CLI arguments in 'key.path=value' format, or a dict
+                  mapping dot-notation keys to values.
+                  Example list: ['trainer.policy.model.path=Qwen/Qwen2.5-1.5B-Instruct', 'trainer.seed=123']
+                  Example dict: {'trainer.policy.model.path': 'Qwen/Qwen2.5-1.5B-Instruct', 'trainer.seed': 123}
 
         Returns:
             A fully constructed SkyRLTrainConfig with CLI overrides applied.
@@ -705,6 +707,9 @@ class SkyRLTrainConfig(BaseConfig):
         Raises:
             ValueError: If an argument uses the unsupported '+' prefix.
         """
+        if isinstance(args, dict):
+            args = [f"{k}={v}" for k, v in args.items()]
+
         from skyrl.train.config.legacy import (
             is_legacy_config,
             translate_legacy_config,

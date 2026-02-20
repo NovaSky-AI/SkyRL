@@ -6,14 +6,15 @@ ensuring that training can resume exactly where it left off.
 
 Run with:
 For FSDP and FSDP2, run:
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
 
 For Megatron, run:
-uv run --isolated --extra dev --extra mcore pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
+uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
 """
 
 import ray
 import pytest
+from omegaconf import OmegaConf
 import torch
 import os
 import shutil
@@ -213,10 +214,12 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         )
 
         # Check key configuration values are preserved
+        config_as_omegaconf = OmegaConf.create(loaded_trainer_state["config"])
+        loaded_trainer_config = SkyRLTrainConfig.from_dict_config(config_as_omegaconf)
         assert (
-            loaded_trainer_state["config"].trainer.train_batch_size == cfg.trainer.train_batch_size
+            loaded_trainer_config.trainer.train_batch_size == cfg.trainer.train_batch_size
         ), "train_batch_size not preserved in checkpoint"
-        assert loaded_trainer_state["config"].trainer.strategy == strategy, "strategy not preserved in checkpoint"
+        assert loaded_trainer_config.trainer.strategy == strategy, "strategy not preserved in checkpoint"
         assert loaded_trainer_state["global_step"] == saved_global_step, "global_step not preserved in checkpoint"
 
         # Cleanup first trainer

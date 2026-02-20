@@ -164,13 +164,15 @@ def get_backend_classes(backend_name: str):
 
         return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
-        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, FSDPBackendConfig
+        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend
+        from skyrl.train.config import SkyRLTrainConfig
 
-        return SkyRLTrainBackend, FSDPBackendConfig
+        return SkyRLTrainBackend, SkyRLTrainConfig
     elif backend_name == "megatron":
-        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, MegatronBackendConfig
+        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend
+        from skyrl.train.config import SkyRLTrainConfig
 
-        return SkyRLTrainBackend, MegatronBackendConfig
+        return SkyRLTrainBackend, SkyRLTrainConfig
     else:
         raise ValueError(
             f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "
@@ -233,7 +235,19 @@ class TinkerEngine:
 
         # Initialize the backend (handles model state, computation, and adapter management)
         backend_class, backend_config_class = get_backend_classes(config.backend)
-        backend_config = backend_config_class(**config.backend_config)
+
+        from skyrl.train.config import SkyRLTrainConfig
+
+        if backend_config_class is SkyRLTrainConfig:
+            # SkyRL backends: pass dict overrides + base_model directly
+            overrides = {**config.backend_config, "trainer.policy.model.path": config.base_model}
+            if config.backend == "megatron":
+                overrides.setdefault("trainer.strategy", "megatron")
+            else:
+                overrides.setdefault("trainer.strategy", "fsdp2")
+            backend_config = SkyRLTrainConfig.from_cli_overrides(overrides)
+        else:
+            backend_config = backend_config_class(**config.backend_config)
         self.backend = backend_class(config.base_model, backend_config)
 
         # Track last cleanup time for periodic stale session cleanup
