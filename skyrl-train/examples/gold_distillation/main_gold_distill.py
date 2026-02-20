@@ -466,6 +466,11 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         """
         Calculate values, log probs, and prepare for GOLD reward computation.
 
+        This override skips the ref model forward pass from the parent implementation
+        because GOLD computes teacher logits separately in apply_reward_kl_penalty with
+        proper teacher tokenization. Computing ref log_probs here would waste computation
+        since apply_reward_kl_penalty never uses them.
+
         For cross-tokenizer distillation, this method also:
         1. Decodes student sequences to text
         2. Re-tokenizes with teacher tokenizer
@@ -473,9 +478,88 @@ class GOLDDistillationTrainer(RayPPOTrainer):
 
         For same-tokenizer case, uses the standard approach.
         """
-        # Call parent implementation for standard log probs and values
-        training_input = super().fwd_logprobs_values_reward(training_input)
+        data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
 
+        def collect_results(actor_infos, results, key):
+            ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)
+            return ret_outputs[key]
+
+        action_log_probs = None
+        values = None
+
+        # Calculate critic values (if critic exists)
+        if self.colocate_all and self.critic_model is not None:
+            self.critic_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
+
+        if self.critic_model is not None:
+            value_refs = self.critic_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+            if self.colocate_all:
+                all_rank_values = ray.get(value_refs)
+                values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
+                self.critic_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+
+        # NOTE: Skipping ref model forward pass here - GOLD computes teacher logits
+        # separately in apply_reward_kl_penalty using _get_teacher_logits with proper
+        # teacher tokenization. The base_action_log_probs output is never used.
+
+        # calculate action log probs
+        if self.colocate_all:
+            self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
+
+        action_log_probs_refs = self.policy_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
+        if self.colocate_all:
+            all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
+            action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
+
+        # Wait for all models to finish (if not colocated)
+        if not self.colocate_all:
+            if not self.cfg.trainer.placement.colocate_policy_ref:
+                if self.critic_model is not None:
+                    all_rank_values = ray.get(value_refs)
+                    values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
+
+            elif self.critic_model is not None:
+                all_rank_values = ray.get(value_refs)
+                values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
+
+            # Always wait for policy results in non-colocated case
+            all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
+            action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
+
+        # Empty cache
+        if not self.colocate_all:
+            empty_cache_refs = self.policy_model.async_run_ray_method("pass_through", "empty_cache")
+            if self.critic_model is not None:
+                empty_cache_refs.extend(self.critic_model.async_run_ray_method("pass_through", "empty_cache"))
+            ray.get(empty_cache_refs)
+
+        sequences_all: torch.Tensor = training_input["sequences"]
+        action_log_probs = action_log_probs[: len(sequences_all)]
+        values = values[: len(sequences_all)] if values is not None else None
+
+        # Set base_action_log_probs to None (not used by GOLD)
+        training_input["base_action_log_probs"] = None
+        training_input["action_log_probs"] = action_log_probs
+        training_input["values"] = values
+
+        # Logprobs difference tracking (if enabled)
+        if self.cfg.generator.sampling_params.logprobs is not None:
+            logprobs_diff = (
+                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
+                - action_log_probs[training_input["loss_mask"] > 0]
+            )
+            prob_diff = logprobs_diff.exp().abs()
+            prob_diff_mean = prob_diff.mean().item()
+            prob_diff_std = prob_diff.std().item()
+            self.all_metrics.update(
+                {
+                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
+                    "policy/rollout_train_prob_diff_std": prob_diff_std,
+                }
+            )
+
+        # GOLD-specific: Prepare teacher tokenization for cross-tokenizer distillation
         sequences = training_input["sequences"]
         attention_mask = training_input["attention_mask"]
         loss_mask = training_input["loss_mask"]
