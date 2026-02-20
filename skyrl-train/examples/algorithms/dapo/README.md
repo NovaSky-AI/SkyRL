@@ -76,8 +76,8 @@ class DAPOTrainer(RayPPOTrainer):
   @torch.no_grad()
   def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
       # apply soft overlong punishment
-      overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
-      overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
+      overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
+      overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
       ...
       # use base class impl for metrics and per-token reward conversion
       return super().postprocess_generator_output(generator_output, uids)
@@ -87,7 +87,7 @@ class DAPOExp(BasePPOExp):
       return DAPOTrainer(*args, **kwargs)
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLTrainConfig):
+def skyrl_entrypoint(cfg: DictConfig):
     exp = DAPOExp(cfg)
     exp.run()
 ```
@@ -95,6 +95,6 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 To add the overlong buffer length and penalty factor parameters to the config, you can add the following lines to the run_dapo_gsm8k.sh script:
 
 ```bash
-+trainer.algorithm.overlong_buffer_len=512 \
-+trainer.algorithm.overlong_buffer_penalty_factor=1.0 \
++trainer.algorithm.overlong_buffer.len=512 \
++trainer.algorithm.overlong_buffer.penalty_factor=1.0 \
 ```

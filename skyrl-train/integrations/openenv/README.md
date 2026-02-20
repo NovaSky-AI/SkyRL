@@ -77,7 +77,7 @@ LOGGER="wandb"
 
 All training parameters can be modified in `run_openenv.sh`, such as the model choice (`trainer.policy.model.path`), GRPO group size (`generator.n_samples_per_prompt`), or training batch size (`trainer.train_batch_size`).
 
-See all available training configuration parameters in `skyrl_train/config/config.py` (Python dataclass definitions).
+See all available training configuration parameters in `ppo_base_config.yaml`.
 
 
 

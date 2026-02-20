@@ -9,7 +9,7 @@ import ray
 import pytest
 from ray.util.placement_group import placement_group
 
-from skyrl_train.config import SkyRLTrainConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.utils import get_ray_pg_ready_with_timeout
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl_train.workers.worker import PPORayActorGroup
@@ -18,16 +18,16 @@ from skyrl_train.workers.worker import PPORayActorGroup
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
-def get_test_actor_config() -> SkyRLTrainConfig:
-    cfg = SkyRLTrainConfig()
+def get_test_actor_config() -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
-    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    cfg.generator.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
     return cfg
 
 
 @pytest.fixture
-def cfg() -> SkyRLTrainConfig:
+def cfg() -> SkyRLConfig:
     return get_test_actor_config()
 
 

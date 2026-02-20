@@ -20,14 +20,7 @@ from skyrl_train.inference_engines.inference_engine_client_http_endpoint import 
 )
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
-from skyrl_train.config import (
-    SkyRLTrainConfig,
-    GeneratorConfig,
-    InferenceEngineConfig,
-    PolicyConfig,
-    ModelConfig,
-    TrainerConfig,
-)
+from skyrl_train.config import SkyRLConfig, GeneratorConfig, PolicyConfig, ModelConfig, TrainerConfig
 import asyncio
 import pytest
 import random
@@ -209,13 +202,7 @@ def test_completion_batched_routing_and_order_preservation(num_prompts, with_ses
 
     engines = [MockEngine() for _ in range(num_engines)]
     tokenizer = object()  # not used by completion()
-    client = InferenceEngineClient(
-        engines=engines,
-        tokenizer=tokenizer,
-        model_path=cfg.trainer.policy.model.path,
-        lora_cfg=cfg.trainer.policy.model.lora,
-        inference_engine_cfg=cfg.generator.inference_engine,
-    )
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
 
     prompts = [str(i) for i in range(num_prompts)]
     if with_session_id:
@@ -294,13 +281,7 @@ def test_generate_batched_routing_and_order_preservation(num_prompts, with_sessi
 
     engines = [MockEngine() for _ in range(num_engines)]
     tokenizer = object()  # not used when prompt_token_ids are provided
-    client = InferenceEngineClient(
-        engines=engines,
-        tokenizer=tokenizer,
-        model_path=cfg.trainer.policy.model.path,
-        lora_cfg=cfg.trainer.policy.model.lora,
-        inference_engine_cfg=cfg.generator.inference_engine,
-    )
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
 
     # Build token id prompts [[0], [1], ..., [n-1]]
     prompt_token_ids = [[i] for i in range(num_prompts)]
@@ -415,17 +396,15 @@ def test_route_prompts_to_engines_validation_errors():
 
 
 def _make_min_cfg():
-    return SkyRLTrainConfig(
+    return SkyRLConfig(
         trainer=TrainerConfig(
             policy=PolicyConfig(model=ModelConfig(path="dummy-model")),
         ),
         generator=GeneratorConfig(
-            inference_engine=InferenceEngineConfig(
-                backend="vllm",
-                enable_http_endpoint=False,
-                http_endpoint_host="127.0.0.1",
-                http_endpoint_port=0,
-            ),
+            backend="vllm",
+            enable_http_endpoint=False,
+            http_endpoint_host="127.0.0.1",
+            http_endpoint_port=0,
         ),
     )
 
@@ -523,13 +502,7 @@ async def test_chat_completion_retry_accumulates_and_sends_continuations():
 
     engines = [MockEngine()]
     cfg = _make_min_cfg()
-    client = InferenceEngineClient(
-        engines=engines,
-        tokenizer=object(),
-        model_path=cfg.trainer.policy.model.path,
-        lora_cfg=cfg.trainer.policy.model.lora,
-        inference_engine_cfg=cfg.generator.inference_engine,
-    )
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
 
     original = {
         "json": {
@@ -665,13 +638,7 @@ async def test_chat_completion_retry_resends_original_when_no_tokens_generated_y
 
     engines = [MockEngine()]
     cfg = _make_min_cfg()
-    client = InferenceEngineClient(
-        engines=engines,
-        tokenizer=object(),
-        model_path=cfg.trainer.policy.model.path,
-        lora_cfg=cfg.trainer.policy.model.lora,
-        inference_engine_cfg=cfg.generator.inference_engine,
-    )
+    client = InferenceEngineClient(engines=engines, tokenizer=object(), full_config=cfg)
 
     original = {
         "json": {
@@ -760,13 +727,7 @@ async def test_generate_retry_some_gen_no_gen_finish(max_tokens_key):
     engines = [MockEngine()]
     cfg = _make_min_cfg()
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    client = InferenceEngineClient(
-        engines=engines,
-        tokenizer=tokenizer,
-        model_path=cfg.trainer.policy.model.path,
-        lora_cfg=cfg.trainer.policy.model.lora,
-        inference_engine_cfg=cfg.generator.inference_engine,
-    )
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
 
     # Original request
     prompt_token_ids = [[1, 2, 3, 4, 5]]  # 5 prompt tokens
@@ -833,13 +794,7 @@ async def test_generate_retry_direct_return():
     engines = [MockEngine()]
     cfg = _make_min_cfg()
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    client = InferenceEngineClient(
-        engines=engines,
-        tokenizer=tokenizer,
-        model_path=cfg.trainer.policy.model.path,
-        lora_cfg=cfg.trainer.policy.model.lora,
-        inference_engine_cfg=cfg.generator.inference_engine,
-    )
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
 
     prompt_token_ids = [[1, 2, 3, 4, 5]]
     sampling_params = {"max_tokens": 10}
@@ -899,13 +854,7 @@ async def test_generate_retry_no_gen_finish():
     engines = [MockEngine()]
     cfg = _make_min_cfg()
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
-    client = InferenceEngineClient(
-        engines=engines,
-        tokenizer=tokenizer,
-        model_path=cfg.trainer.policy.model.path,
-        lora_cfg=cfg.trainer.policy.model.lora,
-        inference_engine_cfg=cfg.generator.inference_engine,
-    )
+    client = InferenceEngineClient(engines=engines, tokenizer=tokenizer, full_config=cfg)
 
     original_prompt_ids = [7, 8, 9]
     input_batch = InferenceEngineInput(

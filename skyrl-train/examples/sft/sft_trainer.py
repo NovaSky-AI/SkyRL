@@ -16,16 +16,18 @@ This example:
 """
 
 import ray
+import hydra
 import torch
 from datasets import load_dataset
 from loguru import logger
+from omegaconf import DictConfig
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
 from ray.util.placement_group import placement_group
 
-from skyrl_train.config import SkyRLTrainConfig
 from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.entrypoints.main_base import config_dir
 from skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl_train.workers.worker import PPORayActorGroup
 from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
@@ -33,14 +35,15 @@ from skyrl_train.utils.utils import initialize_ray, validate_cfg
 from skyrl_train.utils import get_ray_pg_ready_with_timeout
 
 
-def get_sft_config() -> SkyRLTrainConfig:
+def get_sft_config() -> DictConfig:
     """Get config with SFT-specific overrides."""
-    cfg = SkyRLTrainConfig()
+    with hydra.initialize_config_dir(config_dir=config_dir):
+        cfg = hydra.compose(config_name="ppo_base_config")
 
     # Use a small model for testing
     cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
     cfg.trainer.placement.policy_num_gpus_per_node = 1
-    cfg.generator.inference_engine.tensor_parallel_size = 1
+    cfg.generator.inference_engine_tensor_parallel_size = 1
     cfg.trainer.logger = "console"
     cfg.trainer.micro_train_batch_size_per_gpu = 2
 
@@ -144,7 +147,7 @@ def main():
     get_ray_pg_ready_with_timeout(pg, timeout=30)
 
     actor_group = PPORayActorGroup(
-        cfg.trainer,
+        cfg,
         num_nodes=1,
         num_gpus_per_node=num_gpus,
         ray_actor_type=PolicyWorker,

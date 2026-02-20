@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Union
 from pathlib import Path
 from loguru import logger
 from collections import defaultdict
@@ -24,7 +24,8 @@ from skyrl_train.utils.trainer_utils import (
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.utils.logging_utils import log_example
 
-from skyrl_train.config import SkyRLTrainConfig
+from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
@@ -33,7 +34,7 @@ from transformers import AutoTokenizer
 async def evaluate(
     eval_dataloader: StatefulDataLoader,
     generator: GeneratorInterface,
-    cfg: SkyRLTrainConfig,
+    cfg: Union[SkyRLConfig, DictConfig],
     global_step: int | None,
     tokenizer: AutoTokenizer,
 ) -> Dict[str, float]:
@@ -42,7 +43,7 @@ async def evaluate(
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
         generator (GeneratorInterface): generator to use
-        cfg (SkyRLTrainConfig): config
+        cfg (SkyRLConfig): config
         global_step (int | None): current global step, or
             `None` to indicate a non-training context (e.g., eval-only)
         tokenizer (AutoTokenizer): tokenizer to use
@@ -63,7 +64,7 @@ async def evaluate(
         generator_input, uids = prepare_generator_input(
             prompts,
             cfg.generator.eval_n_samples_per_prompt,
-            get_sampling_params_for_backend(cfg.generator.inference_engine.backend, sampling_params),
+            get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
             cfg.environment.env_class,
             "eval",
             global_step,
@@ -131,7 +132,7 @@ async def evaluate(
 async def evaluate_step_wise(
     eval_dataloader: StatefulDataLoader,
     generator: GeneratorInterface,
-    cfg: SkyRLTrainConfig,
+    cfg: Union[SkyRLConfig, DictConfig],
     global_step: int | None,
     tokenizer: AutoTokenizer,
 ) -> Dict[str, float]:
@@ -142,7 +143,7 @@ async def evaluate_step_wise(
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
         generator (GeneratorInterface): generator to use
-        cfg (SkyRLTrainConfig): config
+        cfg (SkyRLConfig): config
         global_step (int | None): current global step, or
             `None` to indicate a non-training context (e.g., eval-only)
         tokenizer (AutoTokenizer): tokenizer to use
@@ -163,7 +164,7 @@ async def evaluate_step_wise(
         generator_input, uids = prepare_generator_input(
             prompts,
             cfg.generator.eval_n_samples_per_prompt,
-            get_sampling_params_for_backend(cfg.generator.inference_engine.backend, sampling_params),
+            get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
             cfg.environment.env_class,
             "eval",
             global_step,

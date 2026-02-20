@@ -2,14 +2,18 @@
 uv run --isolated --extra vllm --extra dev -- pytest -s -vvv tests/gpu/test_grpo_sp_sanity.py
 """
 
+import os
+from hydra import initialize, compose
+from omegaconf import DictConfig
+from pathlib import Path
 from loguru import logger
 import numpy as np
-from skyrl_train.entrypoints.main_base import BasePPOExp
+from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl_train.trainer import RayPPOTrainer
 import ray
 from tqdm import tqdm
 
-from skyrl_train.config import SkyRLTrainConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils import Timer
 from skyrl_train.utils.ppo_utils import normalize_advantages_dict
 
@@ -138,16 +142,24 @@ class RayPPOTestTrainer(RayPPOTrainer):
                 return self.all_metrics
 
 
-def run_exp_and_get_metrics(exp: BasePPOExp, cfg: SkyRLTrainConfig):
+def run_exp_and_get_metrics(exp: BasePPOExp, cfg: SkyRLConfig):
     metrics = exp.run()
     # ray shutdown will clear all state for the ray session
     ray.shutdown()
     return metrics
 
 
-def ppo_run() -> None:
-    cfg = SkyRLTrainConfig()
+def run_with_hydra(func, config_name: str):
+    current_directory = Path(__file__).parent.absolute()
+    abs_config_dir = Path(config_dir).absolute()
+    relative_config_dir = os.path.relpath(abs_config_dir, current_directory)
+    print("relative_config_dir: ", relative_config_dir)
+    with initialize(version_base=None, config_path=relative_config_dir):
+        cfg = compose(config_name=config_name)
+        func(cfg)
 
+
+def ppo_run(cfg: DictConfig) -> None:
     # Configure test settings
     cfg.trainer.train_batch_size = 8
     cfg.trainer.num_episodes = 1
@@ -158,9 +170,9 @@ def ppo_run() -> None:
     cfg.trainer.placement.policy_num_gpus_per_node = 4
     cfg.trainer.placement.critic_num_gpus_per_node = 4
     cfg.trainer.placement.ref_num_gpus_per_node = 4
-    cfg.generator.inference_engine.num_engines = 2
-    cfg.generator.inference_engine.tensor_parallel_size = 2
-    cfg.generator.inference_engine.gpu_memory_utilization = 0.7
+    cfg.generator.num_inference_engines = 2
+    cfg.generator.inference_engine_tensor_parallel_size = 2
+    cfg.generator.gpu_memory_utilization = 0.7
 
     # Run baseline (no sequence parallel)
     cfg.trainer.policy.sequence_parallel_size = 1
@@ -183,7 +195,7 @@ def ppo_run() -> None:
 
 
 def test_ppo_run():
-    ppo_run()
+    run_with_hydra(ppo_run, "ppo_base_config")
 
 
 if __name__ == "__main__":

@@ -3,28 +3,15 @@ uv run --isolated --extra vllm -m examples.tis_correction.main_tis_dapo
 """
 
 import ray
-import sys
+import hydra
 import torch
-from dataclasses import dataclass
 from typing import List
-
-from skyrl_train.config import AlgorithmConfig, make_config
+from omegaconf import DictConfig
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils import initialize_ray, validate_cfg
-from skyrl_train.entrypoints.main_base import BasePPOExp
+from skyrl_train.utils import initialize_ray
+from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
 
 from skyrl_train.generators.base import GeneratorOutput
-
-
-@dataclass
-class DAPOAlgorithmConfig(AlgorithmConfig):
-    """Extended algorithm config with DAPO-specific overlong buffer settings."""
-
-    overlong_buffer_len: int = 512
-    overlong_buffer_penalty_factor: float = 1.0
-
-
-DAPOTISConfig = make_config(algorithm_cls=DAPOAlgorithmConfig)
 
 
 class DAPOTrainer(RayPPOTrainer):
@@ -46,8 +33,8 @@ class DAPOTrainer(RayPPOTrainer):
         Returns:
             GeneratorOutput
         """
-        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
-        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
+        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
+        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
         # modify rewards here
         prompt_token_ids = generator_output["prompt_token_ids"]
         response_ids = generator_output["response_ids"]
@@ -93,14 +80,16 @@ class DAPOExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg):
+def skyrl_entrypoint(cfg: DictConfig):
     exp = DAPOExp(cfg)
     exp.run()
 
 
-def main() -> None:
-    cfg = DAPOTISConfig.from_cli_overrides(sys.argv[1:])
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    # validate the arguments
     validate_cfg(cfg)
+
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 

@@ -7,8 +7,7 @@ from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
-
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 import ray
 import torch
@@ -26,7 +25,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
 
-from skyrl_train.config import TrainerConfig, AlgorithmConfig
+from skyrl_train.config import SkyRLConfig, AlgorithmConfig
 from skyrl_train.dataset.replay_buffer import Experience
 from skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -218,10 +217,12 @@ class DistributedTorchRayActor:
 
 
 class Worker(DistributedTorchRayActor):
-    def __init__(self, cfg: TrainerConfig, *args, **kwargs):
+    def __init__(self, cfg: Union[SkyRLConfig, DictConfig], *args, **kwargs):
+        from skyrl_train.weight_sync import get_transfer_strategy_cls
+
         super().__init__(*args, **kwargs)
         self.cfg = cfg
-        self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
+        self._transfer_strategy_cls = get_transfer_strategy_cls(self.cfg)
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
@@ -281,7 +282,7 @@ class Worker(DistributedTorchRayActor):
         self._snapshot_count += 1
 
         rank = torch.distributed.get_rank()
-        save_path = os.path.join(self.cfg.ckpt_path, "memory_snapshots")
+        save_path = os.path.join(self.cfg.trainer.ckpt_path, "memory_snapshots")
         if self._local_rank == 0 and not io.exists(save_path):
             io.makedirs(save_path, exist_ok=True)
         torch.distributed.barrier()
@@ -305,16 +306,8 @@ class Worker(DistributedTorchRayActor):
         .. note::
             This function should be called on all the ranks in the worker group simultaneously.
         """
-        from skyrl_train.weight_sync import get_transfer_strategy_cls
 
         assert inference_engine_client is not None
-
-        # Determine transfer strategy based on inference engine config and placement
-        ie_cfg = inference_engine_client.inference_engine_cfg
-        self._transfer_strategy_cls = get_transfer_strategy_cls(
-            weight_sync_backend=ie_cfg.weight_sync_backend,
-            colocate_all=self.cfg.placement.colocate_all,
-        )
 
         # For new inference path, fetch world_size from servers
         # For legacy path, calculate from config
@@ -323,7 +316,7 @@ class Worker(DistributedTorchRayActor):
             inference_world_size = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
-        init_info = self._transfer_strategy_cls.create_init_info(ie_cfg, inference_world_size=inference_world_size)
+        init_info = self._transfer_strategy_cls.create_init_info(self.cfg, inference_world_size=inference_world_size)
 
         # Create sender on all ranks
         # Strategy implementations may have different logic for different ranks
@@ -364,7 +357,7 @@ class Worker(DistributedTorchRayActor):
         """
         # run in micro batches of cfg.trainer.micro_forward_batch_size_per_gpu
         # TODO (sumanthrh): this can be in the policy/critic impl if the micro batch size can be specific to policy, critic, etc.
-        micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
+        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
 
         outputs = []
         for micro_batch in micro_batches:
@@ -397,7 +390,7 @@ class PPORayActorGroup:
 
     def __init__(
         self,
-        cfg: TrainerConfig,
+        cfg,
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[Worker],
@@ -663,7 +656,7 @@ class PolicyWorkerBase(Worker):
         self.strategy: DistributedStrategy = None
         self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
-        self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
+        self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.trainer.algorithm.policy_loss_type)
         self._micro_batches_accumulated = 0
 
     def forward_backward(
@@ -688,7 +681,7 @@ class PolicyWorkerBase(Worker):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
+        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
         all_loss_fn_outputs = []  # Handle separately from scalar metrics
 
@@ -776,7 +769,7 @@ class PolicyWorkerBase(Worker):
         rollout_action_logprobs = experience.rollout_logprobs
 
         # Determine which loss function to use
-        resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
+        resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.trainer.algorithm.policy_loss_type
         if loss_fn is not None:
             # Use the provided loss function (Tinker API style)
             current_loss_fn = PolicyLossRegistry.get(loss_fn)
@@ -785,14 +778,16 @@ class PolicyWorkerBase(Worker):
             current_loss_fn = self.policy_loss_fn
 
         # Build config for loss function, applying any overrides
-        loss_config = self.cfg.algorithm
+        loss_config = self.cfg.trainer.algorithm
         if loss_fn_config is not None:
             # Create a copy of the config and apply overrides
             # TODO: Fix nested overrides
-            from dataclasses import asdict
-
-            new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
-            loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
+            if isinstance(loss_config, DictConfig):
+                loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
+            else:
+                assert isinstance(loss_config, AlgorithmConfig)
+                new_loss_config = OmegaConf.merge(OmegaConf.create(loss_config), OmegaConf.create(loss_fn_config))
+                loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -801,10 +796,10 @@ class PolicyWorkerBase(Worker):
                 sequences,
                 num_actions,
                 attention_mask=attention_mask,
-                temperature=self.cfg.algorithm.temperature,
+                temperature=self.cfg.generator.sampling_params.temperature,
                 return_output=True,
                 compute_entropy=True,
-                entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
+                entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
             )
             # loss function
             # TODO: recompute advantages
@@ -858,29 +853,29 @@ class PolicyWorkerBase(Worker):
         else:
             # RL path: add optional KL/entropy terms
             # entropy loss
-            with torch.set_grad_enabled(self.cfg.algorithm.use_entropy_loss):
+            with torch.set_grad_enabled(self.cfg.trainer.algorithm.use_entropy_loss):
                 # batch_size, seqlen
                 entropy_BS = output["entropy"]
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
                 entropy = masked_mean(entropy_BS, loss_mask)
 
-            if self.cfg.algorithm.use_entropy_loss:
-                entropy_loss_term = entropy * self.cfg.algorithm.entropy_loss_coef
+            if self.cfg.trainer.algorithm.use_entropy_loss:
+                entropy_loss_term = entropy * self.cfg.trainer.algorithm.entropy_loss_coef
             else:
                 entropy_loss_term = torch.tensor(0.0)
 
             # kl loss
-            if self.cfg.algorithm.use_kl_loss:
+            if self.cfg.trainer.algorithm.use_kl_loss:
                 kl_loss = compute_approx_kl(
                     action_log_probs,
                     base_action_log_probs,
                     loss_mask=loss_mask,
-                    kl_estimator_type=self.cfg.algorithm.kl_estimator_type,
+                    kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
                 )
                 kl_loss = masked_mean(kl_loss, loss_mask, dim=-1).mean()
             else:
                 kl_loss = torch.tensor(0.0)
-            kl_loss_term = kl_loss * self.cfg.algorithm.kl_loss_coef
+            kl_loss_term = kl_loss * self.cfg.trainer.algorithm.kl_loss_coef
 
             loss = policy_loss + kl_loss_term - entropy_loss_term
             self.strategy.backward(loss, self.model, self.optimizer)
@@ -915,7 +910,7 @@ class PolicyWorkerBase(Worker):
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
-            if self.cfg.algorithm.use_kl_loss:
+            if self.cfg.trainer.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
         loss_fn_outputs = status.pop("loss_fn_outputs", None)
@@ -1020,7 +1015,7 @@ class PolicyWorkerBase(Worker):
                 response_length,
                 attention_mask,
                 return_output=False,
-                temperature=self.cfg.algorithm.temperature,
+                temperature=self.cfg.generator.sampling_params.temperature,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1058,7 +1053,7 @@ class CriticWorkerBase(Worker):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
+        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
 
         for micro_batch in BatchIterator(data, micro_batch_size, drop_last=False):
@@ -1125,7 +1120,7 @@ class CriticWorkerBase(Worker):
                 values,
                 old_values,
                 returns,
-                config=self.cfg.algorithm,
+                config=self.cfg.trainer.algorithm,
                 loss_mask=loss_mask,
             )
         # NO loss scaling here - gradient scaling happens at optim_step

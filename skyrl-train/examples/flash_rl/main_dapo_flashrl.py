@@ -3,16 +3,17 @@ Main entrypoint for DAPO training with FlashRL.
 """
 
 import ray
-import sys
+import hydra
 import torch
-from dataclasses import dataclass
-from typing import List
-
-from skyrl_train.config import SkyRLTrainConfig, AlgorithmConfig, make_config
+from typing import List, Union
+from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils import initialize_ray, validate_cfg
+from skyrl_train.utils import initialize_ray
 from skyrl_train.entrypoints.main_base import (
     BasePPOExp,
+    config_dir,
+    validate_cfg,
     create_remote_inference_engines_from_config,
 )
 from skyrl_train.inference_engines.base import InferenceEngineInterface
@@ -20,38 +21,28 @@ from skyrl_train.inference_engines.inference_engine_client import InferenceEngin
 from skyrl_train.generators.base import GeneratorOutput
 
 
-@dataclass
-class DAPOAlgorithmConfig(AlgorithmConfig):
-    """Extended algorithm config with DAPO-specific overlong buffer settings."""
-
-    overlong_buffer_len: int = 512
-    overlong_buffer_penalty_factor: float = 1.0
-
-
-DAPOFlashRLConfig = make_config(algorithm_cls=DAPOAlgorithmConfig)
-
-
-def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: SkyRLTrainConfig, colocate_pg, tokenizer):
+def create_ray_wrapped_inference_engines_from_config_flashrl(
+    cfg: Union[SkyRLConfig, DictConfig], colocate_pg, tokenizer
+):
     from examples.flash_rl.flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
 
-    ie_cfg = cfg.generator.inference_engine
     return create_ray_wrapped_inference_engines_flashrl(
-        num_inference_engines=ie_cfg.num_engines,
-        tensor_parallel_size=ie_cfg.tensor_parallel_size,
-        model_dtype=ie_cfg.model_dtype,
+        num_inference_engines=cfg.generator.num_inference_engines,
+        tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+        model_dtype=cfg.generator.model_dtype,
         pretrain=cfg.trainer.policy.model.path,
         seed=cfg.trainer.seed,
-        vllm_v1_disable_multiproc=ie_cfg.vllm_v1_disable_multiproc,
-        enable_prefix_caching=ie_cfg.enable_prefix_caching,
-        enforce_eager=ie_cfg.enforce_eager,
+        vllm_v1_disable_multiproc=cfg.generator.vllm_v1_disable_multiproc,
+        enable_prefix_caching=cfg.generator.enable_prefix_caching,
+        enforce_eager=cfg.generator.enforce_eager,
         shared_pg=colocate_pg,
-        gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
+        gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
         inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
-        async_engine=ie_cfg.async_engine,
-        max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
-        max_num_seqs=ie_cfg.max_num_seqs,
+        async_engine=cfg.generator.async_engine,
+        max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
+        max_num_seqs=cfg.generator.max_num_seqs,
         tokenizer=tokenizer,
-        backend=ie_cfg.backend,
+        backend=cfg.generator.backend,
     )
 
 
@@ -74,8 +65,8 @@ class DAPOTrainer(RayPPOTrainer):
         Returns:
             GeneratorOutput
         """
-        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
-        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
+        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
+        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
         # modify rewards here
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
@@ -120,33 +111,29 @@ class DAPOExp(BasePPOExp):
         Returns:
             InferenceEngineInterface: The inference engine client.
         """
-        if self.cfg.generator.inference_engine.run_engines_locally:
+        if self.cfg.generator.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config_flashrl(
                 self.cfg, self.colocate_pg, self.tokenizer
             )
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
 
-        return InferenceEngineClient(
-            inference_engines,
-            self.tokenizer,
-            self.cfg.trainer.policy.model.path,
-            self.cfg.trainer.policy.model.lora,
-            self.cfg.generator.inference_engine,
-        )
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg):
+def skyrl_entrypoint(cfg: DictConfig):
+
     exp = DAPOExp(cfg)
     exp.run()
 
 
-def main() -> None:
-    cfg = DAPOFlashRLConfig.from_cli_overrides(sys.argv[1:])
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    # validate the arguments
     validate_cfg(cfg)
 
-    if not cfg.generator.inference_engine.run_engines_locally:
+    if not cfg.generator.run_engines_locally:
         raise ValueError("FlashRL only supports colocated training.")
 
     if cfg.trainer.strategy not in ("fsdp", "fsdp2"):

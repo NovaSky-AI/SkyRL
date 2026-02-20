@@ -1,6 +1,5 @@
 import asyncio
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 import yaml
 import traceback
 import ray
@@ -12,6 +11,7 @@ from minisweagent.run.utils.save import save_traj
 from minisweagent.config import get_config_path
 from .mini_swe_utils import evaluate_trajectory, get_sb_environment
 
+from omegaconf import DictConfig
 from skyrl_train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator, GeneratorOutput, GeneratorInput
 from skyrl_train.generators.base import TrajectoryID, TrainingPhase, BatchMetadata
@@ -22,14 +22,6 @@ from skyrl_train.generators.utils import (
     get_rollout_metrics,
     get_response_ids_and_loss_mask_from_messages,
 )
-
-
-@dataclass
-class MiniSWEGeneratorConfig(GeneratorConfig):
-    """Extended generator config with Mini-SWE-Agent-specific fields."""
-
-    miniswe_config_path: str = ""
-    miniswe_traj_dir: str = ""
 
 
 class DefaultAgentWithReminder(DefaultAgent):
@@ -53,7 +45,7 @@ def init_and_run(
     instance: dict,
     litellm_model_name: str,
     sweagent_config: dict,
-    generator_cfg: GeneratorConfig,
+    generator_cfg: Union[GeneratorConfig, DictConfig],
     data_source: str,
     sampling_params: dict,
     trajectory_id: TrajectoryID,
@@ -114,19 +106,19 @@ def init_and_run(
 class MiniSweAgentGenerator(SkyRLGymGenerator):
     def __init__(
         self,
-        generator_cfg: GeneratorConfig,
-        skyrl_gym_cfg: SkyRLGymConfig,
+        generator_cfg: Union[GeneratorConfig, DictConfig],
+        skyrl_gym_cfg: Union[SkyRLGymConfig, DictConfig],
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,
     ):
 
         # Call parent constructor first
-        super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer)
+        super().__init__(generator_cfg, skyrl_gym_cfg, inference_engine_client, tokenizer, model_name)
 
-        self.http_server_inference_engine_client_host = generator_cfg.inference_engine.http_endpoint_host
+        self.http_server_inference_engine_client_host = generator_cfg.http_endpoint_host
 
-        self.http_server_inference_engine_client_port = generator_cfg.inference_engine.http_endpoint_port
+        self.http_server_inference_engine_client_port = generator_cfg.http_endpoint_port
 
         self.base_url = (
             f"http://{self.http_server_inference_engine_client_host}:{self.http_server_inference_engine_client_port}"
@@ -228,7 +220,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
         sampling_params = get_sampling_params_for_backend(
-            self.generator_cfg.inference_engine.backend, self.generator_cfg.sampling_params
+            self.generator_cfg.backend, self.generator_cfg.sampling_params
         )
 
         tasks = []

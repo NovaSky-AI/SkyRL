@@ -34,7 +34,7 @@ class MegatronModelWrapper:
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
-        self.use_sample_packing = self.cfg.use_sample_packing
+        self.use_sample_packing = self.cfg.trainer.use_sample_packing
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
@@ -197,20 +197,16 @@ class MegatronModelWrapper:
         forward_backward_func = get_forward_backward_func()
 
         # Resolve loss function
-        resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
+        resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.trainer.algorithm.policy_loss_type
         if loss_fn is not None:
             current_loss_fn = PolicyLossRegistry.get(loss_fn)
         else:
             current_loss_fn = self.policy_loss_fn
 
         # Build config for loss function, applying any overrides
-        loss_config = self.cfg.algorithm
+        loss_config = self.cfg.trainer.algorithm
         if loss_fn_config is not None:
-            from dataclasses import asdict
-            from skyrl_train.config.config import AlgorithmConfig
-
-            new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
-            loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
+            loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
 
         def loss_func(logits, data):
             sequences = data["sequences"]

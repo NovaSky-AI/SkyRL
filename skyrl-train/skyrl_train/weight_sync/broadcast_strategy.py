@@ -7,10 +7,11 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass, replace
-from typing import Iterable, Iterator, Optional, Tuple, TYPE_CHECKING
+from typing import Iterable, Iterator, Optional, Tuple, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from skyrl_train.config import InferenceEngineConfig
+    from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
 
 import ray
 import torch
@@ -205,12 +206,12 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
 
     @staticmethod
     def create_init_info(
-        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
+        cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
     ) -> BroadcastInitInfo:
         """Create init info with all config-derived args.
 
         Args:
-            ie_cfg: InferenceEngineConfig containing inference engine settings.
+            cfg: Configuration object containing generator settings.
             inference_world_size: Total number of inference workers (from client.get_world_size()).
                 If provided, uses this instead of calculating from config.
                 This is the preferred approach for HTTP inference path.
@@ -226,10 +227,10 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             world_size = inference_world_size + 1  # +1 for trainer rank 0
         else:
             # Legacy path: calculate from config
-            num_inference_engines = ie_cfg.num_engines
-            tensor_parallel_size = ie_cfg.tensor_parallel_size
-            pipeline_parallel_size = ie_cfg.pipeline_parallel_size
-            data_parallel_size = ie_cfg.data_parallel_size
+            num_inference_engines = cfg.generator.num_inference_engines
+            tensor_parallel_size = cfg.generator.inference_engine_tensor_parallel_size
+            pipeline_parallel_size = cfg.generator.inference_engine_pipeline_parallel_size
+            data_parallel_size = cfg.generator.inference_engine_data_parallel_size
             world_size = num_inference_engines * tensor_parallel_size * pipeline_parallel_size * data_parallel_size + 1
 
         master_addr = ray._private.services.get_node_ip_address()
@@ -243,9 +244,9 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
             rank_offset=1,
             world_size=world_size,
             group_name="skyrl",
-            backend=ie_cfg.weight_sync_backend,
-            model_dtype_str=ie_cfg.model_dtype,
-            override_existing_receiver=ie_cfg.override_existing_update_group == "enable",
+            backend=cfg.generator.weight_sync_backend,
+            model_dtype_str=cfg.generator.model_dtype,
+            override_existing_receiver=cfg.generator.override_existing_update_group == "enable",
         )
 
     @staticmethod

@@ -20,7 +20,7 @@ from tests.gpu.utils import (
     get_test_actor_config,
 )
 
-from skyrl_train.config import SkyRLTrainConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.utils import initialize_ray, get_ray_pg_ready_with_timeout
@@ -39,20 +39,20 @@ def _check_gpus(num_gpus: int):
         pytest.skip(f"Expert parallel tests require >= {num_gpus} GPUs, found {len(available)}: {available}")
 
 
-def _get_test_cfg() -> SkyRLTrainConfig:
+def _get_test_cfg() -> SkyRLConfig:
     cfg = get_test_actor_config()
 
     # Use MoE policy model
     cfg.trainer.policy.model.path = MODEL
 
     # vLLM generator with EP enabled
-    cfg.generator.inference_engine.backend = "vllm"
-    cfg.generator.inference_engine.async_engine = True
-    cfg.generator.inference_engine.num_engines = NUM_GPUS // 2
-    cfg.generator.inference_engine.tensor_parallel_size = 2
-    cfg.generator.inference_engine.expert_parallel_size = 2
-    cfg.generator.inference_engine.data_parallel_size = 1
-    cfg.generator.inference_engine.gpu_memory_utilization = 0.8
+    cfg.generator.backend = "vllm"
+    cfg.generator.async_engine = True
+    cfg.generator.num_inference_engines = NUM_GPUS // 2
+    cfg.generator.inference_engine_tensor_parallel_size = 2
+    cfg.generator.inference_engine_expert_parallel_size = 2
+    cfg.generator.inference_engine_data_parallel_size = 1
+    cfg.generator.gpu_memory_utilization = 0.8
 
     # Small lengths for faster tests
     cfg.generator.max_input_length = 2048
@@ -85,14 +85,14 @@ async def _run_single_generation(client: InferenceEngineClient, prompts, samplin
 
 
 def init_ray_inference_engines(
-    backend: str, tp_size: int, shared_pg: Optional[PlacementGroup], config: SkyRLTrainConfig
+    backend: str, tp_size: int, shared_pg: Optional[PlacementGroup], config: SkyRLConfig
 ) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     engine = create_ray_wrapped_inference_engines(
         num_inference_engines=1,
         tensor_parallel_size=tp_size,
-        expert_parallel_size=config.generator.inference_engine.expert_parallel_size,
+        expert_parallel_size=config.generator.inference_engine_expert_parallel_size,
         model_dtype="bfloat16",
         pretrain=MODEL,
         seed=42,
@@ -108,13 +108,7 @@ def init_ray_inference_engines(
         tokenizer=tokenizer,
         backend=backend,
     )
-    client = InferenceEngineClient(
-        engine,
-        tokenizer,
-        config.trainer.policy.model.path,
-        config.trainer.policy.model.lora,
-        config.generator.inference_engine,
-    )
+    client = InferenceEngineClient(engine, tokenizer, config)
     return client
 
 
@@ -134,16 +128,14 @@ def test_ep_generation():
         initialize_ray(cfg)
 
         client = init_ray_inference_engines(
-            backend=cfg.generator.inference_engine.backend,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+            backend=cfg.generator.backend,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             shared_pg=None,
             config=cfg,
         )
 
         prompts = get_test_prompts(MODEL, num_samples=4)
-        sampling_params = get_sampling_params_for_backend(
-            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-        )
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         responses, reasons = asyncio.run(_run_single_generation(client, prompts, sampling_params))
         assert len(responses) == len(prompts)
@@ -175,8 +167,8 @@ def test_ep_weight_sync():
 
         # Spin up two inference engines with EP enabled, colocated
         client = init_ray_inference_engines(
-            backend=cfg.generator.inference_engine.backend,
-            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+            backend=cfg.generator.backend,
+            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             shared_pg=pg,
             config=cfg,
         )
@@ -184,9 +176,7 @@ def test_ep_weight_sync():
 
         # Generate before weight sync
         prompts = get_test_prompts(MODEL, num_samples=4)
-        sampling_params = get_sampling_params_for_backend(
-            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
-        )
+        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
         out_before = asyncio.run(
             client.generate(InferenceEngineInput(prompts=prompts, sampling_params=sampling_params))
         )
@@ -206,11 +196,7 @@ def test_ep_weight_sync():
         # Sync weights to inference engines
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.wake_up(tags=["weights"]))
-        ray.get(
-            policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
-            )
-        )
+        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
         policy.offload_to_cpu()
         asyncio.run(client.wake_up(tags=["kv_cache"]))
         asyncio.run(client.reset_prefix_cache())

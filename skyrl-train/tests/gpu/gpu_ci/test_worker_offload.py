@@ -8,20 +8,20 @@ import os
 import shutil
 
 from tests.gpu.utils import init_worker_with_type, make_dummy_training_batch, make_dummy_tensorbatch, get_rank_0_memory
-from skyrl_train.config import SkyRLTrainConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.utils import validate_cfg
 from skyrl_train.training_batch import TrainingOutputBatch
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_actor_config() -> SkyRLTrainConfig:
-    cfg = SkyRLTrainConfig()
+def get_test_actor_config() -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.use_sample_packing = False
     cfg.trainer.logger = "console"
-    cfg.generator.inference_engine.tensor_parallel_size = 2
+    cfg.generator.inference_engine_tensor_parallel_size = 2
 
     validate_cfg(cfg)
 
@@ -29,7 +29,7 @@ def get_test_actor_config() -> SkyRLTrainConfig:
 
 
 @pytest.fixture
-def cfg() -> SkyRLTrainConfig:
+def cfg() -> SkyRLConfig:
     return get_test_actor_config()
 
 

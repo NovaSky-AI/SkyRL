@@ -1,6 +1,10 @@
 """Weight synchronization abstractions for distributed RL training."""
 
-from typing import Type
+from typing import Type, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
 
 from .base import WeightChunk, WeightUpdateRequest, LoraLoadRequest
 from .weight_extractor import WeightExtractor
@@ -27,7 +31,7 @@ from .cuda_ipc_strategy import (
 )
 
 
-def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> Type[WeightTransferStrategy]:
+def get_transfer_strategy_cls(cfg: "Union[SkyRLConfig, DictConfig]") -> Type[WeightTransferStrategy]:
     """Get the appropriate transfer strategy class based on config.
 
     Uses CUDA IPC when:
@@ -37,13 +41,12 @@ def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> T
     Otherwise uses broadcast.
 
     Args:
-        weight_sync_backend: The weight sync backend ("nccl" or other).
-        colocate_all: Whether training and inference are colocated on same nodes.
+        cfg: Configuration object containing generator and trainer settings.
 
     Returns:
         The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
     """
-    if weight_sync_backend == "nccl" and colocate_all:
+    if cfg.generator.weight_sync_backend == "nccl" and cfg.trainer.placement.colocate_all:
         return CudaIpcTransferStrategy
     return BroadcastTransferStrategy
 

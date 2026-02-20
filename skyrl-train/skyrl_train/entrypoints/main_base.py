@@ -2,6 +2,7 @@
 Main entrypoint for training.
 """
 
+from typing import Union
 from ray.util.placement_group import placement_group, PlacementGroup
 
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
@@ -16,12 +17,13 @@ from skyrl_train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeou
 from skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl_train.generators.base import GeneratorInterface
-from skyrl_train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from omegaconf import DictConfig
+from skyrl_train.config import SkyRLConfig, get_config_as_yaml_str
 from pathlib import Path
 import ray
-import sys
 
 import os
+import hydra
 from loguru import logger
 from skyrl_train.utils.tracking import Tracking
 import multiprocessing as mp
@@ -38,33 +40,32 @@ __all__ = ["BasePPOExp", "config_dir"]
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase
+    cfg: Union[SkyRLConfig, DictConfig], colocate_pg, tokenizer: PreTrainedTokenizerBase
 ):
     from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
 
-    ie_cfg = cfg.generator.inference_engine
     engine_kwargs = {
-        "num_inference_engines": ie_cfg.num_engines,
-        "tensor_parallel_size": ie_cfg.tensor_parallel_size,
-        "pipeline_parallel_size": ie_cfg.pipeline_parallel_size,
-        "model_dtype": ie_cfg.model_dtype,
+        "num_inference_engines": cfg.generator.num_inference_engines,
+        "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
+        "pipeline_parallel_size": cfg.generator.inference_engine_pipeline_parallel_size,
+        "model_dtype": cfg.generator.model_dtype,
         "pretrain": cfg.trainer.policy.model.path,
         "seed": cfg.trainer.seed,
-        "vllm_v1_disable_multiproc": ie_cfg.vllm_v1_disable_multiproc,
-        "enable_prefix_caching": ie_cfg.enable_prefix_caching,
-        "enforce_eager": ie_cfg.enforce_eager,
-        "expert_parallel_size": ie_cfg.expert_parallel_size,
-        "data_parallel_size": ie_cfg.data_parallel_size,
+        "vllm_v1_disable_multiproc": cfg.generator.vllm_v1_disable_multiproc,
+        "enable_prefix_caching": cfg.generator.enable_prefix_caching,
+        "enforce_eager": cfg.generator.enforce_eager,
+        "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
+        "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
         "shared_pg": colocate_pg,
-        "gpu_memory_utilization": ie_cfg.gpu_memory_utilization,
+        "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
         "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
-        "async_engine": ie_cfg.async_engine,
-        "max_num_batched_tokens": ie_cfg.max_num_batched_tokens,
-        "max_num_seqs": ie_cfg.max_num_seqs,
+        "async_engine": cfg.generator.async_engine,
+        "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
+        "max_num_seqs": cfg.generator.max_num_seqs,
         "tokenizer": tokenizer,
-        "backend": ie_cfg.backend,
-        "engine_init_kwargs": ie_cfg.engine_init_kwargs,
-        "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
+        "backend": cfg.generator.backend,
+        "engine_init_kwargs": cfg.generator.engine_init_kwargs,
+        "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -73,13 +74,13 @@ def create_ray_wrapped_inference_engines_from_config(
         engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
         engine_kwargs["sleep_level"] = 1
         engine_kwargs["max_loras"] = 1
-        engine_kwargs["fully_sharded_loras"] = ie_cfg.fully_sharded_loras
+        engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
 
         # TODO(devpatel): Bandaid solution, replace this once we have a better
         # solution for LoRA performance degradation on the vLLM side
-        if ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
+        if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
             logger.warning(
-                "LoRA is enabled but inference_engine.enforce_eager=true. "
+                "LoRA is enabled but generator.enforce_eager=true. "
                 "This combination causes significant performance degradation (2-3x slower generation). "
                 "Automatically setting enforce_eager=false for better performance. "
             )
@@ -89,36 +90,37 @@ def create_ray_wrapped_inference_engines_from_config(
         engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
     if cfg.generator.rope_theta is not None:
         engine_kwargs["rope_theta"] = cfg.generator.rope_theta
-    if ie_cfg.served_model_name is not None:
-        engine_kwargs["served_model_name"] = ie_cfg.served_model_name
+    if cfg.generator.served_model_name is not None:
+        engine_kwargs["served_model_name"] = cfg.generator.served_model_name
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
 
 
-def create_remote_inference_engines_from_config(cfg: SkyRLTrainConfig, tokenizer: PreTrainedTokenizerBase):
+def create_remote_inference_engines_from_config(
+    cfg: Union[SkyRLConfig, DictConfig], tokenizer: PreTrainedTokenizerBase
+):
     # TODO(tgriggs): We may want a separate config for the model name in case
     # it's different from the name used in the OpenAI API
-    ie_cfg = cfg.generator.inference_engine
     return create_remote_inference_engines(
-        urls=ie_cfg.remote_urls,
+        urls=cfg.generator.remote_inference_engine_urls,
         model_name=cfg.trainer.policy.model.path,
-        engine_backend=ie_cfg.backend,
+        engine_backend=cfg.generator.backend,
         tokenizer=tokenizer,
-        tensor_parallel_size=ie_cfg.tensor_parallel_size,
-        pipeline_parallel_size=ie_cfg.pipeline_parallel_size,
-        data_parallel_size=ie_cfg.data_parallel_size,
-        expert_parallel_size=ie_cfg.expert_parallel_size,
+        tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+        pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
+        data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
+        expert_parallel_size=cfg.generator.inference_engine_expert_parallel_size,
     )
 
 
 class BasePPOExp:
-    def __init__(self, cfg: SkyRLTrainConfig):
+    def __init__(self, cfg: Union[SkyRLConfig, DictConfig]):
         """
         Initializes a PPO experiment.
 
-        Args:
-            cfg: The fully resolved SkyRLTrainConfig instance.
+        The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
+        # TODO (sumanthrh): Migrate to using SkyRLConfig
         self.cfg = cfg
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
@@ -130,7 +132,7 @@ class BasePPOExp:
         self._inference_router = None
 
     @staticmethod
-    def get_cfg_as_str(cfg: SkyRLTrainConfig) -> str:
+    def get_cfg_as_str(cfg: Union[SkyRLConfig, DictConfig]) -> str:
         return get_config_as_yaml_str(cfg)
 
     def get_tokenizer(self, padding_side="left"):
@@ -192,13 +194,12 @@ class BasePPOExp:
             PlacementGroup: The placement group for colocated training.
         """
         if self.cfg.trainer.placement.colocate_all:
-            ie_cfg = self.cfg.generator.inference_engine
             pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
-                * ie_cfg.num_engines
-                * ie_cfg.tensor_parallel_size
-                * ie_cfg.pipeline_parallel_size
-                * ie_cfg.data_parallel_size,
+                * self.cfg.generator.num_inference_engines
+                * self.cfg.generator.inference_engine_tensor_parallel_size
+                * self.cfg.generator.inference_engine_pipeline_parallel_size
+                * self.cfg.generator.inference_engine_data_parallel_size,
                 strategy="PACK",
             )
             get_ray_pg_ready_with_timeout(pg, timeout=timeout)
@@ -219,6 +220,7 @@ class BasePPOExp:
             skyrl_gym_cfg=cfg.environment.skyrl_gym,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            model_name=cfg.trainer.policy.model.path,
         )
 
     def get_trainer(
@@ -278,20 +280,14 @@ class BasePPOExp:
 
     def _get_legacy_inference_client(self) -> InferenceEngineInterface:
         """Legacy inference client using Ray actors."""
-        if self.cfg.generator.inference_engine.run_engines_locally:
+        if self.cfg.generator.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config(
                 self.cfg, self.colocate_pg, self.tokenizer
             )
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
 
-        return InferenceEngineClient(
-            inference_engines,
-            self.tokenizer,
-            self.cfg.trainer.policy.model.path,
-            self.cfg.trainer.policy.model.lora,
-            self.cfg.generator.inference_engine,
-        )
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
 
     def _get_new_inference_client(self):
         """New inference client using HTTP endpoints.
@@ -310,10 +306,9 @@ class BasePPOExp:
         from skyrl_train.inference_servers.router import InferenceRouter
         from skyrl_train.inference_servers.server_group import ServerGroup
 
-        ie_cfg = self.cfg.generator.inference_engine
         is_colocated = self.cfg.trainer.placement.colocate_all
-        external_proxy_url = ie_cfg.external_proxy_url
-        external_server_urls = ie_cfg.external_server_urls
+        external_proxy_url = self.cfg.generator.get("external_proxy_url")
+        external_server_urls = self.cfg.generator.get("external_server_urls")
 
         has_external_proxy = external_proxy_url is not None
         has_external_servers = external_server_urls is not None
@@ -350,9 +345,9 @@ class BasePPOExp:
 
             self._server_group = ServerGroup(
                 cli_args=cli_args,
-                num_servers=ie_cfg.num_engines,
+                num_servers=self.cfg.generator.num_inference_engines,
                 placement_group=self.colocate_pg if is_colocated else None,
-                enable_dp=ie_cfg.data_parallel_size > 1,
+                enable_dp=self.cfg.generator.inference_engine_data_parallel_size > 1,
             )
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
@@ -419,16 +414,14 @@ class BasePPOExp:
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLTrainConfig):
+def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
     exp = BasePPOExp(cfg)
     exp.run()
 
 
-def main() -> None:
-    # Parse CLI args and build typed config
-    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
-
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
 

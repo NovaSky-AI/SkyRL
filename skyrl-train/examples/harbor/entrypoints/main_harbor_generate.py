@@ -3,22 +3,20 @@ Main entrypoint for generating rollouts on Harbor tasks. For debugging purposes.
 """
 
 import ray
-import sys
 import asyncio
-import yaml
+import hydra
 from loguru import logger
+from omegaconf import DictConfig
 
 from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import BasePPOExp
+from skyrl_train.entrypoints.main_base import (
+    BasePPOExp,
+    config_dir,
+)
 from skyrl_train.generators.base import GeneratorInput, TrajectoryID
 from examples.harbor.harbor_generator import HarborGenerator
 from examples.harbor.dataset import HarborTaskDataset
-from examples.harbor.entrypoints.main_harbor import (
-    HarborSkyRLConfig,
-    HARBOR_DEFAULT_CONFIG,
-    _deep_merge,
-)
 
 
 # For debugging purposes, we only generate a few samples.
@@ -83,21 +81,17 @@ class HarborGenerateExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg):
+def skyrl_entrypoint(cfg: DictConfig):
     # make sure that the training loop is not run on the head node.
     exp = HarborGenerateExp(cfg)
     exp.run()
 
 
-def main() -> None:
-    cfg = HarborSkyRLConfig.from_cli_overrides(sys.argv[1:])
-
-    # Load harbor defaults and merge CLI overrides on top
-    with open(HARBOR_DEFAULT_CONFIG) as f:
-        defaults = yaml.safe_load(f)
-    cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
-
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
+    # validate the arguments
     validate_cfg(cfg)
+
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 

@@ -17,7 +17,7 @@ import tempfile
 import json
 from transformers import AutoTokenizer
 
-from skyrl_train.config import SkyRLTrainConfig
+from skyrl_train.config import SkyRLConfig
 from tests.gpu.utils import (
     init_worker_with_type,
     make_dummy_training_batch,
@@ -31,8 +31,8 @@ MODEL_ARCH = "Qwen3ForCausalLM"
 NUM_GPUS = 4
 
 
-def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
-    cfg = SkyRLTrainConfig()
+def get_test_actor_config(strategy: str) -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
     cfg.trainer.strategy = strategy

@@ -1,12 +1,11 @@
-import sys
-
 import torch
 import ray
-from skyrl_train.config import SkyRLTrainConfig
+from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp
+import hydra
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import validate_cfg
+from skyrl_train.entrypoints.main_base import config_dir, validate_cfg
 from skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
     register_policy_loss,
@@ -63,13 +62,13 @@ class OnPolicyDistillationExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLTrainConfig):
+def skyrl_entrypoint(cfg: DictConfig):
     exp = OnPolicyDistillationExp(cfg)
     exp.run()
 
 
-def main() -> None:
-    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
+@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
+def main(cfg: DictConfig) -> None:
     # validate the arguments
     validate_cfg(cfg)
 

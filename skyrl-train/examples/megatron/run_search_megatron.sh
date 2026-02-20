@@ -52,12 +52,12 @@ uv run --isolated --frozen --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.ref.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.ref.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.ref.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
-  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP \
-  generator.inference_engine.backend=vllm \
-  generator.inference_engine.run_engines_locally=true \
-  generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.gpu_memory_utilization=0.6 \
+  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TP \
+  generator.backend=vllm \
+  generator.run_engines_locally=true \
+  generator.weight_sync_backend=nccl \
+  generator.gpu_memory_utilization=0.6 \
   trainer.epochs=1 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=512 \
@@ -67,7 +67,7 @@ uv run --isolated --frozen --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.max_prompt_length=2048 \
   generator.max_input_length=4096 \
   generator.sampling_params.max_generate_length=500 \
-  generator.inference_engine.async_engine=true \
+  generator.async_engine=true \
   generator.batched=false \
   generator.use_conversation_multi_turn=false \
   generator.n_samples_per_prompt=5 \

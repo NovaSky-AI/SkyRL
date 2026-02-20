@@ -38,8 +38,8 @@ uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.0.5b_int8 --
   data.val_data="['$DATA_DIR/aime-2024-cleaned.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.policy_loss_type="dual_clip" \
-  trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \
-  trainer.algorithm.overlong_buffer_penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
+  +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
+  +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.eps_clip_low=$EPS_CLIP_LOW \
   trainer.algorithm.eps_clip_high=$EPS_CLIP_HIGH \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
@@ -59,8 +59,8 @@ uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.0.5b_int8 --
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.inference_engine.num_engines=$NUM_GPUS \
-  generator.inference_engine.tensor_parallel_size=1 \
+  generator.num_inference_engines=$NUM_GPUS \
+  generator.inference_engine_tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
@@ -76,17 +76,17 @@ uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.0.5b_int8 --
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
-  generator.inference_engine.backend=vllm \
-  generator.inference_engine.run_engines_locally=true \
-  generator.inference_engine.weight_sync_backend=nccl \
-  generator.inference_engine.async_engine=false \
+  generator.backend=vllm \
+  generator.run_engines_locally=true \
+  generator.weight_sync_backend=nccl \
+  generator.async_engine=false \
   generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=5 \
-  generator.inference_engine.gpu_memory_utilization=0.6 \
+  generator.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo_flashrl" \
   trainer.run_name="dapo_flashrl_0.5B_int8" \
   trainer.ckpt_path="$CKPT_PATH" \
-  generator.inference_engine.enforce_eager=false \
+  generator.enforce_eager=false \
   $@

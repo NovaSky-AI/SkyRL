@@ -31,9 +31,9 @@ def verifiers_runtime():
     cfg = get_test_actor_config()
     cfg.trainer.policy.model.path = model
     cfg.generator.max_input_length = 2048
-    cfg.generator.inference_engine.enable_http_endpoint = True
-    cfg.generator.inference_engine.http_endpoint_host = "127.0.0.1"
-    cfg.generator.inference_engine.http_endpoint_port = http_port
+    cfg.generator.enable_http_endpoint = True
+    cfg.generator.http_endpoint_host = "127.0.0.1"
+    cfg.generator.http_endpoint_port = http_port
     cfg.generator.sampling_params.max_generate_length = 256
 
     # Reuse shared initializer for local engines and client

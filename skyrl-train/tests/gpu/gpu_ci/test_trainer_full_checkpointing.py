@@ -22,7 +22,7 @@ from torch.utils.data import Dataset
 from unittest.mock import MagicMock
 from transformers import AutoTokenizer
 
-from skyrl_train.config import SkyRLTrainConfig
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.utils.tracking import Tracking
 from skyrl_train.trainer import RayPPOTrainer
 from tests.gpu.utils import import_worker, ray_init_for_tests
@@ -47,9 +47,9 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLTrainConfig:
+def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLConfig:
     """Create minimal trainer config for testing"""
-    cfg = SkyRLTrainConfig()
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.critic.model.path = MODEL_NAME  # Enable critic for testing
     cfg.trainer.strategy = strategy
@@ -72,8 +72,8 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> S
     cfg.trainer.epochs = 1
     cfg.trainer.logger = "console"
     cfg.generator.n_samples_per_prompt = 1
-    cfg.generator.inference_engine.num_engines = NUM_GPUS // 2
-    cfg.generator.inference_engine.tensor_parallel_size = 2
+    cfg.generator.num_inference_engines = NUM_GPUS // 2
+    cfg.generator.inference_engine_tensor_parallel_size = 2
 
     # Megatron-specific
     if strategy == "megatron":
@@ -94,7 +94,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> S
     return cfg
 
 
-def create_minimal_trainer(cfg: SkyRLTrainConfig):
+def create_minimal_trainer(cfg: SkyRLConfig):
     """Create a minimal trainer setup for testing"""
     # Create minimal tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)

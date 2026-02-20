@@ -7,14 +7,15 @@ transfer mechanisms (broadcast, CUDA IPC) to be used interchangeably.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Iterator, Optional, Tuple
+from typing import TYPE_CHECKING, Iterable, Iterator, Optional, Tuple, Union
 
 import torch
 
 from skyrl_train.weight_sync.base import WeightChunk
 
 if TYPE_CHECKING:
-    from skyrl_train.config import InferenceEngineConfig
+    from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
     from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
     from skyrl_train.weight_sync.base import WeightUpdateRequest
 
@@ -122,12 +123,12 @@ class WeightTransferStrategy(ABC):
     @staticmethod
     @abstractmethod
     def create_init_info(
-        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
+        cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
     ) -> WeightSyncInitInfo:
         """Create init info with all config-derived args.
 
         Args:
-            ie_cfg: InferenceEngineConfig containing inference engine settings.
+            cfg: Configuration object containing generator settings.
             inference_world_size: Total number of inference workers (from client.get_world_size()).
                 Used by HTTP inference path. Strategies that don't need world_size can ignore this.
 

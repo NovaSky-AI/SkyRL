@@ -1,5 +1,5 @@
 from skyrl_train.config.config import (
-    SkyRLTrainConfig,
+    SkyRLConfig,
     DataConfig,
     TrainerConfig,
     PolicyConfig,
@@ -7,7 +7,6 @@ from skyrl_train.config.config import (
     RefConfig,
     AlgorithmConfig,
     GeneratorConfig,
-    InferenceEngineConfig,
     EnvironmentConfig,
     ModelConfig,
     SkyRLLoraConfig,
@@ -32,13 +31,12 @@ from skyrl_train.config.config import (
     MegatronDDPConfig,
     MegatronLoraConfig,
     GSM8kLLMJudgeEnvConfig,
-    make_config,
     get_config_as_dict,
     get_config_as_yaml_str,
 )
 
 __all__ = [
-    "SkyRLTrainConfig",
+    "SkyRLConfig",
     "DataConfig",
     "TrainerConfig",
     "PolicyConfig",
@@ -46,7 +44,6 @@ __all__ = [
     "RefConfig",
     "AlgorithmConfig",
     "GeneratorConfig",
-    "InferenceEngineConfig",
     "EnvironmentConfig",
     "ModelConfig",
     "SkyRLLoraConfig",
@@ -71,7 +68,6 @@ __all__ = [
     "MegatronDDPConfig",
     "MegatronLoraConfig",
     "GSM8kLLMJudgeEnvConfig",
-    "make_config",
     "get_config_as_dict",
     "get_config_as_yaml_str",
 ]
