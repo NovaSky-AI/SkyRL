@@ -23,7 +23,7 @@ Usage:
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, TypedDict, cast, get_type_hints
+from typing import Any, Callable, get_type_hints
 
 from cloudpathlib import AnyPath
 import numpy as np
@@ -103,13 +103,17 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     )
 
 
-OptimStepMetrics = TypedDict(
-    "OptimStepMetrics",
-    {
-        "skyrl.ai/grad_norm": jax.Array | float,
-        "skyrl.ai/learning_rate": jax.Array | float,
-    },
-)
+@jax.tree_util.register_dataclass
+@dataclass
+class OptimStepMetrics:
+    grad_norm: jax.Array
+    learning_rate: jax.Array
+
+    def to_output_metrics(self) -> dict[str, float]:
+        return {
+            "skyrl.ai/grad_norm": self.grad_norm.item(),
+            "skyrl.ai/learning_rate": self.learning_rate.item(),
+        }
 
 
 @jax.tree_util.register_dataclass
@@ -140,10 +144,11 @@ class AccumulatedGradients:
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
+        safe_count = jnp.maximum(count, jnp.int32(1))
 
         def compute_mean(path, g):
             idx = get_adapter_idx(path, adapter_index)
-            return jnp.zeros_like(g).at[idx].set(g[idx] / count.astype(g.dtype))
+            return jnp.zeros_like(g).at[idx].set(g[idx] / safe_count.astype(g.dtype))
 
         return jax.tree.map_with_path(compute_mean, self.grad_sum)
 
@@ -497,10 +502,10 @@ class JaxBackendImpl(AbstractBackend):
             mean_grads = accumulated_grads.get_mean(adapter_index)
             grad_norm = optax.global_norm(mean_grads)
             optimizer.update(lora_params, mean_grads)
-            metrics: OptimStepMetrics = {
-                "skyrl.ai/grad_norm": grad_norm,
-                "skyrl.ai/learning_rate": optimizer.opt_state.hyperparams["learning_rate"],
-            }
+            metrics = OptimStepMetrics(
+                grad_norm=grad_norm,
+                learning_rate=optimizer.opt_state.hyperparams["learning_rate"],
+            )
             return accumulated_grads.reset_adapter(adapter_index), metrics
 
         if self.config.enforce_eager:
@@ -751,12 +756,7 @@ class JaxBackendImpl(AbstractBackend):
 
         # Check if we have any gradients accumulated (count > 0)
         if self.accumulated_grads.counts[adapter_index] == 0:
-            logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
-            optim_metrics: OptimStepMetrics = {
-                "skyrl.ai/grad_norm": 0.0,
-                "skyrl.ai/learning_rate": learning_rate,
-            }
-            return types.OptimStepOutput(metrics=optim_metrics)
+            logger.warning(f"No accumulated gradients for model {model_id}; applying step with zero gradients")
 
         # Update hyperparameters from the request
         hp = optimizer.opt_state.hyperparams
@@ -775,12 +775,9 @@ class JaxBackendImpl(AbstractBackend):
                 jnp.int32(adapter_index),
             )
 
-        optim_metrics = cast(
-            OptimStepMetrics,
-            {k: float(v) for k, v in jax.device_get(optim_metrics).items()},
-        )
-        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={optim_metrics}")
-        return types.OptimStepOutput(metrics=optim_metrics)
+        output_metrics = jax.device_get(optim_metrics).to_output_metrics()
+        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={output_metrics}")
+        return types.OptimStepOutput(metrics=output_metrics)
 
     def sample(
         self,
