@@ -67,9 +67,9 @@ commands. For more, see [quickstart](quickstart).
 ```bash
 cd $HOME
 git clone https://github.com/NovaSky-AI/SkyRL
-cd SkyRL/skyrl-train
+cd SkyRL/
 pip install uv
-uv run --isolated python examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-NUM_GPUS=1 LOGGER=console bash examples/gsm8k/run_gsm8k.sh
+uv run --isolated python examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+NUM_GPUS=1 LOGGER=console bash examples/train/gsm8k/run_gsm8k.sh
 
 ```
