@@ -4,19 +4,19 @@ The registry system in SkyRL Train provides a way to register and manage custom 
 
 ## Base Registry Classes
 
-::: skyrl_train.utils.ppo_utils.BaseFunctionRegistry
+::: skyrl.backends.skyrl_train.utils.ppo_utils.BaseFunctionRegistry
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.utils.ppo_utils.RegistryActor
+::: skyrl.backends.skyrl_train.utils.ppo_utils.RegistryActor
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.utils.ppo_utils.sync_registries
+::: skyrl.backends.skyrl_train.utils.ppo_utils.sync_registries
     options:
       show_root_heading: true
 
@@ -24,19 +24,19 @@ The registry system in SkyRL Train provides a way to register and manage custom 
 
 The advantage estimator registry manages functions that compute advantages and returns for reinforcement learning algorithms.
 
-::: skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry
+::: skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.utils.ppo_utils.AdvantageEstimator
+::: skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimator
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.utils.ppo_utils.register_advantage_estimator
+::: skyrl.backends.skyrl_train.utils.ppo_utils.register_advantage_estimator
     options:
       show_root_heading: true
 
@@ -44,18 +44,18 @@ The advantage estimator registry manages functions that compute advantages and r
 
 The policy loss registry manages functions that compute policy losses for PPO and related algorithms.
 
-::: skyrl_train.utils.ppo_utils.PolicyLossRegistry
+::: skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossRegistry
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.utils.ppo_utils.PolicyLossType
+::: skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossType
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.utils.ppo_utils.register_policy_loss
+::: skyrl.backends.skyrl_train.utils.ppo_utils.register_policy_loss
     options:
       show_root_heading: true

@@ -57,7 +57,7 @@ cd docs
 npm run build:api-ref
 ```
 
-This runs `uv sync --extra docs` in `skyrl-train/` and then builds the MkDocs API reference into `docs/public/api-ref/`. You can then access it via the dev server.
+This runs `uv sync --extra docs` in `skyrl/` and then builds the MkDocs API reference into `docs/public/api-ref/`. You can then access it via the dev server.
 
 ### Full Production Build
 
