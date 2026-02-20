@@ -770,8 +770,6 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         cfg.trainer.strategy = "fsdp2"
         engine_init_kwargs = {}
         if use_custom_template:
-            # use relative path to workspace root
-            # __file__ is skyrl-train/tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
             engine_init_kwargs["chat_template"] = TEMPLATE_PATH
 
         engines = InferenceEngineState.create(
