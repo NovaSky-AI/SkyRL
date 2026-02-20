@@ -152,7 +152,7 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
     cfg.generator.inference_engine_data_parallel_size = dp_size
 
     # Get responses from Ray engine
-    with InferenceEngineState.create(cfg) as engines:
+    with InferenceEngineState.create(cfg, sleep_level=1) as engines:
         llm_client = engines.client
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
@@ -220,7 +220,7 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, pp
     cfg.generator.inference_engine_pipeline_parallel_size = pp_size
     cfg.generator.inference_engine_data_parallel_size = dp_size
 
-    with InferenceEngineState.create(cfg) as engines:
+    with InferenceEngineState.create(cfg, sleep_level=1) as engines:
         llm_client = engines.client
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
@@ -268,7 +268,7 @@ def test_token_based_generation_consistency(ray_init_fixture, backend: str, tp_s
     cfg.generator.inference_engine_pipeline_parallel_size = pp_size
     cfg.generator.inference_engine_data_parallel_size = dp_size
 
-    with InferenceEngineState.create(cfg) as engines:
+    with InferenceEngineState.create(cfg, sleep_level=1) as engines:
         llm_client = engines.client
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
@@ -314,7 +314,7 @@ def test_sample_api(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
     cfg.generator.inference_engine_tensor_parallel_size = tp_size
     cfg.generator.inference_engine_data_parallel_size = dp_size
 
-    with InferenceEngineState.create(cfg) as engines:
+    with InferenceEngineState.create(cfg, sleep_level=1) as engines:
         llm_client = engines.client
         sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
