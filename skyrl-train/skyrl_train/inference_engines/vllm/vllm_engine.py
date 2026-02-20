@@ -91,6 +91,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         self._pp_size = kwargs.get("pipeline_parallel_size", 1)
         self._dp_size = kwargs.get("data_parallel_size", 1)
         self._is_lora = kwargs.get("enable_lora", False)
+        self._last_lora_path: str | None = None
 
         # Let subclass create the appropriate engine
         self.llm = self._create_engine(*args, **kwargs)
@@ -209,9 +210,11 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
             if len(lora_int_ids) > 0:
                 lora_int_id = lora_int_ids[0]
                 batch_size = len(prompt_token_ids)
-                # dummy_lora_path for placeholder (actual loading done in add_lora())
+                # Use last loaded LoRA path or a dummy path for placeholder
+                # (actual loading done in add_lora())
+                lora_path = self._last_lora_path or "/dummy_lora_path"
                 lora_requests = [
-                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path")
+                    LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path=lora_path)
                 ] * batch_size
 
         outputs = await asyncio.to_thread(
@@ -266,6 +269,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
         result = self.llm.llm_engine.add_lora(lora_request)
+        self._last_lora_path = lora_path
         return result
 
     async def update_named_weights(self, request: WeightUpdateRequest):
@@ -399,6 +403,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         lora_id = int(time.time_ns() % 0x7FFFFFFF)
         lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
         result = await self.llm.add_lora(lora_request)
+        self._last_lora_path = lora_path
         return result
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
@@ -411,9 +416,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             lora_int_ids = list(await self.llm.list_loras())
             if len(lora_int_ids) > 0:
                 lora_int_id = lora_int_ids[0]
-                # dummy_lora_path for placeholder (actual loading done in add_lora())
+                # Use last loaded LoRA path or a dummy path for placeholder
+                # (actual loading done in add_lora())
+                lora_path = self._last_lora_path or "/dummy_lora_path"
                 lora_request = LoRARequest(
-                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
+                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path=lora_path
                 )
 
         async for request_output in self.llm.generate(
