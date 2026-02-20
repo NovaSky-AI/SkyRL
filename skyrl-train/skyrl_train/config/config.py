@@ -205,7 +205,7 @@ class CriticConfig(BaseConfig):
 # TODO: Have global config init so that the default value for the ref model path is the policy model path
 @dataclass
 class RefConfig(BaseConfig):
-    model: ModelConfig = field(default_factory=lambda: copy.deepcopy(ModelConfig(path="Qwen/Qwen2.5-1.5B-Instruct")))
+    model: ModelConfig = field(default_factory=ModelConfig)
     sequence_parallel_size: int = 1
     fsdp_config: FSDPConfig = field(default_factory=FSDPConfig)
     megatron_config: MegatronConfig = field(default_factory=MegatronConfig)
@@ -395,7 +395,7 @@ class GeneratorConfig(BaseConfig):
     n_samples_per_prompt: int = 5
     batched: bool = False
     max_turns: int = 1
-    max_input_length: int = 512
+    max_input_length: Optional[int] = None  # Defaults to trainer.max_prompt_length in SkyRLTrainConfig.__post_init__
     chat_template: ChatTemplateConfig = field(default_factory=ChatTemplateConfig)
     chat_template_kwargs: Dict[str, Any] = field(default_factory=dict)
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
@@ -572,6 +572,26 @@ class SkyRLTrainConfig(BaseConfig):
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
     def __post_init__(self):
+        """Apply cross-field defaults that replicate OmegaConf interpolations from the legacy YAML config."""
+        # ref model defaults to the policy model (YAML: ${trainer.policy.model.path})
+        if self.trainer.ref.model.path is None:
+            self.trainer.ref.model.path = self.trainer.policy.model.path
+
+        # generator.max_input_length defaults to trainer.max_prompt_length (YAML: ${trainer.max_prompt_length})
+        if self.generator.max_input_length is None:
+            self.generator.max_input_length = self.trainer.max_prompt_length
+
+        # eval max_generate_length defaults to train max_generate_length
+        # (YAML: ${generator.sampling_params.max_generate_length})
+        if self.generator.eval_sampling_params.max_generate_length == SamplingParams().max_generate_length:
+            self.generator.eval_sampling_params.max_generate_length = self.generator.sampling_params.max_generate_length
+
+        # generator rope params default to trainer rope params (YAML: ${trainer.rope_scaling}, ${trainer.rope_theta})
+        if self.generator.rope_scaling is None and self.trainer.rope_scaling is not None:
+            self.generator.rope_scaling = self.trainer.rope_scaling
+        if self.generator.rope_theta is None and self.trainer.rope_theta is not None:
+            self.generator.rope_theta = self.trainer.rope_theta
+
         # Copy temperature from generator sampling params to algorithm config
         # so workers can access it without needing the generator config
         self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
