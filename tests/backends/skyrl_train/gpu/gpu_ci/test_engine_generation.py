@@ -93,7 +93,7 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
         pytest.param("vllm", 2, 1, 2, marks=pytest.mark.vllm),
         pytest.param("vllm", 2, 2, 1, marks=pytest.mark.vllm),  # TP=2, PP=2
     ],
-    ids=["vllm_tp2", "vllm_dp2", "vllm_tp2_pp2"],
+    ids=["vllm_tp2_pp1_dp1", "vllm_tp2_pp1_dp2", "vllm_tp2_pp2_dp1"],
 )
 def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: int, pp_size: int, dp_size: int):
     """
