@@ -23,7 +23,7 @@ Usage:
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, get_type_hints
+from typing import Any, Callable, TypedDict, cast, get_type_hints
 
 from cloudpathlib import AnyPath
 import numpy as np
@@ -101,6 +101,15 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=None,
         description="Total number of processes in the multi-node cluster",
     )
+
+
+OptimStepMetrics = TypedDict(
+    "OptimStepMetrics",
+    {
+        "skyrl.ai/grad_norm": jax.Array | float,
+        "skyrl.ai/learning_rate": jax.Array | float,
+    },
+)
 
 
 @jax.tree_util.register_dataclass
@@ -483,12 +492,16 @@ class JaxBackendImpl(AbstractBackend):
             lora_params: nnx.State,
             optimizer: nnx.Optimizer,
             adapter_index: jax.Array,
-        ) -> tuple[AccumulatedGradients, jax.Array]:
+        ) -> tuple[AccumulatedGradients, OptimStepMetrics]:
             """Compute full gradients, apply optimizer update, and reset accumulated grads."""
             mean_grads = accumulated_grads.get_mean(adapter_index)
             grad_norm = optax.global_norm(mean_grads)
             optimizer.update(lora_params, mean_grads)
-            return accumulated_grads.reset_adapter(adapter_index), grad_norm
+            metrics: OptimStepMetrics = {
+                "skyrl.ai/grad_norm": grad_norm,
+                "skyrl.ai/learning_rate": optimizer.opt_state.hyperparams["learning_rate"],
+            }
+            return accumulated_grads.reset_adapter(adapter_index), metrics
 
         if self.config.enforce_eager:
             self._compute_grads_and_update = compute_grads_and_update
@@ -739,7 +752,11 @@ class JaxBackendImpl(AbstractBackend):
         # Check if we have any gradients accumulated (count > 0)
         if self.accumulated_grads.counts[adapter_index] == 0:
             logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
-            return types.OptimStepOutput(metrics={"skyrl.ai/learning_rate": learning_rate})
+            optim_metrics: OptimStepMetrics = {
+                "skyrl.ai/grad_norm": 0.0,
+                "skyrl.ai/learning_rate": learning_rate,
+            }
+            return types.OptimStepOutput(metrics=optim_metrics)
 
         # Update hyperparameters from the request
         hp = optimizer.opt_state.hyperparams
@@ -751,16 +768,19 @@ class JaxBackendImpl(AbstractBackend):
 
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
         with jax.set_mesh(self.mesh):
-            self.accumulated_grads, grad_norm = self._compute_grads_and_update(
+            self.accumulated_grads, optim_metrics = self._compute_grads_and_update(
                 self.accumulated_grads,
                 self.lora_params,
                 optimizer,
                 jnp.int32(adapter_index),
             )
 
-        grad_norm = float(jax.device_get(grad_norm))
-        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), grad_norm={grad_norm}")
-        return types.OptimStepOutput(metrics={"skyrl.ai/grad_norm": grad_norm, "skyrl.ai/learning_rate": learning_rate})
+        optim_metrics = cast(
+            OptimStepMetrics,
+            {k: float(v) for k, v in jax.device_get(optim_metrics).items()},
+        )
+        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={optim_metrics}")
+        return types.OptimStepOutput(metrics=optim_metrics)
 
     def sample(
         self,
