@@ -354,7 +354,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if is_connector_path(path):
             connector_slot = value[idx]
             if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
-                return value.at[idx].set(jnp.full_like(connector_slot, 0.1))
+                return value.at[idx].set(jnp.ones_like(connector_slot))
             if key_name == "input_norm_weight":
                 return value.at[idx].set(jnp.ones_like(connector_slot))
             if key_name in {"phi_pre", "phi_post", "phi_res"}:
@@ -406,7 +406,7 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
         if is_connector_path(path):
             connector_slot = value[idx]
             if key in {"alpha_pre", "alpha_post", "alpha_res"}:
-                return value.at[idx].set(jnp.full_like(connector_slot, 0.1))
+                return value.at[idx].set(jnp.ones_like(connector_slot))
             if key in {"phi_pre", "phi_post", "phi_res"}:
                 return value.at[idx].set(jnp.zeros_like(connector_slot))
             if key == "input_norm_weight":

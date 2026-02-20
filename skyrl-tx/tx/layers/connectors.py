@@ -28,7 +28,7 @@ class LoRAConnector(nnx.Module):
     Implementation of Manifold constrained HyperConnections (https://arxiv.org/pdf/2512.24880)
 
     Initialized as exact identity (standard residual): H_pre = 1/n, H_post = 1, M = I.
-    Training discovers stream specialization via input-dependent routing (alpha = 0.1).
+    Training discovers stream specialization through input-dependent routing (alpha = 1).
     """
 
     def __init__(
@@ -53,7 +53,6 @@ class LoRAConnector(nnx.Module):
         C = hidden_dim
 
         # Phi matrices are zero-initialized so that alpha * x @ 0 + bias = bias at init.
-        # Alpha = 0.1 balances gradient flow to phi against LoRA parameter gradients.
         self.input_norm_weight = nnx.Param(jnp.ones((max_lora_adapters, n * C), dtype=dtype))
         self.phi_pre = Param(
             max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs
@@ -75,9 +74,9 @@ class LoRAConnector(nnx.Module):
         # M ~= I: strong identity mixing via Sinkhorn (minimal cross-stream leakage)
         self.b_res = nnx.Param(jnp.broadcast_to(10.0 * jnp.eye(n, dtype=dtype), (max_lora_adapters, n, n)))
 
-        self.alpha_pre = nnx.Param(jnp.full((max_lora_adapters,), 0.1, dtype=dtype))
-        self.alpha_post = nnx.Param(jnp.full((max_lora_adapters,), 0.1, dtype=dtype))
-        self.alpha_res = nnx.Param(jnp.full((max_lora_adapters,), 0.1, dtype=dtype))
+        self.alpha_pre = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
+        self.alpha_post = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
+        self.alpha_res = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
 
     def _get_adapter_indices(self, batch_size: int, adapter_indices: jax.Array | None) -> jax.Array:
         if adapter_indices is None:
