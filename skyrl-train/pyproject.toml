@@ -41,6 +41,8 @@ dependencies = [
     "flash-attn; sys_platform == 'linux'",
     "polars",
     "s3fs",
+    "adlfs",
+    "azure-identity",
     "fastapi",
     "uvicorn",
     "pybind11",

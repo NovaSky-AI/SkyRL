@@ -70,6 +70,8 @@ async def lifespan(app: FastAPI):
         "tinker",
         "--extra",
         app.state.engine_config.backend,
+        "--extra",
+        "azure",
         "-m",
         "tx.tinker.engine",
     ]
@@ -1202,6 +1204,9 @@ async def root():
 if __name__ == "__main__":
     import argparse
     import uvicorn
+
+    from tx.tinker.config import _ensure_azure_default_client
+    _ensure_azure_default_client()
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="SkyRL tx tinker API server")

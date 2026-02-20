@@ -659,6 +659,14 @@ def prepare_runtime_environment(cfg: Union[SkyRLConfig, DictConfig]) -> dict[str
         logger.info("Exporting mlflow tracking token to ray runtime env")
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
+    # Forward Azure storage env vars so Ray workers can authenticate
+    for azure_var in ("AZURE_STORAGE_CONNECTION_STRING", "AZURE_STORAGE_ACCOUNT_NAME", "AZURE_CLIENT_ID"):
+        if value := os.environ.get(azure_var):
+            env_vars[azure_var] = value
+            logger.info(f"Exporting {azure_var} to ray runtime env (length={len(value)})")
+        else:
+            logger.warning(f"{azure_var} not found in os.environ, skipping")
+
     # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
     for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
         if value := os.environ.get(var_name):
