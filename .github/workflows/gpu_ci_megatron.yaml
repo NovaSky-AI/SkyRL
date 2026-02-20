@@ -52,4 +52,4 @@ jobs:
           ANYSCALE_HOST: https://console.anyscale.com
         run: |
           anyscale job submit -f ci/anyscale_gpu_ci_megatron.yaml --timeout 5000
-          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-ci-megatron --timeout 5000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-ci-megatron-old --timeout 5000
