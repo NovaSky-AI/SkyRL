@@ -2,14 +2,32 @@
 Main entrypoint for training on Harbor tasks.
 """
 
+import signal
+import sys
+import time
+
 import ray
 import hydra
+from loguru import logger
 from omegaconf import DictConfig
 from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl_train.utils import validate_cfg
 from skyrl_train.utils.utils import initialize_ray
 from examples.harbor.harbor_generator import HarborGenerator
 from examples.harbor.dataset import HarborTaskDataset
+
+
+def _install_interrupt_handlers():
+    """(Re)install SIGINT and SIGTERM handlers that raise KeyboardInterrupt.
+
+    Ray's C code sets SIGINT to SIG_IGN during initialization and may
+    re-mask it during ray.wait()/ray.get().  We call this after every
+    ray.wait() to ensure signals are always delivered to Python.
+    For SIGTERM, Ray's C++ crash handler intercepts it otherwise.
+    See harbor#656 / SkyRL#1160.
+    """
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, lambda signum, frame: signal.default_int_handler(signum, frame))
 
 
 class HarborExp(BasePPOExp):
@@ -67,7 +85,63 @@ def main(cfg: DictConfig) -> None:
     validate_cfg(cfg)
 
     initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg))
+    ref = skyrl_entrypoint.remote(cfg)
+
+    # Restore signal handlers AFTER Ray init (which overrides them).
+    _install_interrupt_handlers()
+
+    try:
+        # Poll with time.sleep() (interruptible by signals) + non-blocking
+        # ray.wait().  We cannot use ray.get() or ray.wait(timeout=N>0)
+        # because those block in C code and may re-mask SIGINT.
+        while True:
+            time.sleep(1)
+            _install_interrupt_handlers()
+            ready, _ = ray.wait([ref], timeout=0)
+            if ready:
+                ray.get(ref)  # immediate — task already finished
+                break
+    except KeyboardInterrupt:
+        # Explicitly cancel the remote task so the worker receives
+        # KeyboardInterrupt, allowing asyncio.run() to cancel all async
+        # tasks (e.g. Harbor Trial.run()) and trigger their cleanup
+        # (sandbox teardown).  Then WAIT for the worker to finish cleanup
+        # before exiting — otherwise the driver exits immediately and
+        # sandboxes are leaked.  See harbor#656 / SkyRL#1160.
+        #
+        # Temporarily ignore signals: when Ctrl+C sends SIGINT to the
+        # process group, `uv` also dies and sends SIGTERM to us.  Without
+        # this, the SIGTERM immediately triggers a "second interrupt" before
+        # cleanup can start.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        logger.info("KeyboardInterrupt: cancelling worker, waiting for sandbox cleanup...")
+        ray.cancel(ref, force=False)
+        # Brief pause to let uv's dying SIGTERM be absorbed while ignored
+        time.sleep(0.5)
+        # Restore handlers so a deliberate second Ctrl+C can force-kill
+        _install_interrupt_handlers()
+        try:
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                try:
+                    time.sleep(1)
+                    _install_interrupt_handlers()
+                    ready, _ = ray.wait([ref], timeout=0)
+                    if ready:
+                        try:
+                            ray.get(ref)
+                        except Exception:
+                            pass  # Expected: RayTaskError from cancelled task
+                        break
+                except KeyboardInterrupt:
+                    logger.warning("Second interrupt: force-killing worker (sandboxes may leak)...")
+                    ray.cancel(ref, force=True)
+                    break
+        except Exception:
+            pass
+        logger.info("Cleanup complete.")
+        sys.exit(130)  # 128 + SIGINT(2)
 
 
 if __name__ == "__main__":
