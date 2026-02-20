@@ -3,7 +3,7 @@ import jax
 from jax import numpy as jnp
 
 from tx.utils.models import filter_lora, get_adapter_idx
-from tx.layers.connectors import default_b_pre, is_connector_path
+from tx.layers.connectors import LoRAConnector, is_connector_path
 from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
@@ -353,23 +353,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         key_name = path[-2].key
         if is_connector_path(path):
             connector_slot = value[idx]
-            if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
-                return value.at[idx].set(jnp.ones_like(connector_slot))
-            if key_name == "input_norm_weight":
-                return value.at[idx].set(jnp.ones_like(connector_slot))
-            if key_name in {"phi_pre", "phi_post", "phi_res"}:
-                return value.at[idx].set(jnp.zeros_like(connector_slot))
-            if key_name == "b_pre":
-                n = connector_slot.shape[-1]
-                return value.at[idx].set(jnp.full(connector_slot.shape, default_b_pre(n, value.dtype), dtype=value.dtype))
-            if key_name == "b_post":
-                return value.at[idx].set(jnp.zeros_like(connector_slot))
-            if key_name == "b_res":
-                n = connector_slot.shape[-1]
-                eye = 10.0 * jnp.eye(n, dtype=value.dtype)
-                return value.at[idx].set(jnp.broadcast_to(eye, connector_slot.shape))
-            return value
-
+            return value.at[idx].set(LoRAConnector.init_adapter_slot(key_name, connector_slot))
         if key_name == "lora_ranks":
             return value.at[idx].set(effective_rank)
         if key_name == "lora_scaling":
@@ -405,22 +389,7 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
         # remains behaviorally neutral for mHC before being reinitialized.
         if is_connector_path(path):
             connector_slot = value[idx]
-            if key in {"alpha_pre", "alpha_post", "alpha_res"}:
-                return value.at[idx].set(jnp.ones_like(connector_slot))
-            if key in {"phi_pre", "phi_post", "phi_res"}:
-                return value.at[idx].set(jnp.zeros_like(connector_slot))
-            if key == "input_norm_weight":
-                return value.at[idx].set(jnp.ones_like(connector_slot))
-            if key == "b_pre":
-                n = connector_slot.shape[-1]
-                return value.at[idx].set(jnp.full(connector_slot.shape, default_b_pre(n, value.dtype), dtype=value.dtype))
-            if key == "b_post":
-                return value.at[idx].set(jnp.zeros_like(connector_slot))
-            if key == "b_res":
-                n = connector_slot.shape[-1]
-                eye = 10.0 * jnp.eye(n, dtype=value.dtype)
-                return value.at[idx].set(jnp.broadcast_to(eye, connector_slot.shape))
-            return value.at[idx].set(0.0)
+            return value.at[idx].set(LoRAConnector.clear_adapter_slot(key, connector_slot))
         if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
             return value
         return value.at[idx].set(0 if key == "lora_ranks" else 0.0)

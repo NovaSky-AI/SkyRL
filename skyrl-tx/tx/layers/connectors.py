@@ -31,6 +31,8 @@ class LoRAConnector(nnx.Module):
     Training discovers stream specialization through input-dependent routing (alpha = 1).
     """
 
+    B_RES_INIT_SCALING = 10.0
+
     def __init__(
         self,
         hidden_dim: int,
@@ -72,11 +74,42 @@ class LoRAConnector(nnx.Module):
         self.b_post = nnx.Param(jnp.zeros((max_lora_adapters, n), dtype=dtype))
 
         # M ~= I: strong identity mixing via Sinkhorn (minimal cross-stream leakage)
-        self.b_res = nnx.Param(jnp.broadcast_to(10.0 * jnp.eye(n, dtype=dtype), (max_lora_adapters, n, n)))
+        self.b_res = nnx.Param(
+            jnp.broadcast_to(self.B_RES_INIT_SCALING * jnp.eye(n, dtype=dtype), (max_lora_adapters, n, n))
+        )
 
         self.alpha_pre = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
         self.alpha_post = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
         self.alpha_res = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
+
+    @staticmethod
+    def _adapter_slot_default(key_name: str, connector_slot: jax.Array) -> jax.Array | None:
+        dtype = connector_slot.dtype
+        if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
+            return jnp.ones_like(connector_slot)
+        if key_name == "input_norm_weight":
+            return jnp.ones_like(connector_slot)
+        if key_name in {"phi_pre", "phi_post", "phi_res"}:
+            return jnp.zeros_like(connector_slot)
+        if key_name == "b_pre":
+            n = connector_slot.shape[-1]
+            return jnp.full(connector_slot.shape, default_b_pre(n, dtype), dtype=dtype)
+        if key_name == "b_post":
+            return jnp.zeros_like(connector_slot)
+        if key_name == "b_res":
+            n = connector_slot.shape[-1]
+            return jnp.broadcast_to(LoRAConnector.B_RES_INIT_SCALING * jnp.eye(n, dtype=dtype), connector_slot.shape)
+        return None
+
+    @staticmethod
+    def init_adapter_slot(key_name: str, connector_slot: jax.Array) -> jax.Array:
+        default_slot = LoRAConnector._adapter_slot_default(key_name, connector_slot)
+        return connector_slot if default_slot is None else default_slot
+
+    @staticmethod
+    def clear_adapter_slot(key_name: str, connector_slot: jax.Array) -> jax.Array:
+        default_slot = LoRAConnector._adapter_slot_default(key_name, connector_slot)
+        return jnp.zeros_like(connector_slot) if default_slot is None else default_slot
 
     def _get_adapter_indices(self, batch_size: int, adapter_indices: jax.Array | None) -> jax.Array:
         if adapter_indices is None:
