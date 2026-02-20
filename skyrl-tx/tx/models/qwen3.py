@@ -428,13 +428,6 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
         """Return the lm_head callable for logits computation."""
         return self.lm_head
 
-    def is_lora_param(self, path: tuple, _value) -> bool:
-        """Return True if a parameter path corresponds to LoRA weights."""
-        is_lora = any(name in path for name in ("lora_A", "lora_B"))
-        # Connector must be trainable
-        is_connector = self.config.train_connectors and any(name in path for name in ("attn_connector", "mlp_connector"))
-        return is_lora or is_connector
-
     def __call__(
         self,
         input_ids: jax.Array,
