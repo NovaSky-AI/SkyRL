@@ -30,6 +30,19 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
 
+_episode_logger = None
+
+
+def get_episode_logger():
+    """Get or create the global episode logger instance."""
+    global _episode_logger
+    if _episode_logger is None:
+        from skyrl_train.utils.trainer_utils import EpisodeLogger
+
+        _episode_logger = EpisodeLogger()
+    return _episode_logger
+
+
 @torch.no_grad()
 async def evaluate(
     eval_dataloader: StatefulDataLoader,
@@ -219,6 +232,23 @@ async def evaluate_step_wise(
             "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
         }
     )
+
+    # Log examples to wandb
+    input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
+    output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
+    if cfg.trainer.logger in ["wandb", ["wandb"]] or (
+        isinstance(cfg.trainer.logger, list) and "wandb" in cfg.trainer.logger
+    ):
+        episode_logger = get_episode_logger()
+        episode_logger.log_first_episode_to_wandb(
+            concat_generator_outputs,
+            input_prompts,
+            output_responses,
+            concat_all_envs,
+            concat_env_extras,
+            concat_data_sources,
+            global_step if global_step is not None else 0,
+        )
 
     # 4. Prepare dumping data
     # TODO[Ben] update this to be cloud-compatible

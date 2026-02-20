@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
 from enum import Enum
+import dataclasses
 import ray
 from skyrl_train.workers.worker import PPORayActorGroup
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -35,6 +36,89 @@ class ResumeMode(Enum):
         if value is None:
             return cls.NONE
         return super()._missing_(value)
+
+
+@dataclasses.dataclass
+class EpisodeLogger:
+    """Logger for step-wise episode trajectories to wandb."""
+
+    def log_first_episode_to_wandb(
+        self,
+        concat_generator_outputs: GeneratorOutput,
+        input_prompts: List[str],
+        output_responses: List[str],
+        concat_all_envs: List[str],
+        concat_env_extras: List[Dict[str, Any]],
+        concat_data_sources: List[str],
+        global_step: int,
+    ):
+        """Log the first complete episode to wandb as a table, accumulating across evaluations."""
+        try:
+            import wandb
+        except ImportError:
+            logger.warning("wandb not installed, skipping episode logging")
+            return
+
+        # Check if we have trajectory_ids and is_last_step
+        if not concat_generator_outputs.get("trajectory_ids") or not concat_generator_outputs.get("is_last_step"):
+            logger.warning("trajectory_ids or is_last_step not available, skipping episode logging")
+            return
+
+        # Find the first episode
+        trajectory_ids = concat_generator_outputs["trajectory_ids"]
+        first_instance_id = trajectory_ids[0].instance_id
+        first_repetition_id = trajectory_ids[0].repetition_id
+
+        # Collect all steps for the first episode
+        episode_indices = []
+        for i, traj_id in enumerate(trajectory_ids):
+            if traj_id.instance_id == first_instance_id and traj_id.repetition_id == first_repetition_id:
+                episode_indices.append(i)
+            else:  # Stop once we've collected the complete first episode
+                break
+
+        if not episode_indices:
+            logger.warning("No steps found for first episode")
+            return
+
+        # Define columns - each step is a row
+        columns = [
+            "global_step",
+            "episode_id",
+            "step_num",
+            "input_prompt",
+            "output_response",
+            "score",
+            "stop_reason",
+            "is_last_step",
+        ]
+
+        # Initialize table on first call
+        if not hasattr(self, "episode_table"):
+            self.episode_table = wandb.Table(columns=columns)
+
+        # Create a new table with existing data (workaround for wandb issue #2981)
+        new_table = wandb.Table(columns=columns, data=self.episode_table.data)
+
+        # Add rows for each step in the episode
+        episode_id = f"{first_instance_id}_rep{first_repetition_id}"
+        for step_num, idx in enumerate(episode_indices):
+            new_table.add_data(
+                global_step,
+                episode_id,
+                step_num,
+                input_prompts[idx],
+                output_responses[idx],
+                concat_generator_outputs["rewards"][idx],
+                concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[idx],
+                concat_generator_outputs["is_last_step"][idx],
+            )
+
+        # Log to wandb and update reference
+        wandb.log({"eval/episode_trajectories": new_table}, step=global_step)
+        self.episode_table = new_table
+
+        logger.info(f"Logged episode {episode_id} ({len(episode_indices)} steps) to wandb at global_step {global_step}")
 
 
 def get_node_ids(
@@ -268,10 +352,21 @@ def dump_per_dataset_eval_results(
         with open(filename, "w") as f:
             for i in indices:
                 entry = {
+                    "instance_id": (
+                        concat_generator_outputs["trajectory_ids"][i].instance_id
+                        if concat_generator_outputs.get("trajectory_ids")
+                        else None
+                    ),
+                    "repetition_id": (
+                        concat_generator_outputs["trajectory_ids"][i].repetition_id
+                        if concat_generator_outputs.get("trajectory_ids")
+                        else None
+                    ),
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
                     "score": concat_generator_outputs["rewards"][i],
                     "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
+                    "is_last_step": concat_generator_outputs.get("is_last_step", [None] * len(input_prompts))[i],
                     "env_class": concat_all_envs[i],
                     "env_extras": concat_env_extras[i],
                     "data_source": data_source,
