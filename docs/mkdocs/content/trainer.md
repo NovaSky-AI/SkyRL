@@ -4,7 +4,7 @@ The Trainer drives the training loop.
 
 ## Trainer Class
 
-::: skyrl_train.trainer.RayPPOTrainer
+::: skyrl.train.trainer.RayPPOTrainer
     options:
       show_root_heading: true
       members_order: source
@@ -12,19 +12,19 @@ The Trainer drives the training loop.
 
 ## Dispatch APIs
 
-::: skyrl_train.distributed.dispatch.Dispatch
+::: skyrl.backends.skyrl_train.distributed.dispatch.Dispatch
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.distributed.dispatch.MeshDispatch
+::: skyrl.backends.skyrl_train.distributed.dispatch.MeshDispatch
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.distributed.dispatch.PassThroughDispatch
+::: skyrl.backends.skyrl_train.distributed.dispatch.PassThroughDispatch
     options:
       show_root_heading: true
       members_order: source
@@ -34,13 +34,13 @@ The Trainer drives the training loop.
 
 The base worker abstraction in SkyRL:
 
-::: skyrl_train.workers.worker.Worker
+::: skyrl.backends.skyrl_train.workers.worker.Worker
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.workers.worker.PPORayActorGroup
+::: skyrl.backends.skyrl_train.workers.worker.PPORayActorGroup
     options:
       show_root_heading: true
       members_order: source
