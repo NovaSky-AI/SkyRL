@@ -356,7 +356,7 @@ def test_process_optim_step_hyperparams_behavior():
 
 def test_optim_step_returns_metrics():
     """optim_step should return learning rate and grad norm metrics."""
-    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32)
+    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, train_connectors=True)
     backend = JaxBackend(BASE_MODEL, config)
 
     model_id = "adapter_metrics"
@@ -374,6 +374,7 @@ def test_optim_step_returns_metrics():
     assert step_output.metrics is not None
     assert step_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(learning_rate, rel=2e-3)
     assert step_output.metrics["skyrl.ai/grad_norm"] > 0
+    assert step_output.metrics["skyrl.ai/mhc_gradient_norm"] >= 0
 
     no_grad_output = backend.optim_step(
         model_id,
@@ -381,6 +382,7 @@ def test_optim_step_returns_metrics():
     )
     assert no_grad_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(2e-4, rel=2e-3)
     assert no_grad_output.metrics["skyrl.ai/grad_norm"] == pytest.approx(0.0)
+    assert no_grad_output.metrics["skyrl.ai/mhc_gradient_norm"] == pytest.approx(0.0)
 
 
 def test_gradient_checkpointing():

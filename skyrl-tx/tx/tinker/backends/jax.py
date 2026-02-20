@@ -122,12 +122,16 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
 class OptimStepMetrics:
     grad_norm: jax.Array
     learning_rate: jax.Array
+    mhc_gradient_norm: jax.Array | None = None
 
     def to_output_metrics(self) -> dict[str, float]:
-        return {
+        metrics = {
             "skyrl.ai/grad_norm": self.grad_norm.item(),
             "skyrl.ai/learning_rate": self.learning_rate.item(),
         }
+        if self.mhc_gradient_norm is not None:
+            metrics["skyrl.ai/mhc_gradient_norm"] = self.mhc_gradient_norm.item()
+        return metrics
 
 
 @jax.tree_util.register_dataclass
@@ -517,15 +521,18 @@ class JaxBackendImpl(AbstractBackend):
             """Compute full gradients, apply optimizer update, and reset accumulated grads."""
             mean_grads = accumulated_grads.get_mean(adapter_index)
             grad_norm = optax.global_norm(mean_grads)
-            mhc_grads = jax.tree.map_with_path(
-                lambda path, g: g if is_connector_path(path) else jnp.zeros_like(g),
-                mean_grads,
-            )
-            mhc_grad_norm = optax.global_norm(mhc_grads)
+            mhc_gradient_norm = None
+            if self.config.train_connectors:
+                mhc_grads = jax.tree.map_with_path(
+                    lambda path, g: g if is_connector_path(path) else jnp.zeros_like(g),
+                    mean_grads,
+                )
+                mhc_gradient_norm = optax.global_norm(mhc_grads)
             optimizer.update(lora_params, mean_grads)
             metrics = OptimStepMetrics(
                 grad_norm=grad_norm,
                 learning_rate=optimizer.opt_state.hyperparams["learning_rate"],
+                mhc_gradient_norm=mhc_gradient_norm,
             )
             return accumulated_grads.reset_adapter(adapter_index), metrics
 
