@@ -40,7 +40,7 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          paths: [../../skyrl-train, ../../skyrl-gym, ../..]
+          paths: [../../skyrl/, ../../skyrl-gym, ../..]
           options:
             docstring_style: google
             show_root_heading: true
