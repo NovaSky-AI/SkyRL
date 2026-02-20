@@ -33,12 +33,12 @@ def _ring_attention(
     mask_block = attention_mask
 
     # Online softmax state (kept per [B, H, Tq]):
-    # m   = running max score
-    # l   = running denominator sum(exp(score - m))
+    # carry_max = running max score
+    # denom     = running denominator sum(exp(score - carry_max))
     # acc = running numerator sum(exp(score - m) * value), shape [B, H, Tq, D]
     B, H, Tq, D = qh.shape
-    m = jnp.full((B, H, Tq), -jnp.inf, dtype=q.dtype)
-    l = jnp.zeros((B, H, Tq), dtype=q.dtype)
+    carry_max = jnp.full((B, H, Tq), -jnp.inf, dtype=q.dtype)
+    denom = jnp.zeros((B, H, Tq), dtype=q.dtype)
     acc = jnp.zeros((B, H, Tq, D), dtype=q.dtype)
     neg_large = jnp.array(jnp.finfo(q.dtype).min, dtype=q.dtype)
 
@@ -63,15 +63,15 @@ def _ring_attention(
         scores = jnp.where(valid, scores, neg_large)
 
         # Numerically stable online softmax merge:
-        # merge previous state (m,l,acc) with current block scores/values.
+        # merge previous state (carry_max, denom, acc) with current block scores/values.
         m_block = jnp.max(scores, axis=-1)
-        m_new = jnp.maximum(m, m_block)
-        prev_scale = jnp.where(jnp.isfinite(m), jnp.exp(m - m_new), 0.0)
-        p = jnp.exp(scores - m_new[..., None])
+        carry_max_new = jnp.maximum(carry_max, m_block)
+        prev_scale = jnp.where(jnp.isfinite(carry_max), jnp.exp(carry_max - carry_max_new), 0.0)
+        p = jnp.exp(scores - carry_max_new[..., None])
         p = jnp.where(valid, p, 0.0)
-        l_new = prev_scale * l + jnp.sum(p, axis=-1)
+        denom_new = prev_scale * denom + jnp.sum(p, axis=-1)
         acc_new = prev_scale[..., None] * acc + jnp.matmul(p, vh)
-        m, l, acc = m_new, l_new, acc_new
+        carry_max, denom, acc = carry_max_new, denom_new, acc_new
 
         # Rotate KV/mask so the next iteration sees the next shard's block.
         if step < cp - 1:
@@ -80,7 +80,11 @@ def _ring_attention(
             mask_block = jax.lax.ppermute(mask_block, axis_name="cp", perm=perm)
 
     # Final normalize and restore [B, Tq, H, D]
-    out = jnp.where(l[..., None] > 0, acc / jnp.maximum(l[..., None], jnp.asarray(1e-9, dtype=l.dtype)), 0.0)
+    out = jnp.where(
+        denom[..., None] > 0,
+        acc / jnp.maximum(denom[..., None], jnp.asarray(1e-9, dtype=denom.dtype)),
+        0.0,
+    )
     return jnp.transpose(out, (0, 2, 1, 3))
 
 
