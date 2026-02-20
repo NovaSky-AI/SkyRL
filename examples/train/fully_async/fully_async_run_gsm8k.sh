@@ -16,8 +16,8 @@ set -x
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/train/fully_async/fully_async_run_gsm8k.sh`.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
-: "${NUM_INFERENCE_GPUS:=2}"
-: "${NUM_POLICY_GPUS:=2}"
+: "${NUM_INFERENCE_GPUS:=4}"
+: "${NUM_POLICY_GPUS:=4}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout / or use wandb
 
 : "${INFERENCE_BACKEND:=vllm}"
@@ -77,4 +77,6 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
   generator.enforce_eager=true \
+  trainer.flash_attn=false \
+  trainer.use_sample_packing=false \
   $@
