@@ -134,7 +134,7 @@ def test_clear_lora_adapter():
     clamped = np.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
     expected_b_pre = np.log(clamped) - np.log(1.0 - clamped)
 
-    np.testing.assert_allclose(np.asarray(connector.alpha_pre[adapter_idx]), 0.0)
+    np.testing.assert_allclose(np.asarray(connector.alpha_pre[adapter_idx]), 0.1, rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(np.asarray(connector.input_norm_weight[adapter_idx]), 1.0)
     np.testing.assert_allclose(np.asarray(connector.b_pre[adapter_idx]), expected_b_pre, rtol=1e-2, atol=1e-2)
     np.testing.assert_allclose(np.asarray(connector.b_post[adapter_idx]), 0.0)

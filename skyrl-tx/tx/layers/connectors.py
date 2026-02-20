@@ -86,7 +86,7 @@ class LoRAConnector(nnx.Module):
     def _adapter_slot_default(key_name: str, connector_slot: jax.Array) -> jax.Array | None:
         dtype = connector_slot.dtype
         if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
-            return jnp.ones_like(connector_slot)
+            return jnp.full_like(connector_slot, 0.1)
         if key_name == "input_norm_weight":
             return jnp.ones_like(connector_slot)
         if key_name in {"phi_pre", "phi_post", "phi_res"}:
