@@ -419,9 +419,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 # Use last loaded LoRA path or a dummy path for placeholder
                 # (actual loading done in add_lora())
                 lora_path = self._last_lora_path or "/dummy_lora_path"
-                lora_request = LoRARequest(
-                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path=lora_path
-                )
+                lora_request = LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path=lora_path)
 
         async for request_output in self.llm.generate(
             prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
