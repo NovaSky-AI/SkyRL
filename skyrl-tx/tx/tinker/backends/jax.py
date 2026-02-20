@@ -119,6 +119,19 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
 
 @jax.tree_util.register_dataclass
 @dataclass
+class OptimStepMetrics:
+    grad_norm: jax.Array
+    learning_rate: jax.Array
+
+    def to_output_metrics(self) -> dict[str, float]:
+        return {
+            "skyrl.ai/grad_norm": self.grad_norm.item(),
+            "skyrl.ai/learning_rate": self.learning_rate.item(),
+        }
+
+
+@jax.tree_util.register_dataclass
+@dataclass
 class AccumulatedGradients:
     """Stores accumulated gradients for all LoRA adapters."""
 
@@ -145,10 +158,11 @@ class AccumulatedGradients:
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
+        safe_count = jnp.maximum(count, jnp.int32(1))
 
         def compute_mean(path, g):
             idx = get_adapter_idx(path, adapter_index)
-            return jnp.zeros_like(g).at[idx].set(g[idx] / count.astype(g.dtype))
+            return jnp.zeros_like(g).at[idx].set(g[idx] / safe_count.astype(g.dtype))
 
         return jax.tree.map_with_path(compute_mean, self.grad_sum)
 
@@ -499,7 +513,7 @@ class JaxBackendImpl(AbstractBackend):
             lora_params: nnx.State,
             optimizer: nnx.Optimizer,
             adapter_index: jax.Array,
-        ) -> tuple[AccumulatedGradients, jax.Array, jax.Array]:
+        ) -> tuple[AccumulatedGradients, OptimStepMetrics]:
             """Compute full gradients, apply optimizer update, and reset accumulated grads."""
             mean_grads = accumulated_grads.get_mean(adapter_index)
             grad_norm = optax.global_norm(mean_grads)
@@ -509,7 +523,11 @@ class JaxBackendImpl(AbstractBackend):
             )
             mhc_grad_norm = optax.global_norm(mhc_grads)
             optimizer.update(lora_params, mean_grads)
-            return accumulated_grads.reset_adapter(adapter_index), grad_norm, mhc_grad_norm
+            metrics = OptimStepMetrics(
+                grad_norm=grad_norm,
+                learning_rate=optimizer.opt_state.hyperparams["learning_rate"],
+            )
+            return accumulated_grads.reset_adapter(adapter_index), metrics
 
         if self.config.enforce_eager:
             self._compute_grads_and_update = compute_grads_and_update
@@ -759,8 +777,7 @@ class JaxBackendImpl(AbstractBackend):
 
         # Check if we have any gradients accumulated (count > 0)
         if self.accumulated_grads.counts[adapter_index] == 0:
-            logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
-            return types.OptimStepOutput(metrics={"skyrl.ai/learning_rate": learning_rate})
+            logger.warning(f"No accumulated gradients for model {model_id}; applying step with zero gradients")
 
         # Update hyperparameters from the request
         hp = optimizer.opt_state.hyperparams
@@ -772,27 +789,16 @@ class JaxBackendImpl(AbstractBackend):
 
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
         with jax.set_mesh(self.mesh):
-            self.accumulated_grads, grad_norm, mhc_grad_norm = self._compute_grads_and_update(
+            self.accumulated_grads, optim_metrics = self._compute_grads_and_update(
                 self.accumulated_grads,
                 self.lora_params,
                 optimizer,
                 jnp.int32(adapter_index),
             )
 
-        grad_norm, mhc_grad_norm = jax.device_get((grad_norm, mhc_grad_norm))
-        grad_norm = float(grad_norm)
-        mhc_grad_norm = float(mhc_grad_norm)
-        logger.info(
-            f"Applied optimizer step for model {model_id} "
-            f"(adapter {adapter_index}), grad_norm={grad_norm}, mhc_grad_norm={mhc_grad_norm}"
-        )
-        return types.OptimStepOutput(
-            metrics={
-                "skyrl.ai/grad_norm": grad_norm,
-                "skyrl.ai/mhc_gradient_norm": mhc_grad_norm,
-                "skyrl.ai/learning_rate": learning_rate,
-            }
-        )
+        output_metrics = jax.device_get(optim_metrics).to_output_metrics()
+        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={output_metrics}")
+        return types.OptimStepOutput(metrics=output_metrics)
 
     def sample(
         self,

@@ -464,7 +464,6 @@ class InferenceEngineState:
         # Return both router and server group if created to keep references alive
         router = None
         server_group = None
-
         if _SKYRL_USE_NEW_INFERENCE:
             # init with internal router and servers
             if enable_lora:
@@ -552,7 +551,7 @@ def init_remote_inference_servers(
             "run",
             "--isolated",
             "--extra",
-            "vllm",
+            "fsdp",
             "-m",
             "skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server",
             "--model",
@@ -577,30 +576,6 @@ def init_remote_inference_servers(
             str(engine_port),
             "--worker-extension-cls",
             "skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
-        ]
-    elif backend == "sglang":
-        remote_server_command = [
-            "uv",
-            "run",
-            "--isolated",
-            "--extra",
-            "sglang",
-            "-m",
-            "skyrl.backends.skyrl_train.inference_engines.sglang.sglang_server",
-            "--model-path",
-            model,
-            "--tp-size",
-            str(tp_size),
-            "--dtype",
-            "bfloat16",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(engine_port),
-            "--mm-attention-backend",
-            "fa3",
-            "--attention-backend",
-            "fa3",
         ]
     else:
         raise ValueError(f"Unsupported backend: {backend}")
