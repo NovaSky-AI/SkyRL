@@ -414,9 +414,7 @@ class DeepseekV3MoE(nnx.Module):
         top_k_weights = top_k_weights.astype(hidden_states.dtype)
 
         expert_output = self.experts(hidden_states_flat, top_k_index, top_k_weights, adapter_indices_flat)
-        shared_output = self.shared_experts(
-            hidden_states_flat.reshape(batch_size, seq_len, hidden_size), adapter_indices
-        ).reshape(-1, hidden_size)
+        shared_output = self.shared_experts(hidden_states_flat, adapter_indices_flat)
         expert_output = expert_output + shared_output
 
         return expert_output.reshape(batch_size, seq_len, hidden_size)

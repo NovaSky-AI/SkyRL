@@ -1,3 +1,6 @@
+from typing import Any
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -6,15 +9,92 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from tx.models.llama3 import Llama3ForCausalLM
 from tx.models.qwen3 import Qwen3ForCausalLM
-from tx.models.types import ModelForCausalLM
+from tx.models.types import CausalLMOutput, ModelForCausalLM
 
-from tests.models.conftest import load_model
+from tests.models.conftest import create_model, load_model
 
 MODEL_PARAMS = [
     ("unsloth/Llama-3.2-1B", Llama3Config, Llama3ForCausalLM, ("fsdp", "tp")),
     ("Qwen/Qwen3-0.6B", Qwen3Config, Qwen3ForCausalLM, ("fsdp", "tp")),
 ]
 MODEL_IDS = ["llama3", "qwen3"]
+
+
+@pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
+class TestGradientCheckpointing:
+
+    def _forward(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+        gradient_checkpointing: bool,
+        **forward_kwargs: Any,
+    ) -> tuple[ModelForCausalLM, ModelConfig, CausalLMOutput]:
+        """Create model, run forward pass, and return (model, config, out)."""
+        batch_size, seq_len = 2, 8
+        config, model = create_model(
+            model_name,
+            config_cls,
+            model_cls,
+            mesh_axes,
+            max_lora_adapters=1,
+            max_lora_rank=1,
+            gradient_checkpointing=gradient_checkpointing,
+        )
+        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+        out = model(input_ids, attention_mask=attention_mask, **forward_kwargs)
+        return model, config, out
+
+    def test_output_and_hidden_states_match(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+    ) -> None:
+        """Forward pass should produce identical outputs and hidden states with/without checkpointing."""
+        results = {}
+        for use_checkpointing in (False, True):
+            model, config, out = self._forward(
+                model_name,
+                config_cls,
+                model_cls,
+                mesh_axes,
+                gradient_checkpointing=use_checkpointing,
+                output_hidden_states=True,
+            )
+            results[use_checkpointing] = {
+                "logits": np.asarray(model.compute_logits(out.last_hidden_state)),
+                "hidden_states": [np.asarray(hs) for hs in out.hidden_states],
+                "num_hidden_layers": config.num_hidden_layers,
+            }
+            del model, config, out
+
+        np.testing.assert_allclose(results[False]["logits"], results[True]["logits"], rtol=1e-4, atol=1e-6)
+
+        hidden_states_no_ckpt = results[False]["hidden_states"]
+        hidden_states_ckpt = results[True]["hidden_states"]
+        assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == results[False]["num_hidden_layers"] + 1
+        for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
+            np.testing.assert_allclose(
+                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
+            )
+
+    def test_kv_cache_with_checkpointing(
+        self,
+        model_name: str,
+        config_cls: type[ModelConfig],
+        model_cls: type[ModelForCausalLM],
+        mesh_axes: tuple[str, str],
+    ) -> None:
+        """KV cache should be populated even with gradient checkpointing enabled."""
+        _, config, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True)
+
+        # keys is a list with one entry per layer
+        assert len(out.kv_cache.keys) == config.num_hidden_layers
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)

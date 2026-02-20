@@ -60,12 +60,12 @@ uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.int8 -m exam
     ...
     trainer.algorithm.use_tis=$USE_TIS \
     trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
-    generator.sampling_params.logprobs=0 \
+    generator.sampling_params.logprobs=1 \
     ...
 
 ```
 
-Here, we've configured training to use TIS with the importance sampling ratio cap of 8.0. `generator.sampling_params.logprobs=0` ensures that logprobs for the chosen tokens are returned by the inference engine, which is required for TIS. Note that for making sure the FlashRL patches are applied for vLLM, we use the `FLASHRL_CONFIG` environment variable in `examples/flash_rl/.env.int8`: 
+Here, we've configured training to use TIS with the importance sampling ratio cap of 8.0. `generator.sampling_params.logprobs=1` ensures that logprobs for the chosen tokens are returned by the inference engine, which is required for TIS. Note that for making sure the FlashRL patches are applied for vLLM, we use the `FLASHRL_CONFIG` environment variable in `examples/flash_rl/.env.int8`: 
 
 ```bash title="examples/flash_rl/.env.int8"
 FLASHRL_CONFIG=LiyuanLucasLiu/Qwen2.5-32B-quantized.w8a8/flashrl_config.yaml

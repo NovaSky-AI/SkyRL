@@ -1,4 +1,4 @@
-name: skyrl-train-gpu-ci
+name: skyrl-train-gpu-ci-old
 entrypoint: bash ci/gpu_ci_run.sh
 image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8 # (Optional) Exclusive with `containerfile`.
 cloud: sky-anyscale-aws-us-east-1

@@ -5,12 +5,13 @@ on:
     branches: 
       - main
     paths:
-      - 'skyrl/skyrl/backends/skyrl_train/**'
-      - 'skyrl/skyrl/train/**'
-      - 'skyrl/tests/backends/skyrl_train/**'
-      - 'skyrl/pyproject.toml'
-      - '!skyrl/docs/**'
-      - '!skyrl/examples/**'
+      - 'ci/**'
+      - 'skyrl/backends/skyrl_train/**'
+      - 'skyrl/train/**'
+      - 'tests/backends/skyrl_train/**'
+      - 'pyproject.toml'
+      - '!docs/**'
+      - '!examples/**'
       - '.github/workflows/**'
   workflow_dispatch:
 
@@ -26,7 +27,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: ./skyrl
+        working-directory: .
 
     steps:
       - uses: actions/checkout@v4

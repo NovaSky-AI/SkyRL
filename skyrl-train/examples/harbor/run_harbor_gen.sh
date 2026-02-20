@@ -1,18 +1,30 @@
-set -x
+set -ex
 
-# My key
-export DAYTONA_API_KEY=YOUR_KEY_HERE
-export WANDB_API_KEY=YOUR_KEY_HERE
+# wandb api key.
+# export WANDB_API_KEY=YOUR_KEY_HERE
 
-# Got after hf download open-thoughts/OpenThoughts-Agent-v1-RL --repo-type=dataset
-# cd into the downloaded folder, say /path/to/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/hash_code
-# python extract_parquet_tasks.py tasks_new.parquet ./extracted_tasks
-TRAIN_DATA="['/home/ray/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/39ab71434e90d8f87d2cd69c13b6d8a0cb2c238f/extracted_tasks']"
+# Pick the sandbox provider and provide the credentials.
+# export DAYTONA_API_KEY=YOUR_KEY_HERE
+# export MODAL_TOKEN_ID=YOUR_KEY_HERE
+# export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
 
-CHAT_TEMPLATE_PATH="/home/ray/default/SkyRLHarbor3/skyrl-train/skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
-TRIALS_DIR="/home/ray/trials_run"
+# Prepare dataset first (downloads from HuggingFace and extracts tasks):
+# python examples/harbor/prepare_harbor_dataset.py --dataset open-thoughts/CodeContests
 
+DATA_DIR="$HOME/data/harbor"
+TRAIN_DATA="['$DATA_DIR/CodeContests']"
+
+CHAT_TEMPLATE_PATH="$(dirname "$0")/../../skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
+TRIALS_DIR="$HOME/trials_run"
+
+#----------------
+# Infrastructure setup
+#----------------
 NUM_GPUS=4
+ENABLE_RATE_LIMITING=true  # Enable rate/concurrency limiting for trajectory submissions
+TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported). null or omit to disable rate limiting
+MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
+
 
 uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.main_harbor_generate \
   data.train_data=$TRAIN_DATA \
@@ -41,4 +53,7 @@ uv run --isolated --extra vllm --extra harbor -m examples.harbor.entrypoints.mai
   trainer.train_batch_size=$NUM_GPUS \
   trainer.policy_mini_batch_size=$NUM_GPUS \
   trainer.logger=console \
+  +generator.rate_limit.enabled=$ENABLE_RATE_LIMITING \
+  +generator.rate_limit.trajectories_per_second=$TRAJECTORIES_PER_SECOND \
+  +generator.rate_limit.max_concurrency=$MAX_CONCURRENCY \
   $@
