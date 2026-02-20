@@ -29,13 +29,13 @@ Our interface for training data is modelled after [DataProto](https://verl.readt
 
 ## Generator APIs
 
-::: skyrl.train.generators.GeneratorInput
+::: skyrl.train.generators.base.GeneratorInput
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl.train.generators.GeneratorOutput
+::: skyrl.train.generators.base.GeneratorOutput
     options:
       show_root_heading: true
       members_order: source

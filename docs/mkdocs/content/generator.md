@@ -6,7 +6,7 @@ The Generator is responsible for generating trajectories for training.
 
 ### GeneratorInterface
 
-::: skyrl.train.generators.GeneratorInterface
+::: skyrl.train.generators.base.GeneratorInterface
     options:
       show_root_heading: true
       members_order: source
