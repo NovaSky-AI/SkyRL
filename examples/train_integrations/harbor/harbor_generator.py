@@ -112,7 +112,21 @@ class HarborGenerator(GeneratorInterface):
         )
 
         async def _worker(idx, prompt, trajectory_id):
-            result = await self.harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
+            try:
+                result = await self.harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
+            except Exception as e:
+                # Catch unexpected errors (e.g. tokenizer bugs) so that one
+                # failing trajectory does not cancel the entire TaskGroup batch.
+                # CancelledError is NOT caught — it must propagate for cleanup.
+                logger.error(f"Trajectory {trajectory_id} raised unexpected error in agent loop: {e}")
+                result = HarborAgentOutput(
+                    response_ids=[0],
+                    reward=0,
+                    stop_reason="error",
+                    loss_mask=[0],
+                    prompt_ids=[0],
+                    trajectory_id=trajectory_id,
+                )
             all_outputs[idx] = result
             progress.update(1)
 

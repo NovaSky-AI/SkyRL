@@ -2,7 +2,9 @@
 Main entrypoint for training on Harbor tasks.
 """
 
+import signal
 import sys
+import time
 
 import ray
 import hydra
@@ -13,6 +15,19 @@ from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 from ..harbor_generator import HarborGenerator
 from ..dataset import HarborTaskDataset
+
+
+def _install_interrupt_handlers():
+    """(Re)install SIGINT and SIGTERM handlers that raise KeyboardInterrupt.
+
+    Ray's C code sets SIGINT to SIG_IGN during initialization and may
+    re-mask it during ray.wait()/ray.get().  We call this after every
+    ray.wait() to ensure signals are always delivered to Python.
+    For SIGTERM, Ray's C++ crash handler intercepts it otherwise.
+    See harbor#656 / SkyRL#1160.
+    """
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, lambda signum, frame: signal.default_int_handler(signum, frame))
 
 
 class HarborExp(BasePPOExp):
@@ -66,22 +81,14 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
-    import signal
-    import time
-
     # validate the arguments
     validate_cfg(cfg)
 
     initialize_ray(cfg)
     ref = skyrl_entrypoint.remote(cfg)
 
-    # Ray's C code sets SIGINT to SIG_IGN during initialization, which
-    # prevents Python from ever seeing KeyboardInterrupt.  We MUST
-    # reinstall handlers AFTER initialize_ray() to restore them.
-    # For SIGTERM we also install a handler since Ray's C++ crash handler
-    # intercepts it otherwise.  See harbor#656 / SkyRL#1160.
-    signal.signal(signal.SIGINT, signal.default_int_handler)
-    signal.signal(signal.SIGTERM, lambda s, f: signal.default_int_handler(s, f))
+    # Restore signal handlers AFTER Ray init (which overrides them).
+    _install_interrupt_handlers()
 
     try:
         # Poll with time.sleep() (interruptible by signals) + non-blocking
@@ -89,9 +96,7 @@ def main(cfg: DictConfig) -> None:
         # because those block in C code and may re-mask SIGINT.
         while True:
             time.sleep(1)
-            # Reinstall handlers in case ray.wait() overrode them
-            signal.signal(signal.SIGINT, signal.default_int_handler)
-            signal.signal(signal.SIGTERM, lambda s, f: signal.default_int_handler(s, f))
+            _install_interrupt_handlers()
             ready, _ = ray.wait([ref], timeout=0)
             if ready:
                 ray.get(ref)  # immediate — task already finished
@@ -115,14 +120,13 @@ def main(cfg: DictConfig) -> None:
         # Brief pause to let uv's dying SIGTERM be absorbed while ignored
         time.sleep(0.5)
         # Restore handlers so a deliberate second Ctrl+C can force-kill
-        signal.signal(signal.SIGINT, signal.default_int_handler)
-        signal.signal(signal.SIGTERM, lambda s, f: signal.default_int_handler(s, f))
+        _install_interrupt_handlers()
         try:
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
                 try:
                     time.sleep(1)
-                    signal.signal(signal.SIGINT, signal.default_int_handler)
+                    _install_interrupt_handlers()
                     ready, _ = ray.wait([ref], timeout=0)
                     if ready:
                         try:
