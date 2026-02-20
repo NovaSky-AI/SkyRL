@@ -2,8 +2,11 @@
 Main entrypoint for training on Harbor tasks.
 """
 
+import sys
+
 import ray
 import hydra
+from loguru import logger
 from omegaconf import DictConfig
 from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir
 from skyrl.train.utils import validate_cfg
@@ -63,20 +66,78 @@ def skyrl_entrypoint(cfg: DictConfig):
 
 @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
 def main(cfg: DictConfig) -> None:
+    import signal
+    import time
+
     # validate the arguments
     validate_cfg(cfg)
 
     initialize_ray(cfg)
     ref = skyrl_entrypoint.remote(cfg)
+
+    # Ray's C code sets SIGINT to SIG_IGN during initialization, which
+    # prevents Python from ever seeing KeyboardInterrupt.  We MUST
+    # reinstall handlers AFTER initialize_ray() to restore them.
+    # For SIGTERM we also install a handler since Ray's C++ crash handler
+    # intercepts it otherwise.  See harbor#656 / SkyRL#1160.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, lambda s, f: signal.default_int_handler(s, f))
+
     try:
-        ray.get(ref)
+        # Poll with time.sleep() (interruptible by signals) + non-blocking
+        # ray.wait().  We cannot use ray.get() or ray.wait(timeout=N>0)
+        # because those block in C code and may re-mask SIGINT.
+        while True:
+            time.sleep(1)
+            # Reinstall handlers in case ray.wait() overrode them
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            signal.signal(signal.SIGTERM, lambda s, f: signal.default_int_handler(s, f))
+            ready, _ = ray.wait([ref], timeout=0)
+            if ready:
+                ray.get(ref)  # immediate — task already finished
+                break
     except KeyboardInterrupt:
         # Explicitly cancel the remote task so the worker receives
         # KeyboardInterrupt, allowing asyncio.run() to cancel all async
         # tasks (e.g. Harbor Trial.run()) and trigger their cleanup
-        # (sandbox teardown).  See harbor#656 / SkyRL#1160.
+        # (sandbox teardown).  Then WAIT for the worker to finish cleanup
+        # before exiting — otherwise the driver exits immediately and
+        # sandboxes are leaked.  See harbor#656 / SkyRL#1160.
+        #
+        # Temporarily ignore signals: when Ctrl+C sends SIGINT to the
+        # process group, `uv` also dies and sends SIGTERM to us.  Without
+        # this, the SIGTERM immediately triggers a "second interrupt" before
+        # cleanup can start.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        logger.info("KeyboardInterrupt: cancelling worker, waiting for sandbox cleanup...")
         ray.cancel(ref, force=False)
-        raise
+        # Brief pause to let uv's dying SIGTERM be absorbed while ignored
+        time.sleep(0.5)
+        # Restore handlers so a deliberate second Ctrl+C can force-kill
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, lambda s, f: signal.default_int_handler(s, f))
+        try:
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                try:
+                    time.sleep(1)
+                    signal.signal(signal.SIGINT, signal.default_int_handler)
+                    ready, _ = ray.wait([ref], timeout=0)
+                    if ready:
+                        try:
+                            ray.get(ref)
+                        except Exception:
+                            pass  # Expected: RayTaskError from cancelled task
+                        break
+                except KeyboardInterrupt:
+                    logger.warning("Second interrupt: force-killing worker (sandboxes may leak)...")
+                    ray.cancel(ref, force=True)
+                    break
+        except Exception:
+            pass
+        logger.info("Cleanup complete.")
+        sys.exit(130)  # 128 + SIGINT(2)
 
 
 if __name__ == "__main__":
