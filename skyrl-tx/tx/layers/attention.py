@@ -25,7 +25,7 @@ def _ring_attention(
     # qh: [B, H, Tq, D]
     qh = jnp.transpose(q, (0, 2, 1, 3))
 
-    # GQA handling: expand KV heads to match query heads.
+    # Expand KV heads to match query heads (happens in GQA)
     # k/v: [B, Tk, H_kv, D] -> [B, Tk, H, D]
     kv_repeat = q.shape[2] // k.shape[2]
     k_block = jnp.repeat(k, kv_repeat, axis=2)

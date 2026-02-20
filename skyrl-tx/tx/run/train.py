@@ -67,7 +67,7 @@ def train(
     ),
 ) -> None:
     if not jax._src.xla_bridge.backends_are_initialized():  # ty: ignore
-        jax.config.update("jax_num_cpu_devices", tp_size)
+        jax.config.update("jax_num_cpu_devices", tp_size * cp_size)
         # If you want to debug NaNs, add the following:
         # jax.config.update("jax_debug_nans", True)
 
