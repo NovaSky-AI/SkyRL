@@ -4,10 +4,8 @@ Test the HTTP endpoint with LiteLLM and policy weight sync.
 This uses the same workflow as test_policy_local_engines_e2e.py, but with the HTTP endpoint instead of
 the inference client engine. Only requires 1 GPU.
 
-# Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py -m "vllm"
-# Run only sglang tests (requires sglang extra):
-uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py -m "sglang"
+To run:
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py -m "vllm"
 """
 
 import json
@@ -42,13 +40,15 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_e
 from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
 from concurrent.futures import ThreadPoolExecutor
 from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
-
+import skyrl.train.utils
 from transformers import AutoTokenizer
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
 TP_SIZE = 1
 SERVER_HOST = "127.0.0.1"
+
+TEMPLATE_PATH = str(Path(skyrl.train.utils.__file__).parent / "templates/qwen3_acc_thinking.jinja2")
 
 pytestmark = pytest.mark.skipif(
     _SKYRL_USE_NEW_INFERENCE, reason="This test is not applicable with new inference backend"
@@ -791,13 +791,9 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        template_path = "skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
         engine_init_kwargs = {}
         if use_custom_template:
-            # use relative path to workspace root
-            # __file__ is skyrl-train/tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
-            repo_root = Path(__file__).parent.parent.parent.parent
-            engine_init_kwargs["chat_template"] = str(repo_root / template_path)
+            engine_init_kwargs["chat_template"] = TEMPLATE_PATH
 
         engines = InferenceEngineState.create(
             cfg=cfg,
