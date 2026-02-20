@@ -585,7 +585,7 @@ def init_remote_inference_servers(
     env["CUDA_VISIBLE_DEVICES"] = gpu_ids_str
 
     # Start the vLLM server process
-    server_process = subprocess.Popen(remote_server_command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    server_process = subprocess.Popen(remote_server_command, env=env)
 
     wait_for_server(url=f"localhost:{engine_port}", health_path="health", timeout=120)
     print(f"Server at localhost:{engine_port} is online")
