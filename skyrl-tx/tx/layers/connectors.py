@@ -32,7 +32,7 @@ class LoRAConnector(nnx.Module):
     Training discovers stream specialization through input-dependent routing (alpha = 1).
     """
 
-    B_RES_INIT_SCALING = 10.0
+    B_RES_INIT_SCALING = 5.0
 
     def __init__(
         self,
@@ -68,9 +68,11 @@ class LoRAConnector(nnx.Module):
         # H_pre = sigmoid(b_pre) = 1/n: uniform aggregation across streams
         self.b_pre = nnx.Param(jnp.full((max_lora_adapters, n), default_b_pre(n), dtype=dtype))
 
-        # H_post = 2 * sigmoid(b_post) = 1: standard residual for all streams at init.
-        # Training discovers stream specialization (memory vs update roles).
-        self.b_post = nnx.Param(jnp.zeros((max_lora_adapters, n), dtype=dtype))
+        # H_post = 2 * sigmoid(b_post) ~= 1: narrow spectrum [0.8, 1.2] breaks stream
+        # symmetry while preserving mean = 1 (standard residual behavior on average).
+        self.b_post = nnx.Param(jnp.broadcast_to(
+            jnp.linspace(-0.2, 0.2, n, dtype=dtype), (max_lora_adapters, n)
+        ))
 
         # M ~= I: strong identity mixing via Sinkhorn (minimal cross-stream leakage)
         self.b_res = nnx.Param(
@@ -85,14 +87,17 @@ class LoRAConnector(nnx.Module):
     def _adapter_slot_default(key_name: str, connector_slot: jax.Array) -> jax.Array | None:
         dtype = connector_slot.dtype
         if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
-            return jnp.full_like(connector_slot, 0.1)
+            return jnp.full_like(connector_slot, 1.0)
         if key_name in {"phi_pre", "phi_post", "phi_res"}:
             return jnp.zeros_like(connector_slot)
         if key_name == "b_pre":
             n = connector_slot.shape[-1]
             return jnp.full(connector_slot.shape, default_b_pre(n, dtype), dtype=dtype)
         if key_name == "b_post":
-            return jnp.zeros_like(connector_slot)
+            n = connector_slot.shape[-1]
+            return jnp.broadcast_to(
+                jnp.linspace(-0.2, 0.2, n, dtype=dtype), connector_slot.shape
+            )
         if key_name == "b_res":
             n = connector_slot.shape[-1]
             return jnp.broadcast_to(LoRAConnector.B_RES_INIT_SCALING * jnp.eye(n, dtype=dtype), connector_slot.shape)
