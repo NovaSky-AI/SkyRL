@@ -164,13 +164,13 @@ def get_backend_classes(backend_name: str):
 
         return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
-        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, FSDPBackendConfig
+        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, FSDPBackendOverrides
 
-        return SkyRLTrainBackend, FSDPBackendConfig
+        return SkyRLTrainBackend, FSDPBackendOverrides
     elif backend_name == "megatron":
-        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, MegatronBackendConfig
+        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, MegatronBackendOverrides
 
-        return SkyRLTrainBackend, MegatronBackendConfig
+        return SkyRLTrainBackend, MegatronBackendOverrides
     else:
         raise ValueError(
             f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "
@@ -371,8 +371,8 @@ class TinkerEngine:
 
         # TODO: This leaks the abstraction by accessing backend-specific config.
         # We should find a better way to handle this going forward.
-        if self.config.backend == "jax" and self.backend.config_container.sample_max_num_sequences > 0:
-            batchable = batchable[: self.backend.config_container.sample_max_num_sequences]
+        if self.config.backend == "jax" and self.backend.config_overrides.sample_max_num_sequences > 0:
+            batchable = batchable[: self.backend.config_overrides.sample_max_num_sequences]
 
         return {str(f.request_id): (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 

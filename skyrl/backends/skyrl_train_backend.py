@@ -32,27 +32,26 @@ from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine i
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 
-class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
-    """Configuration for the SkyRL-Train backend.
+class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
+    """Configuration overrides for the SkyRL-Train backend.
 
-    Uses SkyRL-Train's default config (ppo_base_config.yaml). Any extra keys
-    are applied as dot-notation overrides via --backend-config.
+    All keys are applied as overrides to the default SkyRL-Train config.
     """
 
     pass
 
 
-class FSDPBackendConfig(SkyRLTrainBackendConfig):
+class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
     strategy: str = "fsdp2"
 
 
-class MegatronBackendConfig(SkyRLTrainBackendConfig):
+class MegatronBackendOverrides(SkyRLTrainBackendOverrides):
     strategy: str = "megatron"
 
 
 def _build_skyrl_train_config(
     base_model: str,
-    config_container: SkyRLTrainBackendConfig,
+    overrides: SkyRLTrainBackendOverrides,
     lora_config: types.LoraConfig | None = None,
 ) -> SkyRLTrainConfig:
     """Build config for SkyRL-Train workers using default config with overrides.
@@ -64,7 +63,7 @@ def _build_skyrl_train_config(
     """
 
     # Apply user overrides from backend_config
-    user_overrides = dict(config_container.model_extra)
+    user_overrides = dict(overrides.model_extra)
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     cfg.trainer.policy.model.path = base_model
@@ -76,11 +75,11 @@ def _build_skyrl_train_config(
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
 
-    assert config_container.strategy in (
+    assert overrides.strategy in (
         "fsdp2",
         "megatron",
     ), "Only fsdp and megatron are supported for SkyRL-Train backend"
-    cfg.trainer.strategy = config_container.strategy
+    cfg.trainer.strategy = overrides.strategy
 
     # Apply LoRA configuration
     if lora_config is not None and lora_config.rank > 0:
@@ -94,7 +93,7 @@ def _build_skyrl_train_config(
 class SkyRLTrainBackend(AbstractBackend):
     """SkyRL-Train backend for supervised training."""
 
-    def __init__(self, base_model: str, config: SkyRLTrainBackendConfig):
+    def __init__(self, base_model: str, config: SkyRLTrainBackendOverrides):
         logger.warning("=" * 80)
         logger.warning("SkyRLTrainBackend is currently EXPERIMENTAL!")
         logger.warning("=" * 80)
@@ -105,7 +104,7 @@ class SkyRLTrainBackend(AbstractBackend):
             )
 
         self.base_model = base_model
-        self.config_container = config
+        self.config_overrides = config
         self._model_id: str | None = None
         self._model_metadata: types.ModelMetadata | None = None
         self._cfg = None
@@ -201,7 +200,7 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{self._model_id}' already exists. Only one model supported.")
 
         # Build config
-        self._cfg = _build_skyrl_train_config(self.base_model, self.config_container, lora_config)
+        self._cfg = _build_skyrl_train_config(self.base_model, self.config_overrides, lora_config)
 
         if not ray.is_initialized():
             logger.info("Initializing Ray with runtime environment")
