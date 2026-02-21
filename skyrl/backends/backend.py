@@ -24,8 +24,8 @@ Design:
 """
 
 from abc import ABC, abstractmethod
-from typing import Any
 
+from pydantic import BaseModel
 
 from skyrl.tinker import types
 
@@ -38,7 +38,7 @@ class AbstractBackend(ABC):
     """
 
     @abstractmethod
-    def __init__(self, base_model: str, config: Any):
+    def __init__(self, base_model: str, config: BaseModel):
         """Initialize the backend."""
         pass
 
