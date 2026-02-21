@@ -98,6 +98,11 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         completion_texts = []
         batch_size = sequences.size(0)
 
+        # loss_mask is response-only [batch, max_output_len], but sequences and
+        # attention_mask are full-sequence [batch, max_input_len + max_output_len].
+        # We need an offset to convert loss_mask indices to full-sequence indices.
+        prompt_offset = sequences.size(1) - loss_mask.size(1)
+
         for i in range(batch_size):
             seq = sequences[i]
             attn_mask = attention_mask[i].bool()
@@ -110,12 +115,14 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                 response_end = response_positions[-1].item() + 1
             else:
                 # No response tokens, treat entire sequence as prompt
-                response_start = seq.size(0)
-                response_end = seq.size(0)
+                response_start = loss_m.size(0)
+                response_end = loss_m.size(0)
 
             # Use attention_mask to filter real tokens (exclude padding)
-            prompt_ids = seq[:response_start][attn_mask[:response_start]].tolist()
-            completion_ids = seq[response_start:response_end][attn_mask[response_start:response_end]].tolist()
+            prompt_ids = seq[: prompt_offset + response_start][attn_mask[: prompt_offset + response_start]].tolist()
+            completion_ids = seq[prompt_offset + response_start : prompt_offset + response_end][
+                attn_mask[prompt_offset + response_start : prompt_offset + response_end]
+            ].tolist()
 
             prompt_text = self.tokenizer.decode(prompt_ids, skip_special_tokens=False)
             completion_text = self.tokenizer.decode(completion_ids, skip_special_tokens=False)
@@ -326,8 +333,13 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         tokens_per_teacher_group = []
         sample_logged = False  # Log only first sample for debugging
 
+        # student_loss_mask is response-only [batch, max_output_len], but student_logits
+        # and student_input_ids are full-sequence [batch, max_input_len + max_output_len, ...].
+        # We need an offset to convert loss_mask indices to full-sequence indices.
+        prompt_offset = student_logits.size(1) - student_loss_mask.size(1)
+
         for i in range(batch_size):
-            # Get student response region
+            # Get student response region (indices are response-relative)
             student_mask = student_loss_mask[i].bool()
             if not student_mask.any():
                 continue
@@ -346,7 +358,8 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             teacher_end = teacher_positions[-1].item() + 1
 
             # Extract response logits
-            student_resp_logits = student_logits[i, student_start:student_end]
+            # student_start/end are response-relative, add prompt_offset for full-sequence indexing
+            student_resp_logits = student_logits[i, prompt_offset + student_start : prompt_offset + student_end]
             teacher_resp_logits = teacher_logits[i, teacher_start:teacher_end]
 
             # Convert to probabilities with temperature
@@ -354,7 +367,10 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             teacher_probs = F.softmax(teacher_resp_logits / self.gold_temperature, dim=-1)
 
             # Get token IDs for alignment
-            student_token_ids = student_input_ids[i, student_start:student_end].tolist()
+            # student_input_ids is full-sequence, so also needs prompt_offset
+            student_token_ids = student_input_ids[
+                i, prompt_offset + student_start : prompt_offset + student_end
+            ].tolist()
             teacher_token_ids = teacher_input_ids[i, teacher_start:teacher_end].tolist()
 
             # Track token counts
