@@ -1,27 +1,23 @@
 import asyncio
+from functools import partial
 from typing import Callable, Any, Dict
 from loguru import logger
 
-DoFnType = Callable[[int, int], Any]  # batch_idx, trajectory_id
+DoFnType = Callable[[int, int], Any] # batch_idx, trajectory_id
 DispatcherType = Callable[[DoFnType, DoFnType, DoFnType], Any]
 
 # Dispatcher Registry
 DISPATCHER_REGISTRY: Dict[str, DispatcherType] = {}
 
-
 def register_dispatcher(name):
     def decorator(fn):
         DISPATCHER_REGISTRY[name] = fn
         return fn
-
     return decorator
-
 
 # Async Pipeline Dispatcher (Producer-Consumer Pipelining)
 @register_dispatcher("async_pipeline")
-async def async_pipeline_dispatcher(
-    cfg, trajectories: Dict[str, Dict[str, Any]], init_fn: str, run_fn: str, eval_fn: str
-):
+async def async_pipeline_dispatcher(cfg, trajectories: Dict[str,Dict[str, Any]], init_fn: str, run_fn: str, eval_fn: str):
     async def pipeline():
         """Pipeline dispatcher for async processing of init, run, and eval functions."""
         # Initialize queues
@@ -37,15 +33,11 @@ async def async_pipeline_dispatcher(
         num_trajectories = cfg["num_trajectories"]
         total_instances = num_instances
 
-        max_eval_parallel_agents = min(total_instances * num_trajectories, max_eval_parallel_agents)
-        max_parallel_agents = min(total_instances * num_trajectories, max_parallel_agents)
+        max_eval_parallel_agents = min(total_instances*num_trajectories, max_eval_parallel_agents)
+        max_parallel_agents = min(total_instances*num_trajectories, max_parallel_agents)
 
-        logger.info(
-            f"Using max_parallel_agents of {max_parallel_agents} for {total_instances} instances with {num_trajectories} trajectories each"
-        )
-        logger.info(
-            f"Using max_eval_parallel_agents of {max_eval_parallel_agents} for {total_instances} instances with {num_trajectories} trajectories each"
-        )
+        logger.info(f"Using max_parallel_agents of {max_parallel_agents} for {total_instances} instances with {num_trajectories} trajectories each")
+        logger.info(f"Using max_eval_parallel_agents of {max_eval_parallel_agents} for {total_instances} instances with {num_trajectories} trajectories each")
 
         # Fill the init queue with tasks
         for trajectory_id in range(num_trajectories):
@@ -124,13 +116,12 @@ async def async_batch_dispatcher(cfg, trajectories: Dict[int, Dict[int, Any]], i
 
 # Async FixedEnv Pool Dispatcher (Env Pool Reuse)
 @register_dispatcher("async_fix_pool")
-async def async_fix_pool_dispatcher(cfg, init_fn, run_fn, eval_fn):
+async def async_fix_pool_dispatcher(cfg, trajectories: Dict[str,Dict[str, Any]], init_fn, run_fn, eval_fn):
     """
     Dispatcher for pre-initialized environments. Each trajectory is assigned
     to a free env. When finished, the env is returned to the pool.
     """
-
-    async def dispatcher():
+    async def run_all():
         envs = cfg["envs"]  # List of pre-initialized environments
         num_envs = len(envs)
         num_instances = cfg["num_instances"]
@@ -154,14 +145,15 @@ async def async_fix_pool_dispatcher(cfg, init_fn, run_fn, eval_fn):
             while True:
                 try:
                     batch_idx, trajectory_id = await work_queue.get()
+                    traj = trajectories[batch_idx][trajectory_id]
                     env_id = await env_queue.get()
 
                     # Reset and assign env
-                    await init_fn(batch_idx, trajectory_id, env_id)
+                    await getattr(traj, init_fn)(env=envs[env_id])
 
                     # Run and eval
-                    await run_fn(batch_idx, trajectory_id, env_id)
-                    await eval_fn(batch_idx, trajectory_id, env_id)
+                    await getattr(traj, run_fn)(env=envs[env_id])
+                    await getattr(traj, eval_fn)(env=envs[env_id])
 
                     # Mark trajectory and env as done
                     work_queue.task_done()
@@ -181,4 +173,4 @@ async def async_fix_pool_dispatcher(cfg, init_fn, run_fn, eval_fn):
         for w in workers:
             w.cancel()
 
-    await dispatcher()
+    await run_all()
