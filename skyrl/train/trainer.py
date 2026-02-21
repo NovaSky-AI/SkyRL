@@ -592,7 +592,7 @@ class RayPPOTrainer:
             "pass_through",
             "broadcast_to_inference_engines",
             self.inference_engine_client,
-            self.inference_engine_client.inference_engine_cfg,
+            self.cfg.generator.inference_engine,
         )
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:

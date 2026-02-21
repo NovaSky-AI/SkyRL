@@ -202,5 +202,5 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             "pass_through",
             "broadcast_to_inference_engines",
             self.inference_engine_client,
-            self.cfg.generator.inference_engine_cfg,
+            self.cfg.generator.inference_engine,
         )
