@@ -36,7 +36,6 @@ def test_connector_shapes(mesh, expansion_rate: int):
             hidden_dim,
             expansion_rate,
             max_lora_adapters=4,
-            trainable=True,
             dtype=jnp.float32,
             rngs=nnx.Rngs(0),
         )
@@ -64,7 +63,6 @@ def test_connector_identity_initialization(mesh, expansion_rate: int):
             hidden_dim,
             n,
             max_lora_adapters=3,
-            trainable=True,
             dtype=jnp.float32,
             rngs=nnx.Rngs(0),
         )
@@ -187,7 +185,9 @@ def _fill_tiny_model(model: _TinyModel) -> None:
         model.self_attn.lora_A[...].shape
     )
     model.self_attn.lora_B[...] = (
-        jnp.arange(np.prod(model.self_attn.lora_B[...].shape), dtype=jnp.float32).reshape(model.self_attn.lora_B[...].shape)
+        jnp.arange(np.prod(model.self_attn.lora_B[...].shape), dtype=jnp.float32).reshape(
+            model.self_attn.lora_B[...].shape
+        )
         + 1000
     )
     model.attn_connector.alpha_pre[...] = (
@@ -239,10 +239,18 @@ def test_connector_adapter_slice_save_load_safetensors(tmp_path):
         rank=2,
     )
 
-    np.testing.assert_allclose(np.asarray(dst.self_attn.lora_A[...][1, :, :2]), np.asarray(src.self_attn.lora_A[...][1, :, :2]))
-    np.testing.assert_allclose(np.asarray(dst.self_attn.lora_B[...][1, :2, :]), np.asarray(src.self_attn.lora_B[...][1, :2, :]))
-    np.testing.assert_allclose(np.asarray(dst.attn_connector.alpha_pre[...][1]), np.asarray(src.attn_connector.alpha_pre[...][1]))
-    np.testing.assert_allclose(np.asarray(dst.attn_connector.phi_pre[...][1]), np.asarray(src.attn_connector.phi_pre[...][1]))
+    np.testing.assert_allclose(
+        np.asarray(dst.self_attn.lora_A[...][1, :, :2]), np.asarray(src.self_attn.lora_A[...][1, :, :2])
+    )
+    np.testing.assert_allclose(
+        np.asarray(dst.self_attn.lora_B[...][1, :2, :]), np.asarray(src.self_attn.lora_B[...][1, :2, :])
+    )
+    np.testing.assert_allclose(
+        np.asarray(dst.attn_connector.alpha_pre[...][1]), np.asarray(src.attn_connector.alpha_pre[...][1])
+    )
+    np.testing.assert_allclose(
+        np.asarray(dst.attn_connector.phi_pre[...][1]), np.asarray(src.attn_connector.phi_pre[...][1])
+    )
     assert np.allclose(np.asarray(dst.attn_connector.alpha_pre[...][0]), 0)
     assert np.allclose(np.asarray(dst.attn_connector.alpha_pre[...][2]), 0)
 
@@ -265,9 +273,13 @@ def test_connector_extract_insert_adapter_state_roundtrip():
         key = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
         arr = leaf.value if hasattr(leaf, "value") else leaf
         if key == "alpha_pre":
-            np.testing.assert_allclose(np.asarray(arr[adapter_index]), np.asarray(src.attn_connector.alpha_pre[...][adapter_index]))
+            np.testing.assert_allclose(
+                np.asarray(arr[adapter_index]), np.asarray(src.attn_connector.alpha_pre[...][adapter_index])
+            )
         elif key == "phi_pre":
-            np.testing.assert_allclose(np.asarray(arr[adapter_index]), np.asarray(src.attn_connector.phi_pre[...][adapter_index]))
+            np.testing.assert_allclose(
+                np.asarray(arr[adapter_index]), np.asarray(src.attn_connector.phi_pre[...][adapter_index])
+            )
         elif key == "lora_A":
             np.testing.assert_allclose(
                 np.asarray(arr[adapter_index, :, :rank]),

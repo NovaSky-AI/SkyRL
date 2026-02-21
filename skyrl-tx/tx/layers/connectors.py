@@ -40,18 +40,12 @@ class LoRAConnector(nnx.Module):
         expansion_rate: int,
         *,
         max_lora_adapters: int,
-        trainable: bool = False,
         sinkhorn_iters: int = 20,
-        eps: float = 1e-5,
         dtype: jnp.dtype,
         rngs: nnx.Rngs,
     ) -> None:
-        self.hidden_dim = hidden_dim
         self.expansion_rate = expansion_rate
-        self.max_lora_adapters = max_lora_adapters
-        self.trainable = trainable
         self.sinkhorn_iters = sinkhorn_iters
-        self.eps = eps
         n = expansion_rate
         C = hidden_dim
 
@@ -63,7 +57,12 @@ class LoRAConnector(nnx.Module):
             max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs
         )
         self.phi_res = Param(
-            max_lora_adapters, n * C, n * n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs,
+            max_lora_adapters,
+            n * C,
+            n * n,
+            dtype=dtype,
+            kernel_init=nnx.initializers.zeros_init(),
+            rngs=rngs,
         )
 
         # H_pre = sigmoid(b_pre) = 1/n: uniform aggregation across streams
@@ -118,10 +117,12 @@ class LoRAConnector(nnx.Module):
     def _sinkhorn_knopp(M: jax.Array, iters: int = 20) -> jax.Array:
         """Project a matrix onto the set of doubly stochastic matrices."""
         M = jnp.exp(M)
+
         def step(_, mat):
             mat = mat / mat.sum(axis=-1, keepdims=True)
             mat = mat / mat.sum(axis=-2, keepdims=True)
             return mat
+
         return jax.lax.fori_loop(0, iters, step, M)
 
     def pre(
@@ -152,11 +153,7 @@ class LoRAConnector(nnx.Module):
         return x_agg, x_norm
 
     def post(
-        self,
-        residual: jax.Array,
-        output: jax.Array,
-        residual_norm: jax.Array,
-        adapter_indices: jax.Array | None = None
+        self, residual: jax.Array, output: jax.Array, residual_norm: jax.Array, adapter_indices: jax.Array | None = None
     ) -> jax.Array:
         B, T, n, C = residual.shape
         if self.expansion_rate == 1:

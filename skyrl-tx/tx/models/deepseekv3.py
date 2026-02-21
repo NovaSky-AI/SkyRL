@@ -438,7 +438,6 @@ class DeepseekV3DecoderLayer(nnx.Module):
             config.hidden_size,
             config.expansion_rate,
             max_lora_adapters=config.max_lora_adapters,
-            trainable=config.train_connectors,
             dtype=dtype,
             rngs=rngs,
         )
@@ -446,7 +445,6 @@ class DeepseekV3DecoderLayer(nnx.Module):
             config.hidden_size,
             config.expansion_rate,
             max_lora_adapters=config.max_lora_adapters,
-            trainable=config.train_connectors,
             dtype=dtype,
             rngs=rngs,
         )

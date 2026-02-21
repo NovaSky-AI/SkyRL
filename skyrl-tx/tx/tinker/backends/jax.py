@@ -98,9 +98,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     expansion_rate: int = Field(
         default=1,
         ge=1,
-        description=(
-            "EXPERIMENTAL: mHC expansion rate (number of residual streams). Set to 1 to disable expansion."
-        ),
+        description=("EXPERIMENTAL: mHC expansion rate (number of residual streams). Set to 1 to disable expansion."),
     )
     loss_chunk_size: int = Field(
         default=1024,
