@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional
@@ -8,7 +9,7 @@ from skyrl.train.generators.utils import get_rollout_metrics, get_response_ids_a
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.utils.rate_limiter import create_rate_limiter
-from tqdm.asyncio import tqdm
+from tqdm import tqdm
 from omegaconf import DictConfig, OmegaConf
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
@@ -96,21 +97,31 @@ class HarborGenerator(GeneratorInterface):
         self._rate_limiter = create_rate_limiter(rate_limit_config)
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        tasks = []
-        for i in range(len(input_batch["prompts"])):
-            tasks.append(
-                self.harbor_agent_loop(
-                    prompt=input_batch["prompts"][i],
-                    trajectory_id=input_batch["trajectory_ids"][i],
-                )
-            )
+        prompts = input_batch["prompts"]
+        trajectory_ids = input_batch["trajectory_ids"]
 
-        all_outputs: List[HarborAgentOutput] = await tqdm.gather(
-            *tasks,
+        if trajectory_ids is None:
+            raise ValueError("`trajectory_ids` is required in the input batch")
+
+        all_outputs: List[HarborAgentOutput] = [None] * len(prompts)  # type: ignore[list-item]
+        progress = tqdm(
+            total=len(prompts),
             desc="Generating Trajectories",
-            miniters=max(1, len(tasks) // 10),
+            miniters=max(1, len(prompts) // 10),
             mininterval=5,
         )
+
+        async def _worker(idx, prompt, trajectory_id):
+            result = await self.harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
+            all_outputs[idx] = result
+            progress.update(1)
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for idx, (prompt, trajectory_id) in enumerate(zip(prompts, trajectory_ids)):
+                    tg.create_task(_worker(idx, prompt, trajectory_id))
+        finally:
+            progress.close()
         all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(all_outputs)
 
         generator_output: GeneratorOutput = {
