@@ -136,7 +136,7 @@ class SkyRLTrainBackend(AbstractBackend):
             ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
 
         policy_model = PPORayActorGroup(
-            cfg,
+            cfg.trainer,
             cfg.trainer.placement.policy_num_nodes,
             cfg.trainer.placement.policy_num_gpus_per_node,
             PolicyWorker,
