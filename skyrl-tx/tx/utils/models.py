@@ -65,7 +65,12 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
     import tx.models.llama3
     import tx.models.qwen3
+    import tx.models.qwen3_vl
     import tx.models.deepseekv3
+
+    model_type = getattr(config, "model_type", None)
+    if model_type == "qwen3_vl":
+        return tx.models.qwen3_vl.Qwen3VLForCausalLM
 
     for architecture in config.architectures or []:
         if hasattr(tx.models.llama3, architecture):
