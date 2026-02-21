@@ -104,8 +104,7 @@ class HarborGenerator(GeneratorInterface):
             raise ValueError("`trajectory_ids` is required in the input batch")
         if len(prompts) != len(trajectory_ids):
             raise ValueError(
-                f"Prompt count ({len(prompts)}) doesn't match "
-                f"trajectory_ids count ({len(trajectory_ids)})"
+                f"Prompt count ({len(prompts)}) doesn't match " f"trajectory_ids count ({len(trajectory_ids)})"
             )
 
         all_outputs: List[HarborAgentOutput] = [None] * len(prompts)  # type: ignore[list-item]
