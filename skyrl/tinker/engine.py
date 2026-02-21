@@ -371,8 +371,8 @@ class TinkerEngine:
 
         # TODO: This leaks the abstraction by accessing backend-specific config.
         # We should find a better way to handle this going forward.
-        if self.config.backend == "jax" and self.backend.config_overrides.sample_max_num_sequences > 0:
-            batchable = batchable[: self.backend.config_overrides.sample_max_num_sequences]
+        if self.config.backend == "jax" and self.backend.config.sample_max_num_sequences > 0:
+            batchable = batchable[: self.backend.config.sample_max_num_sequences]
 
         return {str(f.request_id): (f.model_id, types.SampleInput.model_validate(f.request_data)) for f in batchable}
 

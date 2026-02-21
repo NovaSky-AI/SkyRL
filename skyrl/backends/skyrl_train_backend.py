@@ -104,7 +104,8 @@ class SkyRLTrainBackend(AbstractBackend):
             )
 
         self.base_model = base_model
-        self.config_overrides = config
+        # NOTE: We currently have two config attributes "config" which is just config overrides and "_cfg" which is the actual config object. This is a temporary state given that the Tinker engine expects a .config attribute
+        self.config = config
         self._model_id: str | None = None
         self._model_metadata: types.ModelMetadata | None = None
         self._cfg = None
@@ -200,7 +201,7 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{self._model_id}' already exists. Only one model supported.")
 
         # Build config
-        self._cfg = _build_skyrl_train_config(self.base_model, self.config_overrides, lora_config)
+        self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
 
         if not ray.is_initialized():
             logger.info("Initializing Ray with runtime environment")
