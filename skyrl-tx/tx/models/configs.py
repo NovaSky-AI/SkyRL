@@ -53,3 +53,4 @@ class ModelConfig(PretrainedConfig):
 Llama3Config = ModelConfig
 Qwen3Config = ModelConfig
 DeepseekV3Config = ModelConfig
+Olmo3Config = ModelConfig
