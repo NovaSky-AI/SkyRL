@@ -1,6 +1,7 @@
 """Qwen3-VL configuration classes.
 
 Compatible with HuggingFace Qwen3-VL config structure for loading checkpoints.
+Aligned with transformers.models.qwen3_vl.configuration_qwen3_vl.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from transformers import PretrainedConfig
 class Qwen3VLVisionConfig(PretrainedConfig):
     """Vision encoder (ViT) configuration for Qwen3-VL."""
 
-    model_type = "qwen3_vl_vision"
+    model_type = "qwen3_vl"
     base_config_key = "vision_config"
 
     def __init__(
@@ -49,7 +50,7 @@ class Qwen3VLVisionConfig(PretrainedConfig):
         self.deepstack_visual_indexes = deepstack_visual_indexes or [8, 16, 24]
 
 
-class Qwen3VLTextConfig(PretrainedConfig):
+class Qwen3VLTextConfig(PreTrainedConfig):
     """Text backbone configuration for Qwen3-VL (same as Qwen3 LLM)."""
 
     model_type = "qwen3_vl_text"
@@ -94,7 +95,10 @@ class Qwen3VLTextConfig(PretrainedConfig):
         self.attention_dropout = attention_dropout
         self.rope_parameters = rope_parameters
         self.pad_token_id = pad_token_id
-        super().__init__(**kwargs)
+        super().__init__(
+            ignore_keys_at_rope_validation={"mrope_section", "mrope_interleaved"},
+            **kwargs,
+        )
 
 
 class Qwen3VLConfig(PretrainedConfig):

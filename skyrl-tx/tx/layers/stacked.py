@@ -336,6 +336,7 @@ class MultiStackedDecoderLayers(nnx.Module):
                 keys=kv_cache.keys[start:end],
                 values=kv_cache.values[start:end],
                 cache_position=kv_cache.cache_position,
+                rope_deltas=kv_cache.rope_deltas,
             )
             for start, end in zip(boundaries[:-1], boundaries[1:])
         )
@@ -345,7 +346,12 @@ class MultiStackedDecoderLayers(nnx.Module):
         assert caches, "Expected at least one KV cache."
         keys = [key for cache in caches for key in cache.keys]
         values = [value for cache in caches for value in cache.values]
-        return KVCache(keys=keys, values=values, cache_position=caches[-1].cache_position)
+        return KVCache(
+            keys=keys,
+            values=values,
+            cache_position=caches[-1].cache_position,
+            rope_deltas=caches[-1].rope_deltas,
+        )
 
     def __call__(
         self,
