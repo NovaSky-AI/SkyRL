@@ -291,6 +291,7 @@ class Qwen3DecoderLayer(nnx.Module):
         self.attn_connector = LoRAConnector(
             config.hidden_size,
             config.expansion_rate,
+            input_norm=self.input_layernorm,
             max_lora_adapters=config.max_lora_adapters,
             trainable=config.train_connectors,
             dtype=dtype,
@@ -299,6 +300,7 @@ class Qwen3DecoderLayer(nnx.Module):
         self.mlp_connector = LoRAConnector(
             config.hidden_size,
             config.expansion_rate,
+            input_norm=self.post_attention_layernorm,
             max_lora_adapters=config.max_lora_adapters,
             trainable=config.train_connectors,
             dtype=dtype,

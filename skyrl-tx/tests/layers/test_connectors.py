@@ -33,7 +33,13 @@ def test_connector_shapes(mesh, expansion_rate: int):
         batch, seq = 2, 8
 
         conn = LoRAConnector(
-            hidden_dim, expansion_rate, max_lora_adapters=4, trainable=True, dtype=jnp.float32, rngs=nnx.Rngs(0)
+            hidden_dim,
+            expansion_rate,
+            input_norm=lambda x: x,
+            max_lora_adapters=4,
+            trainable=True,
+            dtype=jnp.float32,
+            rngs=nnx.Rngs(0),
         )
         adapter_indices = jnp.array([1, 2], dtype=jnp.int32)
 
@@ -55,7 +61,15 @@ def test_connector_identity_initialization(mesh, expansion_rate: int):
         hidden_dim = 64
         n = expansion_rate
 
-        conn = LoRAConnector(hidden_dim, n, max_lora_adapters=3, trainable=True, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        conn = LoRAConnector(
+            hidden_dim,
+            n,
+            input_norm=lambda x: x,
+            max_lora_adapters=3,
+            trainable=True,
+            dtype=jnp.float32,
+            rngs=nnx.Rngs(0),
+        )
         adapter_idx = 0
         adapter_indices = jnp.array([adapter_idx], dtype=jnp.int32)
 

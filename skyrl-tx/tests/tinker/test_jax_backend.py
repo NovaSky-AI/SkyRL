@@ -114,7 +114,6 @@ def test_clear_lora_adapter():
 
     # Mutate connector state to ensure clear_lora_adapter actively resets it.
     connector.alpha_pre[...] = connector.alpha_pre[...].at[adapter_idx].set(1.0)
-    connector.input_norm_weight[...] = connector.input_norm_weight[...].at[adapter_idx].set(0.0)
     connector.b_pre[...] = connector.b_pre[...].at[adapter_idx].set(0.0)
     connector.b_res[...] = connector.b_res[...].at[adapter_idx].set(0.0)
     connector.phi_pre[...] = connector.phi_pre[...].at[adapter_idx].set(1.0)
@@ -135,7 +134,6 @@ def test_clear_lora_adapter():
     expected_b_pre = np.log(clamped) - np.log(1.0 - clamped)
 
     np.testing.assert_allclose(np.asarray(connector.alpha_pre[adapter_idx]), 0.1, rtol=1e-3, atol=1e-3)
-    np.testing.assert_allclose(np.asarray(connector.input_norm_weight[adapter_idx]), 1.0)
     np.testing.assert_allclose(np.asarray(connector.b_pre[adapter_idx]), expected_b_pre, rtol=1e-2, atol=1e-2)
     np.testing.assert_allclose(np.asarray(connector.b_post[adapter_idx]), 0.0)
     np.testing.assert_allclose(np.asarray(connector.phi_pre[adapter_idx]), 0.0)

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 from flax import nnx
@@ -38,6 +39,7 @@ class LoRAConnector(nnx.Module):
         hidden_dim: int,
         expansion_rate: int,
         *,
+        input_norm: Callable[[jax.Array], jax.Array],
         max_lora_adapters: int,
         trainable: bool = False,
         sinkhorn_iters: int = 20,
@@ -51,11 +53,11 @@ class LoRAConnector(nnx.Module):
         self.trainable = trainable
         self.sinkhorn_iters = sinkhorn_iters
         self.eps = eps
+        self.input_norm = input_norm
         n = expansion_rate
         C = hidden_dim
 
         # Phi matrices are zero-initialized so that alpha * x @ 0 + bias = bias at init.
-        self.input_norm_weight = nnx.Param(jnp.ones((max_lora_adapters, n * C), dtype=dtype))
         self.phi_pre = Param(
             max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs
         )
@@ -87,8 +89,6 @@ class LoRAConnector(nnx.Module):
         dtype = connector_slot.dtype
         if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
             return jnp.full_like(connector_slot, 0.1)
-        if key_name == "input_norm_weight":
-            return jnp.ones_like(connector_slot)
         if key_name in {"phi_pre", "phi_post", "phi_res"}:
             return jnp.zeros_like(connector_slot)
         if key_name == "b_pre":
@@ -126,12 +126,6 @@ class LoRAConnector(nnx.Module):
             return mat
         return jax.lax.fori_loop(0, iters, step, M)
 
-    def _norm(self, x_flat: jax.Array, adapter_indices: jax.Array) -> jax.Array:
-        """Separate norm from layernorm.RMSNorm due to adapter indexing and trainability."""
-        input_norm_weight = self.input_norm_weight[adapter_indices]
-        rms = jnp.sqrt(jnp.mean(x_flat**2, axis=-1, keepdims=True) + self.eps)
-        return (input_norm_weight[:, None, :] * x_flat) / rms
-
     def pre(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> tuple[jax.Array, jax.Array]:
         B, T, n, C = x.shape
         if self.expansion_rate == 1:
@@ -139,8 +133,8 @@ class LoRAConnector(nnx.Module):
             return x[..., 0, :], x.reshape(B, T, n * C)
 
         adapter_indices = self._get_adapter_indices(B, adapter_indices)
-        x_flat = x.reshape(B, T, n * C)
-        x_norm = self._norm(x_flat, adapter_indices)
+        # Apply self.input_norm independently to each of the n streams
+        x_norm = self.input_norm(x).reshape(B, T, n * C)
 
         alpha_pre = self.alpha_pre[adapter_indices]
         phi_pre = self.phi_pre[adapter_indices]
