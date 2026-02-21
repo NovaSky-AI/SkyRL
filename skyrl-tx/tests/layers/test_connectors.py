@@ -35,7 +35,6 @@ def test_connector_shapes(mesh, expansion_rate: int):
         conn = LoRAConnector(
             hidden_dim,
             expansion_rate,
-            input_norm=lambda x: x,
             max_lora_adapters=4,
             trainable=True,
             dtype=jnp.float32,
@@ -44,7 +43,7 @@ def test_connector_shapes(mesh, expansion_rate: int):
         adapter_indices = jnp.array([1, 2], dtype=jnp.int32)
 
         x = jnp.ones((batch, seq, expansion_rate, hidden_dim))
-        pre_out, residual_norm = conn.pre(x, adapter_indices)
+        pre_out, residual_norm = conn.pre(x, lambda y: y, adapter_indices)
         post_out = conn.post(x, pre_out, residual_norm, adapter_indices)
 
         assert pre_out.shape == (batch, seq, hidden_dim)
@@ -64,7 +63,6 @@ def test_connector_identity_initialization(mesh, expansion_rate: int):
         conn = LoRAConnector(
             hidden_dim,
             n,
-            input_norm=lambda x: x,
             max_lora_adapters=3,
             trainable=True,
             dtype=jnp.float32,

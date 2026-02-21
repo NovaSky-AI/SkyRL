@@ -39,7 +39,6 @@ class LoRAConnector(nnx.Module):
         hidden_dim: int,
         expansion_rate: int,
         *,
-        input_norm: Callable[[jax.Array], jax.Array],
         max_lora_adapters: int,
         trainable: bool = False,
         sinkhorn_iters: int = 20,
@@ -53,7 +52,6 @@ class LoRAConnector(nnx.Module):
         self.trainable = trainable
         self.sinkhorn_iters = sinkhorn_iters
         self.eps = eps
-        self.input_norm = input_norm
         n = expansion_rate
         C = hidden_dim
 
@@ -126,15 +124,20 @@ class LoRAConnector(nnx.Module):
             return mat
         return jax.lax.fori_loop(0, iters, step, M)
 
-    def pre(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> tuple[jax.Array, jax.Array]:
+    def pre(
+        self,
+        x: jax.Array,
+        input_norm: Callable[[jax.Array], jax.Array],
+        adapter_indices: jax.Array | None = None,
+    ) -> tuple[jax.Array, jax.Array]:
         B, T, n, C = x.shape
         if self.expansion_rate == 1:
             # Single-stream fast path: pre is identity on the residual stream.
             return x[..., 0, :], x.reshape(B, T, n * C)
 
         adapter_indices = self._get_adapter_indices(B, adapter_indices)
-        # Apply self.input_norm independently to each of the n streams
-        x_norm = self.input_norm(x).reshape(B, T, n * C)
+        # Apply input_norm independently to each of the n streams.
+        x_norm = input_norm(x).reshape(B, T, n * C)
 
         alpha_pre = self.alpha_pre[adapter_indices]
         phi_pre = self.phi_pre[adapter_indices]

@@ -437,7 +437,6 @@ class DeepseekV3DecoderLayer(nnx.Module):
         self.attn_connector = LoRAConnector(
             config.hidden_size,
             config.expansion_rate,
-            input_norm=self.input_layernorm,
             max_lora_adapters=config.max_lora_adapters,
             trainable=config.train_connectors,
             dtype=dtype,
@@ -446,7 +445,6 @@ class DeepseekV3DecoderLayer(nnx.Module):
         self.mlp_connector = LoRAConnector(
             config.hidden_size,
             config.expansion_rate,
-            input_norm=self.post_attention_layernorm,
             max_lora_adapters=config.max_lora_adapters,
             trainable=config.train_connectors,
             dtype=dtype,
@@ -463,7 +461,7 @@ class DeepseekV3DecoderLayer(nnx.Module):
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
-        hidden_states, residual_norm = self.attn_connector.pre(hidden_states, adapter_indices)
+        hidden_states, residual_norm = self.attn_connector.pre(hidden_states, self.input_layernorm, adapter_indices)
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
@@ -475,7 +473,9 @@ class DeepseekV3DecoderLayer(nnx.Module):
         hidden_states = self.attn_connector.post(residual, hidden_states, residual_norm, adapter_indices)
 
         residual = hidden_states
-        hidden_states, residual_norm = self.mlp_connector.pre(hidden_states, adapter_indices)
+        hidden_states, residual_norm = self.mlp_connector.pre(
+            hidden_states, self.post_attention_layernorm, adapter_indices
+        )
         hidden_states = self.post_attention_layernorm(hidden_states)
         mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
         hidden_states = self.mlp_connector.post(residual, mlp_output, residual_norm, adapter_indices)
