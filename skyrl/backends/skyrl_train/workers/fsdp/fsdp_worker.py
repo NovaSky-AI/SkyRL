@@ -6,6 +6,7 @@ from transformers import AutoConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 import io
+from typing import TYPE_CHECKING
 
 try:
     # for torch 2.5+
@@ -25,6 +26,9 @@ from skyrl.backends.skyrl_train.workers.worker import (
 )
 from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk, LoraLoadRequest
 from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+
+if TYPE_CHECKING:
+    from skyrl.train.config.config import InferenceEngineConfig
 
 
 class FSDPWeightExtractor(WeightExtractor):
@@ -153,6 +157,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             self.optimizer is not None and self.scheduler is not None
         ), "FSDP preparation should create optimizer and scheduler"
 
+    async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
+        # Call super first to set _transfer_strategy_cls and create sender/receivers
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+
         # Initialize weight extractor
         # TODO(haochen): Now module grouping (in order to support FlashRL) is only enabled for the CUDA IPC
         # transfer strategy, we can enable it for other strategies as well.
@@ -162,7 +170,9 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         self.weight_extractor = FSDPWeightExtractor(
             self.model.model,
             group_by_module=group_by_module,
-            batch_size_threshold_gb=0.0,  # Updated in init_weight_transfer_communicator when strategy is known
+            batch_size_threshold_gb=(
+                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if group_by_module else 0.0
+            ),
         )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):

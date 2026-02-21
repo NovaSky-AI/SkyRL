@@ -349,7 +349,10 @@ class WorkerDispatch:
         """Initialize weight sync state for policy model."""
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
-                "pass_through", "init_weight_sync_state", inference_engine_client
+                "pass_through",
+                "init_weight_sync_state",
+                inference_engine_client,
+                self.cfg.generator.inference_engine,
             )
         )
 
@@ -360,7 +363,7 @@ class WorkerDispatch:
                 "pass_through",
                 "broadcast_to_inference_engines",
                 inference_engine_client,
-                inference_engine_client.inference_engine_cfg,
+                self.cfg.generator.inference_engine,
             )
         )
 

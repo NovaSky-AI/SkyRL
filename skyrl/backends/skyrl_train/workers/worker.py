@@ -64,6 +64,7 @@ _SET_AFFINITY = False
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_engines.remote_inference_client import RemoteInferenceClient
+    from skyrl.train.config.config import InferenceEngineConfig
 
 
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
@@ -294,7 +295,9 @@ class Worker(DistributedTorchRayActor):
         torch.cuda.memory._dump_snapshot(record_memory_path)
 
     async def init_weight_sync_state(
-        self, inference_engine_client: "Union[InferenceEngineClient, RemoteInferenceClient]"
+        self,
+        inference_engine_client: "Union[InferenceEngineClient, RemoteInferenceClient]",
+        inference_engine_cfg: "InferenceEngineConfig",
     ):
         """Initialize state for weight syncing with Inference Engine Client
 
@@ -309,9 +312,8 @@ class Worker(DistributedTorchRayActor):
         assert inference_engine_client is not None
 
         # Determine transfer strategy based on inference engine config and placement
-        ie_cfg = inference_engine_client.inference_engine_cfg
         self._transfer_strategy_cls = get_transfer_strategy_cls(
-            weight_sync_backend=ie_cfg.weight_sync_backend,
+            weight_sync_backend=inference_engine_cfg.weight_sync_backend,
             colocate_all=self.cfg.placement.colocate_all,
         )
 
@@ -322,7 +324,9 @@ class Worker(DistributedTorchRayActor):
             inference_world_size = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
-        init_info = self._transfer_strategy_cls.create_init_info(ie_cfg, inference_world_size=inference_world_size)
+        init_info = self._transfer_strategy_cls.create_init_info(
+            inference_engine_cfg, inference_world_size=inference_world_size
+        )
 
         # Create sender on all ranks
         # Strategy implementations may have different logic for different ranks

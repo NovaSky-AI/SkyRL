@@ -500,19 +500,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             policy_loss_fn=self.policy_loss_fn,
         )
 
-        # Initialize weight extractor
-        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
-        # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
-
-        self.weight_extractor = MegatronWeightExtractor(
-            bridge=self.bridge,
-            actor_module=self.actor_module,
-            enable_bucketing=self._transfer_strategy_cls is CudaIpcTransferStrategy,
-            bucket_size_threshold_GB=0.0,  # Updated in init_weight_transfer_communicator when strategy is known
-            training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
-        )
-
         self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
     def forward_backward(
@@ -660,6 +647,26 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         else:
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = learning_rate
+
+    async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
+        # Call super first to set _transfer_strategy_cls and create sender/receivers
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+
+        # Initialize weight extractor
+        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
+        # transfer strategy, we can enable it for other strategies as well.
+        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
+
+        enable_bucketing = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        self.weight_extractor = MegatronWeightExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            enable_bucketing=enable_bucketing,
+            bucket_size_threshold_GB=(
+                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if enable_bucketing else 0.0
+            ),
+            training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
+        )
 
     async def broadcast_to_inference_engines(
         self, inference_engine_client: "InferenceEngineInterface", inference_engine_cfg: "InferenceEngineConfig"

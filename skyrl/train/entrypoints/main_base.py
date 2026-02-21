@@ -370,6 +370,7 @@ class BasePPOExp:
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
+            inference_engine_cfg=ie_cfg,
         )
 
     def _setup_trainer(self):
