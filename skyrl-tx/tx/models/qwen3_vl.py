@@ -251,6 +251,20 @@ def build_text_rope(
     )
 
 
+def build_additive_causal_mask(
+    attention_mask: jax.Array,
+    query_positions: jax.Array,
+    kv_len: int,
+) -> jax.Array:
+    """Build HF-style additive attention mask with causal + padding constraints."""
+    key_idx = jnp.arange(kv_len, dtype=query_positions.dtype)
+    key_valid = attention_mask[:, None, None, :kv_len].astype(bool)
+    causal = key_idx[None, None, None, :] <= query_positions[:, None, :, None]
+    valid = key_valid & causal
+    neg_inf = jnp.array(-1e9, dtype=jnp.float32)
+    return jnp.where(valid, jnp.array(0.0, dtype=jnp.float32), neg_inf)
+
+
 def _get_rope_index_batch_py(
     input_ids: np.ndarray,
     attention_mask: np.ndarray,
@@ -1022,8 +1036,6 @@ class Qwen3VLAttention(nnx.Module):
             v = jnp.transpose(v, (0, 2, 1, 3))  # [B, T, Hkv, D] -> [B, Hkv, T, D]
 
         scale = self.spec.text_head_dim**-0.5
-        attn_mask = attention_mask[:, None, None, :].astype(jnp.float32)
-        attn_mask = (1.0 - attn_mask) * -1e9
 
         kv_len = k.shape[2]
         repeats = 1
@@ -1051,10 +1063,11 @@ class Qwen3VLAttention(nnx.Module):
                 * scale
             )
 
-        scores = scores + attn_mask
-        if T > 1 or kv_cache is None:
-            causal_mask = jnp.tril(jnp.ones((T, kv_len), dtype=jnp.float32))
-            scores = scores + (1.0 - causal_mask)[None, None, :, :] * -1e9
+        if attention_mask.ndim == 4:
+            scores = scores + attention_mask[:, :, :, :kv_len]
+        else:
+            attn_mask = attention_mask[:, None, None, :kv_len].astype(jnp.float32)
+            scores = scores + (1.0 - attn_mask) * -1e9
         weights = jax.nn.softmax(scores, axis=-1)
 
         if self.spec.text_num_heads != self.spec.text_num_kv_heads:
@@ -1174,10 +1187,9 @@ def spec_from_config(config: Qwen3VLConfig | Qwen3VLModelConfig) -> Qwen3VLSpec:
     rope_params = getattr(text_cfg, "rope_parameters", None)
     if isinstance(rope_params, dict):
         rope_section = rope_params.get("mrope_section", [head_dim // 2])
-        mrope_interleaved = bool(rope_params.get("mrope_interleaved", False))
     else:
         rope_section = [head_dim // 2]
-        mrope_interleaved = False
+    mrope_interleaved = True
     rope_section = tuple(int(x) for x in rope_section)
     rope_theta = getattr(text_cfg, "rope_theta", 500000.0)
 
@@ -1344,6 +1356,16 @@ class Qwen3VLModel(nnx.Module):
         batch = hidden.shape[0]
         is_decode = kv_cache is not None
 
+        text_positions = positions
+        explicit_mrope_ids = None
+        if positions is not None and positions.ndim == 3:
+            if positions.shape[0] == 4:
+                text_positions = positions[0]
+                explicit_mrope_ids = positions[1:]
+            elif positions.shape[0] == 3:
+                text_positions = positions[0]
+                explicit_mrope_ids = positions
+
         image_mask = None
         video_mask = None
         deepstack_image: tuple[jax.Array, ...] | None = None
@@ -1375,12 +1397,22 @@ class Qwen3VLModel(nnx.Module):
                 )
 
         rope_deltas = None
-        if is_decode and positions is not None:
+        if is_decode and text_positions is not None:
             rope_deltas_from_cache = (
                 kv_cache.rope_deltas if kv_cache is not None else None
             )
-            if rope_deltas_from_cache is not None:
-                pos_1d = positions.astype(jnp.int32) + rope_deltas_from_cache
+            if explicit_mrope_ids is not None:
+                cos, sin = build_mrope(
+                    explicit_mrope_ids.astype(jnp.int32),
+                    self.spec.text_rope_section,
+                    self.spec.text_rope_theta,
+                    dtype=hidden.dtype,
+                    rope_scaling_type=None,
+                    rope_scaling_factor=None,
+                    mrope_interleaved=self.spec.text_mrope_interleaved,
+                )
+            elif rope_deltas_from_cache is not None:
+                pos_1d = text_positions.astype(jnp.int32) + rope_deltas_from_cache
                 position_ids = jnp.broadcast_to(
                     pos_1d[None, :, :],
                     (3, batch, pos_1d.shape[-1]),
@@ -1396,7 +1428,7 @@ class Qwen3VLModel(nnx.Module):
                 )
             else:
                 cos, sin = build_text_rope(
-                    positions,
+                    text_positions,
                     self.spec.text_rope_section,
                     self.spec.text_rope_theta,
                     dtype=hidden.dtype,
@@ -1405,16 +1437,20 @@ class Qwen3VLModel(nnx.Module):
                     mrope_interleaved=self.spec.text_mrope_interleaved,
                 )
         else:
-            position_ids, rope_deltas = get_rope_index(
-                spatial_merge_size=self.spec.vision_spatial_merge_size,
-                input_ids=input_ids,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                attention_mask=attention_mask,
-                image_token_id=self.spec.image_token_id,
-                video_token_id=self.spec.video_token_id,
-                vision_start_id=self.spec.vision_start_token_id,
-            )
+            if explicit_mrope_ids is not None:
+                position_ids = explicit_mrope_ids.astype(jnp.int32)
+            else:
+                position_ids, rope_deltas = get_rope_index(
+                    spatial_merge_size=self.spec.vision_spatial_merge_size,
+                    input_ids=input_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    attention_mask=attention_mask,
+                    image_token_id=self.spec.image_token_id,
+                    video_token_id=self.spec.video_token_id,
+                    vision_start_id=self.spec.vision_start_token_id,
+                )
+            text_positions = position_ids[0]
             cos, sin = build_mrope(
                 position_ids,
                 self.spec.text_rope_section,
@@ -1424,6 +1460,22 @@ class Qwen3VLModel(nnx.Module):
                 rope_scaling_factor=None,
                 mrope_interleaved=self.spec.text_mrope_interleaved,
             )
+
+        kv_len_for_mask = (
+            kv_cache.keys[0].shape[1]
+            if kv_cache is not None and len(kv_cache.keys) > 0
+            else attention_mask.shape[1]
+        )
+        if text_positions is None:
+            text_positions = jnp.broadcast_to(
+                jnp.arange(hidden.shape[1], dtype=jnp.int32)[None, :],
+                (batch, hidden.shape[1]),
+            )
+        additive_attention_mask = build_additive_causal_mask(
+            attention_mask.astype(jnp.int32),
+            text_positions.astype(jnp.int32),
+            int(kv_len_for_mask),
+        )
 
         all_hidden: list[jax.Array] | None = [] if output_hidden_states else None
         layer_caches: list[tuple[jax.Array, jax.Array]] = []
@@ -1435,9 +1487,9 @@ class Qwen3VLModel(nnx.Module):
                 hidden,
                 cos,
                 sin,
-                attention_mask,
+                additive_attention_mask,
                 kv_cache=layer_kv_tuple,
-                positions=positions,
+                positions=text_positions,
             )
             layer_caches.append(cache)
             if (
@@ -1465,8 +1517,8 @@ class Qwen3VLModel(nnx.Module):
         keys = [jnp.transpose(c[0], (0, 2, 1, 3)) for c in layer_caches]
         values = [jnp.transpose(c[1], (0, 2, 1, 3)) for c in layer_caches]
         pos_for_cache = (
-            positions
-            if positions is not None
+            text_positions
+            if text_positions is not None
             else jnp.broadcast_to(
                 jnp.arange(attention_mask.shape[1], dtype=jnp.int32)[None, :],
                 (batch, attention_mask.shape[1]),

@@ -5,7 +5,12 @@ import pytest
 from flax import nnx
 
 from tx.models.configs import Qwen3VLModelConfig
-from tx.models.qwen3_vl import Qwen3VLModel, get_rope_index
+from tx.models.qwen3_vl import (
+    Qwen3VLModel,
+    build_additive_causal_mask,
+    get_rope_index,
+    spec_from_config,
+)
 from tx.models.qwen3_vl_configs import Qwen3VLConfig
 
 
@@ -297,3 +302,74 @@ def test_qwen3_vl_deepstack_addition_mixed_visual_masks():
     np.testing.assert_array_equal(hidden_np[0, 0], np.zeros((8,), dtype=np.float32))
     np.testing.assert_array_equal(hidden_np[0, 3], np.zeros((8,), dtype=np.float32))
     np.testing.assert_array_equal(hidden_np[0, 5], np.zeros((8,), dtype=np.float32))
+
+
+def test_qwen3_vl_additive_causal_mask_matches_expected_pattern():
+    attention_mask = jnp.array([[1, 1, 1, 0, 0], [1, 1, 1, 1, 0]], dtype=jnp.int32)
+    query_positions = jnp.array([[0, 1, 2], [1, 2, 3]], dtype=jnp.int32)
+
+    mask = build_additive_causal_mask(attention_mask, query_positions, kv_len=5)
+    mask_np = np.asarray(mask)
+
+    assert mask_np.shape == (2, 1, 3, 5)
+
+    # Batch 0, query at pos=2 can attend keys 0..2, cannot attend pad/future.
+    assert np.all(mask_np[0, 0, 2, :3] == 0.0)
+    assert np.all(mask_np[0, 0, 2, 3:] < -1e8)
+
+    # Batch 1, query at pos=1 can attend keys 0..1 only.
+    assert np.all(mask_np[1, 0, 0, :2] == 0.0)
+    assert np.all(mask_np[1, 0, 0, 2:] < -1e8)
+
+
+def test_qwen3_vl_spec_forces_interleaved_mrope_like_hf():
+    base_cfg = Qwen3VLConfig(
+        text_config={
+            "vocab_size": 128,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 4,
+            # HF implementation interleaves regardless; verify our spec does too.
+            "rope_parameters": {"mrope_section": [2, 1, 1], "mrope_interleaved": False},
+        },
+        vision_config={
+            "depth": 0,
+            "hidden_size": 8,
+            "intermediate_size": 16,
+            "num_heads": 2,
+            "out_hidden_size": 8,
+            "patch_size": 2,
+            "spatial_merge_size": 2,
+            "temporal_patch_size": 1,
+            "num_position_embeddings": 4,
+        },
+    )
+    cfg = Qwen3VLModelConfig(
+        base_cfg,
+        max_lora_adapters=0,
+        max_lora_rank=0,
+        shard_attention_heads=True,
+        gradient_checkpointing=False,
+    )
+    spec = spec_from_config(cfg)
+    assert spec.text_mrope_interleaved is True
+
+
+def test_qwen3_vl_accepts_4_plane_position_ids_branch():
+    model = _make_tiny_vl_model()
+    input_ids = jnp.array([[11, 12, 13]], dtype=jnp.int32)
+    attention_mask = jnp.array([[1, 1, 1]], dtype=jnp.int32)
+
+    text_pos = jnp.array([[0, 1, 2]], dtype=jnp.int32)
+    mrope_pos = jnp.stack([text_pos, text_pos, text_pos], axis=0)
+    position_ids = jnp.concatenate([text_pos[None, ...], mrope_pos], axis=0)
+
+    out = model(
+        input_ids,
+        attention_mask=attention_mask,
+        positions=position_ids,
+    )
+    assert out.last_hidden_state.shape == (1, 3, model.spec.text_hidden_size)
