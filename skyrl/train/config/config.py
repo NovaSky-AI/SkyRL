@@ -543,7 +543,7 @@ class TrainerConfig(BaseConfig):
     resume_path: Optional[str] = None
     log_path: str = "/tmp/skyrl-logs"
     """Path for infrastructure log files. For multi-node, use a shared filesystem path to consolidate logs."""
-    ckpt_path: str = field(default_factory=lambda: f"{os.getenv('HOME')}/ckpts/")
+    ckpt_path: str = field(default_factory=lambda: os.path.expanduser("~/ckpts/"))
     max_ckpts_to_keep: int = -1
     """``-1`` to keep all checkpoints, ``N`` to keep only the last N."""
     ckpt_interval: int = 10
