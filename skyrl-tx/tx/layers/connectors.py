@@ -49,67 +49,68 @@ class LoRAConnector(nnx.Module):
 
         # Phi matrices are zero-initialized so that alpha * x @ 0 + bias = bias at init.
         self.phi_pre = Param(
-            max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs
+            max_lora_adapters,
+            n * C,
+            n,
+            dtype=dtype,
+            kernel_init=lambda _, shape, init_dtype: LoRAConnector._default_array("phi_pre", shape, init_dtype),
+            rngs=rngs,
         )
         self.phi_post = Param(
-            max_lora_adapters, n * C, n, dtype=dtype, kernel_init=nnx.initializers.zeros_init(), rngs=rngs
+            max_lora_adapters,
+            n * C,
+            n,
+            dtype=dtype,
+            kernel_init=lambda _, shape, init_dtype: LoRAConnector._default_array("phi_post", shape, init_dtype),
+            rngs=rngs,
         )
         self.phi_res = Param(
             max_lora_adapters,
             n * C,
             n * n,
             dtype=dtype,
-            kernel_init=nnx.initializers.zeros_init(),
+            kernel_init=lambda _, shape, init_dtype: LoRAConnector._default_array("phi_res", shape, init_dtype),
             rngs=rngs,
         )
 
         # H_pre = sigmoid(b_pre) = 1/n: uniform aggregation across streams
-        self.b_pre = nnx.Param(jnp.full((max_lora_adapters, n), default_b_pre(n), dtype=dtype))
+        self.b_pre = nnx.Param(LoRAConnector._default_array("b_pre", (max_lora_adapters, n), dtype))
 
         # H_post = 2 * sigmoid(b_post) ~= 1: narrow spectrum [0.8, 1.2] breaks stream
         # symmetry while preserving mean = 1 (standard residual behavior on average).
-        self.b_post = nnx.Param(jnp.broadcast_to(
-            jnp.linspace(-0.2, 0.2, n, dtype=dtype), (max_lora_adapters, n)
-        ))
+        self.b_post = nnx.Param(LoRAConnector._default_array("b_post", (max_lora_adapters, n), dtype))
 
         # M ~= I: identity mixing via Sinkhorn (minimal cross-stream leakage)
-        self.b_res = nnx.Param(
-            jnp.broadcast_to(jnp.eye(n, dtype=dtype), (max_lora_adapters, n, n))
-        )
+        self.b_res = nnx.Param(LoRAConnector._default_array("b_res", (max_lora_adapters, n, n), dtype))
 
-        self.alpha_pre = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
-        self.alpha_post = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
-        self.alpha_res = nnx.Param(jnp.ones((max_lora_adapters,), dtype=dtype))
+        self.alpha_pre = nnx.Param(LoRAConnector._default_array("alpha_pre", (max_lora_adapters,), dtype))
+        self.alpha_post = nnx.Param(LoRAConnector._default_array("alpha_post", (max_lora_adapters,), dtype))
+        self.alpha_res = nnx.Param(LoRAConnector._default_array("alpha_res", (max_lora_adapters,), dtype))
 
     @staticmethod
-    def _adapter_slot_default(key_name: str, connector_slot: jax.Array) -> jax.Array | None:
-        dtype = connector_slot.dtype
+    def _default_array(key_name: str, shape: tuple[int, ...], dtype: jnp.dtype) -> jax.Array:
         if key_name in {"alpha_pre", "alpha_post", "alpha_res"}:
-            return jnp.full_like(connector_slot, 1.0)
+            return jnp.full(shape, 1.0, dtype=dtype)
         if key_name in {"phi_pre", "phi_post", "phi_res"}:
-            return jnp.zeros_like(connector_slot)
+            return jnp.zeros(shape, dtype=dtype)
         if key_name == "b_pre":
-            n = connector_slot.shape[-1]
-            return jnp.full(connector_slot.shape, default_b_pre(n, dtype), dtype=dtype)
+            n = shape[-1]
+            return jnp.full(shape, default_b_pre(n, dtype), dtype=dtype)
         if key_name == "b_post":
-            n = connector_slot.shape[-1]
-            return jnp.broadcast_to(
-                jnp.linspace(-0.2, 0.2, n, dtype=dtype), connector_slot.shape
-            )
+            n = shape[-1]
+            return jnp.broadcast_to(jnp.linspace(-0.2, 0.2, n, dtype=dtype), shape)
         if key_name == "b_res":
-            n = connector_slot.shape[-1]
-            return jnp.broadcast_to(jnp.eye(n, dtype=dtype), connector_slot.shape)
-        return None
+            n = shape[-1]
+            return jnp.broadcast_to(jnp.eye(n, dtype=dtype), shape)
+        raise ValueError(f"Unknown connector key: {key_name}")
 
     @staticmethod
     def init_adapter_slot(key_name: str, connector_slot: jax.Array) -> jax.Array:
-        default_slot = LoRAConnector._adapter_slot_default(key_name, connector_slot)
-        return connector_slot if default_slot is None else default_slot
+        return LoRAConnector._default_array(key_name, connector_slot.shape, connector_slot.dtype)
 
     @staticmethod
     def clear_adapter_slot(key_name: str, connector_slot: jax.Array) -> jax.Array:
-        default_slot = LoRAConnector._adapter_slot_default(key_name, connector_slot)
-        return jnp.zeros_like(connector_slot) if default_slot is None else default_slot
+        return LoRAConnector._default_array(key_name, connector_slot.shape, connector_slot.dtype)
 
     def _get_adapter_indices(self, batch_size: int, adapter_indices: jax.Array | None) -> jax.Array:
         if adapter_indices is None:
