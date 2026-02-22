@@ -105,11 +105,7 @@ class LoRAConnector(nnx.Module):
         raise ValueError(f"Unknown connector key: {key_name}")
 
     @staticmethod
-    def init_adapter_slot(key_name: str, connector_slot: jax.Array) -> jax.Array:
-        return LoRAConnector._default_array(key_name, connector_slot.shape, connector_slot.dtype)
-
-    @staticmethod
-    def clear_adapter_slot(key_name: str, connector_slot: jax.Array) -> jax.Array:
+    def reset_adapter_slot(key_name: str, connector_slot: jax.Array) -> jax.Array:
         return LoRAConnector._default_array(key_name, connector_slot.shape, connector_slot.dtype)
 
     def _get_adapter_indices(self, batch_size: int, adapter_indices: jax.Array | None) -> jax.Array:
