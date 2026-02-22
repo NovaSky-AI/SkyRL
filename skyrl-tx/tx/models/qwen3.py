@@ -279,14 +279,13 @@ class Qwen3MoeSparseMoeBlock(nnx.Module):
 class Qwen3DecoderLayer(nnx.Module):
 
     def __init__(self, config: Qwen3Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
         self.self_attn = Qwen3Attention(config, dtype=dtype, rngs=rngs)
         if getattr(config, "num_experts", None):
             self.mlp = Qwen3MoeSparseMoeBlock(config, dtype=dtype, rngs=rngs)
         else:
             self.mlp = Qwen3MLP(config, dtype=dtype, rngs=rngs)
-
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
         self.attn_connector = LoRAConnector(
             config.hidden_size,
