@@ -549,7 +549,7 @@ class TrainerConfig(BaseConfig):
     ckpt_interval: int = 10
     hf_save_interval: int = -1
     """Save HuggingFace-format model every N steps. ``-1`` to disable."""
-    export_path: str = field(default_factory=lambda: f"{os.getenv('HOME')}/exports/")
+    export_path: str = field(default_factory=lambda: os.path.expanduser("~/exports/"))
     """Path for exported artifacts (HF models, debug dumps, etc.)."""
     bf16: bool = True
     epochs: int = 1
