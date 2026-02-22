@@ -4,6 +4,8 @@ from jax import lax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh, PartitionSpec
 
+from tx.layers.kernels.ragged_dot import ragged_dot as ragged_dot_pallas
+
 
 def ragged_dot(
     lhs: jax.Array,
@@ -57,6 +59,42 @@ def ragged_dot(
     )
 
     return jnp.where(valid_mask[:, None], result, 0)
+
+
+def fast_ragged_dot(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    precision=None,
+    preferred_element_type=None,
+    group_offset: jax.Array | None = None,
+) -> jax.Array:
+    """Fast ragged dot product with group_offset support using Pallas kernels.
+    
+    Uses GPU info to configure Pallas kernels. Defaults to using ragged_dot().
+    """
+    
+    m, k, n, g = lhs.shape[0], rhs.shape[1], rhs.shape[2], group_sizes.shape[0]
+
+    device_kind = jax.devices()[0].device_kind
+
+    # Tuned parameters for A100 and H100
+    if "A100" in device_kind:
+        block_m, block_k, block_n = 128, 64, 64
+        if m >= 4096 and (k >= 1024 or n >= 1024) and min(k, n) >= 512 and g >= 16:
+            return ragged_dot_pallas(
+                lhs, rhs, group_sizes, group_offset,
+                block_m=block_m, block_k=block_k, block_n=block_n,
+                compute_dtype=preferred_element_type, acc_dtype=preferred_element_type)
+    if "H100" in device_kind:
+        block_m, block_k, block_n = 128, 64, 64
+        if m >= 4096 and (k >= 2048 or n >= 2048) and min(k, n) >= 1024 and g >= 16:
+            return ragged_dot_pallas(
+                lhs, rhs, group_sizes, group_offset,
+                block_m=block_m, block_k=block_k, block_n=block_n,
+                compute_dtype=preferred_element_type, acc_dtype=preferred_element_type)
+
+    return ragged_dot(lhs, rhs, group_sizes, precision=precision, preferred_element_type=preferred_element_type, group_offset=group_offset)
 
 
 def Param(*shape: int, dtype: jnp.dtype, kernel_init: nnx.Initializer, rngs: nnx.Rngs):
