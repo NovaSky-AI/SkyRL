@@ -39,8 +39,8 @@ class BaseConfig(ABC):
 
 @dataclass
 class DataConfig(BaseConfig):
-    train_data: List[str] = field(default_factory=lambda: [f"{os.environ['HOME']}/data/gsm8k/train.parquet"])
-    val_data: List[str] = field(default_factory=lambda: [f"{os.environ['HOME']}/data/gsm8k/validation.parquet"])
+    train_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/train.parquet")])
+    val_data: List[str] = field(default_factory=lambda: [os.path.expanduser("~/data/gsm8k/validation.parquet")])
 
 
 # ---------------------------------------------------------------------------
