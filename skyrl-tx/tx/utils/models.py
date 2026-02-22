@@ -105,17 +105,16 @@ def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
     return (adapter_index,)
 
 
-def get_lora_adapter_slice(path: tuple, adapter_index: int, rank: int) -> tuple | None:
-    """Return index tuple for accessing a single adapter's LoRA weight in an unstacked param.
-
-    After unstack_state, LoRA params have shape (num_adapters, ..., max_rank, ...).
-    Returns the slice to extract/insert one adapter's trimmed-rank weights, or None
-    for non-LoRA params.
-    """
+def get_adapter_slice(path: tuple, adapter_index: int | None, rank: int | None) -> tuple | None:
+    """Return adapter slice for LoRA/connector params in unstacked state, else None."""
+    if adapter_index is None:
+        return None
     if "lora_A" in path:
         return (adapter_index, slice(None), slice(None, rank))
     if "lora_B" in path:
         return (adapter_index, slice(None, rank), slice(None))
+    if is_connector_path(path):
+        return (adapter_index,)
     return None
 
 
@@ -174,9 +173,7 @@ def load_safetensors(
             tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0)
         else:
             tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
-        lora_idx = get_lora_adapter_slice(path, adapter_index, rank) if adapter_index is not None else None
-        connector_idx = (adapter_index,) if adapter_index is not None and is_connector_path(path) else None
-        adapter_idx = lora_idx or connector_idx
+        adapter_idx = get_adapter_slice(path, adapter_index, rank)
         if adapter_idx is not None:
             # Load into specific adapter slot via ArrayRef write-through
             arr = param[...]
@@ -215,9 +212,7 @@ def save_safetensors(
             continue
         key = get_param_key(path, prefix=prefix)
         # Extract specific adapter's LoRA weights when adapter_index is provided
-        lora_idx = get_lora_adapter_slice(path, adapter_index, rank) if adapter_index is not None else None
-        connector_idx = (adapter_index,) if adapter_index is not None and is_connector_path(path) else None
-        adapter_idx = lora_idx or connector_idx
+        adapter_idx = get_adapter_slice(path, adapter_index, rank)
         if adapter_idx is not None:
             param = param[adapter_idx]
         if "experts" in path:
