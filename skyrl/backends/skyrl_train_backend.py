@@ -190,7 +190,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._inference_engine_client = InferenceEngineClient(
             create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
             self._tokenizer,
-            self._cfg,
+            self._cfg.trainer.policy.model.path,
+            self._cfg.trainer.policy.model.lora,
+            self._cfg.generator.inference_engine,
         )
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()

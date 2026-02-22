@@ -25,7 +25,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
 
-from skyrl.train.config import TrainerConfig, AlgorithmConfig
+from skyrl.train.config import TrainerConfig
 from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     ActorInfo,
@@ -795,7 +795,8 @@ class PolicyWorkerBase(Worker):
             from dataclasses import asdict
 
             new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
-            loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
+            # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
+            loss_config = type(loss_config).from_dict_config(new_loss_config)
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):

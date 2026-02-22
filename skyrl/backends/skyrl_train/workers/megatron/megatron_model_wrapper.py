@@ -3,11 +3,13 @@ from functools import partial
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
+from dataclasses import asdict
 
 from megatron.core.pipeline_parallel import get_forward_backward_func
 import megatron.core.parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
 
+from skyrl.train.config import TrainerConfig
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     vocab_parallel_entropy,
@@ -15,7 +17,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import get_model_config
 from skyrl.backends.skyrl_train.utils.ppo_utils import compute_approx_kl, PolicyLossRegistry
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
-
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     make_batch_generator,
     preprocess_packed_seqs,
@@ -28,7 +29,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
 class MegatronModelWrapper:
     def __init__(
         self,
-        config,
+        config: TrainerConfig,
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
@@ -209,11 +210,10 @@ class MegatronModelWrapper:
         # Build config for loss function, applying any overrides
         loss_config = self.cfg.algorithm
         if loss_fn_config is not None:
-            from dataclasses import asdict
-            from skyrl.train.config.config import AlgorithmConfig
 
             new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
-            loss_config = AlgorithmConfig.from_dict_config(new_loss_config)
+            # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
+            loss_config = type(loss_config).from_dict_config(new_loss_config)
 
         def loss_func(logits, data):
             sequences = data["sequences"]
