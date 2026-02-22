@@ -304,6 +304,31 @@ generator:
   # If null (default), the model path (trainer.policy.model.path) is used for validation.
   served_model_name: null
   max_turns: 1
+  summarize_chat: false
+  context_folding:
+    enabled: false
+    trigger_ratio: 0.8
+    min_tokens: 256
+    max_folds: 2
+    keep_initial_prompt_tokens: -1
+    keep_last_messages: 0
+    include_summary_in_training: true
+    summary_role: "user"
+    summary_max_tokens: 256
+    summary_prompt: |
+      Your context window is full. Summarize the conversation so far so another model can continue.
+      Be concise and structured. Include:
+      - Objective
+      - Key facts/constraints
+      - Current plan and open questions
+      - Next action to take
+      Return only the summary wrapped in <summary></summary>.
+    summary_prefix: |
+      [Previous conversation summary]
+      {summary}
+
+      Please continue the task.
+    summary_sampling_params: {}
 
   # chat template configuration for SkyRLGymGenerator.
   # For `/chat/completions` with vllm via the HTTP endpoint for rollout, instead use say
