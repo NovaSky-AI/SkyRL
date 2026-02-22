@@ -134,3 +134,44 @@ class SamplingSessionDB(SQLModel, table=True):
     base_model: str | None = None
     model_path: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
+
+
+class TrainingRunDB(SQLModel, table=True):
+    """Training run for visualization dashboard."""
+
+    __tablename__ = "training_runs"
+
+    id: str = Field(primary_key=True)
+    name: str
+    type: str = Field(default="rl")
+    modality: str = Field(default="text")
+    config: dict | None = Field(default=None, sa_type=JSON)
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))
+    ended_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+
+
+class TrainingStepDB(SQLModel, table=True):
+    """Training step metrics for visualization dashboard."""
+
+    __tablename__ = "training_steps"
+
+    id: int | None = Field(default=None, primary_key=True, sa_column_kwargs={"autoincrement": True})
+    run_id: str = Field(foreign_key="training_runs.id", index=True)
+    step: int
+    reward_mean: float | None = None
+    reward_std: float | None = None
+    loss: float | None = None
+    kl_divergence: float | None = None
+    entropy: float | None = None
+    learning_rate: float | None = None
+    ac_tokens_per_turn: float | None = None
+    ob_tokens_per_turn: float | None = None
+    total_ac_tokens: int | None = None
+    total_turns: int | None = None
+    sampling_time_mean: float | None = None
+    time_total: float | None = None
+    frac_mixed: float | None = None
+    frac_all_good: float | None = None
+    frac_all_bad: float | None = None
+    extras: dict | None = Field(default=None, sa_type=JSON)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_type=DateTime(timezone=True))

@@ -29,7 +29,7 @@ from skyrl_train.config import SkyRLConfig, get_config_as_dict
 
 # TODO(tgriggs): Test all backends.
 class Tracking:
-    supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console"]
+    supported_backends = ["wandb", "mlflow", "swanlab", "tensorboard", "console", "tviz"]
 
     def __init__(
         self,
@@ -80,6 +80,11 @@ class Tracking:
             self.console_logger = ConsoleLogger()
             self.logger["console"] = self.console_logger
 
+        if "tviz" in backends:
+            from skyrl_train.utils.tviz_tracker import TvizTracker
+
+            self.logger["tviz"] = TvizTracker(experiment_name=experiment_name, config=config)
+
     def log(self, data, step, commit=False):
         for logger_name, logger_instance in self.logger.items():
             if logger_name == "wandb":
@@ -101,6 +106,8 @@ class Tracking:
                 self.logger["tensorboard"].finish()
             if "mlflow" in self.logger:
                 self.logger["mlflow"].finish()
+            if "tviz" in self.logger:
+                self.logger["tviz"].finish()
         except Exception as e:
             logger.warning(f"Attempted to finish tracking but got error {e}")
 
