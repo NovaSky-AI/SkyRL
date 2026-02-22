@@ -52,7 +52,7 @@ def test_connector_shapes(mesh, expansion_rate: int):
 
 @pytest.mark.parametrize("expansion_rate", [1, 2, 4])
 def test_connector_identity_initialization(mesh, expansion_rate: int):
-    """Test that LoRAConnector identity initialization behaves like residual connection per adapter slot."""
+    """Test that LoRAConnector default initialization is residual-like per adapter slot."""
     with jax.set_mesh(mesh):
         from tx.layers.connectors import LoRAConnector
 
@@ -74,10 +74,11 @@ def test_connector_identity_initialization(mesh, expansion_rate: int):
         h_pre = jax.nn.sigmoid(b_pre[0])
         assert np.allclose(h_pre, 1.0 / n, atol=1e-5)
 
-        # Verify H_post = 1
+        # Verify H_post follows the configured near-identity spectrum.
         b_post = conn.b_post[adapter_indices]
         h_post = 2.0 * jax.nn.sigmoid(b_post[0])
-        assert np.allclose(h_post, 1.0, atol=1e-6)
+        expected_h_post = 2.0 * jax.nn.sigmoid(jnp.linspace(-0.2, 0.2, n, dtype=jnp.float32))
+        assert np.allclose(h_post, expected_h_post, atol=1e-6)
 
         # Verify M = I
         b_res = conn.b_res[adapter_indices]

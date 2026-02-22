@@ -101,7 +101,7 @@ class LoRAConnector(nnx.Module):
             return jnp.broadcast_to(jnp.linspace(-0.2, 0.2, n, dtype=dtype), shape)
         if key_name == "b_res":
             n = shape[-1]
-            return jnp.broadcast_to(jnp.eye(n, dtype=dtype), shape)
+            return jnp.broadcast_to(10.0 * jnp.eye(n, dtype=dtype), shape)
         raise ValueError(f"Unknown connector key: {key_name}")
 
     @staticmethod
