@@ -113,8 +113,9 @@ def test_clear_lora_adapter():
     assert lora_layer.lora_ranks[adapter_idx] > 0
 
     # Mutate connector state to ensure clear_lora_adapter actively resets it.
-    connector.alpha_pre[...] = connector.alpha_pre[...].at[adapter_idx].set(1.0)
+    connector.alpha_pre[...] = connector.alpha_pre[...].at[adapter_idx].set(0.0)
     connector.b_pre[...] = connector.b_pre[...].at[adapter_idx].set(0.0)
+    connector.b_post[...] = connector.b_post[...].at[adapter_idx].set(0.0)
     connector.b_res[...] = connector.b_res[...].at[adapter_idx].set(0.0)
     connector.phi_pre[...] = connector.phi_pre[...].at[adapter_idx].set(1.0)
 
@@ -133,9 +134,11 @@ def test_clear_lora_adapter():
     clamped = np.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
     expected_b_pre = np.log(clamped) - np.log(1.0 - clamped)
 
-    np.testing.assert_allclose(np.asarray(connector.alpha_pre[adapter_idx]), 0.1, rtol=1e-3, atol=1e-3)
+    expected_b_post = np.linspace(-0.2, 0.2, n, dtype=np.float32)
+
+    np.testing.assert_allclose(np.asarray(connector.alpha_pre[adapter_idx]), 1.0, rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(np.asarray(connector.b_pre[adapter_idx]), expected_b_pre, rtol=1e-2, atol=1e-2)
-    np.testing.assert_allclose(np.asarray(connector.b_post[adapter_idx]), 0.0)
+    np.testing.assert_allclose(np.asarray(connector.b_post[adapter_idx]), expected_b_post, rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(np.asarray(connector.phi_pre[adapter_idx]), 0.0)
     np.testing.assert_allclose(
         np.asarray(connector.b_res[adapter_idx]),
