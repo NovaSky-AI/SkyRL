@@ -6,6 +6,7 @@ import safetensors.numpy
 from flax import nnx
 
 from tx.layers.connectors import is_connector_path
+from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
 from tx.utils.models import (
     extract_adapter_state,
@@ -169,16 +170,11 @@ class _TinyConnector(nnx.Module):
         self.phi_pre = nnx.Param(jnp.zeros((max_adapters, 4, 2), dtype=jnp.float32))
 
 
-class _TinyModel(nnx.Module):
+class _TinyModel(nnx.Module, ModelForCausalLM):
     def __init__(self, train_connectors: bool, max_adapters: int = 3, max_rank: int = 4):
         self.config = _TinyConfig(train_connectors=train_connectors)
         self.self_attn = _TinyLoRA(max_adapters=max_adapters, max_rank=max_rank)
         self.attn_connector = _TinyConnector(max_adapters=max_adapters)
-
-    def is_lora_param(self, path: tuple, _value) -> bool:
-        is_lora = "lora_A" in path or "lora_B" in path
-        is_connector = self.config.train_connectors and is_connector_path(path)
-        return is_lora or is_connector
 
 
 def _fill_tiny_model(model: _TinyModel) -> None:
