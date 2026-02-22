@@ -352,8 +352,7 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
 
         key_name = path[-2].key
         if is_connector_path(path):
-            connector_slot = value[idx]
-            return value.at[idx].set(LoRAConnector.init_adapter_slot(key_name, connector_slot))
+            return value.at[idx].set(LoRAConnector.init_adapter_slot(key_name, value[idx]))
         if key_name == "lora_ranks":
             return value.at[idx].set(effective_rank)
         if key_name == "lora_scaling":
@@ -388,8 +387,7 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
         # Connector parameters are reset to identity-style defaults so the adapter slot
         # remains behaviorally neutral for mHC before being reinitialized.
         if is_connector_path(path):
-            connector_slot = value[idx]
-            return value.at[idx].set(LoRAConnector.clear_adapter_slot(key, connector_slot))
+            return value.at[idx].set(LoRAConnector.clear_adapter_slot(key, value[idx]))
         if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
             return value
         return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
