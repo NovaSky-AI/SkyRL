@@ -27,16 +27,25 @@ def is_available() -> bool:
     return _ensure_registered()
 
 
+def _get_vma(x) -> frozenset[str] | None:
+    aval = getattr(x, "aval", None)
+    if aval is not None:
+        return getattr(aval, "vma", None)
+    return getattr(x, "vma", None)
+
+
 def _ragged_dot_ffi_call(
     lhs: jax.Array,
     rhs: jax.Array,
     group_offset: jax.Array,
     group_offsets_cumsum: jax.Array,
+    *,
+    vma_from: jax.Array | None = None,
 ) -> jax.Array:
     if not _ensure_registered():
         raise RuntimeError("ragged_dot_ffi is not available. Build and load the shared library first.")
 
-    out = jax.ShapeDtypeStruct((lhs.shape[0], rhs.shape[2]), lhs.dtype)
+    out = jax.ShapeDtypeStruct((lhs.shape[0], rhs.shape[2]), lhs.dtype, vma=_get_vma(vma_from))
     call = jax.ffi.ffi_call("ragged_dot_cuda", out, vmap_method=None)
     return call(lhs, rhs, group_offset, group_offsets_cumsum)
 
@@ -47,6 +56,8 @@ def _ragged_dot_bwd_ffi_call(
     group_offset: jax.Array,
     group_offsets_cumsum: jax.Array,
     g_local: int,
+    *,
+    vma_from: jax.Array | None = None,
 ) -> jax.Array:
     """Backward pass for d_rhs: computes lhs.T @ grad per group -> [G, K, N]."""
     if not _ensure_registered():
@@ -55,7 +66,7 @@ def _ragged_dot_bwd_ffi_call(
     k = lhs.shape[1]
     n = grad.shape[1]
 
-    out = jax.ShapeDtypeStruct((g_local, k, n), lhs.dtype)
+    out = jax.ShapeDtypeStruct((g_local, k, n), lhs.dtype, vma=_get_vma(vma_from))
     call = jax.ffi.ffi_call("ragged_dot_bwd_cuda", out, vmap_method=None)
     return call(lhs, grad, group_offset, group_offsets_cumsum)
 
@@ -88,10 +99,10 @@ def _ragged_dot_bwd(res, g):
 
     # d_lhs: g @ rhs.T with ragged grouping
     rhs_t = jnp.swapaxes(rhs, 1, 2)
-    d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_offset, cumsum)
+    d_lhs = _ragged_dot_ffi_call(g, rhs_t, group_offset, cumsum, vma_from=lhs)
 
     # d_rhs: lhs.T @ g accumulated per group
-    d_rhs = _ragged_dot_bwd_ffi_call(lhs, g, group_offset, cumsum, g_local)
+    d_rhs = _ragged_dot_bwd_ffi_call(lhs, g, group_offset, cumsum, g_local, vma_from=rhs)
 
     return d_lhs, d_rhs, None, None
 
