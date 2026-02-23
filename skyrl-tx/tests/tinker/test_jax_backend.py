@@ -357,7 +357,7 @@ def test_process_optim_step_hyperparams_behavior():
 
 def test_optim_step_returns_metrics():
     """optim_step should return learning rate and grad norm metrics."""
-    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, train_connectors=True)
+    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, expansion_rate=4)
     backend = JaxBackend(BASE_MODEL, config)
 
     model_id = "adapter_metrics"

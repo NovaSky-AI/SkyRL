@@ -151,8 +151,8 @@ def test_deepseek_connector_identity_expansion_rate():
 
 
 class _TinyConfig:
-    def __init__(self, train_connectors: bool):
-        self.train_connectors = train_connectors
+    def __init__(self, expansion_rate: int):
+        self.expansion_rate = expansion_rate
 
     def get_num_experts(self):
         return 0
@@ -171,8 +171,8 @@ class _TinyConnector(nnx.Module):
 
 
 class _TinyModel(nnx.Module, ModelForCausalLM):
-    def __init__(self, train_connectors: bool, max_adapters: int = 3, max_rank: int = 4):
-        self.config = _TinyConfig(train_connectors=train_connectors)
+    def __init__(self, expansion_rate: int, max_adapters: int = 3, max_rank: int = 4):
+        self.config = _TinyConfig(expansion_rate=expansion_rate)
         self.self_attn = _TinyLoRA(max_adapters=max_adapters, max_rank=max_rank)
         self.attn_connector = _TinyConnector(max_adapters=max_adapters)
 
@@ -213,8 +213,8 @@ def _adapter_filter(path: tuple) -> bool:
 
 
 def test_connector_adapter_slice_save_load_safetensors(tmp_path):
-    src = _TinyModel(train_connectors=True)
-    dst = _TinyModel(train_connectors=True)
+    src = _TinyModel(expansion_rate=4)
+    dst = _TinyModel(expansion_rate=4)
     _fill_tiny_model(src)
     _zero_tiny_model(dst)
 
@@ -256,12 +256,12 @@ def test_connector_extract_insert_adapter_state_roundtrip():
     rank = 2
     adapter_index = 1
 
-    src = _TinyModel(train_connectors=True)
+    src = _TinyModel(expansion_rate=4)
     _fill_tiny_model(src)
     _, src_lora_params, _ = nnx.split(src, src.is_lora_param, ...)
     extracted = extract_adapter_state(adapter_index, src_lora_params, rank)
 
-    dst = _TinyModel(train_connectors=True)
+    dst = _TinyModel(expansion_rate=4)
     _zero_tiny_model(dst)
     _, dst_lora_params, _ = nnx.split(dst, dst.is_lora_param, ...)
     insert_adapter_state(adapter_index, dst_lora_params, extracted, rank)
@@ -292,7 +292,7 @@ def test_connector_extract_insert_adapter_state_roundtrip():
 def test_lora_checkpoint_includes_connectors_when_trainable(tmp_path):
     adapter_cfg = LoraConfig(rank=2, alpha=4, seed=0)
 
-    model_true = _TinyModel(train_connectors=True)
+    model_true = _TinyModel(expansion_rate=4)
     _fill_tiny_model(model_true)
     ckpt_true = tmp_path / "with_connectors.tar.gz"
     save_lora_checkpoint(model_true, "dummy/base", adapter_cfg, adapter_index=1, output_path=ckpt_true)
@@ -301,7 +301,7 @@ def test_lora_checkpoint_includes_connectors_when_trainable(tmp_path):
         tensors = safetensors.numpy.load_file(extracted_dir / "adapter_model.safetensors")
         assert any("attn_connector" in key for key in tensors.keys())
 
-    loaded_true = _TinyModel(train_connectors=True)
+    loaded_true = _TinyModel(expansion_rate=4)
     _zero_tiny_model(loaded_true)
     load_lora_checkpoint(loaded_true, adapter_cfg, adapter_index=1, checkpoint_path=ckpt_true)
     np.testing.assert_allclose(
@@ -309,7 +309,7 @@ def test_lora_checkpoint_includes_connectors_when_trainable(tmp_path):
         np.asarray(model_true.attn_connector.alpha_pre[...][1]),
     )
 
-    model_false = _TinyModel(train_connectors=False)
+    model_false = _TinyModel(expansion_rate=1)
     _fill_tiny_model(model_false)
     ckpt_false = tmp_path / "without_connectors.tar.gz"
     save_lora_checkpoint(model_false, "dummy/base", adapter_cfg, adapter_index=1, output_path=ckpt_false)
