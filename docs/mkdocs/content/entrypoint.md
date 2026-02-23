@@ -4,7 +4,7 @@
 
 The main entrypoint is the `BasePPOExp` class which runs the main training loop.
 
-::: skyrl_train.entrypoints.main_base.BasePPOExp
+::: skyrl.train.entrypoints.main_base.BasePPOExp
     options:
       show_root_heading: true
       members_order: source
@@ -14,7 +14,7 @@ The main entrypoint is the `BasePPOExp` class which runs the main training loop.
 
 The evaluation-only entrypoint is the `EvalOnlyEntrypoint` class which runs evaluation without training.
 
-::: skyrl_train.entrypoints.main_generate.EvalOnlyEntrypoint
+::: skyrl.train.entrypoints.main_generate.EvalOnlyEntrypoint
     options:
       show_root_heading: true
       members_order: source

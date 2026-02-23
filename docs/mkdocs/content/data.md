@@ -4,24 +4,24 @@ Our interface for training data is modelled after [DataProto](https://verl.readt
 
 ## Trainer APIs
 
-::: skyrl_train.training_batch.TensorBatch
+::: skyrl.backends.skyrl_train.training_batch.TensorBatch
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.training_batch.TrainingInput
+::: skyrl.backends.skyrl_train.training_batch.TrainingInput
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.training_batch.TrainingInputBatch
+::: skyrl.backends.skyrl_train.training_batch.TrainingInputBatch
     options:
       show_root_heading: true
       members_order: source
 
-::: skyrl_train.training_batch.TrainingOutputBatch
+::: skyrl.backends.skyrl_train.training_batch.TrainingOutputBatch
     options:
       show_root_heading: true
       members_order: source
@@ -29,13 +29,13 @@ Our interface for training data is modelled after [DataProto](https://verl.readt
 
 ## Generator APIs
 
-::: skyrl_train.generators.GeneratorInput
+::: skyrl.train.generators.base.GeneratorInput
     options:
       show_root_heading: true
       members_order: source
       show_bases: true
 
-::: skyrl_train.generators.GeneratorOutput
+::: skyrl.train.generators.base.GeneratorOutput
     options:
       show_root_heading: true
       members_order: source
