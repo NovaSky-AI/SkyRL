@@ -95,13 +95,16 @@ class Tracking:
             try:
                 if logger_name == "wandb":
                     logger_instance.finish(exit_code=0)
-                else:
+                elif logger_name != "console":
                     logger_instance.finish()
             except Exception as e:
                 logger.warning(f"Attempted to finish tracking with logger {logger_name} but got error {e}")
 
     def __del__(self):
-        self.finish()
+        try:
+            self.finish()
+        except Exception as e:
+            logger.warning(f"Attempted to finish tracking but got error {e}")
 
 
 class ConsoleLogger:
