@@ -87,22 +87,21 @@ class Tracking:
             else:
                 logger_instance.log(data=data, step=step)
 
+    def finish(self):
+        for logger_name, logger_instance in self.logger.items():
+            # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
+            # This is because wandb often errors out with a BrokenPipeError when closing.
+            # https://github.com/wandb/wandb/issues/6449
+            try:
+                if logger_name == "wandb":
+                    logger_instance.finish(exit_code=0)
+                else:
+                    logger_instance.finish()
+            except Exception as e:
+                logger.warning(f"Attempted to finish tracking with logger {logger_name} but got error {e}")
+
     def __del__(self):
-        # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
-        # This is because wandb often errors out with a BrokenPipeError when closing.
-        # https://github.com/wandb/wandb/issues/6449
-        # TODO (sumanthrh): Check if this is really needed. Trackers like wandb will automatically finish at program exit.
-        try:
-            if "wandb" in self.logger:
-                self.logger["wandb"].finish(exit_code=0)
-            if "swanlab" in self.logger:
-                self.logger["swanlab"].finish()
-            if "tensorboard" in self.logger:
-                self.logger["tensorboard"].finish()
-            if "mlflow" in self.logger:
-                self.logger["mlflow"].finish()
-        except Exception as e:
-            logger.warning(f"Attempted to finish tracking but got error {e}")
+        self.finish()
 
 
 class ConsoleLogger:
