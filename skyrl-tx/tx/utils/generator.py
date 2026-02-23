@@ -48,8 +48,13 @@ class KVCache:
             cache_position = positions[:, 0] + 1
             deltas = kv_cache.rope_deltas if kv_cache.rope_deltas is not None else rope_deltas
         else:
-            # Prefill: next position is the sequence length (number of real tokens)
-            cache_position = attention_mask.sum(axis=1)
+            # Prefill:
+            # - with a 2D mask [B, T], next position is token count
+            # - with an additive/causal mask (e.g. [B, 1, T, K]), derive from positions
+            if attention_mask.ndim == 2:
+                cache_position = attention_mask.sum(axis=1)
+            else:
+                cache_position = positions.max(axis=1) + 1
             deltas = rope_deltas
         return KVCache(keys=keys, values=values, cache_position=cache_position, rope_deltas=deltas)
 

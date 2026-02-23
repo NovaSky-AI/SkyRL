@@ -1386,42 +1386,77 @@ def spec_from_config(config: Qwen3VLModelConfig) -> Qwen3VLSpec:
     """Build Qwen3VLSpec from config."""
     text_cfg = config.text_config
     vision_cfg = config.vision_config
-    hidden_size = int(text_cfg.hidden_size)
-    num_attention_heads = int(text_cfg.num_attention_heads)
-    num_hidden_layers = int(text_cfg.num_hidden_layers)
-    num_kv_heads = int(text_cfg.num_key_value_heads)
-    intermediate_size = int(text_cfg.intermediate_size)
-    vocab_size = int(text_cfg.vocab_size)
-    hidden_act = str(getattr(text_cfg, "hidden_act", "silu") or "silu")
-    rms_norm_eps = float(text_cfg.rms_norm_eps)
-    head_dim = int(
-        getattr(text_cfg, "head_dim", None) or (hidden_size // num_attention_heads)
+    get_cfg = (
+        (lambda cfg, key, default=None: cfg.get(key, default))
+        if isinstance(text_cfg, dict)
+        else (lambda cfg, key, default=None: getattr(cfg, key, default))
+    )
+    get_vis = (
+        (lambda cfg, key, default=None: cfg.get(key, default))
+        if isinstance(vision_cfg, dict)
+        else (lambda cfg, key, default=None: getattr(cfg, key, default))
     )
 
-    rope_params = getattr(text_cfg, "rope_parameters", None)
+    hidden_size = int(get_cfg(text_cfg, "hidden_size"))
+    num_attention_heads = int(get_cfg(text_cfg, "num_attention_heads"))
+    num_hidden_layers = int(get_cfg(text_cfg, "num_hidden_layers"))
+    num_kv_heads = int(get_cfg(text_cfg, "num_key_value_heads"))
+    intermediate_size = int(get_cfg(text_cfg, "intermediate_size"))
+    vocab_size = int(get_cfg(text_cfg, "vocab_size"))
+    hidden_act = str(get_cfg(text_cfg, "hidden_act", "silu") or "silu")
+    rms_norm_eps = float(get_cfg(text_cfg, "rms_norm_eps"))
+    head_dim = int(
+        get_cfg(text_cfg, "head_dim", None) or (hidden_size // num_attention_heads)
+    )
+
+    rope_params = get_cfg(text_cfg, "rope_parameters", None)
+    rope_scaling = get_cfg(text_cfg, "rope_scaling", None)
+    merged_rope_cfg: dict[str, object] = {}
+    if isinstance(rope_scaling, dict):
+        merged_rope_cfg.update(rope_scaling)
     if isinstance(rope_params, dict):
-        rope_section = rope_params.get("mrope_section", [head_dim // 2])
+        # Prefer explicit rope_parameters over rope_scaling when both are present.
+        merged_rope_cfg.update(rope_params)
+
+    if merged_rope_cfg:
+        rope_section = merged_rope_cfg.get(
+            "mrope_section", get_cfg(text_cfg, "mrope_section", [head_dim // 2])
+        )
+        rope_theta = float(
+            merged_rope_cfg.get("rope_theta", get_cfg(text_cfg, "rope_theta", 500000.0))
+        )
+        mrope_interleaved = bool(
+            merged_rope_cfg.get(
+                "mrope_interleaved", get_cfg(text_cfg, "mrope_interleaved", False)
+            )
+        )
+    elif rope_params is not None:
+        rope_section = getattr(rope_params, "mrope_section", [head_dim // 2])
+        rope_theta = float(
+            getattr(rope_params, "rope_theta", get_cfg(text_cfg, "rope_theta", 500000.0))
+        )
+        mrope_interleaved = bool(getattr(rope_params, "mrope_interleaved", False))
     else:
         rope_section = [head_dim // 2]
-    mrope_interleaved = True
+        rope_theta = float(get_cfg(text_cfg, "rope_theta", 500000.0))
+        mrope_interleaved = False
     rope_section = tuple(int(x) for x in rope_section)
-    rope_theta = getattr(text_cfg, "rope_theta", 500000.0)
-    num_experts = int(getattr(text_cfg, "num_experts", 0) or 0)
-    num_experts_per_tok = int(getattr(text_cfg, "num_experts_per_tok", 2) or 2)
+    num_experts = int(get_cfg(text_cfg, "num_experts", 0) or 0)
+    num_experts_per_tok = int(get_cfg(text_cfg, "num_experts_per_tok", 2) or 2)
     moe_intermediate_size = int(
-        getattr(text_cfg, "moe_intermediate_size", intermediate_size) or intermediate_size
+        get_cfg(text_cfg, "moe_intermediate_size", intermediate_size) or intermediate_size
     )
-    decoder_sparse_step = int(getattr(text_cfg, "decoder_sparse_step", 1) or 1)
+    decoder_sparse_step = int(get_cfg(text_cfg, "decoder_sparse_step", 1) or 1)
     mlp_only_layers = tuple(
-        int(x) for x in (getattr(text_cfg, "mlp_only_layers", ()) or ())
+        int(x) for x in (get_cfg(text_cfg, "mlp_only_layers", ()) or ())
     )
 
-    vision_fullatt = tuple(getattr(vision_cfg, "fullatt_block_indexes", ()) or ())
+    vision_fullatt = tuple(get_vis(vision_cfg, "fullatt_block_indexes", ()) or ())
     vision_deepstack = tuple(
-        getattr(vision_cfg, "deepstack_visual_indexes", [8, 16, 24]) or [8, 16, 24]
+        get_vis(vision_cfg, "deepstack_visual_indexes", [8, 16, 24]) or [8, 16, 24]
     )
-    patch_sz = vision_cfg.patch_size if vision_cfg else 16
-    window_sz = patch_sz * getattr(vision_cfg, "spatial_merge_size", 2)
+    patch_sz = get_vis(vision_cfg, "patch_size", 16) if vision_cfg else 16
+    window_sz = patch_sz * get_vis(vision_cfg, "spatial_merge_size", 2)
 
     return Qwen3VLSpec(
         text_hidden_size=hidden_size,
@@ -1436,7 +1471,7 @@ def spec_from_config(config: Qwen3VLModelConfig) -> Qwen3VLSpec:
         text_mrope_interleaved=mrope_interleaved,
         text_rms_norm_eps=rms_norm_eps,
         text_vocab_size=vocab_size,
-        text_attention_bias=getattr(text_cfg, "attention_bias", False),
+        text_attention_bias=get_cfg(text_cfg, "attention_bias", False),
         text_num_experts=num_experts,
         text_num_experts_per_tok=num_experts_per_tok,
         text_moe_intermediate_size=moe_intermediate_size,
@@ -1445,22 +1480,24 @@ def spec_from_config(config: Qwen3VLModelConfig) -> Qwen3VLSpec:
         max_lora_adapters=int(getattr(config, "max_lora_adapters", 0) or 0),
         max_lora_rank=int(getattr(config, "max_lora_rank", 0) or 0),
         shard_attention_heads=bool(getattr(config, "shard_attention_heads", True)),
-        vision_hidden_size=vision_cfg.hidden_size if vision_cfg else 0,
-        vision_out_hidden_size=vision_cfg.out_hidden_size if vision_cfg else 0,
-        vision_depth=vision_cfg.depth if vision_cfg else 0,
-        vision_num_heads=vision_cfg.num_heads if vision_cfg else 0,
-        vision_intermediate_size=vision_cfg.intermediate_size if vision_cfg else 0,
+        vision_hidden_size=get_vis(vision_cfg, "hidden_size", 0) if vision_cfg else 0,
+        vision_out_hidden_size=get_vis(vision_cfg, "out_hidden_size", 0)
+        if vision_cfg
+        else 0,
+        vision_depth=get_vis(vision_cfg, "depth", 0) if vision_cfg else 0,
+        vision_num_heads=get_vis(vision_cfg, "num_heads", 0) if vision_cfg else 0,
+        vision_intermediate_size=get_vis(vision_cfg, "intermediate_size", 0)
+        if vision_cfg
+        else 0,
         vision_patch_size=patch_sz,
-        vision_temporal_patch_size=getattr(vision_cfg, "temporal_patch_size", 2)
+        vision_temporal_patch_size=get_vis(vision_cfg, "temporal_patch_size", 2)
         if vision_cfg
         else 2,
-        vision_spatial_merge_size=getattr(vision_cfg, "spatial_merge_size", 2)
+        vision_spatial_merge_size=get_vis(vision_cfg, "spatial_merge_size", 2)
         if vision_cfg
         else 2,
-        vision_in_channels=getattr(vision_cfg, "in_channels", 3) if vision_cfg else 3,
-        vision_num_position_embeddings=getattr(
-            vision_cfg, "num_position_embeddings", None
-        )
+        vision_in_channels=get_vis(vision_cfg, "in_channels", 3) if vision_cfg else 3,
+        vision_num_position_embeddings=get_vis(vision_cfg, "num_position_embeddings", None)
         if vision_cfg
         else None,
         vision_deepstack_indexes=vision_deepstack,
@@ -1725,7 +1762,7 @@ class Qwen3VLModel(nnx.Module):
         use_manual_loop = has_deepstack or output_hidden_states
 
         if use_manual_loop:
-            all_hidden: list[jax.Array] | None = [] if output_hidden_states else None
+            all_hidden: list[jax.Array] | None = [hidden] if output_hidden_states else None
             layer_caches: list[tuple[jax.Array, jax.Array]] = []
             for i, layer in enumerate(self.layers):
                 layer_kv_tuple = (
@@ -1794,9 +1831,6 @@ class Qwen3VLModel(nnx.Module):
             all_hidden = None
 
         hidden = self.norm(hidden)
-        if output_hidden_states:
-            assert all_hidden is not None
-            all_hidden.append(hidden)
 
         return ModelOutput(
             last_hidden_state=hidden,
