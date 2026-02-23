@@ -35,6 +35,8 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 
 
 # News
+- **[2026/02/17]** 🎉 SkyRL is officially integrated with Harbor! Train your terminal-use agent! [[Blog](https://novasky-ai.notion.site/skyrl-harbor)]
+- **[2026/02/13]** 🎉 SkyRL now implements the Tinker API! Run any training script written in the Tinker API on your local GPUs with SkyRL! [[Blog](https://novasky-ai.notion.site/skyrl-tinker)]
 - **[2025/11/26]** 🎉 We released SkyRL-Agent: An agent layer for efficient, multi-turn, long-horizon agent training and evaluation. [[Paper](https://arxiv.org/pdf/2511.16108)]
 - **[2025/10/06]** 🎉 We released SkyRL tx: An open implementation of a backend for the Tinker API to run a Tinker-like service on their own hardware. [[Blog](https://novasky-ai.notion.site/skyrl-tx)]
 - **[2025/06/26]** 🎉 We released SkyRL-v0.1: A highly-modular, performant RL training framework. [[Blog](https://novasky-ai.notion.site/skyrl-v01)]
@@ -43,6 +45,8 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 - **[2025/05/06]** 🎉 We released SkyRL-v0: our open RL training pipeline for multi-turn tool use LLMs, optimized for long-horizon, real-environment tasks like SWE-Bench!
 
 # Links
+- 📜 [Train Your Terminal-Use Agent with SkyRL + Harbor](https://novasky-ai.notion.site/skyrl-harbor)
+- 📜 [SkyRL Brings Tinker to Your GPUs](https://novasky-ai.notion.site/skyrl-tinker)
 - 📜 [Fully Async RL with In-Flight Weight Updates in SkyRL](https://docs.skyrl.ai/docs/tutorials/fully_async)
 - 📜 [Open Recipes on SkyRL](https://docs.skyrl.ai/docs/recipes/overview)
 - 📜 [SkyRL-Agent Paper](https://arxiv.org/pdf/2511.16108)

@@ -14,7 +14,7 @@ LOGGER="wandb"  # change to "console" to print to stdout
 TIS_IMP_RATIO_CAP=2.0
 TIS_TYPE=token
 # returns rollout logprobs for the generated tokens; required for TIS
-LOGPROBS=0
+LOGPROBS=1
 
 # main DAPO parameters
 EPS_CLIP_LOW=0.2

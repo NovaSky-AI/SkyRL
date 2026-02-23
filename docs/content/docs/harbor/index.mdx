@@ -30,7 +30,7 @@ bash examples/train_integrations/harbor/run_codecontest.sh
 
 ## How the Integration Works
 
-SkyRL's architecture separates training into a **Trainer** (PPO optimization) and a **Generator** (trajectory generation). The Generator is the only component that needs to change to support a new environment. See the [system overview](../getting-started/overview) for more detail.
+SkyRL's architecture separates training into a **Trainer** (PPO optimization) and a **Generator** (trajectory generation). The Generator is the only component that needs to change to support a new environment. See the [system overview](/docs/getting-started/overview) for more detail.
 
 The Harbor integration plugs into this boundary by implementing a custom `HarborGenerator` that replaces the default generator. It also provides a `HarborTaskDataset` that loads Harbor task directories instead of text prompts, and a `HarborExp` entrypoint that wires everything together.
 

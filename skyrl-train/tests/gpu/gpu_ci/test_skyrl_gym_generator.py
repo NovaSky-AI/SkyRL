@@ -6,12 +6,10 @@ import os
 import pytest
 import ray
 from transformers import AutoTokenizer
-from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
-from tests.gpu.utils import Timer, get_test_generator_input
+from tests.gpu.utils import Timer, get_test_generator_input, InferenceEngineState
 from skyrl_train.utils.utils import initialize_ray
 from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
@@ -38,7 +36,7 @@ def get_test_config(
     cfg.trainer.policy.model.path = model
     cfg.generator.sampling_params = SamplingParams(
         max_generate_length=max_generate_length,
-        logprobs=0 if get_logprobs else None,
+        logprobs=1 if get_logprobs else None,
         temperature=temperature,
     )
     cfg.generator.append_eos_token_after_stop_str_in_multi_turn = True
@@ -118,25 +116,6 @@ async def run_generator_end_to_end(
     """
     tokenizer = AutoTokenizer.from_pretrained(model)
 
-    inference_engines = create_ray_wrapped_inference_engines(
-        num_inference_engines=num_inference_engines,
-        tensor_parallel_size=tensor_parallel_size,
-        model_dtype="bfloat16",
-        pretrain=model,
-        seed=42,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=True,
-        enforce_eager=True,
-        shared_pg=None,
-        gpu_memory_utilization=0.8,
-        inference_engine_enable_sleep=True,
-        async_engine=use_async_engine,
-        max_num_batched_tokens=32768,
-        max_num_seqs=1024,
-        tokenizer=tokenizer,
-        sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
-    )
-
     cfg = get_test_config(
         max_generate_length,
         max_input_length,
@@ -150,102 +129,110 @@ async def run_generator_end_to_end(
         get_logprobs,
     )
 
-    env_cfg = cfg.environment.skyrl_gym
-    generator_cfg = cfg.generator
-
-    inference_engine_client = InferenceEngineClient(
-        inference_engines,
-        tokenizer,
-        cfg,
-    )
-
-    await inference_engine_client.wake_up()
-
-    generator = SkyRLGymGenerator(
-        generator_cfg=generator_cfg,
-        skyrl_gym_cfg=env_cfg,
-        inference_engine_client=inference_engine_client,
-        tokenizer=tokenizer,
-        model_name=model,
-    )
-
-    input_batch: GeneratorInput = get_test_generator_input(
+    # Use InferenceEngineState to support both legacy and new inference backends
+    with InferenceEngineState.create(
+        cfg=cfg,
         model=model,
-        num_prompts=num_prompts,
-        n_samples_per_prompt=n_samples_per_prompt,
-        max_prompt_length=max_prompt_length,
-        data_path=data_path,
-        env_class=env_class,
-    )
-    # Attach request-time sampling params into the generator input
-    input_batch["sampling_params"] = get_sampling_params_for_backend(
-        "vllm",
-        SamplingParams(
-            temperature=1.0,
-            top_p=1.0,
-            top_k=-1,
-            max_generate_length=max_generate_length,
-            min_p=0.0,
-            logprobs=0 if get_logprobs else None,
-            stop=["</search>", "</answer>"] if env_class == "search" else None,
-        ),
-    )
+        use_local=True,
+        async_engine=use_async_engine,
+        tp_size=tensor_parallel_size,
+        colocate_all=False,
+        backend="vllm",
+        gpu_memory_utilization=0.8,
+        num_inference_engines=num_inference_engines,
+        sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
+    ) as engines:
+        inference_engine_client = engines.client
+        env_cfg = cfg.environment.skyrl_gym
+        generator_cfg = cfg.generator
 
-    with Timer(f"generate_responses_async_engine_{use_async_engine}"):
-        generator_output = await generator.generate(input_batch)
+        await inference_engine_client.wake_up()
 
-    prompts_out = generator_output["prompt_token_ids"]
-    outputs = [
-        {
-            "response": generator_output["response_ids"][i],
-            "loss_mask": generator_output["loss_masks"][i],
-            "rollout_logprobs": (
-                generator_output["rollout_logprobs"][i] if generator_output["rollout_logprobs"] else None
+        generator = SkyRLGymGenerator(
+            generator_cfg=generator_cfg,
+            skyrl_gym_cfg=env_cfg,
+            inference_engine_client=inference_engine_client,
+            tokenizer=tokenizer,
+            model_name=model,
+        )
+
+        input_batch: GeneratorInput = get_test_generator_input(
+            model=model,
+            num_prompts=num_prompts,
+            n_samples_per_prompt=n_samples_per_prompt,
+            max_prompt_length=max_prompt_length,
+            data_path=data_path,
+            env_class=env_class,
+        )
+        # Attach request-time sampling params into the generator input
+        input_batch["sampling_params"] = get_sampling_params_for_backend(
+            "vllm",
+            SamplingParams(
+                temperature=1.0,
+                top_p=1.0,
+                top_k=-1,
+                max_generate_length=max_generate_length,
+                min_p=0.0,
+                logprobs=1 if get_logprobs else None,
+                stop=["</search>", "</answer>"] if env_class == "search" else None,
             ),
-        }
-        for i in range(len(generator_output["response_ids"]))
-    ]
+        )
 
-    output_keys = [
-        "prompt_token_ids",
-        "response_ids",
-        "rewards",
-        "loss_masks",
-        "stop_reasons",
-        "rollout_metrics",
-        "rollout_logprobs",
-    ]
-    for key in output_keys:
-        assert key in generator_output, f"Key {key} not found in generator output"
-    if max_turns == 1:
-        # make sure that the max number of tokens is less than the max generate length for single turn generation
-        assert "generate/max_num_tokens" in generator_output["rollout_metrics"]
-        assert generator_output["rollout_metrics"]["generate/max_num_tokens"] <= max_generate_length
+        with Timer(f"generate_responses_async_engine_{use_async_engine}"):
+            generator_output = await generator.generate(input_batch)
 
-    assert len(prompts_out) == len(outputs), "Mismatch between prompts and outputs"
-    assert isinstance(prompts_out[0], list), "Prompts output should be a list"
-    assert isinstance(prompts_out[0][0], int), "Prompts output should be a list of list of token ids"
-    assert isinstance(outputs[0]["response"][0], int), "Prompts output should be a list of list of token ids"
-    if not is_step_wise:
-        assert (
-            len(outputs) == num_prompts * n_samples_per_prompt
-        ), "Mismatch between number of outputs and expected outputs"
+        prompts_out = generator_output["prompt_token_ids"]
+        outputs = [
+            {
+                "response": generator_output["response_ids"][i],
+                "loss_mask": generator_output["loss_masks"][i],
+                "rollout_logprobs": (
+                    generator_output["rollout_logprobs"][i] if generator_output["rollout_logprobs"] else None
+                ),
+            }
+            for i in range(len(generator_output["response_ids"]))
+        ]
 
-    if get_logprobs:
-        assert generator_output["rollout_logprobs"] is not None, "expected `rollout_logprobs` to be computed"
+        output_keys = [
+            "prompt_token_ids",
+            "response_ids",
+            "rewards",
+            "loss_masks",
+            "stop_reasons",
+            "rollout_metrics",
+            "rollout_logprobs",
+        ]
+        for key in output_keys:
+            assert key in generator_output, f"Key {key} not found in generator output"
+        if max_turns == 1:
+            # make sure that the max number of tokens is less than the max generate length for single turn generation
+            assert "generate/max_num_tokens" in generator_output["rollout_metrics"]
+            assert generator_output["rollout_metrics"]["generate/max_num_tokens"] <= max_generate_length
 
-    for i in range(len(outputs)):
-        response_length = len(outputs[i]["response"])
-        # TODO (erictang000): make this more precise for multi-turn
-        assert response_length <= max_generate_length + max_input_length, f"Output {i} exceeds max length"
-        assert response_length == len(outputs[i]["loss_mask"]), f"Output {i} loss mask length mismatch"
+        assert len(prompts_out) == len(outputs), "Mismatch between prompts and outputs"
+        assert isinstance(prompts_out[0], list), "Prompts output should be a list"
+        assert isinstance(prompts_out[0][0], int), "Prompts output should be a list of list of token ids"
+        assert isinstance(outputs[0]["response"][0], int), "Prompts output should be a list of list of token ids"
+        if not is_step_wise:
+            assert (
+                len(outputs) == num_prompts * n_samples_per_prompt
+            ), "Mismatch between number of outputs and expected outputs"
+
         if get_logprobs:
-            assert response_length == len(
-                outputs[i]["rollout_logprobs"]
-            ), f"Output {i} rollout logprobs lenght mismatch"
+            assert generator_output["rollout_logprobs"] is not None, "expected `rollout_logprobs` to be computed"
 
-    # TODO (tgriggs): Extend this test to compare the outputs to HF generation with temperature 0
-    return generator_output
+        for i in range(len(outputs)):
+            response_length = len(outputs[i]["response"])
+            # TODO (erictang000): make this more precise for multi-turn
+            assert response_length <= max_generate_length + max_input_length, f"Output {i} exceeds max length"
+            assert response_length == len(outputs[i]["loss_mask"]), f"Output {i} loss mask length mismatch"
+            if get_logprobs:
+                assert response_length == len(
+                    outputs[i]["rollout_logprobs"]
+                ), f"Output {i} rollout logprobs length mismatch"
+
+        # TODO (tgriggs): Extend this test to compare the outputs to HF generation with temperature 0
+        return generator_output
 
 
 @pytest.mark.asyncio

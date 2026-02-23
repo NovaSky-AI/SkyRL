@@ -106,8 +106,8 @@ fsdp = [
     "torchvision; sys_platform == 'linux'",
 ]
 
-# megatron is pinned to python 3.12 due to ml-dtypes needing to be >= 0.5.0
-# potentially loosen this restriction if this error can be root caused.
+# megatron is pinned to python 3.12, relax this constraint once numpy >= 2.0.0 is supported
+# for megatron-core
 megatron = [
     "skyrl[skyrl-train]; python_version == '3.12'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
@@ -144,6 +144,8 @@ harbor = [
 dev = [
     "mkdocs",
     "mkdocs-material",
+    "mkdocstrings[python]>=0.24.0",
+    "pymdown-extensions>=10.7",
     "pytest",
     "pytest-forked",
     "pytest-asyncio",
@@ -198,13 +200,15 @@ no-build-isolation-package = [
     "nv-grouped-gemm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
-# unppinned dependencies
+# unpinned dependencies. Also set ml_dtypes>=0.5.0 for python 3.12, since megatron-core
+# declares numpy<2.0.0, which conflicts with ml_dtypes>=0.5.0 in uv's resolver.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.15.0; sys_platform == 'linux'",
+    "ml_dtypes>=0.5.0; sys_platform == 'linux' and python_version == '3.12'",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -245,7 +249,7 @@ torchvision = [
 ]
 # pin megatron bridge commit to fix for MoE + LoRA merging. Update this when an official release is cut
 megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "04e370eedf8cc44a812189a19f2171d90555c07a", marker = "sys_platform == 'linux'"}
-harbor = { git = "https://github.com/laude-institute/harbor", rev = "29ed63699ef16e5d7817dd4fd26d557d6a861b9a" }
+harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
 
 [tool.black]
 line-length = 120

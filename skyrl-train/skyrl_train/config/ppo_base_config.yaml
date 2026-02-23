@@ -328,7 +328,7 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
-    logprobs: 0
+    logprobs: 1
     stop: null
 
   # whether to use a conversation based format for multi-turn generations
@@ -349,7 +349,7 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
-    logprobs: 0
+    logprobs: 1
     stop: null
 
   # number of samples per prompt for evaluation
