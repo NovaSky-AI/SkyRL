@@ -23,7 +23,7 @@ from flax import nnx
 from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 
 from tx.models.configs import Qwen3VLModelConfig
-from tx.models.qwen3_vl import Qwen3VLForCausalLM
+from tx.models.qwen3_vl_moe import Qwen3VLForCausalLM
 from tx.utils.models import load_safetensors, resolve_model_path
 
 

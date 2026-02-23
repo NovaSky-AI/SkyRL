@@ -8,7 +8,7 @@ from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
 )
 
 from tx.models.configs import Qwen3VLModelConfig
-from tx.models.qwen3_vl import (
+from tx.models.qwen3_vl_moe import (
     Qwen3VLModel,
     build_additive_causal_mask,
     get_rope_index,
