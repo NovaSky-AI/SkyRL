@@ -67,7 +67,7 @@ def prepare_sample_batch(
         request_start = len(all_prompts)
 
         # Expand requests for num_samples
-        prompt_tokens = [token for chunk in request_data.prompt.chunks for token in chunk.tokens]
+        prompt_tokens = request_data.prompt.to_token_list()
         checkpoint_path = ""
         if model_id and request_data.checkpoint_id and checkpoints_base:
             checkpoint_path = str(
@@ -131,7 +131,7 @@ def prepare_model_pass_batch(
             )
         request_start = len(all_input_ids)
         for item in request_data.data:
-            tokens = [t for chunk in item.model_input.chunks for t in chunk.tokens]
+            tokens = item.model_input.to_token_list()
             all_input_ids.append(tokens)
             loss_fn_inputs = item.loss_fn_inputs
             all_targets.append(loss_fn_inputs.target_tokens.data)

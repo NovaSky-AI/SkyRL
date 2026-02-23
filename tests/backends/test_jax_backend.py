@@ -154,7 +154,7 @@ def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInp
         weights = [1] * len(tokens)
         samples.append(
             types.Datum(
-                model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+                model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=tokens)]),
                 loss_fn_inputs=types.LossFnInputs(
                     target_tokens=types.TensorData(data=targets),
                     weights=types.TensorData(data=weights),
@@ -436,7 +436,7 @@ def make_sample_input(tokens: list[int], prompt_logprobs: bool = False, max_toke
     """Build a SampleInput for testing."""
     return types.SampleInput(
         base_model=BASE_MODEL,  # Sample from base model (no LoRA)
-        prompt=types.ModelInput(chunks=[types.ModelInputChunk(tokens=tokens)]),
+        prompt=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=tokens)]),
         sampling_params=api.SamplingParams(temperature=0.0, max_tokens=max_tokens, seed=42).to_types(),
         num_samples=1,
         checkpoint_id="",  # Empty for base model sampling
@@ -451,7 +451,7 @@ def test_ppo_loss_fn_config_is_applied():
     backend.create_model(model_id, LoraConfig(rank=8, alpha=16, seed=0))
 
     datum = types.Datum(
-        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3, 4])]),
+        model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3, 4])]),
         loss_fn_inputs=types.LossFnInputs(
             target_tokens=types.TensorData(data=[2, 3, 4, 0]),
             weights=types.TensorData(data=[1.0, 1.0, 1.0, 1.0]),

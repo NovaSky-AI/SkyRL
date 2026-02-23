@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Discriminator
 
 
 class RequestType(str, Enum):
@@ -92,12 +92,42 @@ class UnloadModelOutput(BaseModel):
     type: str = "unload_model"
 
 
-class ModelInputChunk(BaseModel):
+class EncodedTextChunk(BaseModel):
+    type: Literal["encoded_text"] = "encoded_text"
     tokens: list[int]
+
+
+class ImageChunk(BaseModel):
+    type: Literal["image"] = "image"
+    data: bytes
+    format: Literal["png", "jpeg"]
+    expected_tokens: int | None = None
+
+
+class ImageAssetPointerChunk(BaseModel):
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+    format: Literal["png", "jpeg"]
+    location: str
+    expected_tokens: int | None = None
+
+
+ModelInputChunk = Annotated[
+    EncodedTextChunk | ImageAssetPointerChunk | ImageChunk,
+    Discriminator("type"),
+]
 
 
 class ModelInput(BaseModel):
     chunks: list[ModelInputChunk]
+
+    def to_token_list(self) -> list[int]:
+        """Extract tokens, raising ValueError for non-text chunks."""
+        tokens = []
+        for chunk in self.chunks:
+            if not isinstance(chunk, EncodedTextChunk):
+                raise ValueError(f"to_token_list() requires EncodedTextChunk, got {type(chunk).__name__}")
+            tokens.extend(chunk.tokens)
+        return tokens
 
 
 class TensorData(BaseModel):

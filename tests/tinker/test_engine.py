@@ -110,7 +110,7 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
 ):
     """Test that prepare_model_pass_batch preserves loss_fn and loss_fn_config values."""
     datum = types.Datum(
-        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3])]),
+        model_input=types.ModelInput(chunks=[types.EncodedTextChunk(tokens=[1, 2, 3])]),
         loss_fn_inputs=types.LossFnInputs(
             target_tokens=types.TensorData(data=[2, 3, 4]),
             weights=types.TensorData(data=[1.0, 1.0, 1.0]),
