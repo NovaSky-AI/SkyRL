@@ -1,4 +1,4 @@
-"""Configuration wrappers for models with LoRA support."""
+"""Configuration classes for models with LoRA support."""
 
 from transformers import PretrainedConfig
 

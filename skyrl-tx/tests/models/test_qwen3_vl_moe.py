@@ -4,7 +4,6 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 import torch
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig
 from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (

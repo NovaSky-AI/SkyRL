@@ -1820,6 +1820,7 @@ class Qwen3VLModel(nnx.Module):
                 positions=text_positions,
                 adapter_indices=adapter_indices,
                 kv_cache=kv_cache,
+                rope_deltas=rope_deltas,
                 output_hidden_states=False,
                 gradient_checkpointing=self.config.gradient_checkpointing,
                 is_training=is_training,
