@@ -1174,42 +1174,6 @@ class Qwen3VLMLP(nnx.Module):
         )
 
 
-def _text_activation(x: jax.Array, hidden_act: str) -> jax.Array:
-    if hidden_act in ("silu", "swish"):
-        return nnx.silu(x)
-    if hidden_act in ("gelu", "gelu_pytorch_tanh"):
-        return jax.nn.gelu(x, approximate=True)
-    raise ValueError(f"Unsupported text activation for MoE: {hidden_act}")
-
-
-class Qwen3VLTopKRouter(nnx.Module):
-    """Top-k router matching Qwen3VLMoeTextTopKRouter behavior."""
-
-    def __init__(self, spec: Qwen3VLSpec, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.spec = spec
-        self.weight = Param(
-            spec.text_num_experts,
-            spec.text_hidden_size,
-            dtype=dtype,
-            kernel_init=nnx.initializers.zeros,
-            rngs=rngs,
-        )
-
-    def __call__(self, hidden_states: jax.Array) -> tuple[jax.Array, jax.Array]:
-        router_logits = jnp.einsum(
-            "nh,eh->ne",
-            hidden_states.astype(jnp.float32),
-            self.weight.astype(jnp.float32),
-            precision=jax.lax.Precision.HIGHEST,
-        )
-        router_probs = jax.nn.softmax(router_logits, axis=-1)
-        top_k = min(self.spec.text_num_experts_per_tok, self.spec.text_num_experts)
-        top_vals, top_idx = jax.lax.top_k(router_probs, top_k)
-        denom = jnp.sum(top_vals, axis=-1, keepdims=True) + 1e-9
-        routing_weights = (top_vals / denom).astype(hidden_states.dtype)
-        return routing_weights, top_idx
-
-
 class Qwen3VLExperts(nnx.Module):
     """Expert parameters and dispatch for sparse MoE MLP."""
 

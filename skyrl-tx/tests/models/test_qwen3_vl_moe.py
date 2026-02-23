@@ -42,6 +42,12 @@ def _make_tiny_hf_vl_moe_config() -> Qwen3VLMoeConfig:
                 "rope_theta": 10000.0,
                 "mrope_section": [2, 1, 1],
             },
+            # HF Qwen3VLMoeTextRotaryEmbedding currently reads rope_scaling.
+            "rope_scaling": {
+                "rope_type": "default",
+                "rope_theta": 10000.0,
+                "mrope_section": [2, 1, 1],
+            },
         },
         # Vision tower is unused in these text-only parity tests, but config must exist.
         vision_config={
