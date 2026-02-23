@@ -20,6 +20,7 @@ Usage:
     uv run -m tx.tinker.backends.jax --coordinator-address localhost:7777 --num-processes 2 --process-id 1
 """
 
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -109,22 +110,59 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=1,
         description="Number of Ray worker actors to spawn (only used when enable_ray=True)",
     )
-    # TODO: Future enhancements for GPU allocation:
-    #   1. Support "auto" mode: detect GPUs per node via ray.cluster_resources()
-    #   2. Support scheduling_strategy (SPREAD, PACK) for better placement control
-    #   3. Support placement_group for gang scheduling (ensure all workers start together)
-    #   4. Support accelerator_type (e.g., "A100", "H100") for heterogeneous clusters
     ray_gpus_per_worker: int | None = Field(
         default=None,
         description=(
             "Number of GPUs to allocate per Ray worker actor (typically the number of local GPUs per node). "
-            "If None, no GPU resource constraint is applied. "
+            "If None, auto-detected from cluster resources (falls back to CPU mode if no GPUs found). "
             "Example: For 2 nodes with 8 GPUs each, set ray_num_workers=2 and ray_gpus_per_worker=8."
         ),
     )
     ray_cpus_per_worker: int = Field(
         default=1,
         description="Number of CPUs to allocate per Ray worker actor",
+    )
+    ray_startup_timeout: int = Field(
+        default=60,
+        description="Timeout in seconds for Ray workers to become responsive after spawning",
+    )
+    ray_coordinator_port: int = Field(
+        default=7777,
+        description="Port for the JAX coordinator (used when auto-detecting coordinator address)",
+    )
+    ray_scheduling_strategy: str = Field(
+        default="SPREAD",
+        description=(
+            "Placement group scheduling strategy: 'SPREAD' distributes workers across nodes, "
+            "'STRICT_SPREAD' requires exactly one worker per node, 'PACK' colocates workers, "
+            "'NONE' disables placement groups."
+        ),
+    )
+    ray_placement_group_timeout: int = Field(
+        default=60,
+        description="Timeout in seconds for placement group to be ready (all resources allocated)",
+    )
+    ray_address: str | None = Field(
+        default=None,
+        description=(
+            "Ray cluster address to connect to. If None, starts a new local cluster. "
+            "Set to 'auto' to connect to an existing cluster."
+        ),
+    )
+    ray_dashboard_host: str = Field(
+        default="0.0.0.0",
+        description="Host for the Ray dashboard",
+    )
+    ray_dashboard_port: int = Field(
+        default=8265,
+        description="Port for the Ray dashboard",
+    )
+    ray_runtime_env: dict | None = Field(
+        default=None,
+        description=(
+            "Runtime environment for Ray workers (dict with keys like 'env_vars', "
+            "'pip', 'working_dir'). Example: {'env_vars': {'JAX_PLATFORMS': 'cpu'}}"
+        ),
     )
 
 
@@ -1320,6 +1358,8 @@ class RayProcessManager:
     Usage:
         manager = RayProcessManager(coordinator_address, num_workers, gpus_per_worker=4)
         manager.start_workers()
+        manager.wait_for_workers_ready()
+        manager.start_health_monitor()
         # ... workers are now running and communicating via JAX distributed ...
         manager.shutdown()
     """
@@ -1330,6 +1370,8 @@ class RayProcessManager:
         num_workers: int,
         gpus_per_worker: int | None = None,
         cpus_per_worker: int = 1,
+        scheduling_strategy: str = "SPREAD",
+        placement_group_timeout: int = 60,
     ):
         if not RAY_AVAILABLE:
             raise ImportError("Ray is not installed. Install it with: pip install ray")
@@ -1344,8 +1386,60 @@ class RayProcessManager:
         self.num_workers = num_workers
         self.gpus_per_worker = gpus_per_worker
         self.cpus_per_worker = cpus_per_worker
+        self.scheduling_strategy = scheduling_strategy
+        self.placement_group_timeout = placement_group_timeout
         self.worker_handles: list = []
         self.worker_futures: list = []
+        self._placement_group = None
+        self._monitor_thread: threading.Thread | None = None
+        self._monitor_stop_event = threading.Event()
+
+    def _create_placement_group(self) -> None:
+        """Create a placement group for gang scheduling of workers.
+
+        Uses the configured scheduling strategy (SPREAD, STRICT_SPREAD, or PACK).
+        SPREAD is recommended for multi-node JAX training where each worker
+        should be placed on a separate node with dedicated GPUs.
+
+        Follows the pattern from skyrl_train/utils/utils.py:get_ray_pg_ready_with_timeout.
+        """
+        if self.scheduling_strategy == "NONE":
+            logger.info("Placement groups disabled (scheduling_strategy='NONE')")
+            return
+
+        from ray.util.placement_group import placement_group
+
+        # Build bundle spec: one bundle per worker
+        bundle: dict = {"CPU": self.cpus_per_worker}
+        if self.gpus_per_worker is not None:
+            bundle["GPU"] = self.gpus_per_worker
+
+        bundles = [bundle.copy() for _ in range(self.num_workers)]
+
+        logger.info(
+            f"Creating placement group: strategy={self.scheduling_strategy}, "
+            f"bundles={bundles}"
+        )
+
+        pg = placement_group(bundles, strategy=self.scheduling_strategy)
+
+        # Wait for placement group to be ready (gang scheduling)
+        try:
+            ray.get(pg.ready(), timeout=self.placement_group_timeout)
+        except Exception as e:
+            total_gpus = sum(b.get("GPU", 0) for b in bundles)
+            total_cpus = sum(b.get("CPU", 0) for b in bundles)
+            raise RuntimeError(
+                f"Failed to create placement group with {len(bundles)} bundles "
+                f"(requiring {total_gpus} GPUs, {total_cpus} CPUs total) "
+                f"using strategy={self.scheduling_strategy} in {self.placement_group_timeout}s. "
+                f"This might indicate insufficient resources.\n"
+                f"Cluster resources: {ray.cluster_resources()}\n"
+                f"Error: {e}"
+            ) from e
+
+        self._placement_group = pg
+        logger.info("Placement group ready")
 
     def start_workers(self) -> None:
         """Start all worker processes on Ray cluster.
@@ -1353,67 +1447,157 @@ class RayProcessManager:
         Workers are started with process_id from 1 to num_workers.
         Process 0 is reserved for the coordinator (JaxBackend).
 
-        Resource allocation strategy:
-            - gpus_per_worker: Number of local GPUs per node (e.g., 8 for a node with 8 GPUs)
-            - This ensures each worker is placed on a separate node with dedicated GPU access
-            - Ray scheduler will wait until a node with enough GPUs is available
+        Creates a placement group first (if enabled) for gang scheduling,
+        then launches worker actors within the placement group. If any worker
+        fails to launch, all previously launched workers are cleaned up.
 
         Example topology (2 nodes, 8 GPUs each):
             Node 0 (head): Coordinator (process_id=0) + 8 GPUs
             Node 1: Worker (process_id=1) + 8 GPUs via RayWorkerLauncher
         """
-        RayWorkerLauncher = _create_ray_worker_launcher_class()
+        # Create placement group first (gang scheduling ensures all resources available)
+        self._create_placement_group()
 
+        RayWorkerLauncher = _create_ray_worker_launcher_class()
         num_processes = self.num_workers + 1  # +1 for coordinator (process 0)
 
         # Build resource options for Ray actor placement
-        # gpus_per_worker should match the number of local GPUs per node
         actor_options: dict = {"num_cpus": self.cpus_per_worker}
         if self.gpus_per_worker is not None:
             actor_options["num_gpus"] = self.gpus_per_worker
-
-        # TODO: Future enhancements for resource allocation:
-        #   1. Auto-detect GPUs per node:
-        #      cluster_resources = ray.cluster_resources()
-        #      total_gpus = cluster_resources.get("GPU", 0)
-        #      gpus_per_node = total_gpus // num_nodes
-        #
-        #   2. Use SPREAD scheduling to distribute workers across nodes:
-        #      from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-        #      actor_options["scheduling_strategy"] = "SPREAD"
-        #
-        #   3. Use placement groups for gang scheduling:
-        #      pg = ray.util.placement_group([{"GPU": gpus_per_worker}] * num_workers)
-        #      ray.get(pg.ready())
-        #      actor_options["placement_group"] = pg
+        if self._placement_group is not None:
+            actor_options["placement_group"] = self._placement_group
 
         logger.info(
             f"Launching {self.num_workers} JAX workers via Ray with resources: "
-            f"num_gpus={self.gpus_per_worker}, num_cpus={self.cpus_per_worker}"
+            f"num_gpus={self.gpus_per_worker}, num_cpus={self.cpus_per_worker}, "
+            f"scheduling_strategy={self.scheduling_strategy}"
         )
 
-        for i in range(self.num_workers):
-            process_id = i + 1  # Workers start from 1
+        try:
+            for i in range(self.num_workers):
+                process_id = i + 1  # Workers start from 1
 
-            # Create the launcher actor with resource specification
-            launcher = RayWorkerLauncher.options(**actor_options).remote()
-            self.worker_handles.append(launcher)
+                # Create the launcher actor with resource specification
+                launcher = RayWorkerLauncher.options(**actor_options).remote()
+                self.worker_handles.append(launcher)
 
-            # Start the worker (non-blocking, returns a future)
-            future = launcher.start_worker.remote(
-                self.coordinator_address,
-                num_processes,
-                process_id,
+                # Start the worker (non-blocking, returns a future)
+                future = launcher.start_worker.remote(
+                    self.coordinator_address,
+                    num_processes,
+                    process_id,
+                )
+                self.worker_futures.append(future)
+
+                logger.info(f"Launched worker process_id={process_id} via Ray")
+        except Exception as e:
+            logger.error(
+                f"Failed to launch worker {i + 1}/{self.num_workers}: {e}. "
+                f"Cleaning up {len(self.worker_handles)} already-launched workers."
             )
-            self.worker_futures.append(future)
-
-            logger.info(f"Launched worker process_id={process_id} via Ray")
+            self.shutdown()
+            raise RuntimeError(f"Failed to launch all Ray workers. Error: {e}") from e
 
         logger.info(f"All {self.num_workers} Ray worker launchers started")
 
+    def wait_for_workers_ready(self, timeout: int = 60) -> None:
+        """Verify all worker actors are alive and responsive.
+
+        Calls get_status() on each actor to confirm Ray successfully scheduled
+        and started the actor. This does NOT wait for JAX distributed initialization
+        (that happens when the coordinator calls jax.distributed.initialize).
+
+        Args:
+            timeout: Maximum seconds to wait for all actors to respond
+
+        Raises:
+            RuntimeError: If any worker fails to respond within the timeout
+        """
+        logger.info(
+            f"Waiting for {len(self.worker_handles)} workers to become responsive "
+            f"(timeout={timeout}s)..."
+        )
+
+        status_futures = [handle.get_status.remote() for handle in self.worker_handles]
+
+        try:
+            statuses = ray.get(status_futures, timeout=timeout)
+            for i, status in enumerate(statuses):
+                logger.info(f"Worker {i + 1} is responsive: {status}")
+        except ray.exceptions.GetTimeoutError:
+            # Determine which workers failed
+            ready, not_ready = ray.wait(
+                status_futures, num_returns=len(status_futures), timeout=0
+            )
+            failed_count = len(not_ready)
+            raise RuntimeError(
+                f"{failed_count}/{len(self.worker_handles)} Ray workers failed to respond "
+                f"within {timeout}s. Check Ray dashboard for worker scheduling issues. "
+                f"Cluster resources: {ray.cluster_resources()}"
+            )
+        except ray.exceptions.RayActorError as e:
+            raise RuntimeError(
+                f"Ray worker actor died during startup: {e}. "
+                f"Check Ray dashboard for worker logs."
+            ) from e
+
+    def start_health_monitor(self, check_interval: float = 5.0) -> None:
+        """Start background thread to monitor worker health.
+
+        The monitor uses ray.wait() on worker futures to detect if any
+        worker has exited. Since workers run in an infinite command loop,
+        any completed future indicates failure.
+
+        Args:
+            check_interval: Seconds between health checks
+        """
+        self._monitor_stop_event.clear()
+        self._monitor_thread = threading.Thread(
+            target=self._health_monitor_loop,
+            args=(check_interval,),
+            daemon=True,
+            name="ray-worker-health-monitor",
+        )
+        self._monitor_thread.start()
+        logger.info(f"Started worker health monitor (interval={check_interval}s)")
+
+    def _health_monitor_loop(self, check_interval: float) -> None:
+        """Background loop that checks worker futures for failures."""
+        while not self._monitor_stop_event.is_set():
+            if not self.worker_futures:
+                break
+
+            # Non-blocking check: see if any futures have completed
+            ready, _ = ray.wait(
+                self.worker_futures,
+                num_returns=len(self.worker_futures),
+                timeout=0,
+            )
+
+            for ref in ready:
+                worker_idx = self.worker_futures.index(ref)
+                try:
+                    result = ray.get(ref)
+                    logger.error(
+                        f"Worker {worker_idx + 1} exited unexpectedly with result: {result}"
+                    )
+                except Exception as e:
+                    logger.error(f"Worker {worker_idx + 1} failed: {e}")
+
+            self._monitor_stop_event.wait(check_interval)
+
     def shutdown(self) -> None:
-        """Shutdown all worker processes."""
+        """Shutdown all worker processes and release resources."""
         logger.info("Shutting down Ray worker launchers...")
+
+        # Stop health monitor first
+        if self._monitor_thread is not None:
+            self._monitor_stop_event.set()
+            self._monitor_thread.join(timeout=5.0)
+            self._monitor_thread = None
+
+        # Kill worker actors
         for handle in self.worker_handles:
             try:
                 ray.kill(handle)
@@ -1421,6 +1605,15 @@ class RayProcessManager:
                 logger.warning(f"Error killing worker: {e}")
         self.worker_handles = []
         self.worker_futures = []
+
+        # Remove placement group
+        if self._placement_group is not None:
+            try:
+                ray.util.remove_placement_group(self._placement_group)
+            except Exception as e:
+                logger.warning(f"Error removing placement group: {e}")
+            self._placement_group = None
+
         logger.info("RayProcessManager shutdown complete")
 
 
@@ -1445,10 +1638,58 @@ def _get_coordinator_address(config: JaxBackendConfig) -> str:
     # Auto-detect coordinator address using Ray head node IP
     # This assumes the coordinator (JaxBackend) runs on the Ray head node
     head_node_ip = ray.util.get_node_ip_address()
-    default_port = 7777  # Default JAX coordinator port
-    coordinator_address = f"{head_node_ip}:{default_port}"
+    coordinator_address = f"{head_node_ip}:{config.ray_coordinator_port}"
     logger.info(f"Auto-detected coordinator_address: {coordinator_address}")
     return coordinator_address
+
+
+def _auto_detect_gpus_per_worker(num_workers: int) -> int | None:
+    """Auto-detect GPUs per worker from Ray cluster resources.
+
+    Assumes a homogeneous cluster where each worker gets one node's worth of GPUs.
+    The coordinator (process 0) runs on the head node with its own GPUs.
+
+    Args:
+        num_workers: Number of Ray workers to launch (excludes coordinator)
+
+    Returns:
+        Detected GPUs per worker, or None if no GPUs are available
+    """
+    nodes = ray.nodes()
+    active_nodes = [n for n in nodes if n.get("Alive", False)]
+
+    if not active_nodes:
+        logger.warning("No active Ray nodes found, cannot auto-detect GPUs")
+        return None
+
+    # Collect GPU counts per node
+    gpu_counts = []
+    for node in active_nodes:
+        gpu_count = int(node.get("Resources", {}).get("GPU", 0))
+        if gpu_count > 0:
+            gpu_counts.append(gpu_count)
+
+    if not gpu_counts:
+        logger.info("No GPUs found in Ray cluster, running in CPU mode")
+        return None
+
+    # For homogeneous clusters: use the most common GPU count
+    # For heterogeneous: warn and use the minimum
+    if len(set(gpu_counts)) == 1:
+        gpus_per_worker = gpu_counts[0]
+        logger.info(
+            f"Auto-detected {gpus_per_worker} GPUs per node across "
+            f"{len(gpu_counts)} GPU nodes"
+        )
+    else:
+        gpus_per_worker = min(gpu_counts)
+        logger.warning(
+            f"Heterogeneous GPU counts detected: {gpu_counts}. "
+            f"Using minimum ({gpus_per_worker}) as gpus_per_worker. "
+            f"Set ray_gpus_per_worker explicitly for better control."
+        )
+
+    return gpus_per_worker
 
 
 def start_ray_workers(
@@ -1478,29 +1719,46 @@ def start_ray_workers(
 
     # Initialize Ray if not already initialized (needed for auto-detect)
     if not ray.is_initialized():
-        ray.init(
-            dashboard_host="0.0.0.0",
-            dashboard_port=8265,
-        )
+        init_kwargs: dict = {
+            "dashboard_host": config.ray_dashboard_host,
+            "dashboard_port": config.ray_dashboard_port,
+        }
+        if config.ray_address is not None:
+            init_kwargs["address"] = config.ray_address
+        if config.ray_runtime_env is not None:
+            init_kwargs["runtime_env"] = config.ray_runtime_env
+
+        ray.init(**init_kwargs)
         logger.info(
-            "Ray initialized for process management (dashboard at http://localhost:8265)"
+            f"Ray initialized (dashboard at "
+            f"http://{config.ray_dashboard_host}:{config.ray_dashboard_port})"
         )
 
     # Get or auto-detect coordinator address
     coordinator_address = _get_coordinator_address(config)
 
+    # Auto-detect GPUs per worker if not specified
+    gpus_per_worker = config.ray_gpus_per_worker
+    if gpus_per_worker is None and config.ray_num_workers > 0:
+        gpus_per_worker = _auto_detect_gpus_per_worker(config.ray_num_workers)
+        if gpus_per_worker is not None:
+            logger.info(f"Auto-detected ray_gpus_per_worker={gpus_per_worker}")
+
     manager = RayProcessManager(
         coordinator_address=coordinator_address,
         num_workers=config.ray_num_workers,
-        gpus_per_worker=config.ray_gpus_per_worker,
+        gpus_per_worker=gpus_per_worker,
         cpus_per_worker=config.ray_cpus_per_worker,
+        scheduling_strategy=config.ray_scheduling_strategy,
+        placement_group_timeout=config.ray_placement_group_timeout,
     )
     manager.start_workers()
 
-    # Give workers time to initialize JAX distributed
-    import time
+    # Verify all workers are alive and responsive (replaces time.sleep(2))
+    manager.wait_for_workers_ready(timeout=config.ray_startup_timeout)
 
-    time.sleep(2)
+    # Start background health monitor
+    manager.start_health_monitor()
 
     return manager, coordinator_address
 
