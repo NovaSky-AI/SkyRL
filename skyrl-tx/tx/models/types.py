@@ -19,7 +19,7 @@ class ModelForCausalLM:
     def is_lora_param(self, path: tuple, _value) -> bool:
         """Return True if a parameter path corresponds to trainable LoRA/connector weights."""
         is_lora = any(name in path for name in ("lora_A", "lora_B"))
-        is_connector = self.config.expansion_rate > 1 and any(
+        is_connector = self.config.mhc_expansion_rate > 1 and any(
             name in path for name in ("attn_connector", "mlp_connector")
         )
         return is_lora or is_connector

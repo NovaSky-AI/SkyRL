@@ -289,14 +289,14 @@ class Qwen3DecoderLayer(nnx.Module):
 
         self.attn_connector = LoRAConnector(
             config.hidden_size,
-            config.expansion_rate,
+            config.mhc_expansion_rate,
             max_lora_adapters=config.max_lora_adapters,
             dtype=dtype,
             rngs=rngs,
         )
         self.mlp_connector = LoRAConnector(
             config.hidden_size,
-            config.expansion_rate,
+            config.mhc_expansion_rate,
             max_lora_adapters=config.max_lora_adapters,
             dtype=dtype,
             rngs=rngs,
@@ -373,7 +373,7 @@ class Qwen3Model(nnx.Module):
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        hidden_states = jnp.repeat(hidden_states[..., None, :], self.config.expansion_rate, axis=-2)
+        hidden_states = jnp.repeat(hidden_states[..., None, :], self.config.mhc_expansion_rate, axis=-2)
 
         hidden_states, all_hidden_states, new_kv_cache = self.layers(
             hidden_states,

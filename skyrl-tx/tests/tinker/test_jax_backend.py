@@ -102,7 +102,7 @@ def test_max_adapters_after_delete():
 
 def test_clear_lora_adapter():
     """Test that clear_lora_adapter zeros out adapter state."""
-    backend = create_backend(expansion_rate=4)
+    backend = create_backend(mhc_expansion_rate=4)
     model_id = "test_model"
     adapter_idx = create_model(backend, model_id)
 
@@ -357,7 +357,7 @@ def test_process_optim_step_hyperparams_behavior():
 
 def test_optim_step_returns_metrics():
     """optim_step should return learning rate and grad norm metrics."""
-    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, expansion_rate=4)
+    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, mhc_expansion_rate=4)
     backend = JaxBackend(BASE_MODEL, config)
 
     model_id = "adapter_metrics"

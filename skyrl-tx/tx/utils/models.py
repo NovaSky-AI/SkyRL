@@ -265,7 +265,7 @@ def load_lora_checkpoint(
             prefix="base_model.model.",
             filter_fn=lambda path: (
                 (("lora_A" in path or "lora_B" in path) and filter_lora(adapter_config, path))
-                or (model.config.expansion_rate > 1 and is_connector_path(path))
+                or (model.config.mhc_expansion_rate > 1 and is_connector_path(path))
             ),
             adapter_index=adapter_index,
             rank=adapter_config.rank,
@@ -300,7 +300,7 @@ def save_lora_checkpoint(
             prefix="base_model.model.",
             filter_fn=lambda path: (
                 (("lora_A" in path or "lora_B" in path) and filter_lora(adapter_config, path))
-                or (model.config.expansion_rate > 1 and is_connector_path(path))
+                or (model.config.mhc_expansion_rate > 1 and is_connector_path(path))
             ),
             adapter_index=adapter_index,
             rank=adapter_config.rank,

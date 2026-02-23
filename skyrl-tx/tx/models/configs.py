@@ -16,7 +16,7 @@ class ModelConfig(PretrainedConfig):
         shard_attention_heads: Whether to shard attention across tensor parallel devices
         loss_chunk_size: Chunk size for cross-entropy loss computation (0 = no chunking)
         gradient_checkpointing: Recompute activations during backward to save memory
-        expansion_rate: mHC expansion rate. Connectors are trainable when this is > 1.
+        mhc_expansion_rate: mHC expansion rate. Connectors are trainable when this is > 1.
     """
 
     # Type hints for config attributes
@@ -25,7 +25,7 @@ class ModelConfig(PretrainedConfig):
     shard_attention_heads: bool
     loss_chunk_size: int
     gradient_checkpointing: bool
-    expansion_rate: int
+    mhc_expansion_rate: int
 
     def __init__(
         self,
@@ -36,7 +36,7 @@ class ModelConfig(PretrainedConfig):
         shard_attention_heads: bool,
         loss_chunk_size: int = 0,
         gradient_checkpointing: bool = False,
-        expansion_rate: int = 1,
+        mhc_expansion_rate: int = 1,
     ):
         # Copy all attributes from the base config
         super().__init__(**config.to_dict())
@@ -47,7 +47,7 @@ class ModelConfig(PretrainedConfig):
         self.shard_attention_heads = shard_attention_heads
         self.loss_chunk_size = loss_chunk_size
         self.gradient_checkpointing = gradient_checkpointing
-        self.expansion_rate = expansion_rate
+        self.mhc_expansion_rate = mhc_expansion_rate
 
     def get_num_experts(self):
         return getattr(self, "num_experts", None) or getattr(self, "n_routed_experts", None)

@@ -89,7 +89,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=False,
         description="Per-layer activation checkpointing: recompute activations during backward to save memory",
     )
-    expansion_rate: int = Field(
+    mhc_expansion_rate: int = Field(
         default=1,
         ge=1,
         description=(
@@ -209,7 +209,7 @@ class JaxBackendImpl(AbstractBackend):
             shard_attention_heads=config.shard_attention_heads,
             loss_chunk_size=config.loss_chunk_size,
             gradient_checkpointing=config.gradient_checkpointing,
-            expansion_rate=config.expansion_rate,
+            mhc_expansion_rate=config.mhc_expansion_rate,
         )
 
         model_class = get_model_class(self.model_config)
@@ -517,7 +517,7 @@ class JaxBackendImpl(AbstractBackend):
             mean_grads = accumulated_grads.get_mean(adapter_index)
             grad_norm = optax.global_norm(mean_grads)
             mhc_gradient_norm = None
-            if self.config.expansion_rate > 1:
+            if self.config.mhc_expansion_rate > 1:
                 mhc_grads = jax.tree.map_with_path(
                     lambda path, g: g if is_connector_path(path) else jnp.zeros_like(g),
                     mean_grads,
