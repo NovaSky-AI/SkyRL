@@ -36,7 +36,7 @@ from flax.training import checkpoints
 from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
-from tx.models.configs import Qwen3Config, Qwen3VLModelConfig
+from tx.models.configs import Qwen3Config, Qwen3VLMoeConfig
 from tx.layers.lora import clear_lora_adapter, init_lora_adapter
 from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
@@ -189,10 +189,10 @@ class JaxBackendImpl(AbstractBackend):
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
         base_config = PretrainedConfig.from_pretrained(checkpoint_path)
 
-        # Use Qwen3VLModelConfig for vision-language models, otherwise ModelConfig
+        # Use the VL-MoE config wrapper for multimodal Qwen3-VL models.
         model_type = getattr(base_config, "model_type", None)
-        if model_type == "qwen3_vl":
-            config_cls = Qwen3VLModelConfig
+        if model_type in ("qwen3_vl", "qwen3_vl_moe"):
+            config_cls = Qwen3VLMoeConfig
         else:
             config_cls = Qwen3Config
 

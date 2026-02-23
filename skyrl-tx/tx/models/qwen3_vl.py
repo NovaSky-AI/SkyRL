@@ -1,8 +1,3 @@
-"""Qwen3-VL vision-language model implementation.
-
-Reference: https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,15 +7,16 @@ import jax
 import numpy as np
 from flax import nnx
 from jax import numpy as jnp
+from jax.sharding import get_abstract_mesh
 
-from tx.layers.attention import dot_product_attention
 from tx.layers.layernorm import RMSNorm
-from tx.layers.util import Param
+from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
+from tx.layers.stacked import StackedDecoderLayers
+from tx.layers.util import Param, prepare_routing, shard_map_ep
 from tx.models.configs import Qwen3VLModelConfig
-from tx.models.qwen3_vl_configs import Qwen3VLConfig
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
-from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
+from tx.utils.logits_processor import LMHead, LogitsProcessorMixin
 
 DType = jnp.dtype
 
@@ -68,12 +64,21 @@ class Qwen3VLSpec:
     text_num_kv_heads: int
     text_head_dim: int
     text_intermediate_size: int
+    text_hidden_act: str
     text_rope_theta: float
     text_rope_section: tuple[int, ...]
     text_mrope_interleaved: bool
     text_rms_norm_eps: float
     text_vocab_size: int
     text_attention_bias: bool
+    text_num_experts: int
+    text_num_experts_per_tok: int
+    text_moe_intermediate_size: int
+    text_decoder_sparse_step: int
+    text_mlp_only_layers: tuple[int, ...]
+    max_lora_adapters: int
+    max_lora_rank: int
+    shard_attention_heads: bool
     vision_hidden_size: int
     vision_out_hidden_size: int
     vision_depth: int
@@ -952,35 +957,64 @@ class Qwen3VLAttention(nnx.Module):
 
     def __init__(self, spec: Qwen3VLSpec, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.spec = spec
-        self.q_proj = nnx.Linear(
+        self.num_heads = spec.text_num_heads
+        self.num_kv_heads = spec.text_num_kv_heads
+        tp = get_abstract_mesh().shape.get("tp", 1)
+        shard_attention_heads = spec.shard_attention_heads
+        if shard_attention_heads:
+            assert self.num_heads % tp == 0, (
+                f"num_heads={self.num_heads} must be divisible by tp={tp}"
+            )
+            assert self.num_kv_heads % tp == 0, (
+                f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
+            )
+        tp_shard = "tp" if shard_attention_heads else None
+
+        self.q_proj = LoRALinear(
             spec.text_hidden_size,
             spec.text_num_heads * spec.text_head_dim,
+            sharding=("fsdp", tp_shard),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
             use_bias=spec.text_attention_bias,
             dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
-        self.k_proj = nnx.Linear(
+        self.k_proj = LoRALinear(
             spec.text_hidden_size,
             spec.text_num_kv_heads * spec.text_head_dim,
+            sharding=("fsdp", tp_shard),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
             use_bias=spec.text_attention_bias,
             dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
-        self.v_proj = nnx.Linear(
+        self.v_proj = LoRALinear(
             spec.text_hidden_size,
             spec.text_num_kv_heads * spec.text_head_dim,
+            sharding=("fsdp", tp_shard),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
             use_bias=spec.text_attention_bias,
             dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
-        self.o_proj = nnx.Linear(
+        self.o_proj = LoRALinear(
             spec.text_num_heads * spec.text_head_dim,
             spec.text_hidden_size,
+            sharding=(tp_shard, "fsdp"),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
             use_bias=spec.text_attention_bias,
             dtype=dtype,
+            param_dtype=dtype,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
@@ -1005,15 +1039,16 @@ class Qwen3VLAttention(nnx.Module):
         attention_mask: jax.Array,
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
         positions: jax.Array | None = None,
+        adapter_indices: jax.Array | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         B, T, _ = x.shape
-        q = self.q_proj(x).reshape(
+        q = self.q_proj(x, adapter_indices=adapter_indices).reshape(
             B, T, self.spec.text_num_heads, self.spec.text_head_dim
         )
-        k = self.k_proj(x).reshape(
+        k = self.k_proj(x, adapter_indices=adapter_indices).reshape(
             B, T, self.spec.text_num_kv_heads, self.spec.text_head_dim
         )
-        v = self.v_proj(x).reshape(
+        v = self.v_proj(x, adapter_indices=adapter_indices).reshape(
             B, T, self.spec.text_num_kv_heads, self.spec.text_head_dim
         )
         q = self.q_norm(q)
@@ -1025,15 +1060,13 @@ class Qwen3VLAttention(nnx.Module):
         q, k = apply_multimodal_rotary_pos_emb(
             q, k, cos, sin, self.spec.text_rope_section
         )
-        # Keep [B, H, T, D] for einsum (no transpose back)
-
-        # Handle KV cache (decode step)
+        # Keep cache tensors in [B, T, Hkv, D] to match KVCache contract.
+        k_cache = jnp.transpose(k, (0, 2, 1, 3))
+        v_cache = v
         if kv_cache is not None and positions is not None:
-            k, v = KVCache.update_layer(kv_cache, k, v, positions)
-            k = jnp.transpose(k, (0, 2, 1, 3))  # [B, seq, Hkv, D] -> [B, Hkv, seq, D]
-            v = jnp.transpose(v, (0, 2, 1, 3))
-        else:
-            v = jnp.transpose(v, (0, 2, 1, 3))  # [B, T, Hkv, D] -> [B, Hkv, T, D]
+            k_cache, v_cache = KVCache.update_layer(kv_cache, k_cache, v_cache, positions)
+        k = jnp.transpose(k_cache, (0, 2, 1, 3))
+        v = jnp.transpose(v_cache, (0, 2, 1, 3))
 
         scale = self.spec.text_head_dim**-0.5
 
@@ -1087,46 +1120,251 @@ class Qwen3VLAttention(nnx.Module):
                 v.astype(jnp.float32),
             )
         out = jnp.transpose(out, (0, 2, 1, 3)).astype(x.dtype).reshape(B, T, -1)
-        return self.o_proj(out), (k, v)
+        return self.o_proj(out, adapter_indices=adapter_indices), (k_cache, v_cache)
 
 
 class Qwen3VLMLP(nnx.Module):
     """MLP for VL decoder."""
 
     def __init__(self, spec: Qwen3VLSpec, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.gate_proj = nnx.Linear(
+        self.gate_proj = LoRALinear(
             spec.text_hidden_size,
             spec.text_intermediate_size,
+            sharding=("fsdp", "tp"),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
             use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.initializers.lecun_normal(),
+            rngs=rngs,
+        )
+        self.up_proj = LoRALinear(
+            spec.text_hidden_size,
+            spec.text_intermediate_size,
+            sharding=("fsdp", "tp"),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.initializers.lecun_normal(),
+            rngs=rngs,
+        )
+        self.down_proj = LoRALinear(
+            spec.text_intermediate_size,
+            spec.text_hidden_size,
+            sharding=("tp", "fsdp"),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.initializers.lecun_normal(),
+            rngs=rngs,
+        )
+
+    def __call__(
+        self, x: jax.Array, adapter_indices: jax.Array | None = None
+    ) -> jax.Array:
+        return self.down_proj(
+            nnx.silu(self.gate_proj(x, adapter_indices=adapter_indices))
+            * self.up_proj(x, adapter_indices=adapter_indices),
+            adapter_indices=adapter_indices,
+        )
+
+
+def _text_activation(x: jax.Array, hidden_act: str) -> jax.Array:
+    if hidden_act in ("silu", "swish"):
+        return nnx.silu(x)
+    if hidden_act in ("gelu", "gelu_pytorch_tanh"):
+        return jax.nn.gelu(x, approximate=True)
+    raise ValueError(f"Unsupported text activation for MoE: {hidden_act}")
+
+
+class Qwen3VLTopKRouter(nnx.Module):
+    """Top-k router matching Qwen3VLMoeTextTopKRouter behavior."""
+
+    def __init__(self, spec: Qwen3VLSpec, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.spec = spec
+        self.weight = Param(
+            spec.text_num_experts,
+            spec.text_hidden_size,
+            dtype=dtype,
+            kernel_init=nnx.initializers.zeros,
+            rngs=rngs,
+        )
+
+    def __call__(self, hidden_states: jax.Array) -> tuple[jax.Array, jax.Array]:
+        router_logits = jnp.einsum(
+            "nh,eh->ne",
+            hidden_states.astype(jnp.float32),
+            self.weight.astype(jnp.float32),
+            precision=jax.lax.Precision.HIGHEST,
+        )
+        router_probs = jax.nn.softmax(router_logits, axis=-1)
+        top_k = min(self.spec.text_num_experts_per_tok, self.spec.text_num_experts)
+        top_vals, top_idx = jax.lax.top_k(router_probs, top_k)
+        denom = jnp.sum(top_vals, axis=-1, keepdims=True) + 1e-9
+        routing_weights = (top_vals / denom).astype(hidden_states.dtype)
+        return routing_weights, top_idx
+
+
+class Qwen3VLExperts(nnx.Module):
+    """Expert parameters and dispatch for sparse MoE MLP."""
+
+    def __init__(self, spec: Qwen3VLSpec, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.spec = spec
+        self.gate_proj = LoRAExpert(
+            spec.text_num_experts,
+            spec.text_hidden_size,
+            spec.text_moe_intermediate_size,
+            sharding=("ep", "fsdp", "tp"),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
-        self.up_proj = nnx.Linear(
+        self.up_proj = LoRAExpert(
+            spec.text_num_experts,
             spec.text_hidden_size,
-            spec.text_intermediate_size,
-            use_bias=False,
+            spec.text_moe_intermediate_size,
+            sharding=("ep", "fsdp", "tp"),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
-        self.down_proj = nnx.Linear(
-            spec.text_intermediate_size,
+        self.down_proj = LoRAExpert(
+            spec.text_num_experts,
+            spec.text_moe_intermediate_size,
             spec.text_hidden_size,
-            use_bias=False,
+            sharding=("ep", "tp", "fsdp"),
+            max_lora_adapters=spec.max_lora_adapters,
+            max_lora_rank=spec.max_lora_rank,
             dtype=dtype,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 
-    def __call__(self, x: jax.Array) -> jax.Array:
-        return self.down_proj(nnx.silu(self.gate_proj(x)) * self.up_proj(x))
+    def __call__(
+        self,
+        hidden_states: jax.Array,
+        router_logits: jax.Array,
+        adapter_indices: jax.Array | None = None,
+    ) -> jax.Array:
+        routing_weights, selected_experts = jax.lax.top_k(
+            router_logits, k=self.spec.text_num_experts_per_tok
+        )
+        routing_weights = nnx.softmax(routing_weights, axis=-1)
+
+        num_experts = self.spec.text_num_experts
+        num_experts_per_tok = self.spec.text_num_experts_per_tok
+        hidden_size = self.spec.text_hidden_size
+
+        ep = get_abstract_mesh().shape.get("ep", 1)
+        assert num_experts % ep == 0, (
+            f"num_experts={num_experts} must be divisible by ep={ep}"
+        )
+
+        hidden_expanded = jnp.repeat(hidden_states, num_experts_per_tok, axis=0)
+        adapter_expanded = (
+            jnp.repeat(adapter_indices, num_experts_per_tok)
+            if adapter_indices is not None
+            else None
+        )
+        hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
+            hidden_expanded,
+            selected_experts.ravel(),
+            num_experts,
+            adapter_indices=adapter_expanded,
+        )
+
+        def forward(
+            experts,
+            hidden_sorted,
+            group_sizes,
+            unsort_indices,
+            adapter_sorted,
+            routing_weights,
+        ):
+            ep_rank = jax.lax.axis_index("ep")
+            experts_per_rank = num_experts // jax.lax.axis_size("ep")
+            group_offset = jnp.array([ep_rank * experts_per_rank], dtype=jnp.int32)
+
+            gate = experts.gate_proj(
+                hidden_sorted,
+                group_sizes,
+                adapter_sorted,
+                group_offset=group_offset,
+            )
+            up = experts.up_proj(
+                hidden_sorted,
+                group_sizes,
+                adapter_sorted,
+                group_offset=group_offset,
+            )
+            down = experts.down_proj(
+                nnx.silu(gate) * up,
+                group_sizes,
+                adapter_sorted,
+                group_offset=group_offset,
+            )
+            out = down[unsort_indices].reshape(-1, num_experts_per_tok, hidden_size)
+            local_out = jnp.sum(out * routing_weights[..., None], axis=1)
+            return jax.lax.psum(local_out, axis_name="ep")
+
+        return shard_map_ep(
+            self,
+            forward,
+            hidden_sorted,
+            group_sizes,
+            unsort_indices,
+            adapter_sorted,
+            routing_weights,
+        )
+
+
+class Qwen3VLSparseMoeBlock(nnx.Module):
+    """Sparse MoE feed-forward block aligned with Qwen3VLMoeTextSparseMoeBlock."""
+
+    def __init__(self, spec: Qwen3VLSpec, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        self.spec = spec
+        self.router = nnx.Linear(
+            spec.text_hidden_size,
+            spec.text_num_experts,
+            use_bias=False,
+            dtype=dtype,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                nnx.initializers.lecun_normal(), (None, None)
+            ),
+            rngs=rngs,
+        )
+        self.experts = Qwen3VLExperts(spec, dtype=dtype, rngs=rngs)
+
+    def __call__(
+        self, hidden_states: jax.Array, adapter_indices: jax.Array | None = None
+    ) -> jax.Array:
+        batch, seq_len, hidden_size = hidden_states.shape
+        hidden_flat = hidden_states.reshape(-1, hidden_size)
+        if adapter_indices is not None:
+            adapter_indices = jnp.repeat(adapter_indices, seq_len)
+        router_logits = self.router(hidden_flat)
+        out_flat = self.experts(
+            hidden_flat, router_logits, adapter_indices=adapter_indices
+        )
+        return out_flat.reshape(batch, seq_len, hidden_size)
 
 
 class Qwen3VLDecoderLayer(nnx.Module):
     """Single decoder layer for VL."""
 
-    def __init__(self, spec: Qwen3VLSpec, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+    def __init__(
+        self, spec: Qwen3VLSpec, layer_idx: int, *, dtype: jnp.dtype, rngs: nnx.Rngs
+    ) -> None:
         self.input_norm = RMSNorm(
             spec.text_hidden_size,
             eps=spec.text_rms_norm_eps,
@@ -1140,16 +1378,26 @@ class Qwen3VLDecoderLayer(nnx.Module):
             rngs=rngs,
         )
         self.attn = Qwen3VLAttention(spec, dtype=dtype, rngs=rngs)
-        self.mlp = Qwen3VLMLP(spec, dtype=dtype, rngs=rngs)
+        use_sparse_moe = (
+            spec.text_num_experts > 0
+            and (layer_idx not in spec.text_mlp_only_layers)
+            and ((layer_idx + 1) % max(spec.text_decoder_sparse_step, 1) == 0)
+        )
+        if use_sparse_moe:
+            self.mlp = Qwen3VLSparseMoeBlock(spec, dtype=dtype, rngs=rngs)
+        else:
+            self.mlp = Qwen3VLMLP(spec, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
         x: jax.Array,
+        *,
+        attention_mask: jax.Array,
+        positions: jax.Array,
+        adapter_indices: jax.Array | None = None,
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
         cos: jax.Array,
         sin: jax.Array,
-        attention_mask: jax.Array,
-        kv_cache: tuple[jax.Array, jax.Array] | None = None,
-        positions: jax.Array | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         attn_out, cache = self.attn(
             self.input_norm(x),
@@ -1158,9 +1406,10 @@ class Qwen3VLDecoderLayer(nnx.Module):
             attention_mask,
             kv_cache=kv_cache,
             positions=positions,
+            adapter_indices=adapter_indices,
         )
         x = x + attn_out
-        x = x + self.mlp(self.post_norm(x))
+        x = x + self.mlp(self.post_norm(x), adapter_indices=adapter_indices)
         return x, cache
 
 
@@ -1169,7 +1418,7 @@ class Qwen3VLDecoderLayer(nnx.Module):
 # ============================================================================
 
 
-def spec_from_config(config: Qwen3VLConfig | Qwen3VLModelConfig) -> Qwen3VLSpec:
+def spec_from_config(config: Qwen3VLModelConfig) -> Qwen3VLSpec:
     """Build Qwen3VLSpec from config."""
     text_cfg = config.text_config
     vision_cfg = config.vision_config
@@ -1179,6 +1428,7 @@ def spec_from_config(config: Qwen3VLConfig | Qwen3VLModelConfig) -> Qwen3VLSpec:
     num_kv_heads = int(text_cfg.num_key_value_heads)
     intermediate_size = int(text_cfg.intermediate_size)
     vocab_size = int(text_cfg.vocab_size)
+    hidden_act = str(getattr(text_cfg, "hidden_act", "silu") or "silu")
     rms_norm_eps = float(text_cfg.rms_norm_eps)
     head_dim = int(
         getattr(text_cfg, "head_dim", None) or (hidden_size // num_attention_heads)
@@ -1192,6 +1442,15 @@ def spec_from_config(config: Qwen3VLConfig | Qwen3VLModelConfig) -> Qwen3VLSpec:
     mrope_interleaved = True
     rope_section = tuple(int(x) for x in rope_section)
     rope_theta = getattr(text_cfg, "rope_theta", 500000.0)
+    num_experts = int(getattr(text_cfg, "num_experts", 0) or 0)
+    num_experts_per_tok = int(getattr(text_cfg, "num_experts_per_tok", 2) or 2)
+    moe_intermediate_size = int(
+        getattr(text_cfg, "moe_intermediate_size", intermediate_size) or intermediate_size
+    )
+    decoder_sparse_step = int(getattr(text_cfg, "decoder_sparse_step", 1) or 1)
+    mlp_only_layers = tuple(
+        int(x) for x in (getattr(text_cfg, "mlp_only_layers", ()) or ())
+    )
 
     vision_fullatt = tuple(getattr(vision_cfg, "fullatt_block_indexes", ()) or ())
     vision_deepstack = tuple(
@@ -1207,12 +1466,21 @@ def spec_from_config(config: Qwen3VLConfig | Qwen3VLModelConfig) -> Qwen3VLSpec:
         text_num_kv_heads=num_kv_heads,
         text_head_dim=head_dim,
         text_intermediate_size=intermediate_size,
+        text_hidden_act=hidden_act,
         text_rope_theta=rope_theta,
         text_rope_section=rope_section,
         text_mrope_interleaved=mrope_interleaved,
         text_rms_norm_eps=rms_norm_eps,
         text_vocab_size=vocab_size,
         text_attention_bias=getattr(text_cfg, "attention_bias", False),
+        text_num_experts=num_experts,
+        text_num_experts_per_tok=num_experts_per_tok,
+        text_moe_intermediate_size=moe_intermediate_size,
+        text_decoder_sparse_step=decoder_sparse_step,
+        text_mlp_only_layers=mlp_only_layers,
+        max_lora_adapters=int(getattr(config, "max_lora_adapters", 0) or 0),
+        max_lora_rank=int(getattr(config, "max_lora_rank", 0) or 0),
+        shard_attention_heads=bool(getattr(config, "shard_attention_heads", True)),
         vision_hidden_size=vision_cfg.hidden_size if vision_cfg else 0,
         vision_out_hidden_size=vision_cfg.out_hidden_size if vision_cfg else 0,
         vision_depth=vision_cfg.depth if vision_cfg else 0,
@@ -1250,16 +1518,24 @@ class Qwen3VLModel(nnx.Module):
         self.config = config
         self.spec = spec_from_config(config)
 
-        self.embed_tokens = nnx.Embed(
+        self.embed_tokens = LoRAEmbed(
             self.spec.text_vocab_size,
             self.spec.text_hidden_size,
+            sharding=("tp", None),
+            max_lora_adapters=self.spec.max_lora_adapters,
+            max_lora_rank=self.spec.max_lora_rank,
+            dtype=dtype,
+            param_dtype=dtype,
             embedding_init=nnx.initializers.normal(stddev=0.02),
             rngs=rngs,
         )
-        self.layers = [
-            Qwen3VLDecoderLayer(self.spec, dtype=dtype, rngs=rngs)
-            for _ in range(self.spec.text_num_layers)
-        ]
+        def create_layer(rngs: nnx.Rngs) -> Qwen3VLDecoderLayer:
+            idx = create_layer.layer_idx
+            create_layer.layer_idx += 1
+            return Qwen3VLDecoderLayer(self.spec, idx, dtype=dtype, rngs=rngs)
+
+        create_layer.layer_idx = 0
+        self.layers = StackedDecoderLayers(create_layer, self.spec.text_num_layers, rngs)
         self.norm = RMSNorm(
             self.spec.text_hidden_size,
             eps=self.spec.text_rms_norm_eps,
@@ -1351,8 +1627,10 @@ class Qwen3VLModel(nnx.Module):
         positions: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         output_hidden_states: bool = False,
+        adapter_indices: jax.Array | None = None,
+        is_training: bool = False,
     ) -> ModelOutput:
-        hidden = self.embed_tokens(input_ids)
+        hidden = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         batch = hidden.shape[0]
         is_decode = kv_cache is not None
 
@@ -1477,62 +1755,83 @@ class Qwen3VLModel(nnx.Module):
             int(kv_len_for_mask),
         )
 
-        all_hidden: list[jax.Array] | None = [] if output_hidden_states else None
-        layer_caches: list[tuple[jax.Array, jax.Array]] = []
-        for i, layer in enumerate(self.layers):
-            layer_kv_tuple = (
-                (kv_cache.keys[i], kv_cache.values[i]) if kv_cache else None
-            )
-            hidden, cache = layer(
+        has_deepstack = (deepstack_image is not None and len(deepstack_image) > 0) or (
+            deepstack_video is not None and len(deepstack_video) > 0
+        )
+        use_manual_loop = has_deepstack or output_hidden_states
+
+        if use_manual_loop:
+            all_hidden: list[jax.Array] | None = [] if output_hidden_states else None
+            layer_caches: list[tuple[jax.Array, jax.Array]] = []
+            for i, layer in enumerate(self.layers):
+                layer_kv_tuple = (
+                    (kv_cache.keys[i], kv_cache.values[i]) if kv_cache else None
+                )
+                hidden, cache = layer(
+                    hidden,
+                    attention_mask=additive_attention_mask,
+                    positions=text_positions,
+                    adapter_indices=adapter_indices,
+                    kv_cache=layer_kv_tuple,
+                    cos=cos,
+                    sin=sin,
+                )
+                layer_caches.append(cache)
+                if (
+                    deepstack_image is not None
+                    and image_mask is not None
+                    and i < len(deepstack_image)
+                ):
+                    hidden = self._apply_deepstack(hidden, image_mask, deepstack_image[i])
+                if (
+                    deepstack_video is not None
+                    and video_mask is not None
+                    and i < len(deepstack_video)
+                ):
+                    hidden = self._apply_deepstack(hidden, video_mask, deepstack_video[i])
+                if output_hidden_states:
+                    assert all_hidden is not None
+                    all_hidden.append(hidden)
+            if is_training:
+                new_kv_cache = None
+            else:
+                keys = [c[0] for c in layer_caches]
+                values = [c[1] for c in layer_caches]
+                pos_for_cache = (
+                    text_positions
+                    if text_positions is not None
+                    else jnp.broadcast_to(
+                        jnp.arange(attention_mask.shape[1], dtype=jnp.int32)[None, :],
+                        (batch, attention_mask.shape[1]),
+                    )
+                )
+                new_kv_cache = KVCache.update(
+                    kv_cache,
+                    keys=keys,
+                    values=values,
+                    positions=pos_for_cache,
+                    attention_mask=attention_mask,
+                    rope_deltas=rope_deltas,
+                )
+        else:
+            hidden, _, new_kv_cache = self.layers(
                 hidden,
-                cos,
-                sin,
-                additive_attention_mask,
-                kv_cache=layer_kv_tuple,
+                attention_mask=additive_attention_mask,
                 positions=text_positions,
+                adapter_indices=adapter_indices,
+                kv_cache=kv_cache,
+                output_hidden_states=False,
+                gradient_checkpointing=self.config.gradient_checkpointing,
+                is_training=is_training,
+                cos=cos,
+                sin=sin,
             )
-            layer_caches.append(cache)
-            if (
-                deepstack_image is not None
-                and image_mask is not None
-                and i < len(deepstack_image)
-            ):
-                hidden = self._apply_deepstack(hidden, image_mask, deepstack_image[i])
-            if (
-                deepstack_video is not None
-                and video_mask is not None
-                and i < len(deepstack_video)
-            ):
-                hidden = self._apply_deepstack(hidden, video_mask, deepstack_video[i])
-            if output_hidden_states:
-                assert all_hidden is not None
-                all_hidden.append(hidden)
+            all_hidden = None
 
         hidden = self.norm(hidden)
         if output_hidden_states:
             assert all_hidden is not None
             all_hidden.append(hidden)
-
-        # Transpose caches from [B, Hkv, T, D] to [B, T, Hkv, D] for KVCache
-        keys = [jnp.transpose(c[0], (0, 2, 1, 3)) for c in layer_caches]
-        values = [jnp.transpose(c[1], (0, 2, 1, 3)) for c in layer_caches]
-        pos_for_cache = (
-            text_positions
-            if text_positions is not None
-            else jnp.broadcast_to(
-                jnp.arange(attention_mask.shape[1], dtype=jnp.int32)[None, :],
-                (batch, attention_mask.shape[1]),
-            )
-        )
-        rope_deltas_for_cache = rope_deltas
-        new_kv_cache = KVCache.update(
-            kv_cache,
-            keys=keys,
-            values=values,
-            positions=pos_for_cache,
-            attention_mask=attention_mask,
-            rope_deltas=rope_deltas_for_cache,
-        )
 
         return ModelOutput(
             last_hidden_state=hidden,
@@ -1555,28 +1854,29 @@ class Qwen3VLForCausalLM(
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens.T
         else:
-            self.lm_head = nnx.Linear(
+            self.lm_head = LoRALinear(
                 self.model.spec.text_hidden_size,
                 self.model.spec.text_vocab_size,
+                sharding=(None, "tp"),
+                max_lora_adapters=self.model.spec.max_lora_adapters,
+                max_lora_rank=self.model.spec.max_lora_rank,
                 use_bias=False,
                 dtype=dtype,
+                param_dtype=dtype,
                 kernel_init=nnx.initializers.lecun_normal(),
                 rngs=rngs,
             )
 
     def get_lm_head(self) -> LMHead:
         """Return lm_head callable: (hidden_states, adapter_indices) -> logits."""
-        if self.config.tie_word_embeddings:
-            emb = self.model.embed_tokens.embedding
-            return lambda h, a=None: h @ emb[...].T
-        return lambda h, a=None: self.lm_head(h)
+        return self.lm_head
 
     def get_model_config(self):
         return self.config
 
     @staticmethod
     def is_lora_param(path: tuple, _value: Any) -> bool:
-        return False
+        return any(name in path for name in ("lora_A", "lora_B"))
 
     def __call__(
         self,
@@ -1591,6 +1891,7 @@ class Qwen3VLForCausalLM(
         kv_cache: KVCache | None = None,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
+        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None and kv_cache is None:
             positions = jnp.broadcast_to(
@@ -1607,6 +1908,8 @@ class Qwen3VLForCausalLM(
             positions=positions,
             kv_cache=kv_cache,
             output_hidden_states=output_hidden_states or False,
+            adapter_indices=adapter_indices,
+            is_training=is_training,
         )
         return CausalLMOutput(
             last_hidden_state=outputs.last_hidden_state,

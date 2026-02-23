@@ -3,6 +3,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from flax import nnx
+from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
+    Qwen3VLMoeConfig,
+)
 
 from tx.models.configs import Qwen3VLModelConfig
 from tx.models.qwen3_vl import (
@@ -11,7 +14,6 @@ from tx.models.qwen3_vl import (
     get_rope_index,
     spec_from_config,
 )
-from tx.models.qwen3_vl_configs import Qwen3VLConfig
 
 
 def _hf_reference_rope_index(
@@ -123,7 +125,7 @@ def _hf_reference_rope_index(
 
 
 def _make_tiny_vl_model() -> Qwen3VLModel:
-    base_cfg = Qwen3VLConfig(
+    base_cfg = Qwen3VLMoeConfig(
         image_token_id=7,
         video_token_id=8,
         vision_start_token_id=6,
@@ -323,7 +325,7 @@ def test_qwen3_vl_additive_causal_mask_matches_expected_pattern():
 
 
 def test_qwen3_vl_spec_forces_interleaved_mrope_like_hf():
-    base_cfg = Qwen3VLConfig(
+    base_cfg = Qwen3VLMoeConfig(
         text_config={
             "vocab_size": 128,
             "hidden_size": 8,
