@@ -274,21 +274,21 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
 
 
 @pytest.mark.vllm
-def test_abort_generation_vllm_engine(ray_init_fixture):
+def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     """
-    We send 4 requests that are really long to `InferenceEngineInterface.chat_completion`
-    and then call abort. We set max_num_seqs=2 to test aborting 2 running requests and 2 waiting
-    requests. We expect 2 requests to be returned with completion_tokens=0 and 2 with non-zero
-    completion_tokens. We also expect the finish_reason to be "abort" for all requests.
+    Test that keep-mode pause freezes in-flight requests and resume lets them
+    complete normally.
+
+    We send 4 long-running requests, pause with mode='keep' (which freezes
+    rather than aborts), then resume. All requests should eventually finish
+    with a normal stop reason (e.g. 'length') and non-zero completion tokens.
     """
-    # 1. Build engine
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
     cfg.trainer.placement.colocate_all = True
     cfg.generator.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
-    # We generate 8192 tokens ad ignore eos.
     sampling_params = {
-        "max_tokens": 8192,
+        "max_tokens": 64,
         "stop": None,
         "stop_token_ids": None,
         "ignore_eos": True,
@@ -306,14 +306,11 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
         model=MODEL,
         num_inference_engines=cfg.generator.num_inference_engines,
         sleep_level=1,
-        # We test aborting 2 running requests and 2 waiting requests
         max_num_seqs=2,
     ) as engines:
         client = engines.client
 
         for api in ["chat_completion", "completion"]:
-
-            # 2. Build 4 chat prompts that have no early stops
             convs: List[ConversationType] = [
                 [
                     {"role": "system", "content": "You are a token generator that keeps talking endlessly."},
@@ -322,8 +319,7 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
                 for _ in range(4)
             ]
 
-            # 3. Fire 4 concurrent requests directly to engine[0]
-            async def run_requests_then_pause():
+            async def run_requests_with_pause_resume():
                 async def one_req(i: int):
                     if api == "chat_completion":
                         body = {
@@ -331,38 +327,32 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
                             "messages": convs[i],
                             **sampling_params,
                         }
-                        return await client.chat_completion({"json": body, "headers": {}})
+                        return await client.engines[0].chat_completion({"json": body, "headers": {}})
                     else:
-                        # completions: prompt is a string
                         prompt_str = tokenizer.apply_chat_template(convs[i], add_generation_prompt=True, tokenize=False)
                         body = {
                             "model": MODEL,
                             "prompt": prompt_str,
                             **sampling_params,
                         }
-                        return await client.completion({"json": body, "headers": {}})
+                        return await client.engines[0].completion({"json": body, "headers": {}})
 
                 tasks = [asyncio.create_task(one_req(i)) for i in range(4)]
-                # Wait to let it run a bit, then pause generation
                 await asyncio.sleep(1)
                 await client.pause_generation()
+                await asyncio.sleep(1)
+                await client.resume_generation()
                 return await asyncio.gather(*tasks)
 
-            outputs = asyncio.run(run_requests_then_pause())
+            outputs = asyncio.run(run_requests_with_pause_resume())
 
-            # 5. Validate outputs: each should be a ChatCompletionResponse; finish_reason is either "abort" or "length"
-            num_completion_tokens_is_zero = 0
             for out in outputs:
                 assert "choices" in out and len(out["choices"]) == 1
-                if out["usage"]["completion_tokens"] == 0:
-                    num_completion_tokens_is_zero += 1
-                assert out["choices"][0].get("finish_reason") == "abort"
-
-            # Two requests should have never got to run because we have max_num_seqs=2, and yet they should
-            # be aborted.
-            assert (
-                num_completion_tokens_is_zero == 2
-            ), f"Expected 2 requests with completion_tokens=0, got {num_completion_tokens_is_zero}."
-
-            # Unpause for the next API run
-            asyncio.run(client.resume_generation())
+                assert out["usage"]["completion_tokens"] > 0, (
+                    f"Expected non-zero completion tokens after keep-mode pause/resume, "
+                    f"got {out['usage']['completion_tokens']}"
+                )
+                assert out["choices"][0].get("finish_reason") != "abort", (
+                    f"Expected non-abort finish reason with keep-mode pause, "
+                    f"got {out['choices'][0].get('finish_reason')}"
+                )

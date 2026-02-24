@@ -14,7 +14,30 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndByt
 import numpy as np
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl.backends.skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
-from flash_attn.bert_padding import pad_input, unpad_input
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input
+except ImportError:
+    import torch.nn.functional as _F
+
+    def unpad_input(hidden_states, attention_mask, unused_mask=None):
+        all_masks = (attention_mask + unused_mask) if unused_mask is not None else attention_mask
+        seqlens_in_batch = all_masks.sum(dim=-1, dtype=torch.int32)
+        used_seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+        indices = torch.nonzero(all_masks.flatten(), as_tuple=False).flatten()
+        max_seqlen_in_batch = seqlens_in_batch.max().item()
+        cu_seqlens = _F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+        b, s = hidden_states.shape[:2]
+        flat = hidden_states.reshape(b * s, *hidden_states.shape[2:])
+        return flat[indices], indices, cu_seqlens, max_seqlen_in_batch, used_seqlens_in_batch
+
+    def pad_input(hidden_states, indices, batch, seqlen):
+        output = torch.zeros(
+            (batch * seqlen, *hidden_states.shape[1:]),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        output[indices] = hidden_states
+        return output.reshape(batch, seqlen, *hidden_states.shape[1:])
 from packaging.version import Version
 
 

@@ -11,16 +11,19 @@ import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ErrorResponse,
+)
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.lora.request import LoRARequest
 from uuid import uuid4
 from skyrl.backends.skyrl_train.inference_engines.base import (
@@ -519,7 +522,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
+                from vllm.entrypoints.openai.engine.protocol import ErrorInfo
 
                 return ErrorResponse(
                     error=ErrorInfo(
@@ -568,7 +571,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
+                from vllm.entrypoints.openai.engine.protocol import ErrorInfo
 
                 return ErrorResponse(
                     error=ErrorInfo(
@@ -603,6 +606,18 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
+
+    async def pause_generation(self) -> None:
+        """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
+        engine = self._get_engine()
+        await engine.pause_generation(mode="keep")
+        logger.info("pause_generation(mode='keep') finished")
+
+    async def resume_generation(self) -> None:
+        """Resume generation after a keep-mode pause."""
+        engine = self._get_engine()
+        await engine.resume_generation()
+        logger.info("resume_generation() finished")
 
     async def abort_generation(self) -> None:
         """
