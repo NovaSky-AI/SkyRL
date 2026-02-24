@@ -12,13 +12,19 @@ from tx.utils.log import logger
 
 
 @contextmanager
-def pack_and_upload(dest: AnyPath, rank: Optional[int] = None) -> Generator[Path, None, None]:
+def pack_and_upload(
+    dest: AnyPath,
+    rank: Optional[int] = None,
+    deterministic: bool = False,
+) -> Generator[Path, None, None]:
     """Give the caller a temp directory that gets uploaded as a tar.gz archive on exit.
 
     Args:
         dest: Destination path for the tar.gz file
         rank: Process rank for multi-rank deduplication. If provided and a probe
               file exists at {dest}.probe, only rank 0 writes.
+        deterministic: If true, normalize tar/gzip metadata and entry order so
+              resulting archives are byte-for-byte reproducible.
     """
     with TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -34,9 +40,33 @@ def pack_and_upload(dest: AnyPath, rank: Optional[int] = None) -> Generator[Path
 
         with dest.open("wb") as f:
             # Use compresslevel=0 to prioritize speed, as checkpoint files don't compress well.
-            with gzip.GzipFile(fileobj=f, mode="wb", compresslevel=0) as gz_stream:
+            with gzip.GzipFile(
+                fileobj=f,
+                filename="",
+                mode="wb",
+                compresslevel=0,
+                mtime=0 if deterministic else None,
+            ) as gz_stream:
                 with tarfile.open(fileobj=gz_stream, mode="w:") as tar:
-                    tar.add(tmp_path, arcname="")
+                    if not deterministic:
+                        tar.add(tmp_path, arcname="")
+                    else:
+                        # Deterministic pack: stable traversal + normalized metadata.
+                        for path in sorted(tmp_path.rglob("*"), key=lambda p: p.relative_to(tmp_path).as_posix()):
+                            rel = path.relative_to(tmp_path)
+                            arcname = rel.as_posix()
+                            tarinfo = tar.gettarinfo(str(path), arcname=arcname)
+                            tarinfo.mtime = 0
+                            tarinfo.uid = 0
+                            tarinfo.gid = 0
+                            tarinfo.uname = ""
+                            tarinfo.gname = ""
+
+                            if tarinfo.isdir():
+                                tar.addfile(tarinfo)
+                            else:
+                                with path.open("rb") as src:
+                                    tar.addfile(tarinfo, src)
 
 
 @contextmanager

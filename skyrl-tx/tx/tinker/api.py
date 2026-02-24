@@ -125,6 +125,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Tinker API Mock", version="0.0.1", lifespan=lifespan)
 
 
+def _is_jax_deterministic_mode(request: Request) -> bool:
+    """Return true when deterministic mode is enabled for the JAX backend."""
+    cfg = request.app.state.engine_config
+    return cfg.backend == "jax" and bool(cfg.backend_config.get("deterministic", False))
+
+
 async def get_session(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """Dependency to get a database session."""
     async with AsyncSession(request.app.state.db_engine) as session:
@@ -391,14 +397,16 @@ class SamplingParams(BaseModel):
     top_k: int = -1
     top_p: float = 1
 
-    def to_types(self) -> types.SamplingParams:
+    def to_types(self, deterministic: bool = False) -> types.SamplingParams:
         if self.max_tokens is None:
             raise HTTPException(status_code=400, detail="max_tokens is currently required")
         if self.max_tokens <= 0:
             raise HTTPException(status_code=400, detail="max_tokens must be a positive number")
 
-        # Generate a random seed if not provided
-        seed = self.seed if self.seed is not None else random.randint(0, 2**31 - 1)
+        # In deterministic mode, default to a fixed seed instead of random fallback.
+        seed = self.seed if self.seed is not None else (
+            0 if deterministic else random.randint(0, 2**31 - 1)
+        )
 
         # Determine if stop values are token IDs (int) or strings
         stop_tokens = None
@@ -626,7 +634,7 @@ async def create_sampling_session(request: CreateSamplingSessionRequest, session
 
 
 @app.post("/api/v1/create_model", response_model=CreateModelResponse)
-async def create_model(request: CreateModelRequest, session: AsyncSession = Depends(get_session)):
+async def create_model(request: CreateModelRequest, req: Request, session: AsyncSession = Depends(get_session)):
     """Create a new model, optionally with a LoRA adapter."""
     # Validate session exists
     session_db = await session.get(SessionDB, request.session_id)
@@ -636,8 +644,13 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     model_id = f"model_{uuid4().hex[:8]}"
 
     # alpha = 32 seems to be the tinker default (see https://thinkingmachines.ai/blog/lora/)
-    # Generate a random seed if not provided
-    seed = request.lora_config.seed if request.lora_config.seed is not None else random.randint(0, 2**31 - 1)
+    # In deterministic mode, default to a fixed seed instead of random fallback.
+    deterministic = _is_jax_deterministic_mode(req)
+    seed = (
+        request.lora_config.seed
+        if request.lora_config.seed is not None
+        else (0 if deterministic else random.randint(0, 2**31 - 1))
+    )
     lora_config = types.LoraConfig(rank=request.lora_config.rank, alpha=32.0, seed=seed)
     request_id = await create_future(
         session=session,
@@ -661,7 +674,7 @@ async def create_model(request: CreateModelRequest, session: AsyncSession = Depe
     return CreateModelResponse(
         model_id=model_id,
         base_model=request.base_model,
-        lora_config=request.lora_config,
+        lora_config=LoRAConfig(rank=request.lora_config.rank, seed=seed),
         status="created",
         request_id=str(request_id),
     )
@@ -916,6 +929,8 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         # Validate that the checkpoint exists and is ready
         await validate_checkpoint(req, model_id, checkpoint_id, types.CheckpointType.SAMPLER, session)
 
+    deterministic = _is_jax_deterministic_mode(req)
+
     request_id = await create_future(
         session=session,
         request_type=(
@@ -925,7 +940,7 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
         request_data=types.SampleInput(
             base_model=base_model,
             prompt=request.prompt.to_types(),
-            sampling_params=request.sampling_params.to_types(),
+            sampling_params=request.sampling_params.to_types(deterministic=deterministic),
             num_samples=request.num_samples,
             checkpoint_id=checkpoint_id,
             prompt_logprobs=request.prompt_logprobs if request.prompt_logprobs is not None else False,

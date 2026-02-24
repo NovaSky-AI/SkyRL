@@ -231,7 +231,7 @@ def save_safetensors(
 
         tensors = {k: multihost_utils.process_allgather(v, tiled=True) for k, v in tensors.items()}
 
-    safetensors.numpy.save_file({k: np.asarray(v) for k, v in tensors.items()}, filename)
+    safetensors.numpy.save_file({k: np.asarray(tensors[k]) for k in sorted(tensors)}, filename)
 
 
 def filter_lora(adapter_config: LoraConfig, path: tuple[str, ...]) -> bool:
@@ -278,6 +278,7 @@ def save_lora_checkpoint(
     adapter_config: LoraConfig,
     adapter_index: int,
     output_path: Path | CloudPath,
+    deterministic: bool = False,
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 
@@ -286,12 +287,13 @@ def save_lora_checkpoint(
         adapter_config: LoRA adapter configuration
         adapter_index: Index of the adapter to save
         output_path: Path to save the checkpoint tar.gz file
+        deterministic: Normalize archive metadata and ordering for reproducible bytes
     """
     peft_config = peft.LoraConfig(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
     )
 
-    with pack_and_upload(output_path, rank=jax.process_index()) as temp_dir:
+    with pack_and_upload(output_path, rank=jax.process_index(), deterministic=deterministic) as temp_dir:
 
         save_safetensors(
             model.config,

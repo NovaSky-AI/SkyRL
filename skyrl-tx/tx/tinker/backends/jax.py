@@ -102,6 +102,13 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=1024,
         description="Chunk size for cross-entropy loss computation. Reduces memory by avoiding full [B*T, V] logits materialization. Set to 0 to disable chunking.",
     )
+    deterministic: bool = Field(
+        default=False,
+        description=(
+            "Enable deterministic behavior for JAX backend operations and checkpoint serialization. "
+            "This mode assumes fixed hardware/software/runtime."
+        ),
+    )
     # Multi-node configuration
     coordinator_address: str | None = Field(
         default=None,
@@ -957,6 +964,7 @@ class JaxBackendImpl(AbstractBackend):
             lora_model.lora_config,
             lora_model.adapter_index,
             output_path,
+            deterministic=self.config.deterministic,
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
