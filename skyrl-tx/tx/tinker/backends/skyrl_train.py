@@ -17,36 +17,17 @@ from tx.tinker import types
 from tx.tinker.backends.backend import AbstractBackend
 from tx.utils.log import logger
 
-try:  # Optional dependency: keep other backends importable without ray/skyrl-train.
-    import ray
-    from ray.util.placement_group import placement_group, PlacementGroup
-    from skyrl_train.training_batch import TrainingInputBatch
-    from skyrl_train.workers.worker import PPORayActorGroup
-    from skyrl_train.workers.worker_dispatch import WorkerDispatch
-    from skyrl_train.utils.utils import initialize_ray
-    from skyrl_train.utils import get_ray_pg_ready_with_timeout
-    from skyrl_train.config.utils import get_legacy_config
-    from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
-    from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
-    from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-
-    SKYRL_TRAIN_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised only in non-ray installs
-    from typing import Any
-
-    ray = None
-    placement_group = None
-    PlacementGroup = None
-    TrainingInputBatch = Any
-    PPORayActorGroup = Any
-    WorkerDispatch = Any
-    initialize_ray = None
-    get_ray_pg_ready_with_timeout = None
-    get_legacy_config = None
-    SKYRL_RAY_PG_TIMEOUT_IN_S = None
-    create_ray_wrapped_inference_engines = None
-    InferenceEngineClient = None
-    SKYRL_TRAIN_AVAILABLE = False
+import ray
+from ray.util.placement_group import placement_group, PlacementGroup
+from skyrl_train.training_batch import TrainingInputBatch
+from skyrl_train.workers.worker import PPORayActorGroup
+from skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl_train.utils.utils import initialize_ray
+from skyrl_train.utils import get_ray_pg_ready_with_timeout
+from skyrl_train.config.utils import get_default_config
+from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 
 class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
@@ -81,7 +62,7 @@ def _build_config(
     """
     from omegaconf import OmegaConf
 
-    cfg = get_legacy_config()
+    cfg = get_default_config()
     cfg.trainer.policy.model.path = base_model
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
