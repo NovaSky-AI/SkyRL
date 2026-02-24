@@ -327,7 +327,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()  // rhs
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offset
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offsets_cumsum
-        .Ret<ffi::Buffer<ffi::BF16>>());  // out
+        .Ret<ffi::Buffer<ffi::BF16>>(),  // out
+    {ffi::Traits::kCmdBufferCompatible});
 
 // Backward pass for d_rhs: computes lhs.T @ grad per group -> d_rhs[G, K, N]
 ffi::Error RaggedDotBwdCudaImpl(
@@ -378,4 +379,5 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
         .Arg<ffi::Buffer<ffi::BF16>>()  // grad
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offset
         .Arg<ffi::Buffer<ffi::S32>>()   // group_offsets_cumsum
-        .Ret<ffi::Buffer<ffi::BF16>>());  // d_rhs
+        .Ret<ffi::Buffer<ffi::BF16>>(),  // d_rhs
+    {ffi::Traits::kCmdBufferCompatible});
