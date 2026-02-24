@@ -1,0 +1,143 @@
+---
+title: "Environment Variables"
+description: "Configuration via environment variables."
+---
+
+### <span className="bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">module</span> `env_vars`
+
+Environment variable configuration for SkyRL.
+
+All environment variables used by SkyRL should be defined here for discoverability.
+
+**Attributes:**
+
+Name | Type | Description
+---- | ---- | -----------
+[`SKYRL_RAY_PG_TIMEOUT_IN_S`](#attr-skyrl_ray_pg_timeout_in_s) | | Timeout for allocating the placement group for different actors in SkyRL.
+[`SKYRL_WORKER_NCCL_TIMEOUT_IN_S`](#attr-skyrl_worker_nccl_timeout_in_s) | | Timeout for initializing the NCCL process group for the worker, defaults to 10 minutes.
+[`SKYRL_VLLM_DP_PORT_OFFSET`](#attr-skyrl_vllm_dp_port_offset) | | Offset for the data parallel port of the vLLM server.
+[`SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S`](#attr-skyrl_wait_until_inference_server_healthy_timeout_s) | | Timeout for waiting until the inference server is healthy.
+[`SKYRL_LD_LIBRARY_PATH_EXPORT`](#attr-skyrl_ld_library_path_export) | | Whether to export `LD_LIBRARY_PATH` environment variable from the driver to the workers with Ray's runtime env.
+[`SKYRL_PYTHONPATH_EXPORT`](#attr-skyrl_pythonpath_export) | | Whether to export `PYTHONPATH` environment variable from the driver to the workers with Ray's runtime env.
+
+#### <span className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">attr</span> `SKYRL_RAY_PG_TIMEOUT_IN_S`
+
+```python
+SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get('SKYRL_RAY_PG_TIMEOUT_IN_S', 180))
+```
+
+Timeout for allocating the placement group for different actors in SkyRL.
+
+
+<details>
+<summary>Source code in `skyrl_train/env_vars.py:13-13`</summary>
+
+```python
+SKYRL_RAY_PG_TIMEOUT_IN_S = int(os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", 180))
+```
+
+</details>
+
+#### <span className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">attr</span> `SKYRL_WORKER_NCCL_TIMEOUT_IN_S`
+
+```python
+SKYRL_WORKER_NCCL_TIMEOUT_IN_S = int(os.environ.get('SKYRL_WORKER_NCCL_TIMEOUT_IN_S', 600))
+```
+
+Timeout for initializing the NCCL process group for the worker, defaults to 10 minutes.
+
+
+<details>
+<summary>Source code in `skyrl_train/env_vars.py:22-22`</summary>
+
+```python
+SKYRL_WORKER_NCCL_TIMEOUT_IN_S = int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_IN_S", 600))
+```
+
+</details>
+
+#### <span className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">attr</span> `SKYRL_VLLM_DP_PORT_OFFSET`
+
+```python
+SKYRL_VLLM_DP_PORT_OFFSET = int(os.environ.get('SKYRL_VLLM_DP_PORT_OFFSET', 500))
+```
+
+Offset for the data parallel port of the vLLM server.
+
+
+<details>
+<summary>Source code in `skyrl_train/env_vars.py:31-31`</summary>
+
+```python
+SKYRL_VLLM_DP_PORT_OFFSET = int(os.environ.get("SKYRL_VLLM_DP_PORT_OFFSET", 500))
+```
+
+</details>
+
+#### <span className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">attr</span> `SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S`
+
+```python
+SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S = int(os.environ.get('SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S', 600))
+```
+
+Timeout for waiting until the inference server is healthy.
+
+
+<details>
+<summary>Source code in `skyrl_train/env_vars.py:35-37`</summary>
+
+```python
+SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S = int(
+    os.environ.get("SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", 600)
+)
+```
+
+</details>
+
+#### <span className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">attr</span> `SKYRL_LD_LIBRARY_PATH_EXPORT`
+
+```python
+SKYRL_LD_LIBRARY_PATH_EXPORT = str(os.environ.get('SKYRL_LD_LIBRARY_PATH_EXPORT', 'False')).lower() in ('true', '1', 'yes')
+```
+
+Whether to export `LD_LIBRARY_PATH` environment variable from the driver to the workers with Ray's runtime env.
+
+For example, if you are using RDMA, you may need to customize the `LD_LIBRARY_PATH` to include the RDMA libraries (Ex: EFA on AWS).
+
+
+<details>
+<summary>Source code in `skyrl_train/env_vars.py:46-50`</summary>
+
+```python
+SKYRL_LD_LIBRARY_PATH_EXPORT = str(os.environ.get("SKYRL_LD_LIBRARY_PATH_EXPORT", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+```
+
+</details>
+
+#### <span className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">attr</span> `SKYRL_PYTHONPATH_EXPORT`
+
+```python
+SKYRL_PYTHONPATH_EXPORT = str(os.environ.get('SKYRL_PYTHONPATH_EXPORT', 'False')).lower() in ('true', '1', 'yes')
+```
+
+Whether to export `PYTHONPATH` environment variable from the driver to the workers with Ray's runtime env.
+
+See https://github.com/ray-project/ray/issues/56697 for details on why this is needed.
+
+
+<details>
+<summary>Source code in `skyrl_train/env_vars.py:57-61`</summary>
+
+```python
+SKYRL_PYTHONPATH_EXPORT = str(os.environ.get("SKYRL_PYTHONPATH_EXPORT", "False")).lower() in (
+    "true",
+    "1",
+    "yes",
+)
+```
+
+</details>

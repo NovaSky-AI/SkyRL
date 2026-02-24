@@ -12,6 +12,7 @@
     "configuration",
     "checkpointing-logging",
     "troubleshooting",
-    "skyagent"
+    "skyagent",
+    "api-ref"
   ]
 }

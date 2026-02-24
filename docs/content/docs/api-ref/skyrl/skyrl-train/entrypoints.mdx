@@ -1,0 +1,720 @@
+---
+title: "Entrypoint"
+description: "Entrypoint API - Training and evaluation entrypoints."
+---
+
+
+## Training Entrypoint
+
+
+The main entrypoint is the `BasePPOExp` class which runs the main training loop.
+
+### <span className="bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">class</span> `BasePPOExp`
+
+```python
+BasePPOExp(cfg: Union[SkyRLConfig, DictConfig])
+```
+
+**Functions:**
+
+Name | Description
+---- | -----------
+[`__init__`](#method-__init__) | Initializes a PPO experiment.
+[`get_cfg_as_str`](#method-staticmethod-get_cfg_as_str) |
+[`get_tokenizer`](#method-get_tokenizer) | Initializes a tokenizer for the given model.
+[`get_train_dataset`](#method-get_train_dataset) | Initializes the training dataset.
+[`get_eval_dataset`](#method-get_eval_dataset) | Initializes the evaluation dataset.
+[`get_colocate_pg`](#method-get_colocate_pg) | Initializes a placement group for colocated training.
+[`get_generator`](#method-get_generator) | Initializes the generator.
+[`get_trainer`](#method-get_trainer) | Initializes the trainer.
+[`get_tracker`](#method-get_tracker) | Initializes the tracker for experiment tracking.
+[`get_inference_client`](#method-get_inference_client) | Setup and return the inference engine client.
+[`_get_legacy_inference_client`](#method-_get_legacy_inference_client) | Legacy inference client using Ray actors.
+[`_get_new_inference_client`](#method-_get_new_inference_client) | New inference client using HTTP endpoints.
+[`_build_vllm_cli_args`](#method-_build_vllm_cli_args) | Build CLI args for vLLM server from config.
+[`_setup_trainer`](#method-_setup_trainer) | Setup and return the trainer.
+[`run`](#method-run) |
+
+Initializes a PPO experiment.
+
+The `cfg` passed here will be the final config from Hydra, including CLI overrides.
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> <span className="bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">staticmethod</span> `get_cfg_as_str`
+
+```python
+get_cfg_as_str(cfg: Union[SkyRLConfig, DictConfig]) -> str
+```
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:133-135`</summary>
+
+```python
+    @staticmethod
+    def get_cfg_as_str(cfg: Union[SkyRLConfig, DictConfig]) -> str:
+        return get_config_as_yaml_str(cfg)
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_tokenizer`
+
+```python
+get_tokenizer(padding_side = 'left')
+```
+
+Initializes a tokenizer for the given model.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:137-148`</summary>
+
+```python
+    def get_tokenizer(self, padding_side="left"):
+        """Initializes a tokenizer for the given model."""
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.cfg.trainer.policy.model.path,
+            trust_remote_code=True,
+            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
+        )
+        tokenizer.padding_side = padding_side
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+        return tokenizer
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_train_dataset`
+
+```python
+get_train_dataset()
+```
+
+Initializes the training dataset.
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`PromptDataset` | | The training dataset.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:150-166`</summary>
+
+```python
+    def get_train_dataset(self):
+        """Initializes the training dataset.
+
+        Returns:
+            PromptDataset: The training dataset.
+        """
+        prompts_dataset = PromptDataset(
+            datasets=self.cfg.data.train_data,
+            tokenizer=self.tokenizer,
+            max_prompt_length=self.cfg.trainer.max_prompt_length,
+            num_workers=8,
+        )
+        # make sure the dataset is large enough to train on
+        assert (
+            len(prompts_dataset) >= self.cfg.trainer.train_batch_size
+        ), f"dataset should be at least as large as `train_batch_size` {self.cfg.trainer.train_batch_size}, got size {len(prompts_dataset)}"
+        return prompts_dataset
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_eval_dataset`
+
+```python
+get_eval_dataset()
+```
+
+Initializes the evaluation dataset.
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`PromptDataset` | | The evaluation dataset.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:168-182`</summary>
+
+```python
+    def get_eval_dataset(self):
+        """Initializes the evaluation dataset.
+
+        Returns:
+            PromptDataset: The evaluation dataset.
+        """
+        if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+            prompts_dataset = PromptDataset(
+                datasets=self.cfg.data.val_data,
+                tokenizer=self.tokenizer,
+                max_prompt_length=self.cfg.trainer.max_prompt_length,
+                num_workers=8,
+            )
+            return prompts_dataset
+        return None
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_colocate_pg`
+
+```python
+get_colocate_pg(timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> PlacementGroup
+```
+
+Initializes a placement group for colocated training.
+
+A single placement group that packs all the inference engines together is created.
+
+**Parameters:**
+
+Name | Type | Description | Default
+---- | ---- | ----------- | -------
+`timeout` | int | The timeout for the placement group to be ready. | [SKYRL_RAY_PG_TIMEOUT_IN_S](/docs/api-ref/skyrl/skyrl-train/env-vars#attr-skyrl_ray_pg_timeout_in_s)
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`PlacementGroup` | PlacementGroup | The placement group for colocated training.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:184-207`</summary>
+
+```python
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> PlacementGroup:
+        """Initializes a placement group for colocated training.
+
+        A single placement group that packs all the inference engines together is created.
+
+        Args:
+            timeout (int): The timeout for the placement group to be ready.
+
+        Returns:
+            PlacementGroup: The placement group for colocated training.
+        """
+        if self.cfg.trainer.placement.colocate_all:
+            pg = placement_group(
+                [{"GPU": 1, "CPU": 1}]
+                * self.cfg.generator.num_inference_engines
+                * self.cfg.generator.inference_engine_tensor_parallel_size
+                * self.cfg.generator.inference_engine_pipeline_parallel_size
+                * self.cfg.generator.inference_engine_data_parallel_size,
+                strategy="PACK",
+            )
+            get_ray_pg_ready_with_timeout(pg, timeout=timeout)
+            return pg
+        else:
+            return None
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_generator`
+
+```python
+get_generator(cfg, tokenizer, inference_engine_client)
+```
+
+Initializes the generator.
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`GeneratorInterface` | | The generator.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:209-223`</summary>
+
+```python
+    def get_generator(self, cfg, tokenizer, inference_engine_client):
+        """Initializes the generator.
+
+        Returns:
+            GeneratorInterface: The generator.
+        """
+        from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
+
+        return SkyRLGymGenerator(
+            generator_cfg=cfg.generator,
+            skyrl_gym_cfg=cfg.environment.skyrl_gym,
+            inference_engine_client=inference_engine_client,
+            tokenizer=tokenizer,
+            model_name=cfg.trainer.policy.model.path,
+        )
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_trainer`
+
+```python
+get_trainer(cfg, tracker, tokenizer, train_dataset, eval_dataset, inference_engine_client, generator: GeneratorInterface, colocate_pg: GeneratorInterface)
+```
+
+Initializes the trainer.
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`RayPPOTrainer` | | The trainer.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:225-250`</summary>
+
+```python
+    def get_trainer(
+        self,
+        cfg,
+        tracker,
+        tokenizer,
+        train_dataset,
+        eval_dataset,
+        inference_engine_client,
+        generator: GeneratorInterface,
+        colocate_pg,
+    ):
+        """Initializes the trainer.
+
+        Returns:
+            RayPPOTrainer: The trainer.
+        """
+        return RayPPOTrainer(
+            cfg=cfg,
+            tracker=tracker,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            inference_engine_client=inference_engine_client,
+            generator=generator,
+            colocate_pg=colocate_pg,
+        )
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_tracker`
+
+```python
+get_tracker()
+```
+
+Initializes the tracker for experiment tracking.
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`Tracking` | | The tracker.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:252-263`</summary>
+
+```python
+    def get_tracker(self):
+        """Initializes the tracker for experiment tracking.
+
+        Returns:
+            Tracking: The tracker.
+        """
+        return Tracking(
+            project_name=self.cfg.trainer.project_name,
+            experiment_name=self.cfg.trainer.run_name,
+            backends=self.cfg.trainer.logger,
+            config=self.cfg,
+        )
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_inference_client`
+
+```python
+get_inference_client() -> InferenceEngineInterface
+```
+
+Setup and return the inference engine client.
+
+This is a hook method that can be overridden by subclasses to customize
+inference engine creation (e.g., FlashRL, custom backends).
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`InferenceEngineInterface` | [InferenceEngineInterface](/docs/api-ref/skyrl/skyrl-train/generators#class-inferenceengineinterface) | The inference engine client.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:265-277`</summary>
+
+```python
+    def get_inference_client(self) -> InferenceEngineInterface:
+        """Setup and return the inference engine client.
+
+        This is a hook method that can be overridden by subclasses to customize
+        inference engine creation (e.g., FlashRL, custom backends).
+
+        Returns:
+            InferenceEngineInterface: The inference engine client.
+        """
+        if _SKYRL_USE_NEW_INFERENCE:
+            return self._get_new_inference_client()
+        else:
+            return self._get_legacy_inference_client()
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `_get_legacy_inference_client`
+
+```python
+_get_legacy_inference_client() -> InferenceEngineInterface
+```
+
+Legacy inference client using Ray actors.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:279-288`</summary>
+
+```python
+    def _get_legacy_inference_client(self) -> InferenceEngineInterface:
+        """Legacy inference client using Ray actors."""
+        if self.cfg.generator.run_engines_locally:
+            inference_engines = create_ray_wrapped_inference_engines_from_config(
+                self.cfg, self.colocate_pg, self.tokenizer
+            )
+        else:
+            inference_engines = create_remote_inference_engines_from_config(self.cfg, self.tokenizer)
+
+        return InferenceEngineClient(inference_engines, self.tokenizer, self.cfg)
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `_get_new_inference_client`
+
+```python
+_get_new_inference_client()
+```
+
+New inference client using HTTP endpoints.
+
+Config combinations:
+
+- Colocated + external URLs → ERROR (validated earlier)
+- Neither set → Build servers internally
+- external_server_urls only → Create router over external servers
+- external_proxy_url only → Use proxy for both data + control plane
+- Both set → Fully external (proxy for data plane, servers for control plane)
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`RemoteInferenceClient` | | The new inference client.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:290-364`</summary>
+
+```python
+    def _get_new_inference_client(self):
+        """New inference client using HTTP endpoints.
+
+        Config combinations:
+        - Colocated + external URLs → ERROR (validated earlier)
+        - Neither set → Build servers internally
+        - external_server_urls only → Create router over external servers
+        - external_proxy_url only → Use proxy for both data + control plane
+        - Both set → Fully external (proxy for data plane, servers for control plane)
+
+        Returns:
+            RemoteInferenceClient: The new inference client.
+        """
+        from skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+        from skyrl_train.inference_servers.router import InferenceRouter
+        from skyrl_train.inference_servers.server_group import ServerGroup
+
+        is_colocated = self.cfg.trainer.placement.colocate_all
+        external_proxy_url = self.cfg.generator.get("external_proxy_url")
+        external_server_urls = self.cfg.generator.get("external_server_urls")
+
+        has_external_proxy = external_proxy_url is not None
+        has_external_servers = external_server_urls is not None
+
+        if has_external_proxy and has_external_servers:
+            # Case: Both external - fully external setup
+            proxy_url = external_proxy_url
+            server_urls = list(external_server_urls)
+            logger.info(
+                f"HTTP Inference: Using fully external setup - " f"proxy_url={proxy_url}, server_urls={server_urls}"
+            )
+
+        elif has_external_proxy and not has_external_servers:
+            # Case: Proxy only - assume proxy handles control plane too
+            proxy_url = external_proxy_url
+            server_urls = [proxy_url]
+            logger.info(
+                f"HTTP Inference: Using external proxy for both data and " f"control plane - proxy_url={proxy_url}"
+            )
+
+        elif has_external_servers and not has_external_proxy:
+            # Case: Servers only - create internal router over them
+            server_urls = list(external_server_urls)
+            self._inference_router = InferenceRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Created internal router over external "
+                f"servers - server_urls={server_urls}, proxy_url={proxy_url}"
+            )
+
+        else:
+            # Case: Neither - build servers and router internally
+            cli_args = self._build_vllm_cli_args()
+
+            self._server_group = ServerGroup(
+                cli_args=cli_args,
+                num_servers=self.cfg.generator.num_inference_engines,
+                placement_group=self.colocate_pg if is_colocated else None,
+                enable_dp=self.cfg.generator.inference_engine_data_parallel_size > 1,
+            )
+            server_infos = self._server_group.start()
+            server_urls = [info.url for info in server_infos]
+
+            self._inference_router = InferenceRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Built servers and router internally - "
+                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
+            )
+
+        return RemoteInferenceClient(
+            proxy_url=proxy_url,
+            server_urls=server_urls,
+            model_name=self.cfg.trainer.policy.model.path,
+        )
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `_build_vllm_cli_args`
+
+```python
+_build_vllm_cli_args()
+```
+
+Build CLI args for vLLM server from config.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:366-398`</summary>
+
+```python
+    def _build_vllm_cli_args(self):
+        """Build CLI args for vLLM server from config."""
+        from argparse import Namespace
+
+        cfg = self.cfg
+        args = Namespace(
+            model=cfg.trainer.policy.model.path,
+            tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+            pipeline_parallel_size=cfg.generator.inference_engine_pipeline_parallel_size,
+            dtype=cfg.generator.model_dtype,
+            data_parallel_size=cfg.generator.inference_engine_data_parallel_size,
+            seed=cfg.trainer.seed,
+            gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
+            enable_prefix_caching=cfg.generator.enable_prefix_caching,
+            enforce_eager=cfg.generator.enforce_eager,
+            max_num_batched_tokens=cfg.generator.max_num_batched_tokens,
+            max_num_seqs=cfg.generator.max_num_seqs,
+            enable_sleep_mode=cfg.trainer.placement.colocate_all,
+        )
+
+        # Add LoRA params if enabled
+        if cfg.trainer.policy.model.lora.rank > 0:
+            args.enable_lora = True
+            args.max_lora_rank = cfg.trainer.policy.model.lora.rank
+            args.max_loras = 1
+            args.fully_sharded_loras = cfg.generator.fully_sharded_loras
+
+        # Add any extra engine_init_kwargs
+        engine_kwargs = OmegaConf.to_container(cfg.generator.engine_init_kwargs, resolve=True)
+        for key, value in engine_kwargs.items():
+            setattr(args, key, value)
+
+        return args
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `_setup_trainer`
+
+```python
+_setup_trainer()
+```
+
+Setup and return the trainer.
+
+Instantiates the trainer and all the associated models for training.
+
+**Returns:**
+
+Name | Type | Description
+---- | ---- | -----------
+`RayPPOTrainer` | | The trainer.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:400-440`</summary>
+
+```python
+    def _setup_trainer(self):
+        """Setup and return the trainer.
+
+        Instantiates the trainer and all the associated models for training.
+
+        Returns:
+            RayPPOTrainer: The trainer.
+        """
+        logger.info(self.get_cfg_as_str(self.cfg))
+        os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
+        os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
+
+        if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
+            from skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
+        elif self.cfg.trainer.strategy == "megatron":
+            from skyrl_train.workers.megatron.megatron_worker import PolicyWorker, CriticWorker, RefWorker
+        else:
+            raise ValueError(f"Unknown strategy type: {self.cfg.trainer.strategy}")
+
+        # NOTE (sumanthrh): Instantiate tracker before trainer init.
+        # We have custom validation before this step to give better error messages.
+        tracker = self.get_tracker()
+
+        inference_engine_client = self.get_inference_client()
+
+        generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
+
+        trainer = self.get_trainer(
+            cfg=self.cfg,
+            tracker=tracker,
+            tokenizer=self.tokenizer,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.eval_dataset,
+            inference_engine_client=inference_engine_client,
+            generator=generator,
+            colocate_pg=self.colocate_pg,
+        )
+
+        # Build the models
+        trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
+        return trainer
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `run`
+
+```python
+run()
+```
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_base.py:442-445`</summary>
+
+```python
+    def run(self):
+        trainer = self._setup_trainer()
+        # Start the training loop
+        asyncio.run(trainer.train())
+```
+
+</details>
+
+
+## Evaluation Entrypoint
+
+
+The evaluation-only entrypoint is the `EvalOnlyEntrypoint` class which runs evaluation without training.
+
+### <span className="bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">class</span> `EvalOnlyEntrypoint`
+
+Bases: [BasePPOExp](#class-baseppoexp)
+
+**Functions:**
+
+Name | Description
+---- | -----------
+[`get_train_dataset`](#method-get_train_dataset) | Override to avoid requiring a train dataset for eval-only runs.
+[`run`](#method-async-run) |
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `get_train_dataset`
+
+```python
+get_train_dataset()
+```
+
+Override to avoid requiring a train dataset for eval-only runs.
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_generate.py:23-25`</summary>
+
+```python
+    def get_train_dataset(self):
+        """Override to avoid requiring a train dataset for eval-only runs."""
+        return None
+```
+
+</details>
+
+#### <span className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 inline-block px-1.5 py-0.5 rounded text-xs font-medium align-middle">method</span> `run`
+
+```python
+run() -> dict[str, Any]
+```
+
+
+<details>
+<summary>Source code in `skyrl_train/entrypoints/main_generate.py:27-45`</summary>
+
+```python
+    async def run(self) -> dict[str, Any]:
+        assert self.eval_dataset is not None, "The evaluation only entrypoint requires an eval dataset is provided"
+
+        inference_engine_client = self.get_inference_client()
+        await inference_engine_client.wake_up()
+        generator = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
+
+        results: dict[str, Any] = await evaluate(
+            eval_dataloader=build_dataloader(self.cfg, self.eval_dataset, is_train=False),
+            generator=generator,
+            cfg=self.cfg,
+            global_step=None,
+            tokenizer=self.tokenizer,
+        )
+
+        tracker = self.get_tracker()
+        tracker.log(results, step=0, commit=True)
+
+        return results
+```
+
+</details>
