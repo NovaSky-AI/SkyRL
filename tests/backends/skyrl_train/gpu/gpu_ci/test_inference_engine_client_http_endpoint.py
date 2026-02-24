@@ -258,9 +258,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         ]
 
         for batched in batched_list:
-            print("Testing batched", batched, flush=True)
             for with_traj in with_traj_list:
-                print("Testing with_traj", with_traj, flush=True)
                 if not batched:
                     outputs = []
                     for i, p in enumerate(text_prompts):
@@ -444,7 +442,6 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
 
         for test_type in test_types:
             for endpoint in endpoints:
-                print(f"Testing {test_type} with {endpoint}")
                 outputs = _generate_outputs(test_type, endpoint)
                 if endpoint == "chat_completions":
                     _check_chat_completions_outputs(outputs, test_type, num_samples, "vllm")
