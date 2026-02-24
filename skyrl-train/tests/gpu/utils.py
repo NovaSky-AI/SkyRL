@@ -485,9 +485,7 @@ class InferenceEngineState:
                 f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={cfg.trainer.placement.colocate_all}"
             )
             client = RemoteInferenceClient(
-                proxy_url=proxy_url,
-                server_urls=server_urls,
-                model_name=served_model_name,
+                proxy_url=proxy_url, server_urls=server_urls, model_name=cfg.trainer.policy.model.path
             )
         else:
             eps = create_ray_wrapped_inference_engines(
