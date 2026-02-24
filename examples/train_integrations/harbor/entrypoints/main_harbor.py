@@ -11,12 +11,15 @@ from pathlib import Path
 from typing import Any, Dict
 
 from skyrl.train.entrypoints.main_base import BasePPOExp
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import SkyRLTrainConfig, GeneratorConfig, get_config_as_yaml_str
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
+from skyrl.train.utils.rate_limiter import RateLimiterConfig
 from ..harbor_generator import HarborGenerator
 from ..dataset import HarborTaskDataset
 
+# NOTE (sumanthrh): We use a YAML to store the defaults for the Harbor trial configuration
+# TODO: Convert to a dataclass
 HARBOR_DEFAULT_CONFIG = Path(__file__).parent.parent / "harbor_trial_config" / "default.yaml"
 
 
@@ -31,10 +34,18 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 
 @dataclass
+class HarborGeneratorConfig(GeneratorConfig):
+    """GeneratorConfig with Harbor-specific rate limiting."""
+
+    rate_limit: RateLimiterConfig = field(default_factory=RateLimiterConfig)
+
+
+@dataclass
 class HarborSkyRLConfig(SkyRLTrainConfig):
     """SkyRLTrainConfig with Harbor trial configuration."""
 
     harbor_trial_config: Dict[str, Any] = field(default_factory=dict)
+    generator: HarborGeneratorConfig = field(default_factory=HarborGeneratorConfig)
 
 
 class HarborExp(BasePPOExp):

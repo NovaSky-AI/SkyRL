@@ -1,4 +1,4 @@
-> **Note:** SkyRL configuration has transitioned to Python-based dataclasses. The canonical config reference is now `skyrl_train/config/config.py`.
+> **Note:** SkyRL configuration has transitioned to Python-based dataclasses. The canonical config reference is now `skyrl/train/config/config.py`.
 
 ## Guide: OpenEnv + SkyRL
 
@@ -79,7 +79,7 @@ LOGGER="wandb"
 
 All training parameters can be modified in `run_openenv.sh`, such as the model choice (`trainer.policy.model.path`), GRPO group size (`generator.n_samples_per_prompt`), or training batch size (`trainer.train_batch_size`).
 
-See all available training configuration parameters in `skyrl_train/config/config.py` (Python dataclass definitions).
+See all available training configuration parameters in `skyrl/train/config/config.py` (Python dataclass definitions).
 
 
 

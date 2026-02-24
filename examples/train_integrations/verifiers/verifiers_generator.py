@@ -25,8 +25,9 @@ class VerifiersGenerator(GeneratorInterface):
         self.tokenizer = tokenizer
         self.model_name = model_name
 
-        assert generator_cfg.enable_http_endpoint, "HTTP endpoint must be enabled for VerifiersGenerator"
-        self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}/v1"
+        ie_cfg = generator_cfg.inference_engine
+        assert ie_cfg.enable_http_endpoint, "HTTP endpoint must be enabled for VerifiersGenerator"
+        self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}/v1"
         self.client = self._setup_client(connection_limit=None)  # None means unlimited connections
 
     def _setup_client(self, connection_limit: Optional[int]) -> AsyncOpenAI:
