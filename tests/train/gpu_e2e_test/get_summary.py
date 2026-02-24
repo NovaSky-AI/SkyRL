@@ -30,22 +30,23 @@ api = wandb.Api()
 # get all runs in the project in the order of latest to oldest
 runs = api.runs(f"{args.project_name}", order="-created_at", per_page=50)
 # pages are fetched lazily
-run = None
+matched_run = None
 for run in runs:
     if run.name == args.run_name:
+        matched_run = run
         break
 
 
-if run is None:
+if matched_run is None:
     raise ValueError(f"Run {args.run_name} not found in project {args.project_name}")
 
 for assertion in args.asserts:
     metric_name, operator_str, threshold = assertion.lstrip().rstrip().split()
     threshold = float(threshold)
-    if metric_name not in run.summary_metrics:
+    if metric_name not in matched_run.summary_metrics:
         raise ValueError(f"Metric {metric_name} not found in run {args.run_name}")
 
-    metric_value = run.summary_metrics[metric_name]
+    metric_value = matched_run.summary_metrics[metric_name]
     if not OPERATORS[operator_str](metric_value, threshold):
         print(f"Metric {metric_name} is not {operator_str} threshold {threshold}")
         exit(1)
