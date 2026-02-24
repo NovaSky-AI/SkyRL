@@ -270,8 +270,8 @@ class RemoteInferenceClient:
                 headers["X-Session-ID"] = str(session_id)
 
             async with session.post(url, json=payload, headers=headers) as resp:
-                resp.raise_for_status()
                 response = await resp.json()
+                resp.raise_for_status()
 
             choice = response["choices"][0]
             new_token_ids = choice["token_ids"]
@@ -321,8 +321,9 @@ class RemoteInferenceClient:
         url = f"{self.proxy_url}/v1/chat/completions"
 
         async with session.post(url, json=body, headers=headers) as resp:
+            response = await resp.json()
             resp.raise_for_status()
-            return await resp.json()
+            return response
 
     async def completion(
         self,
@@ -352,8 +353,9 @@ class RemoteInferenceClient:
         url = f"{self.proxy_url}/v1/completions"
 
         async with session.post(url, json=body, headers=headers) as resp:
+            response = await resp.json()
             resp.raise_for_status()
-            return await resp.json()
+            return response
 
     async def tokenize(
         self,
@@ -382,8 +384,8 @@ class RemoteInferenceClient:
                 "add_special_tokens": add_special_tokens,
             }
             async with session.post(url, json=payload) as resp:
-                resp.raise_for_status()
                 result = await resp.json()
+                resp.raise_for_status()
                 results.append(result.get("tokens", []))
 
         return results
@@ -412,8 +414,8 @@ class RemoteInferenceClient:
                 "tokens": ids,
             }
             async with session.post(url, json=payload) as resp:
-                resp.raise_for_status()
                 result = await resp.json()
+                resp.raise_for_status()
                 results.append(result.get("prompt", ""))
 
         return results
@@ -444,8 +446,8 @@ class RemoteInferenceClient:
         async def call_server(server_url: str) -> tuple:
             url = f"{server_url}{endpoint}"
             async with session.request(method, url, json=json) as resp:
-                resp.raise_for_status()
                 body = await resp.json() if resp.content_length else None
+                resp.raise_for_status()
                 return server_url, {"status": resp.status, "body": body}
 
         results = await asyncio.gather(*[call_server(url) for url in self.server_urls])

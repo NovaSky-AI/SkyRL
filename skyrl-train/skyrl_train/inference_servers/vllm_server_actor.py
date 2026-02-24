@@ -13,6 +13,10 @@ from typing import Any, Dict, Optional, Tuple
 import httpx
 import uvicorn
 import vllm.envs as envs
+from vllm.entrypoints.constants import (
+    H11_MAX_HEADER_COUNT_DEFAULT,
+    H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
+)
 from fastapi import Request, HTTPException
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -296,6 +300,10 @@ class VLLMServerActor(ServerActorProtocol):
             ssl_ca_certs=self._cli_args.ssl_ca_certs,
             ssl_cert_reqs=self._cli_args.ssl_cert_reqs,
             access_log=not getattr(self._cli_args, "disable_uvicorn_access_log", False),
+            h11_max_incomplete_event_size=getattr(
+                self._cli_args, "h11_max_incomplete_event_size", H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
+            ),
+            h11_max_header_count=getattr(self._cli_args, "h11_max_header_count", H11_MAX_HEADER_COUNT_DEFAULT),
         )
         server = uvicorn.Server(config)
         await server.serve(sockets=[sock])

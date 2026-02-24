@@ -33,7 +33,9 @@ def build_vllm_cli_args(cfg: "Union[SkyRLConfig, DictConfig]") -> Namespace:
         enable_sleep_mode=cfg.trainer.placement.colocate_all,
         # NOTE (sumanthrh): We set generation config to be vLLM so that the generation behaviour of the server is same as using the vLLM Engine APIs directly
         generation_config="vllm",
+        served_model_name=cfg.generator.served_model_name if cfg.generator.served_model_name else None,
     )
+    print(f"overrides: {overrides}", flush=True)
     for key, value in overrides.items():
         setattr(args, key, value)
 
