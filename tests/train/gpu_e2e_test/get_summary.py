@@ -28,15 +28,8 @@ args = parser.parse_args()
 
 api = wandb.Api()
 # get latest run with the run name
-# get all runs in the project in the order of latest to oldest
-runs = api.runs(f"{args.project_name}", order="-created_at", per_page=50)
-# pages are fetched lazily
-matched_run = None
-for run in runs:
-    if run.name == args.run_name:
-        matched_run = run
-        break
-
+runs = api.runs(f"{args.project_name}", filters={"display_name": args.run_name}, order="-created_at")
+matched_run = next(iter(runs), None)
 
 if matched_run is None:
     raise ValueError(f"Run {args.run_name} not found in project {args.project_name}")
