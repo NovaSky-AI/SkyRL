@@ -11,10 +11,12 @@ from skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
+    compute_gdpo_outcome_advantage,
     compute_advantages_and_returns,
     AdaptiveKLController,
     FixedKLController,
     AdvantageEstimatorRegistry,
+    AdvantageEstimator,
     register_advantage_estimator,
     PolicyLossRegistry,
     register_policy_loss,
@@ -170,6 +172,65 @@ def test_compute_grpo_outcome_advantage_norm_std_false():
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
     assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_compute_gdpo_outcome_advantage_shape_and_alias_norm_flag():
+    """
+    GDPO expects multi-objective rewards (B, T, K) and should be configurable via the existing
+    `grpo_norm_by_std` flag (aliased internally to GDPO to avoid redundant config).
+
+    """
+    token_level_rewards = torch.zeros((4, 3, 2), dtype=torch.float)
+    token_level_rewards[0, -1] = torch.tensor([1.0, 2.0])
+    token_level_rewards[1, -1] = torch.tensor([2.0, 0.0])
+    token_level_rewards[2, -1] = torch.tensor([0.0, 1.0])
+    token_level_rewards[3, -1] = torch.tensor([1.0, 1.0])
+
+    response_mask = torch.ones((4, 3), dtype=torch.float)
+    index = np.array([0, 0, 1, 1])
+
+    adv_direct, ret_direct = compute_gdpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=False,
+    )
+    assert adv_direct.shape == response_mask.shape
+    assert torch.allclose(adv_direct, ret_direct), "Advantages and returns should be equal with GDPO"
+
+    expected_adv = torch.tensor(
+        [
+            [0.5, 0.5, 0.5],
+            [-0.5, -0.5, -0.5],
+            [-0.5, -0.5, -0.5],
+            [0.5, 0.5, 0.5],
+        ]
+    )
+    assert torch.allclose(adv_direct, expected_adv, atol=1e-5), f"Expected {expected_adv}, got {adv_direct}"
+
+    from omegaconf import OmegaConf
+
+    cfg = OmegaConf.create({})
+    adv_false, _ = compute_advantages_and_returns(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        adv_estimator=AdvantageEstimator.GDPO,
+        config=cfg,
+        grpo_norm_by_std=False,
+    )
+    adv_true, _ = compute_advantages_and_returns(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        adv_estimator=AdvantageEstimator.GDPO,
+        config=cfg,
+        grpo_norm_by_std=True,
+    )
+    assert adv_false.shape == response_mask.shape
+    assert adv_true.shape == response_mask.shape
+    assert torch.allclose(adv_false, expected_adv, atol=1e-5), "Direct call should match compute_advantages_and_returns"
+    assert not torch.allclose(adv_false, adv_true), "Toggling grpo_norm_by_std should affect GDPO advantages"
 
 
 def test_compute_gae_advantage_return(advantage_test_data):
