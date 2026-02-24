@@ -444,8 +444,7 @@ class InferenceEngineConfig(BaseConfig):
     max_num_seqs: int = 1024
     remote_urls: List[str] = field(default_factory=lambda: [])
     enable_http_endpoint: bool = False
-    """When ``True``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.\
-        
+    """When ``True``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.
     
     NOTE: When using HTTP endpoints directly, make sure to set ``generator.sampling_params.temperature`` to the temperature used during generation - the algorithm config temperature (used fo logits scaling) inherits this value.
     """
