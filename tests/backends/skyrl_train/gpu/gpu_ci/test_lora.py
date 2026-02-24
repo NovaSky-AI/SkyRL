@@ -91,11 +91,15 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+            )
+        )
         asyncio.run(client.reset_prefix_cache())
         ray.get(
             policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))

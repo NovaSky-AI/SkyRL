@@ -322,11 +322,15 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
             cfg=cfg,
         )
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+            )
+        )
         asyncio.run(client.reset_prefix_cache())
         ray.get(
             policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
 

@@ -155,7 +155,11 @@ def test_megatron_policy_weight_sync(
                 num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
                 cfg=cfg,
             )
-            ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+                )
+            )
             asyncio.run(client.wake_up(tags=["weights"]))
             # TODO (erictang000): improve this timing
             # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
@@ -164,7 +168,7 @@ def test_megatron_policy_weight_sync(
             with Timer("sync_weights"):
                 ray.get(
                     policy.async_run_ray_method(
-                        "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+                        "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
                     )
                 )
 

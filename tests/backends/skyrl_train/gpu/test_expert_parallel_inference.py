@@ -200,11 +200,15 @@ def test_ep_weight_sync():
         )
 
         # Sync weights to inference engines
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+            )
+        )
         asyncio.run(client.wake_up(tags=["weights"]))
         ray.get(
             policy.async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", client, client.inference_engine_cfg
+                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
             )
         )
         policy.offload_to_cpu()
