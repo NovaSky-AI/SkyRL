@@ -331,7 +331,7 @@ class AlgorithmConfig(BaseConfig):
     """Temperature for scaling logits in policy loss computation.
     Typically set from ``generator.sampling_params.temperature`` during config validation.
     
-    NOTE: When using HTTP endpoints, and you are not utilizing the sampling parameter at ``generator.sampling_params.temperature``, this value should be set appropriately to the temperature used during generation.
+    NOTE: When using HTTP endpoints, and you are not utilizing the sampling parameter at ``generator.sampling_params.temperature``, this value should be set to the temperature used during generation.
     """
     advantage_batch_normalize: bool = False
     value_head_prefix: str = "value_head"
