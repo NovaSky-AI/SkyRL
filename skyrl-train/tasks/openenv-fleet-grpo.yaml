@@ -128,6 +128,11 @@ run: |
   # Login to Weights & Biases
   uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
 
+  # Fix Ray binary permissions (RunPod issue where binaries lose execute permissions)
+  if [ -d "/root/skypilot-runtime" ]; then
+    chmod -R +x /root/skypilot-runtime/lib/python*/site-packages/ray/core/src/ray/ 2>/dev/null || true
+  fi
+
   # Ray cluster setup - limit object store to prevent disk exhaustion
   export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
   export RAY_object_store_memory=10000000000  # 10GB limit for object store
