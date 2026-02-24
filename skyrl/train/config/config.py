@@ -329,7 +329,10 @@ class AlgorithmConfig(BaseConfig):
     entropy_loss_coef: float = 0.01
     temperature: float = 1.0
     """Temperature for scaling logits in policy loss computation.
-    Typically set from ``generator.sampling_params.temperature`` during config validation."""
+    Typically set from ``generator.sampling_params.temperature`` during config validation.
+    
+    NOTE: When using HTTP endpoints, and you are not utilizing the sampling parameter at ``generator.sampling_params.temperature``, this value should be set appropriately to the temperature used during generation.
+    """
     advantage_batch_normalize: bool = False
     value_head_prefix: str = "value_head"
     policy_loss_type: str = "regular"
@@ -441,6 +444,11 @@ class InferenceEngineConfig(BaseConfig):
     max_num_seqs: int = 1024
     remote_urls: List[str] = field(default_factory=lambda: [])
     enable_http_endpoint: bool = False
+    """When ``True``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.\
+        
+    
+    NOTE: When using HTTP endpoints, it is also important to propagate the temperature appropriately to the trainer configuration at ``trainer.algorithm.temperature`` if you are not utilizing ``generator.sampling_params.temperature``.
+    """
     http_endpoint_host: str = "127.0.0.1"
     http_endpoint_port: int = 8000
     served_model_name: Optional[str] = None
