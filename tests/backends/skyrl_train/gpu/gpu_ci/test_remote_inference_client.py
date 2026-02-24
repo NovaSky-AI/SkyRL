@@ -127,6 +127,42 @@ def _check_completions_outputs(prompts: List, outputs: List[Dict], test_type: st
 
 
 @pytest.mark.vllm
+def test_served_model_name(vllm_server):
+    """Test that served_model_name works and model path fails."""
+    client = vllm_server.client
+    messages = [{"role": "user", "content": "Hello, who are you?"}]
+
+    # Request with served_model_name should succeed
+    result = asyncio.run(
+        client.chat_completion(
+            {
+                "json": {
+                    "model": SERVED_MODEL_NAME,
+                    "messages": messages,
+                    "max_tokens": 50,
+                }
+            }
+        )
+    )
+    assert "choices" in result and len(result["choices"]) > 0
+    assert result["choices"][0]["message"]["content"] is not None
+
+    # Request with model path should fail (model name mismatch)
+    with pytest.raises(Exception):
+        asyncio.run(
+            client.chat_completion(
+                {
+                    "json": {
+                        "model": MODEL_QWEN2_5,
+                        "messages": messages,
+                        "max_tokens": 50,
+                    }
+                }
+            )
+        )
+
+
+@pytest.mark.vllm
 def test_chat_completions(vllm_server):
     """Test chat completions via RemoteInferenceClient."""
     client = vllm_server.client
@@ -276,42 +312,3 @@ def test_context_length_error_returns_400(vllm_server):
         assert err.status == HTTPStatus.BAD_REQUEST
     print("Error message is", str(err))
     assert "maximum context length" in str(err).lower() or "context" in str(err).lower()
-
-
-# --- Group C: served_model_name ---
-
-
-@pytest.mark.vllm
-def test_served_model_name(vllm_server):
-    """Test that served_model_name works and model path fails."""
-    client = vllm_server.client
-    messages = [{"role": "user", "content": "Hello, who are you?"}]
-
-    # Request with served_model_name should succeed
-    result = asyncio.run(
-        client.chat_completion(
-            {
-                "json": {
-                    "model": SERVED_MODEL_NAME,
-                    "messages": messages,
-                    "max_tokens": 50,
-                }
-            }
-        )
-    )
-    assert "choices" in result and len(result["choices"]) > 0
-    assert result["choices"][0]["message"]["content"] is not None
-
-    # Request with model path should fail (model name mismatch)
-    with pytest.raises(Exception):
-        asyncio.run(
-            client.chat_completion(
-                {
-                    "json": {
-                        "model": MODEL_QWEN2_5,
-                        "messages": messages,
-                        "max_tokens": 50,
-                    }
-                }
-            )
-        )

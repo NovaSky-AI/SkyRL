@@ -36,7 +36,6 @@ def build_vllm_cli_args(cfg: "Union[SkyRLConfig, DictConfig]") -> Namespace:
         # NOTE: vllm expects a list entry for served_model_name
         served_model_name=[cfg.generator.served_model_name] if cfg.generator.served_model_name else None,
     )
-    print(f"overrides: {overrides}", flush=True)
     for key, value in overrides.items():
         setattr(args, key, value)
 
