@@ -71,6 +71,27 @@ envs:
 
 setup: |
   set -euo pipefail
+
+  # Fix Ray binary permissions (RunPod issue where binaries lose execute permissions)
+  # Must run BEFORE any Ray commands, including SkyPilot's internal cluster verification
+  echo "Checking for skypilot-runtime Ray binaries..."
+  RAY_BIN_DIR="/root/skypilot-runtime/lib/python3.10/site-packages/ray/core/src/ray"
+  if [ -d "$RAY_BIN_DIR" ]; then
+    echo "Found Ray binaries at $RAY_BIN_DIR"
+    echo "Current permissions:"
+    ls -la "$RAY_BIN_DIR/gcs/" 2>/dev/null || echo "  (gcs dir not found)"
+    echo "Fixing permissions..."
+    find /root/skypilot-runtime -name "gcs_server" -exec chmod +x {} \; 2>/dev/null || true
+    find /root/skypilot-runtime -name "raylet" -exec chmod +x {} \; 2>/dev/null || true
+    find /root/skypilot-runtime -name "plasma_store_server" -exec chmod +x {} \; 2>/dev/null || true
+    chmod -R +x "$RAY_BIN_DIR" 2>/dev/null || true
+    echo "Permissions after fix:"
+    ls -la "$RAY_BIN_DIR/gcs/" 2>/dev/null || echo "  (gcs dir not found)"
+  else
+    echo "Ray binaries not found at expected path, checking alternatives..."
+    find /root -name "gcs_server" 2>/dev/null | head -5 || echo "  (not found)"
+  fi
+
   cd skyrl-train
 
   # Validate required environment variables
@@ -127,11 +148,6 @@ run: |
 
   # Login to Weights & Biases
   uv run -- python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
-
-  # Fix Ray binary permissions (RunPod issue where binaries lose execute permissions)
-  if [ -d "/root/skypilot-runtime" ]; then
-    chmod -R +x /root/skypilot-runtime/lib/python*/site-packages/ray/core/src/ray/ 2>/dev/null || true
-  fi
 
   # Ray cluster setup - limit object store to prevent disk exhaustion
   export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
