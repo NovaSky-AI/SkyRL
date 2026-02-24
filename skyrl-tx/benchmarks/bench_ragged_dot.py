@@ -12,6 +12,20 @@ from tx.ffi import ragged_dot_ffi, ragged_dot_ffi_available
 
 # Preset configurations for different workloads
 PRESETS = {
+    "decode-moe": {
+        "description": "Decode-time MoE expert layer (small/sparse token batches)",
+        "num_tokens": 64,
+        "num_groups": 128,  # num_experts
+        "k_dim": 2048,      # hidden_size
+        "n_dim": 768,       # intermediate_size
+    },
+    "decode-lora": {
+        "description": "Decode-time LoRA adapter layer (small token batches)",
+        "num_tokens": 64,
+        "num_groups": 32,   # max_lora_adapters
+        "k_dim": 8,         # lora_rank
+        "n_dim": 4096,      # output features
+    },
     "moe": {
         "description": "MoE expert layer (Qwen3-30B-A3B)",
         "num_tokens": 8192,

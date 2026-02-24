@@ -60,11 +60,19 @@ constexpr int AlignmentOutput = 8;
 
 using ArchTag = cutlass::arch::Sm90;
 using OperatorClass = cutlass::arch::OpClassTensorOp;
+using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int32_t, int32_t, int32_t>>;
+
+// Prefill-optimized kernel config: larger N tile is better for long sequences.
 using TileShape = cute::Shape<cute::_64, cute::_256, cute::_64>;
 using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
 using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
 using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
-using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int32_t, int32_t, int32_t>>;
+
+// Decode-optimized config: smaller N tile improves occupancy for tiny/sparse M.
+using TileShapeDecode = cute::Shape<cute::_64, cute::_128, cute::_64>;
+using ClusterShapeDecode = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelScheduleDecode = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+using EpilogueScheduleDecode = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
 
 using CollectiveEpilogue =
     typename cutlass::epilogue::collective::CollectiveBuilder<
@@ -84,6 +92,26 @@ using CollectiveMainloop =
 
 using GemmKernel = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop, CollectiveEpilogue>;
 using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
+using CollectiveEpilogueDecode =
+    typename cutlass::epilogue::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, TileShapeDecode, ClusterShapeDecode,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
+        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueScheduleDecode,
+        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
+
+using CollectiveMainloopDecode =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
+        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShapeDecode, ClusterShapeDecode,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogueDecode::SharedStorage))>,
+        KernelScheduleDecode>::CollectiveOp;
+
+using GemmKernelDecode =
+    cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopDecode, CollectiveEpilogueDecode>;
+using GemmDecode = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelDecode>;
 using ProblemShapeType = ProblemShape::UnderlyingProblemShape;
 
 // Backward kernel for d_rhs: computes lhs.T @ grad per group
@@ -159,6 +187,15 @@ struct GroupedGemmData {
 };
 
 enum class GemmDir { Fwd, Bwd };
+
+constexpr int32_t kDecodeTokenThreshold = 256;
+constexpr float kDecodeTokensPerGroupThreshold = 4.0f;
+
+static bool use_decode_kernel(int32_t m, int32_t g_local) {
+  int32_t safe_group_count = g_local > 0 ? g_local : 1;
+  float avg_tokens_per_group = static_cast<float>(m) / static_cast<float>(safe_group_count);
+  return m <= kDecodeTokenThreshold || avg_tokens_per_group <= kDecodeTokensPerGroupThreshold;
+}
 
 // Unified prepare kernel for forward and backward passes
 // Fwd: A[M,K] @ B[G,K,N] -> out[M,N] (ragged by group)
@@ -255,8 +292,21 @@ ffi::Error RaggedDotCudaImpl(
   int32_t g_local = static_cast<int32_t>(rhs_dims[0]);
   int32_t n = static_cast<int32_t>(rhs_dims[2]);
 
+  if (g_local <= 0) {
+    return ffi::Error::InvalidArgument("rhs must have at least one group.");
+  }
+
   if (cudaMemsetAsync(out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
     return ffi::Error::Internal("Failed to zero output.");
+  }
+
+  if (use_decode_kernel(m, g_local)) {
+    return ExecuteGroupedGemm<GemmDecode, GemmDir::Fwd>(
+        stream, scratch,
+        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+        reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+        reinterpret_cast<DtypeOutput*>(out->typed_data()),
+        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
   }
 
   return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(

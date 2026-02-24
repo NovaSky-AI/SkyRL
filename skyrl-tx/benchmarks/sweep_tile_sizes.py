@@ -46,6 +46,14 @@ SCHEDULE_CONFIGS = [
 
 # Workload presets for benchmarking
 WORKLOAD_PRESETS = {
+    "decode-moe": {
+        "description": "Decode-time MoE expert layer",
+        "args": ["--preset", "decode-moe"],
+    },
+    "decode-lora": {
+        "description": "Decode-time LoRA adapter layer",
+        "args": ["--preset", "decode-lora"],
+    },
     "moe": {
         "description": "MoE expert layer (Qwen3-30B-A3B)",
         "args": ["--preset", "moe"],
