@@ -331,7 +331,7 @@ class AlgorithmConfig(BaseConfig):
     """Temperature for scaling logits in policy loss computation.
     Typically set from ``generator.sampling_params.temperature`` during config validation.
     
-    NOTE: When using HTTP endpoints, and you are not utilizing the sampling parameter at ``generator.sampling_params.temperature``, this value should be set to the temperature used during generation.
+    NOTE: When using HTTP endpoints directly, make sure to set ``generator.sampling_params.temperature`` to the temperature used during generation - the algorithm config temperature inherits this value.
     """
     advantage_batch_normalize: bool = False
     value_head_prefix: str = "value_head"
@@ -447,7 +447,7 @@ class InferenceEngineConfig(BaseConfig):
     """When ``True``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.\
         
     
-    NOTE: When using HTTP endpoints, it is also important to propagate the temperature appropriately to the trainer configuration at ``trainer.algorithm.temperature`` if you are not utilizing ``generator.sampling_params.temperature``.
+    NOTE: When using HTTP endpoints directly, make sure to set ``generator.sampling_params.temperature`` to the temperature used during generation - the algorithm config temperature (used fo logits scaling) inherits this value.
     """
     http_endpoint_host: str = "127.0.0.1"
     http_endpoint_port: int = 8000
