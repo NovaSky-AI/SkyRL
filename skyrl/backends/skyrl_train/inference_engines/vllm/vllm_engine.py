@@ -510,9 +510,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
 
-        print(f"Handling OpenAI request: {body}", flush=True)
-        print(f"Headers: {headers}", flush=True)
-
         # 1. Build request
         try:
             if endpoint == "/chat/completions":
@@ -564,8 +561,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             is_context_length_error = (
                 "maximum context length" in error_message or "maximum model length" in error_message
             )
-
-            print(f"Error message in the vllm engine: {e}, {error_message}", flush=True)
 
             if is_context_length_error:
                 http_status = HTTPStatus.BAD_REQUEST

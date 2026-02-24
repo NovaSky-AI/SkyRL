@@ -511,7 +511,6 @@ class InferenceEngineClient(InferenceEngineInterface):
             if "error" in result or result.get("object", "") == "error":
                 # former is vllm format, latter is sglang format
                 error_details = result.get("error", result)  # resolves vllm/sglang format difference
-                print(f"Error details: {error_details}", flush=True)
                 error_code = error_details["code"]
                 error_type = error_details["type"]
                 error_message = error_details["message"]
