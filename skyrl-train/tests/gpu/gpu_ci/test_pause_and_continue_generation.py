@@ -331,7 +331,7 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
                             "messages": convs[i],
                             **sampling_params,
                         }
-                        return await client.chat_completion({"json": body, "headers": {}})
+                        return await client.engines[0].chat_completion({"json": body, "headers": {}})
                     else:
                         # completions: prompt is a string
                         prompt_str = tokenizer.apply_chat_template(convs[i], add_generation_prompt=True, tokenize=False)
@@ -340,7 +340,7 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
                             "prompt": prompt_str,
                             **sampling_params,
                         }
-                        return await client.completion({"json": body, "headers": {}})
+                        return await client.engines[0].completion({"json": body, "headers": {}})
 
                 tasks = [asyncio.create_task(one_req(i)) for i in range(4)]
                 # Wait to let it run a bit, then pause generation
