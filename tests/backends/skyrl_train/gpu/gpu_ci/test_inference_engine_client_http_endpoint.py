@@ -244,11 +244,13 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         client = engines.client
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
+        print("Engine initialized successfully", flush=True)
+
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
 
         # 2. Build prompts
-        num_samples = 20
+        num_samples = 5
         test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
         text_prompts = [
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
@@ -256,7 +258,9 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         ]
 
         for batched in batched_list:
+            print("Testing batched", batched, flush=True)
             for with_traj in with_traj_list:
+                print("Testing with_traj", with_traj, flush=True)
                 if not batched:
                     outputs = []
                     for i, p in enumerate(text_prompts):

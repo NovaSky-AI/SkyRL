@@ -386,7 +386,7 @@ class FullyAsyncConfig(BaseConfig):
 
 @dataclass
 class SamplingParams(BaseConfig):
-    max_generate_length: Optional[int] = None
+    max_generate_length: int = 1024
     repetition_penalty: float = 1.0
     temperature: float = 1.0
     top_p: float = 1.0
@@ -481,7 +481,8 @@ class GeneratorConfig(BaseConfig):
     append_eos_token_after_stop_str_in_multi_turn: bool = True
     """When ``use_conversation_multi_turn=True`` and ``sampling_params.stop`` is set, append
     ``eos_token_id`` to generations that end with a matched stop string."""
-    eval_sampling_params: SamplingParams = field(default_factory=lambda: SamplingParams(temperature=0.0))
+    eval_sampling_params: Optional[SamplingParams] = None
+    """Separate sampling params for evaluation. If ``None``, then it defaults to ``SamplingParams(temperature=0.0, max_generate_length=generator.sampling_params.max_generate_length)``."""
     eval_n_samples_per_prompt: int = 1
     zero_reward_on_non_stop: bool = False
     """Set reward to 0 when ``stop_reason`` is not ``"stop"`` (i.e., generation was truncated or aborted)."""
@@ -492,6 +493,13 @@ class GeneratorConfig(BaseConfig):
     """Can differ from the trainer's ``rope_scaling``, useful for thinking models."""
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+
+    def __post_init__(self):
+
+        if self.eval_sampling_params is None:
+            self.eval_sampling_params = SamplingParams(
+                temperature=0.0, max_generate_length=self.sampling_params.max_generate_length
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +585,11 @@ class TrainerConfig(BaseConfig):
     dump_eval_results: bool = True
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
+
+    def __post_init__(self):
+        # ref model defaults to the policy model
+        if self.ref.model.path is None:
+            self.ref.model.path = self.policy.model.path
 
 
 def validate_dict_keys_against_dataclass(datacls: Type[Any], d: dict):
@@ -664,17 +677,10 @@ class SkyRLTrainConfig(BaseConfig):
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
     def __post_init__(self):
-        # ref model defaults to the policy model
-        if self.trainer.ref.model.path is None:
-            self.trainer.ref.model.path = self.trainer.policy.model.path
 
         # generator.max_input_length defaults to trainer.max_prompt_length
         if self.generator.max_input_length is None:
             self.generator.max_input_length = self.trainer.max_prompt_length
-
-        # eval max_generate_length defaults to train max_generate_length
-        if self.generator.eval_sampling_params.max_generate_length is None:
-            self.generator.eval_sampling_params.max_generate_length = self.generator.sampling_params.max_generate_length
 
         # generator rope params default to trainer rope params
         if self.generator.rope_scaling is None and self.trainer.rope_scaling is not None:
