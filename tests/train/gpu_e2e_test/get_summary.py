@@ -48,7 +48,7 @@ for assertion in args.asserts:
 
     metric_value = matched_run.summary_metrics[metric_name]
     if not OPERATORS[operator_str](metric_value, threshold):
-        print(f"Metric {metric_name} is not {operator_str} threshold {threshold}")
+        print(f"Metric {metric_name} is not {operator_str} threshold {threshold}: {metric_value}")
         exit(1)
     else:
         print(f"Metric {metric_name} is {operator_str} threshold {threshold}: {metric_value}")
