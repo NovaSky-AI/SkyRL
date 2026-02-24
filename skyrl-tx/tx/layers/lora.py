@@ -75,7 +75,7 @@ class LoRAMixin:
         assert lora_weight.ndim == 3
         assert x_sorted.ndim == 2  # (tokens, in_features)
         assert x_sorted.shape[1] == lora_weight.shape[1]
-        return jax.lax.ragged_dot(x_sorted, lora_weight, group_sizes)
+        return ragged_dot(x_sorted, lora_weight, group_sizes)
 
     def apply_lora(
         self,
@@ -103,7 +103,7 @@ class LoRAMixin:
 
         # Apply LoRA: x @ A @ B (or A[x] @ B for embeddings)
         intermediate = self._apply_lora_weight(self.lora_A[...], x_sorted, adapter_indices_sorted, group_sizes)
-        lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
+        lora_output_sorted = ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
         lora_output = lora_output_sorted[unsort_indices].reshape(base_output.shape)

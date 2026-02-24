@@ -23,17 +23,13 @@ def ragged_dot(
 ) -> jax.Array:
     """Ragged dot product with group_offset support.
 
-    When group_offset is specified, rhs contains groups [offset, offset + g_local).
-    Tokens outside this range are routed to boundary groups and masked to zero.
+    When group_offset is None, we default to offset 0 and still run through
+    the same fast-path checks. When specified, rhs contains groups
+    [offset, offset + g_local). Tokens outside this range are routed to
+    boundary groups and masked to zero.
     """
     if group_offset is None:
-        return lax.ragged_dot(
-            lhs,
-            rhs,
-            group_sizes,
-            precision=precision,
-            preferred_element_type=preferred_element_type,
-        )
+        group_offset = jnp.zeros((1,), dtype=jnp.int32)
 
     # CUTLASS kernel requires k and n dimensions divisible by 8
     k = lhs.shape[-1]
