@@ -2,7 +2,8 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
-from tx.utils.models import filter_lora
+from tx.utils.models import filter_lora, get_adapter_idx
+from tx.layers.connectors import LoRAConnector, is_connector_path
 from tx.layers.util import Param, prepare_routing, ragged_dot
 from tx.models.types import ModelForCausalLM
 from tx.tinker.types import LoraConfig
@@ -88,11 +89,12 @@ class LoRAMixin:
         if self.lora_A is None or self.lora_B is None or self.lora_scaling is None:
             raise RuntimeError("LoRA parameters are not initialized. `init_lora` must be called.")
 
-        (batch_size, seq_len, *dims) = x.shape
-        assert adapter_indices.shape[0] == batch_size
+        assert adapter_indices.shape[0] == x.shape[0]
 
-        x_flat = x.reshape(-1, *dims)
-        adapter_indices_expanded = jnp.repeat(adapter_indices, seq_len)
+        # Flatten x: (tokens, features) for linear, (tokens,) for embed, in the latter case feature_shape is ()
+        feature_shape = x.shape[base_output.ndim - 1 :]
+        x_flat = x.reshape(-1, *feature_shape)
+        adapter_indices_expanded = jnp.repeat(adapter_indices, x_flat.shape[0] // adapter_indices.shape[0])
 
         # Sort tokens to prepare for ragged_dot
         x_sorted, group_sizes, unsort_indices, adapter_indices_sorted = prepare_routing(
@@ -104,9 +106,10 @@ class LoRAMixin:
         lora_output_sorted = jax.lax.ragged_dot(intermediate, self.lora_B[...], group_sizes)
 
         # Unsort, reshape, scale
-        lora_output = lora_output_sorted[unsort_indices].reshape(batch_size, seq_len, -1)
-        lora_output = lora_output * self.lora_scaling[...][adapter_indices, None, None]
-        return base_output + lora_output.reshape(base_output.shape)
+        lora_output = lora_output_sorted[unsort_indices].reshape(base_output.shape)
+        scaling = self.lora_scaling[...][adapter_indices_expanded]
+        lora_output = lora_output * scaling.reshape(base_output.shape[:-1] + (1,))
+        return base_output + lora_output
 
 
 class LoRAEmbed(LoRAMixin, nnx.Embed):
@@ -345,21 +348,24 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         if not filter_lora(lora_config, normalized_path):
             effective_rank = 0
 
+        idx = get_adapter_idx(path, adapter_index)
+
         key_name = path[-2].key
+        if is_connector_path(path):
+            return value.at[idx].set(LoRAConnector.reset_adapter_slot(key_name, value[idx]))
         if key_name == "lora_ranks":
-            return value.at[adapter_index].set(effective_rank)
+            return value.at[idx].set(effective_rank)
         if key_name == "lora_scaling":
-            # Set scaling to 0.0 if rank is 0
-            return value.at[adapter_index].set(lora_config.alpha / effective_rank if effective_rank > 0 else 0.0)
+            scaling = lora_config.alpha / effective_rank if effective_rank > 0 else 0.0
+            return value.at[idx].set(scaling)
         if key_name == "lora_A":
             # Reinitialize with he_uniform, then zero columns beyond rank
-            shape = value[adapter_index].shape
-            new_A = nnx.initializers.he_uniform()(rngs.params(), shape, value.dtype)
+            new_A = nnx.initializers.he_uniform()(rngs.params(), value[idx].shape, value.dtype)
             new_A = new_A.at[..., effective_rank:].set(0.0)
-            return value.at[adapter_index].set(new_A)
+            return value.at[idx].set(new_A)
         if key_name == "lora_B":
             # Explicitly zero lora_B
-            return value.at[adapter_index].set(0.0)
+            return value.at[idx].set(0.0)
         return value
 
     updated_state = jax.tree.map_with_path(init_adapter, state)
@@ -376,11 +382,15 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
 
     def clear_adapter(path, value):
         key = path[-2].key
-        if key == "lora_ranks":
-            return value.at[adapter_index].set(0)
-        if key in ("lora_scaling", "lora_A", "lora_B"):
-            return value.at[adapter_index].set(0.0)
-        return value
+        idx = get_adapter_idx(path, adapter_index)
+
+        # Connector parameters are reset to identity-style defaults so the adapter slot
+        # remains behaviorally neutral for mHC before being reinitialized.
+        if is_connector_path(path):
+            return value.at[idx].set(LoRAConnector.reset_adapter_slot(key, value[idx]))
+        if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
+            return value
+        return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
 
     updated_state = jax.tree.map_with_path(clear_adapter, state)
     nnx.update(model, updated_state)

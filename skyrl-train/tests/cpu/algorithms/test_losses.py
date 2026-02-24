@@ -6,9 +6,26 @@ uv run --isolated --extra dev -- pytest tests/cpu/algorithms/test_losses.py
 
 import pytest
 import torch
-from skyrl_train.config import AlgorithmConfig, SAPOConfig, CISPOConfig, ClipCovConfig, KLCovConfig
+from skyrl_train.config import (
+    AlgorithmConfig,
+    SAPOConfig,
+    CISPOConfig,
+    ClipCovConfig,
+    KLCovConfig,
+    OffPolicyCorrectionConfig,
+)
 
-from skyrl_train.utils.ppo_utils import PolicyLossRegistry, masked_mean
+from skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+)
+from skyrl_train.utils.torch_utils import masked_mean
+
+NULL_OFF_POLICY_CORR = OffPolicyCorrectionConfig(
+    tis_ratio_type=None,
+    sequence_mask_metric=None,
+    outlier_token_is_threshold_low=None,
+    outlier_token_is_threshold_high=None,
+)
 
 
 # Adapted a good test from NeMO-RL
@@ -32,7 +49,7 @@ def test_policy_loss_dual_clip():
         policy_loss_type="dual_clip",
         loss_reduction="token_mean",
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     # Create loss function with dual clipping
@@ -83,7 +100,7 @@ def test_policy_loss_cispo():
         policy_loss_type="cispo",
         loss_reduction="token_mean",
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     # Create loss function with cispo
@@ -159,7 +176,7 @@ def test_policy_loss_reduction_modes():
         policy_loss_type="regular",
         loss_reduction="token_mean",
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     config_seq = AlgorithmConfig(
@@ -169,7 +186,7 @@ def test_policy_loss_reduction_modes():
         policy_loss_type="regular",
         loss_reduction="sequence_mean",
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     # Get loss function
@@ -240,7 +257,7 @@ def test_policy_loss_reduction_edge_cases():
         policy_loss_type="regular",
         loss_reduction="token_mean",
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     config_seq = AlgorithmConfig(
@@ -250,7 +267,7 @@ def test_policy_loss_reduction_edge_cases():
         policy_loss_type="regular",
         loss_reduction="sequence_mean",
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
     # Get loss function
     loss_fn = PolicyLossRegistry.get("regular")
@@ -333,7 +350,7 @@ def test_gspo_importance_sampling_levels():
         policy_loss_type="regular",
         loss_reduction="token_mean",
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
     ppo_loss_fn = PolicyLossRegistry.get("regular")
     loss_token, _ = ppo_loss_fn(log_probs, old_log_probs, advantages, ppo_config, loss_mask)
@@ -346,7 +363,7 @@ def test_gspo_importance_sampling_levels():
         policy_loss_type="gspo",
         loss_reduction="sequence_mean",  # GSPO recommended reduction
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
     gspo_loss_fn = PolicyLossRegistry.get("gspo")
     loss_sequence, _ = gspo_loss_fn(log_probs, old_log_probs, advantages, gspo_config, loss_mask)
@@ -451,17 +468,19 @@ def test_clip_cov_policy_loss():
         loss_reduction="token_mean",
         max_seq_len=4,
         clip_cov=ClipCovConfig(clip_ratio=0.5, clip_cov_lb=-5.0, clip_cov_ub=5.0),  # Large ratio for testing
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     # Get loss function
     clip_cov_fn = PolicyLossRegistry.get("clip_cov")
 
     # Calculate loss
-    loss, clip_frac = clip_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+    loss, loss_metrics = clip_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+    clip_ratio = loss_metrics["clip_ratio"]
 
     # Basic sanity checks
     assert torch.isfinite(loss), "Loss should be finite"
-    assert 0 <= clip_frac <= 1, f"Clip fraction should be between 0 and 1, got {clip_frac}"
+    assert 0 <= clip_ratio <= 1, f"Clip ratio should be between 0 and 1, got {clip_ratio}"
 
     # Compare with regular PPO (should be different due to covariance correction)
     regular_config = AlgorithmConfig(
@@ -470,11 +489,11 @@ def test_clip_cov_policy_loss():
         policy_loss_type="regular",
         loss_reduction="token_mean",
         max_seq_len=4,
-        use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     regular_fn = PolicyLossRegistry.get("regular")
-    regular_loss, regular_clip_frac = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
+    regular_loss, regular_loss_metrics = regular_fn(log_probs, old_log_probs, advantages, regular_config, loss_mask)
 
     # Clip-Cov should give different results due to covariance-based correction
     assert not torch.allclose(
@@ -509,17 +528,18 @@ def test_kl_cov_policy_loss():
         loss_reduction="token_mean",
         max_seq_len=4,
         kl_cov=KLCovConfig(kl_cov_frac=0.5, ppo_kl_coef=1.0),  # Apply KL to 50% of tokens
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     # Get loss function
     kl_cov_fn = PolicyLossRegistry.get("kl_cov")
 
     # Calculate loss
-    loss, clip_frac = kl_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
+    loss, loss_metrics = kl_cov_fn(log_probs, old_log_probs, advantages, config, loss_mask)
 
     # Basic sanity checks
     assert torch.isfinite(loss), "Loss should be finite"
-    assert clip_frac == 0.0, "KL-Cov should return 0.0 for clipfrac value"
+    assert loss_metrics["clip_ratio"] == 0.0, "KL-Cov should return 0.0 for clip_ratio value"
 
     # Compare with regular PPO (should be different due to KL regularization)
     regular_config = AlgorithmConfig(
@@ -529,6 +549,7 @@ def test_kl_cov_policy_loss():
         loss_reduction="token_mean",
         max_seq_len=4,
         use_tis=False,
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     regular_fn = PolicyLossRegistry.get("regular")
@@ -559,12 +580,13 @@ def test_sapo_policy_loss_basic():
         loss_reduction="sequence_mean",
         max_seq_len=4,
         sapo=SAPOConfig(tau_pos=1.0, tau_neg=2.0),
+        off_policy_correction=NULL_OFF_POLICY_CORR,
     )
 
     loss_fn = PolicyLossRegistry.get("sapo")
 
     # Actual SAPO loss
-    actual_loss, actual_clip_ratio = loss_fn(
+    actual_loss, loss_metrics = loss_fn(
         log_probs=log_probs,
         old_log_probs=old_log_probs,
         advantages=advantages,
@@ -593,4 +615,4 @@ def test_sapo_policy_loss_basic():
     torch.testing.assert_close(actual_loss, expected_loss, rtol=1e-5, atol=1e-8)
 
     # SAPO should always report clip_ratio = 0.0
-    assert actual_clip_ratio == 0.0
+    assert loss_metrics["clip_ratio"] == 0.0

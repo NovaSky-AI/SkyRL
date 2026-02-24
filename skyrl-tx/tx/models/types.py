@@ -16,6 +16,14 @@ class ModelForCausalLM:
     def get_model_config(self) -> ModelConfig:
         return self.config
 
+    def is_lora_param(self, path: tuple, _value) -> bool:
+        """Return True if a parameter path corresponds to trainable LoRA/connector weights."""
+        is_lora = any(name in path for name in ("lora_A", "lora_B"))
+        is_connector = self.config.mhc_expansion_rate > 1 and any(
+            name in path for name in ("attn_connector", "mlp_connector")
+        )
+        return is_lora or is_connector
+
 
 @jax.tree_util.register_dataclass
 @dataclass
@@ -24,12 +32,12 @@ class ModelOutput:
 
     Attributes:
         last_hidden_state: The last hidden state from the model.
-        kv_cache: The updated key-value cache.
+        kv_cache: The updated key-value cache (None during training).
         hidden_states: All hidden states if output_hidden_states=True.
     """
 
     last_hidden_state: jax.Array
-    kv_cache: KVCache
+    kv_cache: KVCache | None
     hidden_states: list[jax.Array] | None = None
 
 
@@ -40,10 +48,10 @@ class CausalLMOutput:
 
     Attributes:
         last_hidden_state: The last hidden state from the model.
-        kv_cache: The updated key-value cache.
+        kv_cache: The updated key-value cache (None during training).
         hidden_states: All hidden states, if output_hidden_states=True.
     """
 
     last_hidden_state: jax.Array
-    kv_cache: KVCache
+    kv_cache: KVCache | None
     hidden_states: list[jax.Array] | None = None

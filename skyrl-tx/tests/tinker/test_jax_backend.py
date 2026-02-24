@@ -19,9 +19,9 @@ MAX_LORA_ADAPTERS = 4
 LORA_RANK = 8
 
 
-def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS):
+def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS, **config_overrides):
     """Create a JaxBackend."""
-    config = JaxBackendConfig(max_lora_adapters=max_lora_adapters, max_lora_rank=32)
+    config = JaxBackendConfig(max_lora_adapters=max_lora_adapters, max_lora_rank=32, **config_overrides)
     return JaxBackend(BASE_MODEL, config)
 
 
@@ -102,23 +102,50 @@ def test_max_adapters_after_delete():
 
 def test_clear_lora_adapter():
     """Test that clear_lora_adapter zeros out adapter state."""
-    backend = create_backend()
+    backend = create_backend(mhc_expansion_rate=4)
     model_id = "test_model"
     adapter_idx = create_model(backend, model_id)
 
     # Verify adapter has non-zero rank after creation
     model = backend.model
     lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+    connector = model.model.layers[0].attn_connector
     assert lora_layer.lora_ranks[adapter_idx] > 0
+
+    # Mutate connector state to ensure clear_lora_adapter actively resets it.
+    connector.alpha_pre[...] = connector.alpha_pre[...].at[adapter_idx].set(0.0)
+    connector.b_pre[...] = connector.b_pre[...].at[adapter_idx].set(0.0)
+    connector.b_post[...] = connector.b_post[...].at[adapter_idx].set(0.0)
+    connector.b_res[...] = connector.b_res[...].at[adapter_idx].set(0.0)
+    connector.phi_pre[...] = connector.phi_pre[...].at[adapter_idx].set(1.0)
 
     # Delete the model (calls clear_lora_adapter internally)
     backend.delete_model(model_id)
 
-    # Verify adapter state is zeroed
+    # Verify LoRA adapter state is zeroed
     assert lora_layer.lora_ranks[adapter_idx] == 0
     assert lora_layer.lora_scaling[adapter_idx] == 0.0
     assert (lora_layer.lora_A[adapter_idx] == 0.0).all()
     assert (lora_layer.lora_B[adapter_idx] == 0.0).all()
+
+    # Verify connector state is reset to identity-style defaults.
+    n = connector.b_pre[adapter_idx].shape[-1]
+    target_h_pre = np.array(1.0 / n, dtype=np.float32)
+    clamped = np.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
+    expected_b_pre = np.log(clamped) - np.log(1.0 - clamped)
+
+    expected_b_post = np.linspace(-0.2, 0.2, n, dtype=np.float32)
+
+    np.testing.assert_allclose(np.asarray(connector.alpha_pre[adapter_idx]), 1.0, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(np.asarray(connector.b_pre[adapter_idx]), expected_b_pre, rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(connector.b_post[adapter_idx]), expected_b_post, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(np.asarray(connector.phi_pre[adapter_idx]), 0.0)
+    np.testing.assert_allclose(
+        np.asarray(connector.b_res[adapter_idx]),
+        10.0 * np.eye(n, dtype=np.float32),
+        rtol=1e-3,
+        atol=1e-2,
+    )
 
 
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:
@@ -328,6 +355,37 @@ def test_process_optim_step_hyperparams_behavior():
     assert default_norm / tiny_norm == pytest.approx(1e4, rel=5e-3)
 
 
+def test_optim_step_returns_metrics():
+    """optim_step should return learning rate and grad norm metrics."""
+    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, mhc_expansion_rate=4)
+    backend = JaxBackend(BASE_MODEL, config)
+
+    model_id = "adapter_metrics"
+    backend.create_model(model_id, LoraConfig(rank=32, alpha=32, seed=0))
+
+    tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
+    reqs = {"1001": (model_id, make_fwd_bwd_input(tokens))}
+    backend.forward_backward(prepare_model_pass_batch(reqs))
+
+    learning_rate = 1e-4
+    step_output = backend.optim_step(
+        model_id,
+        OptimStepInput(adam_params=api.AdamParams(learning_rate=learning_rate).to_types()),
+    )
+    assert step_output.metrics is not None
+    assert step_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(learning_rate, rel=2e-3)
+    assert step_output.metrics["skyrl.ai/grad_norm"] > 0
+    assert step_output.metrics["skyrl.ai/mhc_gradient_norm"] >= 0
+
+    no_grad_output = backend.optim_step(
+        model_id,
+        OptimStepInput(adam_params=api.AdamParams(learning_rate=2e-4).to_types()),
+    )
+    assert no_grad_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(2e-4, rel=2e-3)
+    assert no_grad_output.metrics["skyrl.ai/grad_norm"] == pytest.approx(0.0)
+    assert no_grad_output.metrics["skyrl.ai/mhc_gradient_norm"] == pytest.approx(0.0)
+
+
 def test_gradient_checkpointing():
     """
     Verify gradient checkpointing doesn't affect loss values.
@@ -353,6 +411,7 @@ def test_gradient_checkpointing():
         loss_fn_types = jnp.zeros((B,), dtype=jnp.int32)
         sampling_logprobs = jnp.zeros((B, T), dtype=jnp.float32)
         advantages = jnp.zeros((B, T), dtype=jnp.float32)
+        loss_fn_config = backend._build_loss_fn_config([None] * B)
 
         # Compute loss, using gradient checkpointing if enabled
         _, per_token_losses, _ = backend._forward_backward_and_accumulate(
@@ -367,6 +426,7 @@ def test_gradient_checkpointing():
             loss_fn_types,
             sampling_logprobs,
             advantages,
+            loss_fn_config,
         )
         losses.append(float(per_token_losses.mean()))
 
@@ -384,6 +444,51 @@ def make_sample_input(tokens: list[int], prompt_logprobs: bool = False, max_toke
         checkpoint_id="",  # Empty for base model sampling
         prompt_logprobs=prompt_logprobs,
     )
+
+
+def test_ppo_loss_fn_config_is_applied():
+    """Test that per-request loss_fn_config is passed through to PPO loss in JAX backend."""
+    backend = JaxBackend(BASE_MODEL, JaxBackendConfig(max_lora_adapters=2, max_lora_rank=8))
+    model_id = "ppo_adapter"
+    backend.create_model(model_id, LoraConfig(rank=8, alpha=16, seed=0))
+
+    datum = types.Datum(
+        model_input=types.ModelInput(chunks=[types.ModelInputChunk(tokens=[1, 2, 3, 4])]),
+        loss_fn_inputs=types.LossFnInputs(
+            target_tokens=types.TensorData(data=[2, 3, 4, 0]),
+            weights=types.TensorData(data=[1.0, 1.0, 1.0, 1.0]),
+            # Force very large probability ratios so clipping controls the loss.
+            logprobs=types.TensorData(data=[-100.0, -100.0, -100.0, -100.0]),
+            advantages=types.TensorData(data=[1.0, 1.0, 1.0, 1.0]),
+        ),
+    )
+
+    req_default = {
+        "req_default": (
+            model_id,
+            types.ForwardBackwardInput(data=[datum], loss_fn="ppo"),
+        )
+    }
+    req_tight_clip = {
+        "req_tight": (
+            model_id,
+            types.ForwardBackwardInput(
+                data=[datum],
+                loss_fn="ppo",
+                loss_fn_config={"clip_low_threshold": 0.99, "clip_high_threshold": 1.01},
+            ),
+        )
+    }
+    default_out = backend.forward(prepare_model_pass_batch(req_default))["req_default"]
+    tight_out = backend.forward(prepare_model_pass_batch(req_tight_clip))["req_tight"]
+
+    default_losses = np.array(default_out.loss_fn_outputs[0]["elementwise_loss"]["data"], dtype=np.float32)
+    tight_losses = np.array(tight_out.loss_fn_outputs[0]["elementwise_loss"]["data"], dtype=np.float32)
+
+    # Default PPO clip thresholds are 0.8..1.2.
+    # Configured clip thresholds 0.99..1.01 should cap losses at -1.01.
+    np.testing.assert_allclose(default_losses, -1.2, atol=1e-4)
+    np.testing.assert_allclose(tight_losses, -1.01, atol=1e-4)
 
 
 def test_sample_max_num_sequences():
@@ -581,6 +686,7 @@ def test_mixed_train_unembed_adapters():
         loss_fn_types = jnp.zeros((batch_size,), dtype=jnp.int32)
         sampling_logprobs = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
         advantages = jnp.zeros((batch_size, seq_len), dtype=jnp.float32)
+        loss_fn_config = backend._build_loss_fn_config([None] * batch_size)
         adapter_indices = jnp.array([normal_idx, unembed_idx], dtype=jnp.int32)
 
         _, losses, logprobs = backend._forward(
@@ -595,6 +701,7 @@ def test_mixed_train_unembed_adapters():
             loss_fn_types,
             sampling_logprobs,
             advantages,
+            loss_fn_config,
         )
         return np.asarray(losses), np.asarray(logprobs)
 

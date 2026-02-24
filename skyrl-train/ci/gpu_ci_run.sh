@@ -30,3 +30,10 @@ uv run --isolated --extra vllm --extra dev \
     --with torch==2.7.0 \
     --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
     -- pytest -s -vvv tests/gpu/gpu_ci/test_engine_generation.py::test_token_based_generation -m "vllm"
+
+
+# Run tests for new inference layer
+# TODO (sumanthrh): Migrate the remaining tests: test_verifiers_generator.py , test_pause_and_continue_generation.py and the relevant tests in test_inference_engine_client_http_endpoint.py
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci/test_engine_generation.py -m "vllm"
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra vllm pytest -s tests/gpu/gpu_ci/test_skyrl_gym_generator.py

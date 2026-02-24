@@ -4,10 +4,11 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
+from tx.layers.attention import dot_product_attention
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
-from tx.layers.attention import dot_product_attention
+from tx.layers.stacked import StackedDecoderLayers
 from tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache
@@ -211,9 +212,11 @@ class Llama3Model(nnx.Module):
             embedding_init=nnx.initializers.normal(),
             rngs=rngs,
         )
-        self.layers = nnx.List(
-            [Llama3DecoderLayer(config, dtype=dtype, rngs=rngs) for _ in range(config.num_hidden_layers)]
-        )
+
+        def create_layer(rngs: nnx.Rngs) -> Llama3DecoderLayer:
+            return Llama3DecoderLayer(config, dtype=dtype, rngs=rngs)
+
+        self.layers = StackedDecoderLayers(create_layer, config.num_hidden_layers, rngs)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, dtype=dtype, rngs=rngs)
 
     def __call__(
@@ -225,28 +228,24 @@ class Llama3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
-        all_hidden_states: list[jax.Array] = []
-        updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
-
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
+        hidden_states, all_hidden_states, new_kv_cache = self.layers(
+            hidden_states,
+            attention_mask=attention_mask,
+            positions=positions,
+            adapter_indices=adapter_indices,
+            kv_cache=kv_cache,
+            output_hidden_states=output_hidden_states,
+            gradient_checkpointing=self.config.gradient_checkpointing,
+            is_training=is_training,
+        )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -254,7 +253,7 @@ class Llama3Model(nnx.Module):
 
         return ModelOutput(
             last_hidden_state=hidden_states,
-            kv_cache=KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask),
+            kv_cache=new_kv_cache,
             hidden_states=all_hidden_states if output_hidden_states else None,
         )
 
@@ -285,11 +284,6 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         """Return the lm_head callable for logits computation."""
         return self.lm_head
 
-    @staticmethod
-    def is_lora_param(path: tuple, _value) -> bool:
-        """Return True if a parameter path corresponds to LoRA weights."""
-        return any(name in path for name in ("lora_A", "lora_B"))
-
     def __call__(
         self,
         input_ids: jax.Array,
@@ -299,6 +293,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
@@ -310,6 +305,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            is_training=is_training,
         )
 
         return CausalLMOutput(

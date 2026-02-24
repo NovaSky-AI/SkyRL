@@ -337,6 +337,33 @@ def test_sample_with_stop_strings(service_client):
     assert stop_string in stopped_text
 
 
+def test_sample_num_samples_diversity(service_client):
+    """Test that num_samples > 1 produces diverse sequences with a fixed seed, and results are reproducible."""
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
+    sampling_client = service_client.create_sampling_client(base_model=BASE_MODEL)
+    prompt = types.ModelInput.from_ints(tokenizer.encode("Hello, how are you doing today? ", add_special_tokens=True))
+
+    num_samples = 3
+    params = types.SamplingParams(temperature=1.0, max_tokens=10, seed=42)
+
+    # Request 1: num_samples > 1 should produce diverse sequences
+    result1 = sampling_client.sample(prompt=prompt, sampling_params=params, num_samples=num_samples).result()
+    assert len(result1.sequences) == num_samples
+    tokens1 = [seq.tokens for seq in result1.sequences]
+    assert len(set(tuple(t) for t in tokens1)) > 1, "num_samples > 1 with seed should produce diverse sequences"
+
+    # Request 2: same seed should reproduce the exact same sequences
+    result2 = sampling_client.sample(prompt=prompt, sampling_params=params, num_samples=num_samples).result()
+    tokens2 = [seq.tokens for seq in result2.sequences]
+    assert tokens1 == tokens2, "Same seed should produce identical results across calls"
+
+    # Request 3: different seed should produce different sequences
+    params_different = types.SamplingParams(temperature=1.0, max_tokens=10, seed=999)
+    result3 = sampling_client.sample(prompt=prompt, sampling_params=params_different, num_samples=num_samples).result()
+    tokens3 = [seq.tokens for seq in result3.sequences]
+    assert tokens1 != tokens3, "Different seeds should produce different results"
+
+
 @pytest.fixture(scope="function")
 def api_server_fast_cleanup():
     """Start the FastAPI server with fast cleanup settings for testing."""

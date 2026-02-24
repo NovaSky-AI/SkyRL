@@ -3,9 +3,11 @@
   "pages": [
     "index",
     "getting-started",
-    "datasets",
     "tutorials",
     "examples",
+    "harbor",
+    "tinker",
+    "datasets",
     "platforms",
     "recipes",
     "algorithms",

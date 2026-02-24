@@ -96,7 +96,6 @@ class InferenceEngineClient(InferenceEngineInterface):
             prompt_token_ids = self.tokenizer.apply_chat_template(
                 prompts,
                 add_generation_prompt=True,
-                add_special_tokens=False,
                 return_dict=True,
                 tokenize=True,
             )["input_ids"]
@@ -392,6 +391,12 @@ class InferenceEngineClient(InferenceEngineInterface):
             partial_response = await self.engines[engine_idx].chat_completion(
                 {"json": cur_request_json, "headers": headers}
             )
+
+            # 1.2.1. Check for error response from engine (e.g., context length exceeded).
+            # Error responses have "error" key instead of "choices", so return them directly
+            # for the HTTP endpoint to handle with proper status codes.
+            if "error" in partial_response or partial_response.get("object", "") == "error":
+                return partial_response
 
             # 1.3. Parse partial response and in-place update accumulators.
             (
