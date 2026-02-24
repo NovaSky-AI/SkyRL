@@ -66,6 +66,7 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
     import tx.models.llama3
     import tx.models.qwen3
+    import tx.models.qwen3_next
     import tx.models.deepseekv3
 
     for architecture in config.architectures or []:
@@ -73,6 +74,8 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
             return getattr(tx.models.llama3, architecture)
         if hasattr(tx.models.qwen3, architecture):
             return getattr(tx.models.qwen3, architecture)
+        if hasattr(tx.models.qwen3_next, architecture):
+            return getattr(tx.models.qwen3_next, architecture)
         if hasattr(tx.models.deepseekv3, architecture):
             return getattr(tx.models.deepseekv3, architecture)
 
@@ -122,6 +125,8 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
     "Get the safetensors key for a given model path."
     if path[-1] in {"embedding", "kernel"}:
         path = (*path[:-1], "weight")
+    elif path[-1] == "conv1d_weight":
+        path = (*path[:-1], "conv1d", "weight")
     elif path[-1] in {"lora_A", "lora_B"}:
         path = (*path, "weight")
     return prefix + ".".join(map(str, path))

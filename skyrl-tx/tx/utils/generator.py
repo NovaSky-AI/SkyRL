@@ -19,6 +19,8 @@ class KVCache:
     keys: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
     values: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
     cache_position: jax.Array  # Per-sequence positions of shape (batch,)
+    conv_states: list[jax.Array] | None = None
+    recurrent_states: list[jax.Array] | None = None
 
     @staticmethod
     def update(
@@ -27,6 +29,9 @@ class KVCache:
         values: list[jax.Array],
         positions: jax.Array,
         attention_mask: jax.Array,
+        *,
+        conv_states: list[jax.Array] | None = None,
+        recurrent_states: list[jax.Array] | None = None,
     ) -> KVCache:
         """Create an updated KVCache with computed cache positions for left-aligned decoding.
 
@@ -46,7 +51,15 @@ class KVCache:
         else:
             # Prefill: next position is the sequence length (number of real tokens)
             cache_position = attention_mask.sum(axis=1)
-        return KVCache(keys=keys, values=values, cache_position=cache_position)
+        return KVCache(
+            keys=keys,
+            values=values,
+            cache_position=cache_position,
+            conv_states=conv_states if conv_states is not None else (kv_cache.conv_states if kv_cache is not None else None),
+            recurrent_states=(
+                recurrent_states if recurrent_states is not None else (kv_cache.recurrent_states if kv_cache is not None else None)
+            ),
+        )
 
     @staticmethod
     def update_layer(kv_cache, k, v, positions):
@@ -76,13 +89,22 @@ class KVCache:
         Returns:
             New KVCache with padded keys and values.
         """
-        # k and v have shape [B, T, num_heads, head_dim]
-        cache_pad_length = max_length - self.keys[0].shape[1]
-        pad_spec = ((0, 0), (0, cache_pad_length), (0, 0), (0, 0))
         return KVCache(
-            keys=[jnp.pad(k, pad_spec) for k in self.keys],
-            values=[jnp.pad(v, pad_spec) for v in self.values],
+            keys=[
+                jnp.pad(k, ((0, 0), (0, max_length - k.shape[1]), (0, 0), (0, 0)))
+                if k.shape[1] < max_length
+                else k
+                for k in self.keys
+            ],
+            values=[
+                jnp.pad(v, ((0, 0), (0, max_length - v.shape[1]), (0, 0), (0, 0)))
+                if v.shape[1] < max_length
+                else v
+                for v in self.values
+            ],
             cache_position=self.cache_position,
+            conv_states=self.conv_states,
+            recurrent_states=self.recurrent_states,
         )
 
 
