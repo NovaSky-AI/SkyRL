@@ -19,6 +19,7 @@ class KVCache:
     keys: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
     values: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
     cache_position: jax.Array  # Per-sequence positions of shape (batch,)
+    rope_deltas: jax.Array | None = None  # [B,1] for VL decode RoPE alignment (None = text-only)
 
     @staticmethod
     def update(
@@ -27,6 +28,7 @@ class KVCache:
         values: list[jax.Array],
         positions: jax.Array,
         attention_mask: jax.Array,
+        rope_deltas: jax.Array | None = None,
     ) -> KVCache:
         """Create an updated KVCache with computed cache positions for left-aligned decoding.
 
@@ -36,17 +38,25 @@ class KVCache:
             values: List of value arrays per layer.
             positions: Position indices with shape [B, seq_len].
             attention_mask: Attention mask with shape [B, seq_len].
+            rope_deltas: Optional [B,1] RoPE deltas for VL decode (preserved from prefill).
 
         Returns:
             New KVCache with computed cache_position.
         """
         if kv_cache is not None:
-            # Decode: next position is current position + 1
+            # Decode: next position is current position + 1; preserve rope_deltas
             cache_position = positions[:, 0] + 1
+            deltas = kv_cache.rope_deltas if kv_cache.rope_deltas is not None else rope_deltas
         else:
-            # Prefill: next position is the sequence length (number of real tokens)
-            cache_position = attention_mask.sum(axis=1)
-        return KVCache(keys=keys, values=values, cache_position=cache_position)
+            # Prefill:
+            # - with a 2D mask [B, T], next position is token count
+            # - with an additive/causal mask (e.g. [B, 1, T, K]), derive from positions
+            if attention_mask.ndim == 2:
+                cache_position = attention_mask.sum(axis=1)
+            else:
+                cache_position = positions.max(axis=1) + 1
+            deltas = rope_deltas
+        return KVCache(keys=keys, values=values, cache_position=cache_position, rope_deltas=deltas)
 
     @staticmethod
     def update_layer(kv_cache, k, v, positions):
@@ -83,6 +93,7 @@ class KVCache:
             keys=[jnp.pad(k, pad_spec) for k in self.keys],
             values=[jnp.pad(v, pad_spec) for v in self.values],
             cache_position=self.cache_position,
+            rope_deltas=self.rope_deltas,
         )
 
 

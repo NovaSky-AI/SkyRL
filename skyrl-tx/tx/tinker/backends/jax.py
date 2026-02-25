@@ -36,7 +36,7 @@ from flax.training import checkpoints
 from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
-from tx.models.configs import Qwen3Config
+from tx.models.configs import Qwen3Config, Qwen3VLMoeConfig
 from tx.layers.connectors import is_connector_path
 from tx.layers.lora import clear_lora_adapter, init_lora_adapter
 from tx.tinker import types
@@ -202,7 +202,15 @@ class JaxBackendImpl(AbstractBackend):
         checkpoint_path = resolve_model_path(base_model)
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
         base_config = PretrainedConfig.from_pretrained(checkpoint_path)
-        self.model_config = Qwen3Config(
+
+        # Use the VL-MoE config wrapper for multimodal Qwen3-VL models.
+        model_type = getattr(base_config, "model_type", None)
+        if model_type in ("qwen3_vl", "qwen3_vl_moe"):
+            config_cls = Qwen3VLMoeConfig
+        else:
+            config_cls = Qwen3Config
+
+        self.model_config = config_cls(
             base_config,
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,

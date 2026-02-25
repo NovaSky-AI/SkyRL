@@ -182,9 +182,11 @@ class StackedDecoderLayers(nnx.Module):
         positions: jax.Array,
         adapter_indices: jax.Array | None,
         kv_cache: KVCache | None,
+        rope_deltas: jax.Array | None = None,
         output_hidden_states: bool,
         gradient_checkpointing: bool,
         is_training: bool = False,
+        **layer_kwargs,
     ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
         """Forward pass through all layers.
 
@@ -242,11 +244,19 @@ class StackedDecoderLayers(nnx.Module):
                     positions=positions,
                     adapter_indices=adapter_indices,
                     kv_cache=layer_kv,
+                    **layer_kwargs,
                 )
                 updated_keys.append(k)
                 updated_values.append(v)
 
-            new_kv_cache = KVCache.update(kv_cache, updated_keys, updated_values, positions, attention_mask)
+            new_kv_cache = KVCache.update(
+                kv_cache,
+                updated_keys,
+                updated_values,
+                positions,
+                attention_mask,
+                rope_deltas=kv_cache.rope_deltas,
+            )
             return hidden_states, all_hidden_states, new_kv_cache
 
         # Prefill/training mode: use scan for efficiency
@@ -261,6 +271,7 @@ class StackedDecoderLayers(nnx.Module):
                 positions=positions,
                 adapter_indices=adapter_indices,
                 kv_cache=None,
+                **layer_kwargs,
             )
 
             hs_output = new_hs if output_hidden_states else None
@@ -282,7 +293,14 @@ class StackedDecoderLayers(nnx.Module):
             # Convert stacked scan outputs to list format
             keys_list = [all_keys[i] for i in range(self.num_layers)]
             values_list = [all_values[i] for i in range(self.num_layers)]
-            new_kv_cache = KVCache.update(None, keys_list, values_list, positions, attention_mask)
+            new_kv_cache = KVCache.update(
+                None,
+                keys_list,
+                values_list,
+                positions,
+                attention_mask,
+                rope_deltas=rope_deltas,
+            )
 
         all_hidden_states = [hidden_states] + list(all_hs[:-1]) if output_hidden_states else []
         return final_hs, all_hidden_states, new_kv_cache
@@ -336,6 +354,7 @@ class MultiStackedDecoderLayers(nnx.Module):
                 keys=kv_cache.keys[start:end],
                 values=kv_cache.values[start:end],
                 cache_position=kv_cache.cache_position,
+                rope_deltas=kv_cache.rope_deltas,
             )
             for start, end in zip(boundaries[:-1], boundaries[1:])
         )
@@ -345,7 +364,12 @@ class MultiStackedDecoderLayers(nnx.Module):
         assert caches, "Expected at least one KV cache."
         keys = [key for cache in caches for key in cache.keys]
         values = [value for cache in caches for value in cache.values]
-        return KVCache(keys=keys, values=values, cache_position=caches[-1].cache_position)
+        return KVCache(
+            keys=keys,
+            values=values,
+            cache_position=caches[-1].cache_position,
+            rope_deltas=caches[-1].rope_deltas,
+        )
 
     def __call__(
         self,
@@ -355,9 +379,11 @@ class MultiStackedDecoderLayers(nnx.Module):
         positions: jax.Array,
         adapter_indices: jax.Array | None,
         kv_cache: KVCache | None,
+        rope_deltas: jax.Array | None = None,
         output_hidden_states: bool,
         gradient_checkpointing: bool,
         is_training: bool = False,
+        **layer_kwargs,
     ) -> tuple[jax.Array, list[jax.Array], KVCache | None]:
         all_hidden_states: list[jax.Array] = []
 
@@ -379,9 +405,11 @@ class MultiStackedDecoderLayers(nnx.Module):
                 positions=positions,
                 adapter_indices=adapter_indices,
                 kv_cache=group_kv_cache,
+                rope_deltas=rope_deltas,
                 output_hidden_states=output_hidden_states,
                 gradient_checkpointing=gradient_checkpointing,
                 is_training=is_training,
+                **layer_kwargs,
             )
             all_hidden_states.extend(layer_hidden_states)
             if not is_training:
