@@ -235,9 +235,20 @@ class MegatronWorker:
         provider.attention_backend = "flash" if flash_attn else "fused"
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
-        provider.moe_token_dispatcher_type = "alltoall"
-        provider.moe_router_load_balancing_type = "none"
 
+        # Apply explicit MoE config fields to the provider.
+        # These replace the previously hardcoded values and can be further
+        # overridden by transformer_config_kwargs if needed.
+        provider.moe_token_dispatcher_type = megatron_config.moe_token_dispatcher_type
+        provider.moe_router_load_balancing_type = megatron_config.moe_router_load_balancing_type
+        if megatron_config.moe_grouped_gemm:
+            provider.moe_grouped_gemm = megatron_config.moe_grouped_gemm
+        if megatron_config.moe_router_score_function is not None:
+            provider.moe_router_score_function = megatron_config.moe_router_score_function
+        if megatron_config.moe_router_enable_expert_bias is not None:
+            provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
+
+        # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
         provider.finalize()

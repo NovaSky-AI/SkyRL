@@ -394,10 +394,16 @@ class WorkerDispatch:
         self.prepare_for_weight_sync()
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
+        else:
+            # Non-colocated: pause generation to prevent in-flight requests from
+            # reading partially-updated weights during the NCCL broadcast.
+            await self._inference_engine_client.pause_generation()
         self.broadcast_to_inference_engines(self._inference_engine_client)
         self.finish_weight_sync()
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
+        else:
+            await self._inference_engine_client.resume_generation()
 
     def set_inference_engine_client(self, inference_engine_client: InferenceEngineClient) -> None:
         """Set the inference engine client for weight sync.
