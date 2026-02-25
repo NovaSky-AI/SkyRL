@@ -47,7 +47,7 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
     cfg.generator.num_inference_engines = num_inference_engines
     cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
     cfg.generator.run_engines_locally = True
-    cfg.generator.served_model_name = SERVED_MODEL_NAME
+    cfg.generator.inference_engine.served_model_name = SERVED_MODEL_NAME
     cfg.generator.sampling_params.max_generate_length = 256
     return cfg
 
