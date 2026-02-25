@@ -10,12 +10,13 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 import json
 import pytest
 import asyncio
+import aiohttp
 from http import HTTPStatus
 from typing import Any, Dict, List
 from pydantic import BaseModel
 
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from tests.backends.skyrl_train.gpu.utils import get_test_prompts, InferenceEngineState
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
@@ -26,7 +27,7 @@ SERVED_MODEL_NAME = "my_qwen"
 TP_SIZE = 1
 
 
-def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> Dict[str, Any]:
+def _get_test_sampling_params(backend: str, cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str, Any]:
     assert endpoint in ["chat_completions", "completions"]
     sampling_params = get_sampling_params_for_backend(backend, cfg.generator.sampling_params)
     sampling_params["logprobs"] = True
@@ -36,9 +37,9 @@ def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> 
     return sampling_params
 
 
-def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig:
+def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
@@ -140,7 +141,7 @@ def test_served_model_name(vllm_server):
     assert result["choices"][0]["message"]["content"] is not None
 
     # Request with model path should fail (model name mismatch)
-    with pytest.raises(Exception):
+    with pytest.raises(aiohttp.ClientResponseError):
         asyncio.run(
             client.chat_completion(
                 {
@@ -259,12 +260,12 @@ def test_error_handling(vllm_server):
     client = vllm_server.client
 
     # Missing required field (messages)
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(aiohttp.ClientResponseError) as exc_info:
         asyncio.run(client.chat_completion({"json": {"model": SERVED_MODEL_NAME}}))
     assert exc_info.value is not None
 
     # Wrong model name
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(aiohttp.ClientResponseError) as exc_info:
         asyncio.run(
             client.chat_completion(
                 {
@@ -287,7 +288,7 @@ def test_context_length_error_returns_400(vllm_server):
     # Oversized prompt (max_model_len=1024 in fixture)
     messages_oversized = [{"role": "user", "content": "hello " * 1500}]
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(aiohttp.ClientResponseError) as exc_info:
         asyncio.run(
             client.chat_completion(
                 {
