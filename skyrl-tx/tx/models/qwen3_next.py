@@ -148,9 +148,21 @@ class Qwen3NextAttention(nnx.Module):
         tp_shard = "tp" if shard_attention_heads else None
 
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
-        rotary_dim = int(self.head_dim * getattr(config, "partial_rotary_factor", 1.0))
+        rope_parameters = getattr(config, "rope_parameters", None)
+        assert isinstance(
+            rope_parameters, dict
+        ), "Qwen3NextAttention requires config.rope_parameters to be a dict."
+        assert "partial_rotary_factor" in rope_parameters, (
+            "Qwen3NextAttention requires rope_parameters['partial_rotary_factor']."
+        )
+        assert "rope_theta" in rope_parameters, "Qwen3NextAttention requires rope_parameters['rope_theta']."
+        partial_rotary_factor = rope_parameters["partial_rotary_factor"]
+        rope_theta = rope_parameters["rope_theta"]
+
+        rotary_dim = int(self.head_dim * partial_rotary_factor)
         rotary_dim = min(self.head_dim, rotary_dim)
         self.rotary_dim = rotary_dim - (rotary_dim % 2)
+        self.rope_theta = rope_theta
 
         self.q_proj = LoRALinear(
             in_features=config.hidden_size,
@@ -222,7 +234,7 @@ class Qwen3NextAttention(nnx.Module):
         k = self.k_norm(self.k_proj(x, adapter_indices=adapter_indices).reshape(bsz, seq_len, self.num_kv_heads, self.head_dim))
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(bsz, seq_len, self.num_kv_heads, self.head_dim)
 
-        q, k = apply_partial_rope(q, k, positions, self.rotary_dim, self.config.rope_theta)
+        q, k = apply_partial_rope(q, k, positions, self.rotary_dim, self.rope_theta)
 
         if kv_cache is not None:
             k, v = KVCache.update_layer(kv_cache, k, v, positions)

@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from transformers import PretrainedConfig
 from transformers.models.qwen3_next.configuration_qwen3_next import Qwen3NextConfig as HFQwen3NextConfig
 from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextForCausalLM as HFQwen3NextForCausalLM
 
@@ -35,6 +36,11 @@ def make_small_hf_config() -> HFQwen3NextConfig:
         num_experts=0,
         num_experts_per_tok=1,
         decoder_sparse_step=1,
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 10000.0,
+            "partial_rotary_factor": 0.25,
+        },
     )
 
 
@@ -163,3 +169,52 @@ def test_qwen3_next_generate():
     assert len(out.generated_ids) == 1
     assert len(out.logprobs) == 1
     assert len(out.generated_ids[0]) == 2
+
+
+def test_qwen3_next_nested_rope_parameters_without_top_level_rope_theta():
+    text_config = {
+        "vocab_size": 128,
+        "hidden_size": 32,
+        "intermediate_size": 64,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 8,
+        "rms_norm_eps": 1e-6,
+        "max_position_embeddings": 128,
+        "tie_word_embeddings": False,
+        "linear_conv_kernel_dim": 3,
+        "linear_key_head_dim": 4,
+        "linear_value_head_dim": 4,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 2,
+        "layer_types": ["linear_attention", "full_attention", "linear_attention", "full_attention"],
+        "num_experts": 0,
+        "num_experts_per_tok": 1,
+        "decoder_sparse_step": 1,
+        "rope_parameters": {
+            "rope_type": "default",
+            "rope_theta": 10_000_000,
+            "partial_rotary_factor": 0.25,
+        },
+    }
+    base_config = PretrainedConfig(
+        architectures=["Qwen3NextForCausalLM"],
+        model_type="qwen3_5_moe",
+        text_config=text_config,
+    )
+    config = Qwen3NextConfig(
+        base_config,
+        max_lora_adapters=2,
+        max_lora_rank=8,
+        shard_attention_heads=False,
+    )
+
+    mesh = jax.make_mesh((1, 1, 1), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
+    with jax.set_mesh(mesh):
+        model = Qwen3NextForCausalLM(config, dtype=jnp.float32, rngs=nnx.Rngs(0))
+        input_ids = jnp.array([[1, 2, 3]], dtype=jnp.int32)
+        attention_mask = jnp.array([[1, 1, 1]], dtype=jnp.int32)
+        outputs = model(input_ids, attention_mask=attention_mask)
+
+    assert outputs.last_hidden_state.shape == (1, 3, config.hidden_size)
