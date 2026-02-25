@@ -70,7 +70,6 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     # If colocate is True, this will load the engine, sleep, and wake up the engine
     with InferenceEngineState.create(
         cfg,
-        cfg=cfg,
         model=MODEL,
         use_local=True,
         async_engine=cfg.generator.async_engine,

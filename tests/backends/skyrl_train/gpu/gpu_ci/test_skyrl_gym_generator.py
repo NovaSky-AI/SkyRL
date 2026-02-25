@@ -10,7 +10,6 @@ from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_para
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from tests.backends.skyrl_train.gpu.utils import Timer, get_test_generator_input, InferenceEngineState
-from skyrl.train.utils.utils import initialize_ray
 from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any, Dict
@@ -249,229 +248,208 @@ async def run_generator_end_to_end(
     ],
 )
 async def test_generator_single_turn_gsm8k(
-    use_async_engine, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
+    ray_init_fixture, use_async_engine, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
 ):
     """
     Test the generator with a single turn of GSM8K
     """
-    initialize_ray(SkyRLConfig())
-    try:
-        await run_generator_end_to_end(
-            use_async_engine=use_async_engine,
-            batched=batched,
-            n_samples_per_prompt=n_samples_per_prompt,
-            num_inference_engines=num_inference_engines,
-            tensor_parallel_size=tensor_parallel_size,
-            # TODO (sumanthrh): Add tests for non-batched mode once supported
-            get_logprobs=batched,
-        )
-    finally:
-        ray.shutdown()
+    await run_generator_end_to_end(
+        use_async_engine=use_async_engine,
+        batched=batched,
+        n_samples_per_prompt=n_samples_per_prompt,
+        num_inference_engines=num_inference_engines,
+        tensor_parallel_size=tensor_parallel_size,
+        # TODO (sumanthrh): Add tests for non-batched mode once supported
+        get_logprobs=batched,
+    )
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_search():
+async def test_generator_multi_turn_search(ray_init_fixture):
     """
     Test the generator with multiple turns of search
     """
-    initialize_ray(SkyRLConfig())
-    try:
-        await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=5,
-            num_inference_engines=2,
-            tensor_parallel_size=2,
-            model="Qwen/Qwen2.5-1.5B-Instruct",
-            max_prompt_length=2048,
-            max_input_length=4096,
-            max_generate_length=1000,
-            data_path=os.path.expanduser("~/data/searchR1/validation.parquet"),
-            env_class="search",
-            num_prompts=2,
-            max_turns=2,
-            use_conversation_multi_turn=False,
-            max_env_workers=0,
-        )
-    finally:
-        ray.shutdown()
+    await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=5,
+        num_inference_engines=2,
+        tensor_parallel_size=2,
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        max_prompt_length=2048,
+        max_input_length=4096,
+        max_generate_length=1000,
+        data_path=os.path.expanduser("~/data/searchR1/validation.parquet"),
+        env_class="search",
+        num_prompts=2,
+        max_turns=2,
+        use_conversation_multi_turn=False,
+        max_env_workers=0,
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
-async def test_generator_formatting_use_conversation_multi_turn(model_name):
+async def test_generator_formatting_use_conversation_multi_turn(ray_init_fixture, model_name):
     """
     Test generator formatting when using conversation formatting for multi-turn
     """
-    initialize_ray(SkyRLConfig())
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        generator_output = await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=1,
-            num_inference_engines=1,
-            tensor_parallel_size=1,
-            model=model_name,
-            max_prompt_length=3000,
-            max_input_length=10000,
-            max_generate_length=3000,
-            env_class="test_env",
-            num_prompts=2,
-            max_turns=3,
-            use_conversation_multi_turn=True,
-        )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    generator_output = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=1,
+        num_inference_engines=1,
+        tensor_parallel_size=1,
+        model=model_name,
+        max_prompt_length=3000,
+        max_input_length=10000,
+        max_generate_length=3000,
+        env_class="test_env",
+        num_prompts=2,
+        max_turns=3,
+        use_conversation_multi_turn=True,
+    )
 
-        for i, resp_ids in enumerate(generator_output["response_ids"]):
-            loss_mask = generator_output["loss_masks"][i]
-            prompt_token_ids = generator_output["prompt_token_ids"][i]
-            stop_reason = generator_output["stop_reasons"][i]
-            masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
-            masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
+    for i, resp_ids in enumerate(generator_output["response_ids"]):
+        loss_mask = generator_output["loss_masks"][i]
+        prompt_token_ids = generator_output["prompt_token_ids"][i]
+        stop_reason = generator_output["stop_reasons"][i]
+        masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
+        masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
 
-            masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
-            masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
+        masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
+        masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
 
-            assert (
-                MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
-                and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-            ), "generation prompts should be loss masked out"
+        assert (
+            MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
+            and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
+        ), "generation prompts should be loss masked out"
 
-            # Observations and EOS expectations only strictly apply when the model finished turns
-            if stop_reason == "stop":
-                assert (
-                    f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str
-                ), f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
-                assert (
-                    f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str
-                ), f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
-                # TODO(Charlie): add more rigorous tests that is robust to stop_reason being length.
-                # Either make GeneratorOutput return stop reason for each turn, or change the way we manage
-                # max generation length.
-                num_resp_eos = sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id)
-                num_total_eos = sum(1 for _ in resp_ids if _ == tokenizer.eos_token_id)
-                common_msg = "Could be due to stop_reason is length in some of the turns."
-                # count number of eos tokens in masked_in_resp_ids: 1 eos per assistant response (3 turns)
-                if num_resp_eos != 3:
-                    logger.warning(f"Got {num_resp_eos} eos tokens in masked_in_resp_ids, expected 3. {common_msg}")
-                # total eos in full response: 2 user eos + 3 assistant eos
-                if num_total_eos != 5:
-                    logger.warning(f"Got {num_total_eos} eos tokens in resp_ids, expected 5. {common_msg}")
-            else:
-                # On length stops, the model may not produce EOS at the end of each assistant turn.
-                # Only check that generation prompts are masked out.
-                logger.warning(f"Got stop reason {stop_reason}, so we did not fully check the response")
-            if model_name == "Qwen/Qwen3-0.6B":
-                assert (
-                    sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
-                )  # 1 user eos (no system for Qwen3)
-            else:
-                assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
-    finally:
-        ray.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
-)
-async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
-    """
-    Test generator formatting when not using conversation formatting for multi-turn
-    """
-    initialize_ray(SkyRLConfig())
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        generator_output = await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=1,
-            num_inference_engines=1,
-            tensor_parallel_size=1,
-            model=model_name,
-            max_prompt_length=3000,
-            max_input_length=10000,
-            max_generate_length=3000,
-            env_class="test_env",
-            num_prompts=2,
-            max_turns=3,
-            use_conversation_multi_turn=False,
-        )
-
-        for i, resp_ids in enumerate(generator_output["response_ids"]):
-            loss_mask = generator_output["loss_masks"][i]
-            prompt_token_ids = generator_output["prompt_token_ids"][i]
-            masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
-            masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
-
-            prompt_str = tokenizer.decode(prompt_token_ids)
-            resp_str = tokenizer.decode(resp_ids)
-            masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
-            masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
-
+        # Observations and EOS expectations only strictly apply when the model finished turns
+        if stop_reason == "stop":
             assert (
                 f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str
             ), f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
             assert (
                 f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str
             ), f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
+            # TODO(Charlie): add more rigorous tests that is robust to stop_reason being length.
+            # Either make GeneratorOutput return stop reason for each turn, or change the way we manage
+            # max generation length.
+            num_resp_eos = sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id)
+            num_total_eos = sum(1 for _ in resp_ids if _ == tokenizer.eos_token_id)
+            common_msg = "Could be due to stop_reason is length in some of the turns."
+            # count number of eos tokens in masked_in_resp_ids: 1 eos per assistant response (3 turns)
+            if num_resp_eos != 3:
+                logger.warning(f"Got {num_resp_eos} eos tokens in masked_in_resp_ids, expected 3. {common_msg}")
+            # total eos in full response: 2 user eos + 3 assistant eos
+            if num_total_eos != 5:
+                logger.warning(f"Got {num_total_eos} eos tokens in resp_ids, expected 5. {common_msg}")
+        else:
+            # On length stops, the model may not produce EOS at the end of each assistant turn.
+            # Only check that generation prompts are masked out.
+            logger.warning(f"Got stop reason {stop_reason}, so we did not fully check the response")
+        if model_name == "Qwen/Qwen3-0.6B":
             assert (
-                prompt_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
-                + resp_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
-                == 1
-            ), "the single generation prompt should be included in the prompt"
-            assert (
-                MODEL_TO_GENERATION_PROMPT[model_name] in prompt_str
-                and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-            ), "the single generation prompt should be included in the prompt"
+                sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
+            )  # 1 user eos (no system for Qwen3)
+        else:
+            assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
 
-            # count number of eos tokens in masked_in_resp_ids
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
+)
+async def test_generator_formatting_no_use_conversation_multi_turn(ray_init_fixture, model_name):
+    """
+    Test generator formatting when not using conversation formatting for multi-turn
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    generator_output = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=1,
+        num_inference_engines=1,
+        tensor_parallel_size=1,
+        model=model_name,
+        max_prompt_length=3000,
+        max_input_length=10000,
+        max_generate_length=3000,
+        env_class="test_env",
+        num_prompts=2,
+        max_turns=3,
+        use_conversation_multi_turn=False,
+    )
+
+    for i, resp_ids in enumerate(generator_output["response_ids"]):
+        loss_mask = generator_output["loss_masks"][i]
+        prompt_token_ids = generator_output["prompt_token_ids"][i]
+        masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
+        masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
+
+        prompt_str = tokenizer.decode(prompt_token_ids)
+        resp_str = tokenizer.decode(resp_ids)
+        masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
+        masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
+
+        assert (
+            f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str
+        ), f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
+        assert (
+            f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str
+        ), f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
+        assert (
+            prompt_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
+            + resp_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
+            == 1
+        ), "the single generation prompt should be included in the prompt"
+        assert (
+            MODEL_TO_GENERATION_PROMPT[model_name] in prompt_str
+            and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
+        ), "the single generation prompt should be included in the prompt"
+
+        # count number of eos tokens in masked_in_resp_ids
+        assert (
+            sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
+        )  # 1 eos for each assistant response
+        if model_name == "Qwen/Qwen3-0.6B":
             assert (
-                sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
-            )  # 1 eos for each assistant response
-            if model_name == "Qwen/Qwen3-0.6B":
-                assert (
-                    sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
-                )  # 1 user eos (no system for Qwen3)
-            else:
-                assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
-    finally:
-        ray.shutdown()
+                sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
+            )  # 1 user eos (no system for Qwen3)
+        else:
+            assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_gsm8k_step_wise():
+async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
     """
     Test the generator with the multi-turn GSM8K environment for step-wise training
     """
-    initialize_ray(SkyRLConfig())
-    try:
-        generator_output: GeneratorOutput = await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=5,
-            num_inference_engines=2,
-            tensor_parallel_size=2,
-            model="Qwen/Qwen2.5-1.5B-Instruct",
-            max_prompt_length=2048,
-            max_input_length=4096,
-            max_generate_length=1000,
-            data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
-            env_class="gsm8k_multi_turn",
-            num_prompts=2,
-            max_turns=2,
-            use_conversation_multi_turn=True,
-            max_env_workers=0,
-            is_step_wise=True,
-            temperature=0,
-        )
+    generator_output: GeneratorOutput = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=5,
+        num_inference_engines=2,
+        tensor_parallel_size=2,
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        max_prompt_length=2048,
+        max_input_length=4096,
+        max_generate_length=1000,
+        data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
+        env_class="gsm8k_multi_turn",
+        num_prompts=2,
+        max_turns=2,
+        use_conversation_multi_turn=True,
+        max_env_workers=0,
+        is_step_wise=True,
+        temperature=0,
+    )
 
-        assert isinstance(generator_output["is_last_step"], list) and isinstance(
-            generator_output["is_last_step"][0], bool
-        )
-        # Expect atleast one response with more than one turn
-        assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
-    finally:
-        ray.shutdown()
+    assert isinstance(generator_output["is_last_step"], list) and isinstance(
+        generator_output["is_last_step"][0], bool
+    )
+    # Expect atleast one response with more than one turn
+    assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
