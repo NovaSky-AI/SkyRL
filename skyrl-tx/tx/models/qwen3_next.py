@@ -633,8 +633,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         router_logits = self.gate(hidden_states_flat)
         routing_weights = nnx.softmax(router_logits, axis=-1)
         routing_weights, selected_experts = jax.lax.top_k(routing_weights, k=self.config.num_experts_per_tok)
-        if self.config.norm_topk_prob:
-            routing_weights = routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
+        routing_weights = routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
         routing_weights = routing_weights.astype(hidden_states_flat.dtype)
 
         expert_output = self.experts(hidden_states_flat, selected_experts, routing_weights, adapter_flat)
