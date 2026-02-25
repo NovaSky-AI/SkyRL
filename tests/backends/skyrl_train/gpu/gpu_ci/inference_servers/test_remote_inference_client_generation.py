@@ -1,10 +1,10 @@
 """
-Tests for RemoteInferenceClient (new inference path).
+Generation and error handling tests for `RemoteInferenceClient` (new inference path) 
 
 Requires _SKYRL_USE_NEW_INFERENCE=1.
 
 # Run with:
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_remote_inference_client.py -m vllm -v
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_generation.py -m vllm -v
 """
 
 import json
