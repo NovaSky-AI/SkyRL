@@ -7,12 +7,12 @@ title: "Configuration Overview"
 
 ```yaml
 data:
-  train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
-  val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
+  train_data: ["~/data/gsm8k/train.parquet"]
+  val_data: ["~/data/gsm8k/validation.parquet"]
 
 ```
 
-- `data.train_data`: A list of files for the training dataset. 
+- `data.train_data`: A list of files for the training dataset.
 - `data.val_data`: A list of files for the evaluation dataset.
 
 A dataset file can be a path to a parquet or json file, or the name of a Hugging Face dataset.
@@ -25,15 +25,12 @@ A dataset file can be a path to a parquet or json file, or the name of a Hugging
 placement:
   colocate_all: true
   colocate_policy_ref: true
-  colocate_critic_reward: false
   policy_num_nodes: 1
-  policy_num_gpus_per_node: 4
+  policy_num_gpus_per_node: 1
   critic_num_nodes: 1
-  critic_num_gpus_per_node: 4
+  critic_num_gpus_per_node: 1
   ref_num_nodes: 1
-  ref_num_gpus_per_node: 4
-  reward_num_nodes: 1
-  reward_num_gpus_per_node: 4
+  ref_num_gpus_per_node: 1
 
 ```
 
@@ -95,11 +92,11 @@ eval_interval: 5 # Set to -1 to disable evaluation.
 ```yaml
 resume_mode: latest # null/"none", "latest", "from_path"
 resume_path: null
-ckpt_path: "${oc.env:HOME}/ckpts/" # Local directory path or cloud storage path (S3, GCP) for resumable training checkpoints (model state, optimizer state, etc.)
+ckpt_path: "~/ckpts/" # Local directory path or cloud storage path (S3, GCP) for resumable training checkpoints (model state, optimizer state, etc.)
 max_ckpts_to_keep: -1 # -1 to keep all checkpoints, N to keep the last N checkpoints
 ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
-hf_save_interval: -1  # Save HF format model(s)every `hf_save_interval` steps.
-export_path: "${oc.env:HOME}/exports/" # Path for exported artifacts (HF models, debug dumps, etc.)
+hf_save_interval: -1  # Save HF format model(s) every `hf_save_interval` steps.
+export_path: "~/exports/" # Path for exported artifacts (HF models, debug dumps, etc.)
 project_name: "skyrl"
 run_name: "test_run"
 logger: "wandb"
@@ -157,7 +154,7 @@ fsdp_config:
 
 ```yaml
 megatron_config:
-  tensor_model_parallel_size: 1 
+  tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
   context_parallel_size: 1
   expert_model_parallel_size: 1
@@ -316,7 +313,7 @@ critic:
 ```yaml
 ref:
   model:
-    path: ${trainer.policy.model.path}
+    path: null  # defaults to `trainer.policy.model.path`
   fsdp_config:
     cpu_offload: false
     reshard_after_forward: true
@@ -326,7 +323,7 @@ ref:
 
 ```
 
-- `ref.model.path`: Path to the reference model. Defaults to the policy model path, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
+- `ref.model.path`: Path to the reference model. Defaults to the`trainer.policy.model.path`, but can be separately set (i.e. for distillation based approaches, the reference model can be a different model than the policy model).
 - `ref.fsdp_config`: FSDP configuration, applicable if `trainer.strategy='fsdp'`.
 - `ref.sequence_parallel_size`: Sequence parallel size. We implement [Ulysses sequence parallelism](https://arxiv.org/abs/2309.14509)
 
@@ -352,6 +349,14 @@ algorithm:
   use_kl_in_reward: false # apply kl loss to rewards
   use_kl_loss: true # used in policy model
   kl_loss_coef: 0.001
+
+  # Entropy loss
+  use_entropy_loss: false # add entropy bonus to policy loss
+  entropy_loss_coef: 0.01 # coefficient for the entropy loss
+
+  # Temperature for scaling logits in policy loss computation
+  temperature: 1.0
+
   # this adds training batch level normalization to advantages
   advantage_batch_normalize: false
   value_head_prefix: "value_head"
@@ -382,7 +387,7 @@ algorithm:
     ppo_kl_coef: 1.0 # coefficient for KL regularization term
 
   # cispo parameters (only used when policy_loss_type: "cispo")
-  cispo: 
+  cispo:
     cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
     cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
 
@@ -397,7 +402,7 @@ algorithm:
 
   # To be deprecated in favor of off_policy_correction.tis_ratio_type = "token"
   # and "token_tis_ratio_clip_high"
-  use_tis: false 
+  use_tis: false
   tis_imp_ratio_cap: -1.0
 
   # Used for seq_mean_token_sum_norm loss reduction. Users should set this value for multi-turn for that loss.
@@ -432,7 +437,7 @@ algorithm:
     product_mask_high: 2.0
     product_mask_low: 0.5
 
-    # separate from sequence_mask_metric and tis_ratio_type 
+    # separate from sequence_mask_metric and tis_ratio_type
     # if any off_policy_correction is enabled, masks out sequences with any token having importance ratio
     # far outside an acceptable range (low and high thresholds) - set to null to disable
     # suggested values: 1e-4 for low and 100 for high
@@ -449,7 +454,7 @@ algorithm:
 - `algorithm.advantage_estimator`: Advantage estimator to use. We currently implement `grpo`, `gae`, `rloo`, `reinforce++`, and custom advantage estimators can be registered with the `AdvantageEstimatorRegistry`.
 - `algorithm.kl_ctrl` Configuration for the KL controller - only used if `use_kl_in_reward` is `true` (not applied in the case of `use_kl_loss` is `true`). `kl_loss_coef` is used as the initial KL coefficient for both `fixed` and `adaptive` KL controllers.
 
- - `type`: Type of KL controller to use. Options include: `fixed` or `adaptive`. 
+ - `type`: Type of KL controller to use. Options include: `fixed` or `adaptive`.
  - `kl_target`: Target KL divergence for adaptive KL controller.
  - `horizon`: Controls the update rate of the adaptive KL controller.
 
@@ -457,6 +462,9 @@ algorithm:
 - `algorithm.use_kl_in_reward`: Whether to apply KL divergence penalty to rewards. The new rewards will be computed as `rewards - kl * kl_loss_coef`.
 - `algorithm.use_kl_loss`: Whether to add a KL divergence loss to the policy model. The policy loss will be computed as `policy_loss + kl * kl_loss_coef`.
 - `algorithm.kl_loss_coef`: Coefficient for the KL divergence loss.
+- `algorithm.use_entropy_loss`: Whether to add an entropy bonus to the policy loss. This encourages exploration by penalizing low-entropy (overly confident) policies.
+- `algorithm.entropy_loss_coef`: Coefficient for the entropy loss term. Only used when `use_entropy_loss=true`.
+- `algorithm.temperature`: Temperature for scaling logits in policy loss computation. This is automatically set from `generator.sampling_params.temperature` during config validation. When using HTTP endpoints and not utilizing `generator.sampling_params.temperature`, this value should be set to the temperature used during generation.
 - `algorithm.advantage_batch_normalize`: Whether to normalize advantages by the (global) batch mean and standard deviation.
 - `algorithm.value_head_prefix`: The name used to identify the value head in the critic model.
 - `algorithm.policy_loss_type`: Type of policy loss to use. Options include:
@@ -550,7 +558,7 @@ def ppo_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: DictConfig, # trainer.algorithm config
+    config: AlgorithmConfig, # trainer.algorithm config
     loss_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, dict]:
 
@@ -569,31 +577,49 @@ def ppo_policy_loss(
 
 ```
 
+## Fully Async Training Configuration
+
+```yaml
+fully_async:
+  max_staleness_steps: 4
+  num_parallel_generation_workers: 768
+
+```
+
+- `fully_async.max_staleness_steps`: Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*, then `j - i <= max_staleness_steps`. Larger values increase throughput but also off-policy-ness.
+- `fully_async.num_parallel_generation_workers`: Number of generation workers to spawn. Should be >= `policy_mini_batch_size` and <= `policy_mini_batch_size * (max_staleness_steps + 1)`.
+
 ## Generator Configuration
 
 ```yaml
 generator:
-  model_dtype: "bfloat16" # should match dtype for inference engine
-  run_engines_locally: true
-  num_inference_engines: 1
-  backend: "vllm"
-  weight_sync_backend: "nccl"
-  inference_engine_tensor_parallel_size: 4
-  inference_engine_pipeline_parallel_size: 1
-  inference_engine_expert_parallel_size: 1  
-  inference_engine_data_parallel_size: 1
   n_samples_per_prompt: 5
-  async_engine: true
-  batched: true
-  max_input_length: ${trainer.max_prompt_length} # max generator input length used for multi-turn conversations - for single turn set equal to max_prompt_length
-  enable_prefix_caching: true
-  enable_chunked_prefill: true
-  max_num_batched_tokens: 8192
-  enforce_eager: false
-  gpu_memory_utilization: 0.8
-  max_num_seqs: 1024
-  remote_inference_engine_urls: ["127.0.0.1:8001"]
+  batched: false
+  max_input_length: null # defaults to trainer.max_prompt_length
   max_turns: 1
+
+  # Inference engine configuration
+  inference_engine:
+    model_dtype: "bfloat16" # should match dtype for inference engine
+    run_engines_locally: true
+    num_engines: 1
+    backend: "vllm"
+    weight_sync_backend: "nccl"
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    expert_parallel_size: 1
+    data_parallel_size: 1
+    async_engine: true
+    enforce_eager: true
+    enable_prefix_caching: true
+    enable_chunked_prefill: true
+    max_num_batched_tokens: 8192
+    gpu_memory_utilization: 0.8
+    max_num_seqs: 1024
+    vllm_v1_disable_multiproc: true
+    remote_urls: []
+    engine_init_kwargs: {}
+    override_existing_update_group: "auto" # "auto", "enable", "disable"
 
   # Custom chat template configuration if needed
   chat_template:
@@ -603,9 +629,6 @@ generator:
   # Chat templating kwargs to pass to `tokenizer.apply_chat_template`
   chat_template_kwargs: {}
 
-  engine_init_kwargs: {}
-
-  override_existing_update_group: "auto" # "auto", "enable", "disable"
   # sampling params for generation phase
   sampling_params:
     max_generate_length: 1024
@@ -613,18 +636,15 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
-    logprobs: 0
+    repetition_penalty: 1.0
+    logprobs: 1
+    stop: null
 
   use_conversation_multi_turn: true
 
   # sampling params for evaluation
-  eval_sampling_params:
-    max_generate_length: ${generator.sampling_params.max_generate_length}
-    temperature: 1.0
-    top_p: 1.0
-    min_p: 0.0
-    top_k: -1
-    logprobs: 0
+  # defaults to temperature=0.0 with same max_generate_length as sampling_params
+  eval_sampling_params: null
 
   # number of samples per prompt for evaluation
   eval_n_samples_per_prompt: 1
@@ -637,61 +657,65 @@ generator:
 
 ### Inference Engine Placement Configuration
 
-- `generator.run_engines_locally`: Whether to use local inference engines. If `true`, the inference engine will be initialized during the training run in the current Ray cluster. We use one Ray actor per inference replica and communication will happen via Ray object store.  If set to `false`, then the generator expects a list of remote urls and communication will happen over HTTP.
-- `generator.num_inference_engines`: Number of inference engines to use. If `run_engines_locally` is `false`, then this number should match the number of remote urls.
-- `generator.remote_inference_engine_urls`: List of remote urls to use. Applicable only when `run_engines_locally` is `false`.
+- `generator.inference_engine.run_engines_locally`: Whether to use local inference engines. If `true`, the inference engine will be initialized during the training run in the current Ray cluster. We use one Ray actor per inference replica and communication will happen via Ray object store.  If set to `false`, then the generator expects a list of remote urls and communication will happen over HTTP.
+- `generator.inference_engine.num_engines`: Number of inference engines to use. If `run_engines_locally` is `false`, then this number should match the number of remote urls.
+- `generator.inference_engine.remote_urls`: List of remote urls to use. Applicable only when `run_engines_locally` is `false`.
 
 For more details on how different placement options work, please refer to the [placement guide](placement).
 
 ### HTTP Endpoint Configuration
 
-- `generator.enable_http_endpoint`: When `true`, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using `.generate()` Python calls.
-- `generator.http_endpoint_host`: Host for the inference HTTP endpoint.
-- `generator.http_endpoint_port`: Port for the inference HTTP endpoint.
-- ``generator.served_model_name``: The model name to use for HTTP endpoint validation. If set, this name must be used in the `model` field of `/chat/completions` and `/completions` requests instead of the model path. This is useful when:
+- `generator.inference_engine.enable_http_endpoint`: When `true`, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using `.generate()` Python calls. When using HTTP endpoints, it is also important to propagate the temperature appropriately to the trainer configuration at `trainer.algorithm.temperature` if you are not utilizing `generator.sampling_params.temperature`.
+- `generator.inference_engine.http_endpoint_host`: Host for the inference HTTP endpoint.
+- `generator.inference_engine.http_endpoint_port`: Port for the inference HTTP endpoint.
+- `generator.inference_engine.served_model_name`: The model name to use for HTTP endpoint validation. If set, this name must be used in the `model` field of `/chat/completions` and `/completions` requests instead of the model path. This is useful when:
   - The model path differs from the desired API model name (e.g., local paths vs API names)
   - Using LiteLLM or other clients that expect a specific model name format
 
 ### Weight Transfer Configuration
 
-- `generator.weight_sync_backend`: Backend to use for weight synchronization. Currently, we support `nccl` and `gloo`.
-- `generator.override_existing_update_group`: Whether to override the existing update group for the inference engine. This is applicable only for remote inference engines. During training, `skyrl-train` forms a custom process group ("update group") with the rank 0 training worker and all the inference engine ranks.  If `override_existing_update_group=enable`, then during initialization, a previous weight update group will be overriden in the inference engine. For example, if you have a remote server setup and you run training for the same model multiple times, it is helpful to override the previous update group. We recommend leaving this to `auto` - since it will automatically determine if the previous update group should be overridden based on `run_engines_locally`.
+- `generator.inference_engine.weight_sync_backend`: Backend to use for weight synchronization. Currently, we support `nccl` and `gloo`.
+- `generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB`: When using `cuda_ipc` weight sync, send weights in batches of this size (in GB). Default: `1.0`.
+- `generator.inference_engine.override_existing_update_group`: Whether to override the existing update group for the inference engine. This is applicable only for remote inference engines. During training, `skyrl-train` forms a custom process group ("update group") with the rank 0 training worker and all the inference engine ranks.  If `override_existing_update_group=enable`, then during initialization, a previous weight update group will be overriden in the inference engine. For example, if you have a remote server setup and you run training for the same model multiple times, it is helpful to override the previous update group. We recommend leaving this to `auto` - since it will automatically determine if the previous update group should be overridden based on `run_engines_locally`.
 
 ### Inference Engine Configuration
 
-- `generator.backend`: Backend to use for the inference engine. We support `vllm` and `sglang`. `sglang` is supported only for remote inference engines at the moment.
-- `generator.model_dtype`: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
-- `generator.async_engine`:  Whether to use an asynchronous/ offline inference engine. Applicable only when `backend="vllm"`.
-- `generator.inference_engine_tensor_parallel_size`: Tensor parallel size for the inference engine.
-- `generator.inference_engine_pipeline_parallel_size`: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend with async_engine=true.
-- `generator.inference_engine_expert_parallel_size`: Expert parallel size for the inference engine. Currently, EP is only supported for vLLM backend and ep_size must equal dp_size * tp_size.
-- `generator.inference_engine_data_parallel_size`: Data parallel size for the inference engine. Currently, DP is only supported for vLLM backend.
-- `generator.gpu_memory_utilization`: GPU memory utilization for the inference engine. Applicable only for `run_engines_locally=true`.
-- `generator.vllm_v1_disable_multiproc`: If `true`, this will set `VLLM_ENABLE_V1_MULTIPROCESSING=0` in the environment, which makes the scheduling deterministic. This is useful for reproducibility.
-- `generator.enable_prefix_caching`: Whether to enable prefix caching for the inference engine. Applicable only when `backend="vllm"`. This can be left to the default `true` in most cases. Note that in the case of remote inference engines, you would need to match the setting used when you initialized the remote servers.
-- `generator.enable_chunked_prefill`: Whether to enable chunked prefill for the inference engine. Applicable only when `backend="vllm"`. With vLLM, this can be left to the default `true` in most cases.
-- `generator.max_num_seqs`: Continous batching parameter for vLLM. Maximum number of sequences to pack into a batch.
-- `generator.max_num_batched_tokens`: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
-- ``generator.enable_ray_prometheus_stats``: Whether to enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only). When enabled, uses ``vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger``.
+- `generator.inference_engine.backend`: Backend to use for the inference engine. We support `vllm` and `sglang`. `sglang` is supported only for remote inference engines at the moment.
+- `generator.inference_engine.model_dtype`: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
+- `generator.inference_engine.async_engine`:  Whether to use an asynchronous/ offline inference engine. Applicable only when `backend="vllm"`.
+- `generator.inference_engine.tensor_parallel_size`: Tensor parallel size for the inference engine.
+- `generator.inference_engine.pipeline_parallel_size`: Pipeline parallel size for the inference engine. Currently, PP is only supported for vLLM backend with async_engine=true.
+- `generator.inference_engine.expert_parallel_size`: Expert parallel size for the inference engine. Currently, EP is only supported for vLLM backend and ep_size must equal dp_size * tp_size.
+- `generator.inference_engine.data_parallel_size`: Data parallel size for the inference engine. Currently, DP is only supported for vLLM backend.
+- `generator.inference_engine.gpu_memory_utilization`: GPU memory utilization for the inference engine. Applicable only for `run_engines_locally=true`.
+- `generator.inference_engine.vllm_v1_disable_multiproc`: If `true`, this will set `VLLM_ENABLE_V1_MULTIPROCESSING=0` in the environment, which makes the scheduling deterministic. This is useful for reproducibility.
+- `generator.inference_engine.enable_prefix_caching`: Whether to enable prefix caching for the inference engine. Applicable only when `backend="vllm"`. This can be left to the default `true` in most cases. Note that in the case of remote inference engines, you would need to match the setting used when you initialized the remote servers.
+- `generator.inference_engine.enable_chunked_prefill`: Whether to enable chunked prefill for the inference engine. Applicable only when `backend="vllm"`. With vLLM, this can be left to the default `true` in most cases.
+- `generator.inference_engine.max_num_seqs`: Continous batching parameter for vLLM. Maximum number of sequences to pack into a batch.
+- `generator.inference_engine.max_num_batched_tokens`: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
+- `generator.inference_engine.enforce_eager`: Whether to disable CUDA graphs. Default is `true` for stability. Set to `false` for higher performance, but this may affect convergence for long-running or long-context training jobs.
+- `generator.inference_engine.enable_ray_prometheus_stats`: Whether to enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only). When enabled, uses `vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger`.
+- `generator.inference_engine.engine_init_kwargs`: Inference engine arguments passed directly to the vLLM or SGLang engine. If duplicate kwargs are passed or kwargs clash with existing inference engine arguments (e.g., `tensor_parallel_size`), an error is raised.
 
 ### Generation Parameters
 
 - `generator.n_samples_per_prompt`: Number of samples to generate per prompt. Note that the total size of the training batch will be `trainer.train_batch_size * generator.n_samples_per_prompt`.
 - `generator.batched`: Whether to use batched inference. This is applicable only for single turn generation.
-- `generator.max_input_length`: Maximum input length for the inference engine. For single turn generation, this can be same as `trainer.max_prompt_length` (i.e., the initial prompt length). For multi-turn generation, this is the maximum input length used for multi-turn conversations at each turn.
+- `generator.max_input_length`: Maximum input length for the inference engine. For single turn generation, this can be same as `trainer.max_prompt_length` (i.e., the initial prompt length). For multi-turn generation, this is the maximum input length used for multi-turn conversations at each turn. Defaults to `trainer.max_prompt_length` if not set.
 - `generator.sampling_params`: Sampling parameters for the inference engine during trajectory generation phase.
 
     - `generator.sampling_params.max_generate_length`: Maximum length of the generated response.
-    - `generator.sampling_params.temperature`: Temperature for the inference engine.
+    - `generator.sampling_params.temperature`: Temperature for the inference engine. This value is also automatically propagated to `trainer.algorithm.temperature` during config initialization.
     - `generator.sampling_params.top_p`: Top-p sampling parameter for the inference engine.
     - `generator.sampling_params.min_p`: Min-p sampling parameter for the inference engine, as proposed in [this paper](https://arxiv.org/pdf/2407.01082).
     - `generator.sampling_params.top_k`: Top-k sampling parameter for the inference engine.
-    - `generator.sampling_params.logprobs`: Number of logprobs to return from the inference engine. Set to `0` to return only the chosen token's logprob.
-- `generator.eval_sampling_params`: Sampling parameters for evaluation.
+    - `generator.sampling_params.repetition_penalty`: Repetition penalty parameter. Default `1.0` (no penalty).
+    - `generator.sampling_params.logprobs`: Number of logprobs to return from the inference engine. Set to `0` to return only the chosen token's logprob. Default `1`.
+    - `generator.sampling_params.stop`: Optional list of stop strings for generation. Default `null`.
+- `generator.eval_sampling_params`: Sampling parameters for evaluation. Defaults to `temperature=0.0` with the same `max_generate_length` as `generator.sampling_params` if not explicitly set.
 - `generator.eval_n_samples_per_prompt`: Number of samples to generate per prompt for evaluation.
 - `generator.max_turns`: Maximum number of turns for generation with multi-turn RL.
 - `generator.use_conversation_multi_turn`: Whether to use conversation format for multi-turn generation. If set to `true` then observations are appended to the chat history as a new turn. If set to `false` then observations are appended as-is to the assistant response in token space and generation is continued  (after removing any EOS token in the response).  We've observed some cases where model can be sensitive to chat history format (ex: in SkyRL-SQL), and thus `false` can be used for full control over the exact tokens added after environment interaction.
-- `generator.engine_init_kwargs`: Inference engine arguments passed directly to the vLLM or SGLang engine. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.[arg_name]=value. If duplicate kwargs are passed or kwargs clash with existing generator arguments (e.g., `tensor_parallel_size`), an error is raised.
 - `generator.chat_template`: Custom chat template configuration if needed.
     - `generator.chat_template.source`: Source of the chat template. Can be either `name` or `file`.
     - `generator.chat_template.name_or_path`: Name or path of the chat template. If the source is `name`, then it should be one of the supported templates in `skyrl_train/generators/utils.py`. If the source is `file`, then this field should be a path to a Jinja2 template file.

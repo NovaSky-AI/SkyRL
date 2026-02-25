@@ -16,6 +16,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from skyrl.tinker import types
 from skyrl.backends.backend import AbstractBackend
 from skyrl.utils.log import logger
+from skyrl.train.config import SkyRLTrainConfig
 
 import ray
 from ray.util.placement_group import placement_group, PlacementGroup
@@ -23,7 +24,7 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl.train.config.utils import get_default_config
+from skyrl.train.config import get_config_as_yaml_str
 from skyrl.backends.skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
@@ -31,40 +32,43 @@ from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine i
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 
 
-class SkyRLTrainBackendConfig(BaseModel, extra="allow"):
-    """Configuration for the SkyRL-Train backend.
+class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
+    """Configuration overrides for the SkyRL-Train backend.
 
-    Uses SkyRL-Train's default config (ppo_base_config.yaml). Any extra keys
-    are applied as dot-notation overrides via --backend-config.
+    All keys are applied as overrides to the default SkyRL-Train config.
     """
 
     pass
 
 
-class FSDPBackendConfig(SkyRLTrainBackendConfig):
+class FSDPBackendOverrides(SkyRLTrainBackendOverrides):
     strategy: str = "fsdp2"
 
 
-class MegatronBackendConfig(SkyRLTrainBackendConfig):
+class MegatronBackendOverrides(SkyRLTrainBackendOverrides):
     strategy: str = "megatron"
 
 
-def _build_config(
+def _build_skyrl_train_config(
     base_model: str,
-    config: SkyRLTrainBackendConfig,
+    overrides: SkyRLTrainBackendOverrides,
     lora_config: types.LoraConfig | None = None,
-):
+) -> SkyRLTrainConfig:
     """Build config for SkyRL-Train workers using default config with overrides.
 
     Args:
         base_model: HuggingFace model path
-        config: Backend configuration
+        config_container: Backend configuration
         lora_config: LoRA configuration if using LoRA
     """
-    from omegaconf import OmegaConf
 
-    cfg = get_default_config()
-    cfg.trainer.policy.model.path = base_model
+    # Apply user overrides from backend_config
+    user_overrides = dict(overrides.model_extra)
+    # override base model path
+    # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
+    # that will resolve other attributes such as the reference model path based on the policy model path.
+    user_overrides["trainer.policy.model.path"] = base_model
+    cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
     cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
@@ -73,26 +77,25 @@ def _build_config(
     # TODO(tyler): Support KL Loss
     cfg.trainer.algorithm.use_kl_loss = False
 
-    assert config.strategy in ("fsdp2", "megatron"), "Only fsdp and megatron are supported for SkyRL-Train backend"
-    cfg.trainer.strategy = config.strategy
+    assert overrides.strategy in (
+        "fsdp2",
+        "megatron",
+    ), "Only fsdp and megatron are supported for SkyRL-Train backend"
+    cfg.trainer.strategy = overrides.strategy
 
     # Apply LoRA configuration
     if lora_config is not None and lora_config.rank > 0:
         cfg.trainer.policy.model.lora.rank = lora_config.rank
         cfg.trainer.policy.model.lora.alpha = int(lora_config.alpha)
 
-    # Apply user overrides from backend_config
-    for key, value in config.model_extra.items():
-        OmegaConf.update(cfg, key, value)
-
-    logger.info("SkyRL-Train config:\n%s", OmegaConf.to_yaml(cfg))
+    logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
     return cfg
 
 
 class SkyRLTrainBackend(AbstractBackend):
     """SkyRL-Train backend for supervised training."""
 
-    def __init__(self, base_model: str, config: SkyRLTrainBackendConfig):
+    def __init__(self, base_model: str, config: SkyRLTrainBackendOverrides):
         logger.warning("=" * 80)
         logger.warning("SkyRLTrainBackend is currently EXPERIMENTAL!")
         logger.warning("=" * 80)
@@ -103,6 +106,7 @@ class SkyRLTrainBackend(AbstractBackend):
             )
 
         self.base_model = base_model
+        # NOTE: We currently have two config attributes "config" which is just config overrides and "_cfg" which is the actual config object. This is a temporary state given that the Tinker engine expects a .config attribute
         self.config = config
         self._model_id: str | None = None
         self._model_metadata: types.ModelMetadata | None = None
@@ -124,17 +128,17 @@ class SkyRLTrainBackend(AbstractBackend):
             assert pg is not None, "placement group must be created when colocate_all=True"
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
             num_rollout_gpus = (
-                cfg.generator.num_inference_engines
-                * cfg.generator.inference_engine_tensor_parallel_size
-                * cfg.generator.inference_engine_pipeline_parallel_size
-                * cfg.generator.inference_engine_data_parallel_size
+                cfg.generator.inference_engine.num_engines
+                * cfg.generator.inference_engine.tensor_parallel_size
+                * cfg.generator.inference_engine.pipeline_parallel_size
+                * cfg.generator.inference_engine.data_parallel_size
             )
             assert (
                 num_policy_gpus == num_rollout_gpus
             ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
 
         policy_model = PPORayActorGroup(
-            cfg,
+            cfg.trainer,
             cfg.trainer.placement.policy_num_nodes,
             cfg.trainer.placement.policy_num_gpus_per_node,
             PolicyWorker,
@@ -184,11 +188,13 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_engines_initialized:
             return
 
-        logger.info(f"Creating {self._cfg.generator.num_inference_engines} inference engines")
+        logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} inference engines")
         self._inference_engine_client = InferenceEngineClient(
             create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
             self._tokenizer,
-            self._cfg,
+            self._cfg.trainer.policy.model.path,
+            self._cfg.trainer.policy.model.lora,
+            self._cfg.generator.inference_engine,
         )
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()
@@ -199,7 +205,7 @@ class SkyRLTrainBackend(AbstractBackend):
             raise ValueError(f"Model '{self._model_id}' already exists. Only one model supported.")
 
         # Build config
-        self._cfg = _build_config(self.base_model, self.config, lora_config)
+        self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
 
         if not ray.is_initialized():
             logger.info("Initializing Ray with runtime environment")
@@ -229,10 +235,10 @@ class SkyRLTrainBackend(AbstractBackend):
     def _create_colocate_pg(self):
         """Create placement group for colocated training + inference (following main_base.py pattern)."""
         total_gpu_slots = (
-            self._cfg.generator.num_inference_engines
-            * self._cfg.generator.inference_engine_tensor_parallel_size
-            * self._cfg.generator.inference_engine_pipeline_parallel_size
-            * self._cfg.generator.inference_engine_data_parallel_size
+            self._cfg.generator.inference_engine.num_engines
+            * self._cfg.generator.inference_engine.tensor_parallel_size
+            * self._cfg.generator.inference_engine.pipeline_parallel_size
+            * self._cfg.generator.inference_engine.data_parallel_size
         )
         logger.info(f"Creating placement group with {total_gpu_slots} GPU slots for colocated training+inference")
         pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
@@ -706,30 +712,30 @@ class SkyRLTrainBackend(AbstractBackend):
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainBackendConfig, colocate_pg: PlacementGroup | None, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainConfig, colocate_pg: PlacementGroup | None, tokenizer: PreTrainedTokenizerBase
 ):
     engine_kwargs = {
-        "num_inference_engines": cfg.generator.num_inference_engines,
-        "tensor_parallel_size": cfg.generator.inference_engine_tensor_parallel_size,
-        "pipeline_parallel_size": cfg.generator.inference_engine_pipeline_parallel_size,
-        "model_dtype": cfg.generator.model_dtype,
+        "num_inference_engines": cfg.generator.inference_engine.num_engines,
+        "tensor_parallel_size": cfg.generator.inference_engine.tensor_parallel_size,
+        "pipeline_parallel_size": cfg.generator.inference_engine.pipeline_parallel_size,
+        "model_dtype": cfg.generator.inference_engine.model_dtype,
         "pretrain": cfg.trainer.policy.model.path,
         "seed": cfg.trainer.seed,
-        "vllm_v1_disable_multiproc": cfg.generator.vllm_v1_disable_multiproc,
-        "enable_prefix_caching": cfg.generator.enable_prefix_caching,
-        "enforce_eager": cfg.generator.enforce_eager,
-        "expert_parallel_size": cfg.generator.inference_engine_expert_parallel_size,
-        "data_parallel_size": cfg.generator.inference_engine_data_parallel_size,
+        "vllm_v1_disable_multiproc": cfg.generator.inference_engine.vllm_v1_disable_multiproc,
+        "enable_prefix_caching": cfg.generator.inference_engine.enable_prefix_caching,
+        "enforce_eager": cfg.generator.inference_engine.enforce_eager,
+        "expert_parallel_size": cfg.generator.inference_engine.expert_parallel_size,
+        "data_parallel_size": cfg.generator.inference_engine.data_parallel_size,
         "shared_pg": colocate_pg,
-        "gpu_memory_utilization": cfg.generator.gpu_memory_utilization,
+        "gpu_memory_utilization": cfg.generator.inference_engine.gpu_memory_utilization,
         "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
-        "async_engine": cfg.generator.async_engine,
-        "max_num_batched_tokens": cfg.generator.max_num_batched_tokens,
-        "max_num_seqs": cfg.generator.max_num_seqs,
+        "async_engine": cfg.generator.inference_engine.async_engine,
+        "max_num_batched_tokens": cfg.generator.inference_engine.max_num_batched_tokens,
+        "max_num_seqs": cfg.generator.inference_engine.max_num_seqs,
         "tokenizer": tokenizer,
-        "backend": cfg.generator.backend,
-        "engine_init_kwargs": cfg.generator.engine_init_kwargs,
-        "enable_ray_prometheus_stats": cfg.generator.enable_ray_prometheus_stats,
+        "backend": cfg.generator.inference_engine.backend,
+        "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
+        "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -738,11 +744,11 @@ def create_ray_wrapped_inference_engines_from_config(
         engine_kwargs["max_lora_rank"] = cfg.trainer.policy.model.lora.rank
         engine_kwargs["sleep_level"] = 1
         engine_kwargs["max_loras"] = 1
-        engine_kwargs["fully_sharded_loras"] = cfg.generator.fully_sharded_loras
+        engine_kwargs["fully_sharded_loras"] = cfg.generator.inference_engine.fully_sharded_loras
 
-        if cfg.generator.enforce_eager and cfg.generator.backend == "vllm":
+        if cfg.generator.inference_engine.enforce_eager and cfg.generator.inference_engine.backend == "vllm":
             logger.warning(
-                "LoRA is enabled but generator.enforce_eager=true. "
+                "LoRA is enabled but generator.inference_engine.enforce_eager=true. "
                 "This combination causes significant performance degradation (2-3x slower generation). "
                 "Automatically setting enforce_eager=false for better performance. "
             )
@@ -752,7 +758,7 @@ def create_ray_wrapped_inference_engines_from_config(
         engine_kwargs["rope_scaling"] = cfg.generator.rope_scaling
     if cfg.generator.rope_theta is not None:
         engine_kwargs["rope_theta"] = cfg.generator.rope_theta
-    if cfg.generator.served_model_name is not None:
-        engine_kwargs["served_model_name"] = cfg.generator.served_model_name
+    if cfg.generator.inference_engine.served_model_name is not None:
+        engine_kwargs["served_model_name"] = cfg.generator.inference_engine.served_model_name
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)

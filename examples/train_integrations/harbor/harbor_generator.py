@@ -57,24 +57,24 @@ class HarborGenerator(GeneratorInterface):
             tokenizer: tokenizer object for encoding and decoding text
             max_seq_len: Maximum total sequence length (prompt + response). Used to truncate responses.
         """
-        self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
+        ie_cfg = generator_cfg.inference_engine
+        self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}"
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-        self.model_name = generator_cfg.model_name
 
         # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
         # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
-        self._harbor_trial_config_template = OmegaConf.to_container(harbor_cfg, resolve=True)
+        self._harbor_trial_config_template = deepcopy(harbor_cfg)
 
         # Set model_name and api_base once (constant across all trials)
-        assert generator_cfg.served_model_name is not None, "served_model_name must be set"
+        assert ie_cfg.served_model_name is not None, "served_model_name must be set"
         assert (
-            "/" not in generator_cfg.served_model_name
+            "/" not in ie_cfg.served_model_name
         ), "served_model_name must not contain '/', Harbor expects hosted_vllm/{model_name}"
         self._harbor_trial_config_template.setdefault("agent", {})[
             "model_name"
-        ] = f"hosted_vllm/{generator_cfg.served_model_name}"
+        ] = f"hosted_vllm/{ie_cfg.served_model_name}"
         self._harbor_trial_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
         logger.info(
@@ -84,7 +84,7 @@ class HarborGenerator(GeneratorInterface):
         )
 
         # Read custom chat template
-        custom_chat_template_path = generator_cfg.engine_init_kwargs.get("chat_template", None)
+        custom_chat_template_path = ie_cfg.engine_init_kwargs.get("chat_template", None)
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()
@@ -93,7 +93,7 @@ class HarborGenerator(GeneratorInterface):
             self.custom_chat_template_content = None
 
         # Initialize rate limiter from generator config (not part of Harbor TrialConfig)
-        rate_limit_config = generator_cfg.get("rate_limit", None)
+        rate_limit_config = getattr(generator_cfg, "rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
