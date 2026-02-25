@@ -1,12 +1,10 @@
 """
-Custom chat template tests for the RemoteInferenceClient.
-
-Requires _SKYRL_USE_NEW_INFERENCE=1.
+Custom chat template tests for the `RemoteInferenceClient`.
 
 NOTE: This test is separate from `test_remote_inference_client_generation.py` because we use separate engine configurations for each test parametrization.
 
 # Run with:
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_chat_template.py -m vllm -v
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_chat_template.py -m vllm -v
 """
 
 import pytest
@@ -16,21 +14,12 @@ from pathlib import Path
 import skyrl
 from skyrl.train.config import SkyRLConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from transformers import AutoTokenizer
 
 MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
 TP_SIZE = 1
 
 TEMPLATE_PATH = str(Path(skyrl.train.utils.__file__).parent / "templates/qwen3_acc_thinking.jinja2")
-
-pytestmark = [
-    pytest.mark.vllm,
-    pytest.mark.skipif(
-        not _SKYRL_USE_NEW_INFERENCE,
-        reason="Requires _SKYRL_USE_NEW_INFERENCE=1",
-    ),
-]
 
 
 def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig:
@@ -62,6 +51,7 @@ def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
             model=MODEL_QWEN3,
             sleep_level=1,
             engine_init_kwargs={"chat_template": TEMPLATE_PATH} if use_custom_template else None,
+            use_new_inference_servers=True,
         )
         client = engines.client
 

@@ -1,10 +1,8 @@
 """
-Generation and error handling tests for `RemoteInferenceClient` (new inference path) 
-
-Requires _SKYRL_USE_NEW_INFERENCE=1.
+Generation and error handling tests for `RemoteInferenceClient` (new inference path)
 
 # Run with:
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_generation.py -m vllm -v
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_generation.py -m vllm -v
 """
 
 import json
@@ -19,20 +17,11 @@ from skyrl.train.config import SkyRLConfig
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from tests.backends.skyrl_train.gpu.utils import get_test_prompts, InferenceEngineState
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
 from transformers import AutoTokenizer
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 SERVED_MODEL_NAME = "my_qwen"
 TP_SIZE = 1
-
-pytestmark = [
-    pytest.mark.vllm,
-    pytest.mark.skipif(
-        not _SKYRL_USE_NEW_INFERENCE,
-        reason="Requires _SKYRL_USE_NEW_INFERENCE=1",
-    ),
-]
 
 
 def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> Dict[str, Any]:
@@ -72,6 +61,7 @@ def vllm_server(module_scoped_ray_init_fixture):
         model=MODEL_QWEN2_5,
         sleep_level=1,
         engine_init_kwargs={"max_model_len": 1024},  # for test_context_length_error_returns_400
+        use_new_inference_servers=True,
     )
     yield engines
     engines.close()
