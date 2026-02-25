@@ -193,3 +193,23 @@ def test_cross_field_defaults():
     )  # same as `generator.sampling_params.max_generate_length`
     assert cfg.generator.rope_scaling == cfg.trainer.rope_scaling
     assert cfg.generator.rope_theta == cfg.trainer.rope_theta
+
+
+class TestMaxSeqLenValidation:
+    """Tests for the max_seq_len auto-calculation and explicit-override logic in __post_init__."""
+
+    def test_max_seq_len_auto_calculated_when_none(self):
+        """When max_seq_len is None (default), __post_init__ should compute it as
+        max_input_length + max_generate_length."""
+        # implicitly set max_seq_len to None
+        cfg = SkyRLTrainConfig.from_cli_overrides([])
+
+        expected = cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
+        assert cfg.trainer.algorithm.max_seq_len == expected
+
+    def test_max_seq_len_preserved_when_explicitly_set(self):
+        """When max_seq_len is explicitly set by the user, __post_init__ should NOT overwrite it."""
+        # explicitly set max_seq_len to 32768
+        cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.algorithm.max_seq_len=32768"])
+
+        assert cfg.trainer.algorithm.max_seq_len == 32768
