@@ -5,6 +5,8 @@ Generation and error handling tests for `RemoteInferenceClient` (new inference p
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_generation.py -m vllm -v
 """
 
+# TODO (sumanthrh) (RemoteInferenceClient deprecation): These tests should be migrated to directly interact with the router once we move away from the lightweight RemoteInferenceClient.
+
 import json
 import pytest
 import asyncio
