@@ -26,6 +26,27 @@ PRESETS = {
         "k_dim": 8,         # lora_rank
         "n_dim": 4096,      # output features
     },
+    "decode-lora-A-qwen4b": {
+        "description": "Decode LoRA A pass on Qwen3-4B attn (x @ lora_A)",
+        "num_tokens": 256,
+        "num_groups": 3,    # max_lora_adapters (RL workload)
+        "k_dim": 2560,      # hidden_size
+        "n_dim": 32,        # lora_rank
+    },
+    "decode-lora-B-qwen4b": {
+        "description": "Decode LoRA B pass on Qwen3-4B attn (intermediate @ lora_B)",
+        "num_tokens": 256,
+        "num_groups": 3,    # max_lora_adapters (RL workload)
+        "k_dim": 32,        # lora_rank
+        "n_dim": 2560,      # hidden_size
+    },
+    "decode-lora-B-mlp-qwen4b": {
+        "description": "Decode LoRA B pass on Qwen3-4B MLP (intermediate @ lora_B)",
+        "num_tokens": 256,
+        "num_groups": 3,    # max_lora_adapters (RL workload)
+        "k_dim": 32,        # lora_rank
+        "n_dim": 9728,      # intermediate_size
+    },
     "moe": {
         "description": "MoE expert layer (Qwen3-30B-A3B)",
         "num_tokens": 8192,
@@ -76,11 +97,15 @@ def benchmark_forward(
     group_offset = jnp.array([0], dtype=jnp.int32)
 
     if use_ffi:
-        fn = lambda: ragged_dot_ffi(lhs, rhs, group_sizes, group_offset)
+        @jax.jit
+        def fn():
+            return ragged_dot_ffi(lhs, rhs, group_sizes, group_offset)
     else:
-        fn = lambda: lax.ragged_dot(lhs, rhs, group_sizes)
+        @jax.jit
+        def fn():
+            return lax.ragged_dot(lhs, rhs, group_sizes)
 
-    # Warmup
+    # Warmup (includes JIT compilation on first call)
     for _ in range(num_warmup):
         out = fn()
         out.block_until_ready()
@@ -124,9 +149,9 @@ def benchmark_backward(
         def forward(lhs, rhs):
             return lax.ragged_dot(lhs, rhs, group_sizes).sum()
 
-    grad_fn = jax.grad(forward, argnums=(0, 1))
+    grad_fn = jax.jit(jax.grad(forward, argnums=(0, 1)))
 
-    # Warmup
+    # Warmup (includes JIT compilation on first call)
     for _ in range(num_warmup):
         d_lhs, d_rhs = grad_fn(lhs, rhs)
         d_lhs.block_until_ready()

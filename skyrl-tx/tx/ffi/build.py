@@ -51,6 +51,7 @@ def build_ragged_dot():
             "-DCUTLASS_ENABLE_TENSOR_CORE_MMA=1",
             "-DCUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED",
             "-DCUTLASS_ENABLE_GDC_FOR_SM90=1",
+            "-Xptxas", "-O3", "-Xptxas", "--allow-expensive-optimizations=true",
             "-shared", "-Xcompiler", "-fPIC",
             f"-I{jax_include_dir}",
             f"-I{cutlass_dir}/include",
@@ -58,6 +59,11 @@ def build_ragged_dot():
             str(source_file), "-o", str(output_file),
             "-lcuda",
         ]
+
+        # Allow extra nvcc flags via environment variable
+        extra_flags = os.environ.get("EXTRA_NVCC_FLAGS", "").strip()
+        if extra_flags:
+            cmd.extend(extra_flags.split())
 
         print(f"Building {output_file}...")
         subprocess.run(cmd, check=True)

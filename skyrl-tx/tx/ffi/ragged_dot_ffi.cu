@@ -68,11 +68,19 @@ using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
 using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
 using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
 
-// Decode-optimized config: smaller N tile improves occupancy for tiny/sparse M.
-using TileShapeDecode = cute::Shape<cute::_64, cute::_128, cute::_64>;
+// Decode-optimized config for large K (e.g. LoRA A pass: K=hidden_size, N=rank).
+// Deeper K tile (128) improves throughput for large reduction dimensions.
+using TileShapeDecode = cute::Shape<cute::_64, cute::_64, cute::_128>;
 using ClusterShapeDecode = cute::Shape<cute::_1, cute::_1, cute::_1>;
 using KernelScheduleDecode = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
 using EpilogueScheduleDecode = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
+
+// Decode-optimized config for small K (e.g. LoRA B pass: K=rank, N=hidden_size).
+// Cooperative schedule with 128x128 tile improves SM utilization for small-K GEMMs.
+using TileShapeDecodeSmallK = cute::Shape<cute::_128, cute::_128, cute::_32>;
+using ClusterShapeDecodeSmallK = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelScheduleDecodeSmallK = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
+using EpilogueScheduleDecodeSmallK = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
 
 using CollectiveEpilogue =
     typename cutlass::epilogue::collective::CollectiveBuilder<
@@ -112,6 +120,27 @@ using CollectiveMainloopDecode =
 using GemmKernelDecode =
     cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopDecode, CollectiveEpilogueDecode>;
 using GemmDecode = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelDecode>;
+
+using CollectiveEpilogueDecodeSmallK =
+    typename cutlass::epilogue::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, TileShapeDecodeSmallK, ClusterShapeDecodeSmallK,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
+        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueScheduleDecodeSmallK,
+        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
+
+using CollectiveMainloopDecodeSmallK =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
+        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShapeDecodeSmallK, ClusterShapeDecodeSmallK,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogueDecodeSmallK::SharedStorage))>,
+        KernelScheduleDecodeSmallK>::CollectiveOp;
+
+using GemmKernelDecodeSmallK =
+    cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopDecodeSmallK, CollectiveEpilogueDecodeSmallK>;
+using GemmDecodeSmallK = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelDecodeSmallK>;
+
 using ProblemShapeType = ProblemShape::UnderlyingProblemShape;
 
 // Backward kernel for d_rhs: computes lhs.T @ grad per group
@@ -301,6 +330,16 @@ ffi::Error RaggedDotCudaImpl(
   }
 
   if (use_decode_kernel(m, g_local)) {
+    if (k <= 64) {
+      // Small K (e.g. LoRA B pass: K=rank) — use wider N tile, narrower K tile.
+      return ExecuteGroupedGemm<GemmDecodeSmallK, GemmDir::Fwd>(
+          stream, scratch,
+          reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+          reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+          reinterpret_cast<DtypeOutput*>(out->typed_data()),
+          group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+    }
+    // Large K (e.g. LoRA A pass: K=hidden_size) — use wider K tile.
     return ExecuteGroupedGemm<GemmDecode, GemmDir::Fwd>(
         stream, scratch,
         reinterpret_cast<const DtypeA*>(lhs.typed_data()),
