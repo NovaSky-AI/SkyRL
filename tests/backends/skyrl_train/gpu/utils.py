@@ -491,7 +491,7 @@ class InferenceEngineState:
             client = RemoteInferenceClient(
                 proxy_url=proxy_url,
                 server_urls=server_urls,
-                model_name=served_model_name,
+                model_name=served_model_name if served_model_name else "default",
             )
         else:
             eps = create_ray_wrapped_inference_engines(
