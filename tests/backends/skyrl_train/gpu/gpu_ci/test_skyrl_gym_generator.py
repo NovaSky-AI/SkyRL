@@ -4,7 +4,6 @@ uv run --extra dev --extra vllm --isolated pytest tests/gpu/gpu_ci/test_skyrl_gy
 
 import os
 import pytest
-import ray
 from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
@@ -359,6 +358,7 @@ async def test_generator_formatting_use_conversation_multi_turn(ray_init_fixture
         else:
             assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
@@ -448,8 +448,6 @@ async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
         temperature=0,
     )
 
-    assert isinstance(generator_output["is_last_step"], list) and isinstance(
-        generator_output["is_last_step"][0], bool
-    )
+    assert isinstance(generator_output["is_last_step"], list) and isinstance(generator_output["is_last_step"][0], bool)
     # Expect atleast one response with more than one turn
     assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
