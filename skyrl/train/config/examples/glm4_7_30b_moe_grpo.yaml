@@ -1,0 +1,122 @@
+# GLM-4.7-Flash (30B-A3B) MoE GRPO training config
+#
+# GLM-4.7-Flash is a DeepSeek-V3 architecture clone with Multi-Head Latent
+# Attention (MLA) and Mixture-of-Experts (64 routed experts, 4 active per
+# token, ~3B active parameters).
+#
+# HF model: zai-org/GLM-4.7-Flash
+#
+# Designed for 1 node x 8 H100 GPUs (8 GPUs, TP=2 EP=4).
+# For 16 GPUs, change to EP=8 and policy_num_nodes=2.
+#
+# Usage:
+#   bash examples/megatron/run_megatron_grpo_glm4_7_30b.sh
+
+defaults:
+  - _self_
+  - megatron_config@trainer.policy.megatron_config: policy
+  - megatron_config@trainer.ref.megatron_config: ref
+  - skyrl_gym_config: default
+
+data:
+  # Replace with your dataset paths
+  train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
+  val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
+
+trainer:
+  placement:
+    colocate_all: true
+    colocate_policy_ref: true
+    policy_num_nodes: 1
+    policy_num_gpus_per_node: 8
+    ref_num_nodes: 1
+    ref_num_gpus_per_node: 8
+
+  strategy: megatron
+
+  policy:
+    model:
+      path: "zai-org/GLM-4.7-Flash"
+    optimizer_config:
+      lr: 1.0e-6
+      weight_decay: 0.1
+      max_grad_norm: 1.0
+      num_warmup_steps: 10
+      scheduler: "constant_with_warmup"
+    megatron_config:
+      tensor_model_parallel_size: 2
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 4
+      expert_tensor_parallel_size: 1
+      # GLM4.7-30B uses sigmoid routing with expert bias (DeepSeek-V3 style)
+      moe_token_dispatcher_type: "alltoall"
+      moe_router_load_balancing_type: "none"
+      moe_grouped_gemm: true
+      moe_router_score_function: "sigmoid"
+      moe_router_enable_expert_bias: true
+      transformer_config_kwargs:
+        recompute_granularity: full
+        recompute_modules: ["core_attn"]
+        recompute_method: uniform
+        recompute_num_layers: 1
+
+  ref:
+    model:
+      path: ${trainer.policy.model.path}
+    megatron_config:
+      tensor_model_parallel_size: ${trainer.policy.megatron_config.tensor_model_parallel_size}
+      pipeline_model_parallel_size: ${trainer.policy.megatron_config.pipeline_model_parallel_size}
+      context_parallel_size: ${trainer.policy.megatron_config.context_parallel_size}
+      expert_model_parallel_size: ${trainer.policy.megatron_config.expert_model_parallel_size}
+      expert_tensor_parallel_size: ${trainer.policy.megatron_config.expert_tensor_parallel_size}
+      moe_token_dispatcher_type: ${trainer.policy.megatron_config.moe_token_dispatcher_type}
+      moe_router_load_balancing_type: ${trainer.policy.megatron_config.moe_router_load_balancing_type}
+      moe_grouped_gemm: ${trainer.policy.megatron_config.moe_grouped_gemm}
+      moe_router_score_function: ${trainer.policy.megatron_config.moe_router_score_function}
+      moe_router_enable_expert_bias: ${trainer.policy.megatron_config.moe_router_enable_expert_bias}
+
+  algorithm:
+    advantage_estimator: "grpo"
+    use_kl_loss: true
+    kl_loss_coef: 0.001
+    policy_loss_type: "regular"
+    loss_reduction: "token_mean"
+    eps_clip_low: 0.2
+    eps_clip_high: 0.2
+
+  # MLA does not support flash attention in TransformerEngine
+  flash_attn: false
+  use_sample_packing: true
+  epochs: 20
+  update_epochs_per_batch: 1
+  train_batch_size: 128
+  policy_mini_batch_size: 64
+  micro_forward_batch_size_per_gpu: 4
+  micro_train_batch_size_per_gpu: 4
+  max_prompt_length: 512
+  eval_batch_size: 1024
+  eval_before_train: false
+  eval_interval: 5
+  ckpt_interval: 10
+  logger: "wandb"
+  project_name: "glm4_7_30b_grpo"
+  run_name: "glm4_7_30b_a3b_grpo_megatron"
+  resume_mode: null
+  ckpt_path: "${oc.env:HOME}/ckpts/glm4_7_30b_a3b_grpo"
+
+generator:
+  backend: "vllm"
+  run_engines_locally: true
+  weight_sync_backend: "nccl"
+  async_engine: true
+  batched: true
+  num_inference_engines: 2
+  inference_engine_tensor_parallel_size: 8
+  n_samples_per_prompt: 5
+  gpu_memory_utilization: 0.6
+  sampling_params:
+    max_generate_length: 1024
+
+environment:
+  env_class: "gsm8k"
