@@ -224,7 +224,7 @@ class Worker(DistributedTorchRayActor):
         self._transfer_strategy_cls = None  # Set in init_weight_transfer_communicator
 
         if self.cfg.algorithm.temperature is None:
-            raise ValueError("`trainer.algorithm.temperature` must be set")
+            raise ValueError("`cfg.algorithm.temperature` must be set")
 
     def init_model(self, *args, **kwargs):
         """Initialize worker state (model, and optimizer if applicable) on worker."""
