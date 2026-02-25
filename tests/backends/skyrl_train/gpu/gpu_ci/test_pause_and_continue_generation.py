@@ -276,7 +276,7 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
 @pytest.mark.vllm
 def test_abort_generation_vllm_engine(ray_init_fixture):
     """
-    We send 4 requests that are really long to `InferenceEngineInterface.chat_completion`
+    We send 4 requests that are really long to `InferenceEngineInterface.engines[0].chat_completion`
     and then call abort. We set max_num_seqs=2 to test aborting 2 running requests and 2 waiting
     requests. We expect 2 requests to be returned with completion_tokens=0 and 2 with non-zero
     completion_tokens. We also expect the finish_reason to be "abort" for all requests.
@@ -331,7 +331,7 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
                             "messages": convs[i],
                             **sampling_params,
                         }
-                        return await client.chat_completion({"json": body, "headers": {}})
+                        return await client.engines[0].chat_completion({"json": body, "headers": {}})
                     else:
                         # completions: prompt is a string
                         prompt_str = tokenizer.apply_chat_template(convs[i], add_generation_prompt=True, tokenize=False)
@@ -340,7 +340,7 @@ def test_abort_generation_vllm_engine(ray_init_fixture):
                             "prompt": prompt_str,
                             **sampling_params,
                         }
-                        return await client.completion({"json": body, "headers": {}})
+                        return await client.engines[0].completion({"json": body, "headers": {}})
 
                 tasks = [asyncio.create_task(one_req(i)) for i in range(4)]
                 # Wait to let it run a bit, then pause generation
