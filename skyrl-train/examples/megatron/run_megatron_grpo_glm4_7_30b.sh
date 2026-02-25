@@ -1,8 +1,8 @@
 set -x
 
-# Colocated GRPO training+generation for GLM4.7-30B-A3B on GSM8K with Megatron.
-# GLM4.7-30B-A3B is a DeepSeek-V3 architecture clone with MLA + MoE
-# (128 experts, 8 active per token, ~3B active parameters).
+# Colocated GRPO training+generation for GLM-4.7-Flash on GSM8K with Megatron.
+# GLM-4.7-Flash (zai-org/GLM-4.7-Flash) is a DeepSeek-V3 architecture clone
+# with MLA + MoE (64 routed experts, 4 active per token, ~3B active parameters).
 #
 # Runs on 2 nodes of 8xH100s (16 GPUs total).
 #
@@ -10,8 +10,7 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/megatron/run_megatron_grpo_glm4_7_30b.sh
 
-# Replace with the GLM4.7-30B-A3B model path or HF ID
-MODEL_NAME="THUDM/GLM-4-9B-0414"
+MODEL_NAME="zai-org/GLM-4.7-Flash"
 DATA_DIR="$HOME/data/gsm8k"
 LOGGER="wandb"  # change to "console" to print to stdout
 

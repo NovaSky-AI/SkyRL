@@ -1,8 +1,10 @@
-# GLM4.7-30B-A3B MoE GRPO training config
+# GLM-4.7-Flash (30B-A3B) MoE GRPO training config
 #
-# GLM4.7-30B-A3B is a DeepSeek-V3 architecture clone with Multi-Head Latent
-# Attention (MLA) and Mixture-of-Experts (128 experts, 8 active per token,
-# ~3B active parameters).
+# GLM-4.7-Flash is a DeepSeek-V3 architecture clone with Multi-Head Latent
+# Attention (MLA) and Mixture-of-Experts (64 routed experts, 4 active per
+# token, ~3B active parameters).
+#
+# HF model: zai-org/GLM-4.7-Flash
 #
 # Designed for 2 nodes x 8 H100 GPUs (16 GPUs total).
 # Adjust parallelism and batch sizes for different cluster sizes.
@@ -34,7 +36,7 @@ trainer:
 
   policy:
     model:
-      path: "THUDM/GLM-4-9B-0414"  # Replace with GLM4.7-30B-A3B model path or HF ID when available
+      path: "zai-org/GLM-4.7-Flash"
     optimizer_config:
       lr: 1.0e-6
       weight_decay: 0.1
