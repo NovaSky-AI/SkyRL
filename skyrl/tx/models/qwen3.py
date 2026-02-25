@@ -4,11 +4,12 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from skyrl.tx.layers.attention import dot_product_attention
+from skyrl.tx.layers.connectors import LoRAConnector
 from skyrl.tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
-from skyrl.tx.layers.util import prepare_routing, shard_map_ep
-from skyrl.tx.layers.rotary_embedding import apply_rope
 from skyrl.tx.layers.layernorm import RMSNorm
+from skyrl.tx.layers.rotary_embedding import apply_rope
 from skyrl.tx.layers.stacked import StackedDecoderLayers
+from skyrl.tx.layers.util import prepare_routing, shard_map_ep
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from skyrl.tx.utils.generator import GeneratorMixin, KVCache
@@ -286,6 +287,21 @@ class Qwen3DecoderLayer(nnx.Module):
         else:
             self.mlp = Qwen3MLP(config, dtype=dtype, rngs=rngs)
 
+        self.attn_connector = LoRAConnector(
+            config.hidden_size,
+            config.mhc_expansion_rate,
+            max_lora_adapters=config.max_lora_adapters,
+            dtype=dtype,
+            rngs=rngs,
+        )
+        self.mlp_connector = LoRAConnector(
+            config.hidden_size,
+            config.mhc_expansion_rate,
+            max_lora_adapters=config.max_lora_adapters,
+            dtype=dtype,
+            rngs=rngs,
+        )
+
     def __call__(
         self,
         hidden_states: jax.Array,
@@ -296,6 +312,7 @@ class Qwen3DecoderLayer(nnx.Module):
         kv_cache: tuple[jax.Array, jax.Array] | None = None,
     ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         residual = hidden_states
+        hidden_states, residual_norm = self.attn_connector.pre(hidden_states, self.input_layernorm, adapter_indices)
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
@@ -304,12 +321,15 @@ class Qwen3DecoderLayer(nnx.Module):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = residual + hidden_states
+        hidden_states = self.attn_connector.post(residual, hidden_states, residual_norm, adapter_indices)
 
         residual = hidden_states
+        hidden_states, residual_norm = self.mlp_connector.pre(
+            hidden_states, self.post_attention_layernorm, adapter_indices
+        )
         hidden_states = self.post_attention_layernorm(hidden_states)
         mlp_output = self.mlp(hidden_states, adapter_indices=adapter_indices)
-        hidden_states = residual + mlp_output
+        hidden_states = self.mlp_connector.post(residual, mlp_output, residual_norm, adapter_indices)
 
         return hidden_states, updated_cache
 
@@ -353,6 +373,7 @@ class Qwen3Model(nnx.Module):
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
+        hidden_states = jnp.repeat(hidden_states[..., None, :], self.config.mhc_expansion_rate, axis=-2)
 
         hidden_states, all_hidden_states, new_kv_cache = self.layers(
             hidden_states,
@@ -364,6 +385,10 @@ class Qwen3Model(nnx.Module):
             gradient_checkpointing=self.config.gradient_checkpointing,
             is_training=is_training,
         )
+
+        hidden_states = hidden_states.sum(axis=-2)
+        if output_hidden_states:
+            all_hidden_states = [hs.sum(axis=-2) for hs in all_hidden_states]
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -401,11 +426,6 @@ class Qwen3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProce
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
         return self.lm_head
-
-    @staticmethod
-    def is_lora_param(path: tuple, _value) -> bool:
-        """Return True if a parameter path corresponds to LoRA weights."""
-        return any(name in path for name in ("lora_A", "lora_B"))
 
     def __call__(
         self,
