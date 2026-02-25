@@ -31,9 +31,9 @@ This example includes four launch scripts that share **identical hyperparameters
 | Script | Reward | Training | GPUs | Entrypoint |
 |--------|--------|----------|------|------------|
 | `run_rule_based.sh` | Rule-based (string match) | Sync | 1 | `skyrl_train.entrypoints.main_base` |
-| `run_llm_judge_local.sh` | LLM judge (Qwen2.5-1.5B) | Sync | 2 | `main_llm_judge_local.py` |
+| `run_llm_judge_local.sh` | LLM judge (Qwen2.5-1.5B-Instruct) | Sync | 2 | `main_llm_judge_local.py` |
 | `run_rule_based_async.sh` | Rule-based (string match) | Async | 2 | `examples.async.main_async` |
-| `run_llm_judge_local_async.sh` | LLM judge (Qwen2.5-1.5B) | Async | 3 | `main_llm_judge_local_async.py` |
+| `run_llm_judge_local_async.sh` | LLM judge (Qwen2.5-1.5B-Instruct) | Async | 3 | `main_llm_judge_local_async.py` |
 
 ### GPU Layouts
 

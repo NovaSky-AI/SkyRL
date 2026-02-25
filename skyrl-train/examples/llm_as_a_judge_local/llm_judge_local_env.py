@@ -29,11 +29,14 @@ begins (see ``main_llm_judge_local.py``).
 
 from typing import Any, Dict, Union
 
+import logging
 import re
 from dataclasses import dataclass
 
 import ray
 from omegaconf import DictConfig
+
+logger = logging.getLogger(__name__)
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 PROMPT = """
@@ -109,15 +112,18 @@ class GSM8kLLMJudgeLocalEnv(BaseTextEnv):
             )
 
     def _get_reward(self, action: str) -> float:
-        message = (
-            PROMPT
-            + f"\n\nGOLD SOLUTION:\n{self.ground_truth}"
-            + f"\n\nPREDICTED SOLUTION:\n{action}"
-            + "\n\nAnswer:"
+        # Use system/user role separation to reduce prompt injection risk
+        user_content = (
+            f"GOLD SOLUTION:\n{self.ground_truth}"
+            f"\n\nPREDICTED SOLUTION:\n{action}"
+            f"\n\nAnswer:"
         )
 
         try:
-            messages = [{"role": "user", "content": message}]
+            messages = [
+                {"role": "system", "content": PROMPT.strip()},
+                {"role": "user", "content": user_content},
+            ]
             reply = ray.get(
                 self._reward_service.score.remote(
                     messages,
@@ -140,11 +146,14 @@ class GSM8kLLMJudgeLocalEnv(BaseTextEnv):
             if last_line in {"1", "0", "1.0", "0.0"}:
                 return float(last_line)
 
-            print(f"[LLMJudgeLocal] Unrecognized output: {reply[-200:]}")
+            logger.warning(f"[LLMJudgeLocal] Unrecognized output: {reply[-200:]}")
             return 0.0
 
         except Exception as e:
-            print(f"[LLMJudgeLocal] Error: {type(e).__name__}: {e}")
+            logger.error(
+                f"[LLMJudgeLocal] Error: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
             return 0.0
 
     def step(self, action: str) -> BaseTextEnvStepOutput:

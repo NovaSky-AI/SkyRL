@@ -74,6 +74,7 @@ def create_frozen_vllm_engines(
     enable_prefix_caching: bool = True,
     enforce_eager: bool = True,
     gpu_memory_utilization: float = 0.85,
+    max_model_len: Optional[int] = None,
     max_num_batched_tokens: int = 4096,
     max_num_seqs: int = 256,
 ) -> List[InferenceEngineInterface]:
@@ -102,6 +103,9 @@ def create_frozen_vllm_engines(
         enable_prefix_caching: Enable vLLM prefix caching.
         enforce_eager: Disable CUDA graphs for reliability.
         gpu_memory_utilization: GPU memory fraction.
+        max_model_len: Maximum sequence length for KV cache allocation.
+            If ``None``, vLLM infers from the model config (can be very
+            large and waste GPU memory).  Set explicitly to limit VRAM.
         max_num_batched_tokens: Maximum tokens per batch.
         max_num_seqs: Maximum concurrent sequences.
 
@@ -162,6 +166,12 @@ def create_frozen_vllm_engines(
             placement_group_bundle_index=base_pg_index,
         )
 
+        # Build optional kwargs (only pass max_model_len if explicitly set,
+        # otherwise let vLLM infer from the model config)
+        extra_kwargs: Dict[str, Any] = {}
+        if max_model_len is not None:
+            extra_kwargs["max_model_len"] = max_model_len
+
         engine = AsyncVLLMRayActor.options(
             num_cpus=num_gpus_per_actor,
             num_gpus=num_gpus_per_actor,
@@ -180,12 +190,13 @@ def create_frozen_vllm_engines(
             vllm_v1_disable_multiproc=True,
             gpu_memory_utilization=gpu_memory_utilization,
             bundle_indices=bundle_indices,
-            num_gpus=num_gpus_per_actor,
+            num_gpus=per_engine_gpu_count,
             enable_sleep_mode=False,
             noset_visible_devices=noset_visible_devices,
             max_num_batched_tokens=max_num_batched_tokens,
             max_num_seqs=max_num_seqs,
             max_logprobs=1,
+            **extra_kwargs,
         )
         actors.append(engine)
 
@@ -253,6 +264,7 @@ class FrozenRewardInferenceClient(InferenceEngineClient):
             enable_prefix_caching=enable_prefix_caching,
             enforce_eager=enforce_eager,
             gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
             max_num_batched_tokens=max_model_len,
             max_num_seqs=max_num_seqs,
         )

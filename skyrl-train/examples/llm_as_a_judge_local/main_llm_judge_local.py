@@ -36,6 +36,7 @@ Usage:
 import os
 import ray
 import hydra
+import omegaconf
 from omegaconf import DictConfig, OmegaConf
 from loguru import logger
 
@@ -56,17 +57,24 @@ def _cleanup_stale_reward_services() -> None:
     import time
 
     for class_name in ["RewardInferenceService"]:
-        result = subprocess.run(
-            [
-                "ray", "list", "actors",
-                "--filter", "state=ALIVE",
-                "--filter", f"class_name={class_name}",
-                "-f", "json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "ray", "list", "actors",
+                    "--filter", "state=ALIVE",
+                    "--filter", f"class_name={class_name}",
+                    "-f", "json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                f"Timeout while listing Ray actors for cleanup. "
+                f"Skipping cleanup for {class_name}."
+            )
+            continue
         try:
             actors = json.loads(result.stdout) if result.stdout.strip() else []
         except json.JSONDecodeError:
@@ -121,7 +129,8 @@ def start_reward_service(cfg: DictConfig, hf_token: str = "") -> None:
             cfg.environment.skyrl_gym.llm_as_a_judge_local,
             resolve=True,
         )
-    except Exception:
+    except (AttributeError, KeyError, omegaconf.errors.ConfigAttributeError) as e:
+        logger.warning(f"Could not resolve reward config: {e}. Using defaults.")
         reward_cfg = {}
 
     model = reward_cfg.get("model", "Qwen/Qwen2.5-1.5B-Instruct")
@@ -142,8 +151,8 @@ def start_reward_service(cfg: DictConfig, hf_token: str = "") -> None:
     actor_env_vars = {}
     effective_token = (
         hf_token
-        or os.environ.get("HF_TOKEN", "")
-        or os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     )
     if effective_token:
         actor_env_vars["HF_TOKEN"] = effective_token
