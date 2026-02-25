@@ -443,7 +443,10 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 "to vLLM. "
                 "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
             )
-        if "min_new_tokens" in cfg.generator.sampling_params or "min_new_tokens" in cfg.generator.eval_sampling_params:
+        if (
+            "min_new_tokens" in cfg.generator.sampling_params.additional_kwargs
+            or "min_new_tokens" in cfg.generator.eval_sampling_params.additional_kwargs
+        ):
             raise ValueError(
                 "`sampling_params.min_new_tokens` and `eval_sampling_params.min_new_tokens` are not "
                 "supported for SGLang backend since we always set `skip_tokenizer_init` to True. "

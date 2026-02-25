@@ -65,7 +65,7 @@ class HarborGenerator(GeneratorInterface):
 
         # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
         # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
-        self._harbor_trial_config_template = OmegaConf.to_container(harbor_cfg, resolve=True)
+        self._harbor_trial_config_template = deepcopy(harbor_cfg)
 
         # Set model_name and api_base once (constant across all trials)
         assert ie_cfg.served_model_name is not None, "served_model_name must be set"
