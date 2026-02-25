@@ -17,7 +17,7 @@ dependencies = [
     "rich>=14.1.0",
     "safetensors>=0.6.2",
     "tokenizers>=0.21.2",
-    "transformers>=4.56.1,<5",
+    "transformers>=5.0.0",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
@@ -98,7 +98,7 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.13.0; sys_platform == 'linux'",
+    "vllm==0.16.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.9.0; sys_platform == 'linux'",
     "flashinfer-python; sys_platform == 'linux' and platform_machine == 'x86_64'",
@@ -112,7 +112,7 @@ megatron = [
     "skyrl[skyrl-train]; python_version == '3.12'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
     "flash-attn==2.8.1; sys_platform == 'linux' and python_version == '3.12'",
-    "vllm==0.13.0; sys_platform == 'linux' and python_version == '3.12'",
+    "vllm==0.16.0; sys_platform == 'linux' and python_version == '3.12'",
     "torch==2.9.0; sys_platform == 'linux' and python_version == '3.12'",
     "flashinfer-python==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
     "torchvision; sys_platform == 'linux' and python_version == '3.12'",
