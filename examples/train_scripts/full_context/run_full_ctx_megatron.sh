@@ -19,7 +19,7 @@ MEGATRON_TP=4
 MEGATRON_PP=2
 MEGATRON_CP=1
 
-MAX_PROMPT_LENGTH=2048  
+MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=8192
 
 MODEL_NAME="Qwen/Qwen3-4B"
@@ -33,8 +33,8 @@ uv run --isolated --extra megatron -m examples.train_scripts.full_context.main_f
   trainer.strategy=megatron \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS_PER_NODE \
-  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -52,18 +52,18 @@ uv run --isolated --extra megatron -m examples.train_scripts.full_context.main_f
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.policy.optimizer_config.lr=1.0e-5 \
   trainer.algorithm.use_kl_loss=false \
-  generator.backend=vllm \
-  generator.run_engines_locally=true \
-  generator.weight_sync_backend=nccl \
-  generator.async_engine=false \
+  generator.inference_engine.backend=vllm \
+  generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.weight_sync_backend=nccl \
+  generator.inference_engine.async_engine=false \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.8 \
+  generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="wandb" \
   trainer.project_name="gsm8k_full_ctx" \
   trainer.run_name="gsm8k_full_ctx_test_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
   trainer.eval_interval=5 \
-  +trainer.num_dummy_steps=5
+  trainer.num_dummy_steps=5

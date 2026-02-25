@@ -1,5 +1,4 @@
-from typing import Optional, Union
-from omegaconf import DictConfig
+from typing import Optional
 from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput
 from openai import AsyncOpenAI
 import httpx
@@ -13,7 +12,7 @@ from skyrl.train.config import GeneratorConfig
 class VerifiersGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: Union[GeneratorConfig, DictConfig],
+        generator_cfg: GeneratorConfig,
         tokenizer,
         model_name: str,
     ):
@@ -26,8 +25,9 @@ class VerifiersGenerator(GeneratorInterface):
         self.tokenizer = tokenizer
         self.model_name = model_name
 
-        assert generator_cfg.enable_http_endpoint, "HTTP endpoint must be enabled for VerifiersGenerator"
-        self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}/v1"
+        ie_cfg = generator_cfg.inference_engine
+        assert ie_cfg.enable_http_endpoint, "HTTP endpoint must be enabled for VerifiersGenerator"
+        self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}/v1"
         self.client = self._setup_client(connection_limit=None)  # None means unlimited connections
 
     def _setup_client(self, connection_limit: Optional[int]) -> AsyncOpenAI:
