@@ -4,13 +4,11 @@ uv run --extra dev --extra vllm --isolated pytest tests/gpu/gpu_ci/test_skyrl_gy
 
 import os
 import pytest
-import ray
 from transformers import AutoTokenizer
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput
 from tests.gpu.utils import Timer, get_test_generator_input, InferenceEngineState
-from skyrl_train.utils.utils import initialize_ray
 from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from typing import Any, Dict
@@ -264,6 +262,7 @@ async def test_generator_single_turn_gsm8k(
         get_logprobs=batched,
     )
 
+
 @pytest.mark.asyncio
 async def test_generator_multi_turn_search(ray_init_fixture):
     """
@@ -449,8 +448,6 @@ async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
         temperature=0,
     )
 
-    assert isinstance(generator_output["is_last_step"], list) and isinstance(
-        generator_output["is_last_step"][0], bool
-    )
+    assert isinstance(generator_output["is_last_step"], list) and isinstance(generator_output["is_last_step"][0], bool)
     # Expect atleast one response with more than one turn
     assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
