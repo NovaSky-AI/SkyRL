@@ -1,3 +1,6 @@
+# NOTE: This YAML is now deprecated. 
+# The SkyRL-Train Backend now uses a dataclass based configuration
+# See skyrl/train/config/config.py for the dataclass based configuration.
 defaults:
   - _self_
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>

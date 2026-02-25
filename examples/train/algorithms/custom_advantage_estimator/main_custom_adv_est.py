@@ -2,13 +2,14 @@
 uv run --isolated --extra fsdp -m examples.train.algorithms.custom_advantage_estimator.main_custom_adv_est
 """
 
+import sys
+
 import ray
-import hydra
 import torch
 import numpy as np
-from omegaconf import DictConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils import initialize_ray
-from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl.backends.skyrl_train.utils.ppo_utils import AdvantageEstimatorRegistry
 
 
@@ -38,13 +39,13 @@ AdvantageEstimatorRegistry.register("simple_baseline", compute_simple_baseline_a
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp = BasePPOExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # validate the arguments
     validate_cfg(cfg)
 

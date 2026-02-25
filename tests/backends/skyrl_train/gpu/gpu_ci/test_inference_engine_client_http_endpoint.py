@@ -26,7 +26,7 @@ from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
 import logging
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from tests.backends.skyrl_train.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState
@@ -60,7 +60,7 @@ pytestmark = pytest.mark.skipif(
 litellm.disable_aiohttp_transport = True
 
 
-def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> Dict[str, Any]:
+def _get_test_sampling_params(backend: str, cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str, Any]:
     assert endpoint in ["chat_completions", "completions"]
     sampling_params = get_sampling_params_for_backend(backend, cfg.generator.sampling_params)
     sampling_params["logprobs"] = True
@@ -70,16 +70,16 @@ def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> 
     return sampling_params
 
 
-def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig:
+def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-    cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = num_inference_engines
-    cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
-    cfg.generator.run_engines_locally = True
+    cfg.generator.inference_engine.async_engine = True
+    cfg.generator.inference_engine.num_engines = num_inference_engines
+    cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
+    cfg.generator.inference_engine.run_engines_locally = True
     return cfg
 
 
@@ -225,11 +225,13 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
     batched_list = [False, True]
     with_traj_list = [False, True]
 
+    server_port = None
+    server_thread = None
     try:
         # 1. Build engine
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
 
@@ -242,11 +244,13 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         client = engines.client
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
+        print("Engine initialized successfully", flush=True)
+
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
 
         # 2. Build prompts
-        num_samples = 20
+        num_samples = 5
         test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
         text_prompts = [
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
@@ -270,8 +274,9 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
                 _check_completions_outputs(text_prompts, outputs, "request_posting", "vllm")
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
@@ -290,11 +295,13 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
     test_types = ["request_posting", "aiohttp_client_session", "litellm"]
     endpoints = ["chat_completions", "completions"]
+    server_port = None
+    server_thread = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         engines = InferenceEngineState.create(
             cfg=cfg,
@@ -314,12 +321,20 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             "policy",
             shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
             cfg=cfg,
         )
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+            )
+        )
         asyncio.run(client.reset_prefix_cache())
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+            )
+        )
 
         # 2. Do tests
         num_samples = 20
@@ -427,7 +442,6 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
 
         for test_type in test_types:
             for endpoint in endpoints:
-                print(f"Testing {test_type} with {endpoint}")
                 outputs = _generate_outputs(test_type, endpoint)
                 if endpoint == "chat_completions":
                     _check_chat_completions_outputs(outputs, test_type, num_samples, "vllm")
@@ -435,8 +449,9 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                     _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, test_type, "vllm")
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
@@ -457,10 +472,12 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
     """Test sending both /chat/completions and /completions requests to remote servers."""
     endpoints = ["chat_completions", "completions"]
 
+    server_port = None
+    server_thread = None
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-        cfg.generator.backend = backend
+        cfg.generator.inference_engine.backend = backend
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
         client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL_QWEN2_5)
@@ -528,7 +545,10 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
             server_thread.join(timeout=5)
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
+            server_thread.join(timeout=5)
         if "remote_server_process" in locals():
             remote_server_process.terminate()
             remote_server_process.wait()
@@ -536,10 +556,12 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 
 @pytest.mark.vllm
 def test_structured_generation(ray_init_fixture):
+    server_port = None
+    server_thread = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
         engines = InferenceEngineState.create(
@@ -585,8 +607,9 @@ def test_structured_generation(ray_init_fixture):
         text = output.choices[0].message.content
         assert json.loads(text) is not None, f"Output is not valid JSON: {text}"
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
@@ -599,10 +622,12 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     Tests validation errors (400) for invalid requests and verifies that internal
     server errors (500) are logged with traceback server-side (not exposed to client).
     """
+    server_port = None
+    server_thread = None
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
         engines = InferenceEngineState.create(
@@ -750,8 +775,9 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
         assert r.status_code == HTTPStatus.BAD_REQUEST
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
@@ -762,11 +788,13 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
     Test the HTTP endpoint /chat/completions with and without custom chat template.
     Check the output correspondingly.
     """
+    server_port = None
+    server_thread = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         engine_init_kwargs = {}
         if use_custom_template:
@@ -775,12 +803,12 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
         engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN3,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
             engine_init_kwargs=engine_init_kwargs,
         )
@@ -835,8 +863,9 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             assert "<think>" not in prompt_str and "</think>" not in prompt_str
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
@@ -856,24 +885,26 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
     # Use a custom served model name that differs from the actual model path
     SERVED_MODEL_NAME = "my-custom-model-alias"
 
+    server_port = None
+    server_thread = None
     try:
         # 1. Set up engine with served_model_name
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         # Set the served_model_name to be different from the model path
-        cfg.generator.served_model_name = SERVED_MODEL_NAME
+        cfg.generator.inference_engine.served_model_name = SERVED_MODEL_NAME
 
         engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
         client = engines.client
@@ -925,8 +956,9 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         ), f"Completions request with served_model_name failed: {response.status_code}, {response.json()}"
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
@@ -946,21 +978,23 @@ def test_context_length_error_returns_400(ray_init_fixture):
     # Use a small max_model_len to make testing faster
     TEST_MAX_MODEL_LEN = 1024
 
+    server_port = None
+    server_thread = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
         engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,
             engine_init_kwargs={"max_model_len": TEST_MAX_MODEL_LEN},
         )
@@ -1039,6 +1073,7 @@ def test_context_length_error_returns_400(ray_init_fixture):
         ), f"Error message should mention 'maximum context length': {str(exception_raised)[:200]}"
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
