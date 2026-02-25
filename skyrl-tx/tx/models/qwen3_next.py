@@ -53,7 +53,7 @@ def recurrent_gated_delta_rule(
     initial_state: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     dtype = query.dtype
-    compute_dtype = jnp.float32
+    compute_dtype = dtype
     query = l2norm(query.astype(compute_dtype), axis=-1)
     key = l2norm(key.astype(compute_dtype), axis=-1)
     value = value.astype(compute_dtype)
@@ -109,7 +109,7 @@ class Qwen3NextRMSNorm(nnx.Module):
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        compute_dtype = jnp.float32
+        compute_dtype = x.dtype
         out = x.astype(compute_dtype)
         out = out * jax.lax.rsqrt(jnp.mean(out * out, axis=-1, keepdims=True) + self.eps)
         out = out * (1.0 + self.weight[...].astype(compute_dtype))
@@ -129,7 +129,7 @@ class Qwen3NextRMSNormGated(nnx.Module):
 
     def __call__(self, hidden_states: jax.Array, gate: jax.Array) -> jax.Array:
         input_dtype = hidden_states.dtype
-        compute_dtype = jnp.float32
+        compute_dtype = hidden_states.dtype
         out = hidden_states.astype(compute_dtype)
         out = out * jax.lax.rsqrt(jnp.mean(out * out, axis=-1, keepdims=True) + self.eps)
         out = out * self.weight[...].astype(compute_dtype)
