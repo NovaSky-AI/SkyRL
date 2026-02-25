@@ -231,8 +231,6 @@ class RefConfig(BaseConfig):
 
 @dataclass
 class KLCtrlConfig(BaseConfig):
-    """Only used when ``use_kl_in_reward=True`` (not applied when ``use_kl_loss=True``).
-    Uses ``kl_loss_coef`` as the initial KL coefficient."""
 
     type: str = "fixed"
     """``"fixed"`` or ``"adaptive"``."""
@@ -260,7 +258,6 @@ class DynamicSamplingConfig(BaseConfig):
 
 @dataclass
 class ClipCovConfig(BaseConfig):
-    """Only used when ``policy_loss_type="clip_cov"``."""
 
     clip_ratio: float = 0.0002
     """Fraction of tokens to clip based on covariance."""
@@ -270,7 +267,6 @@ class ClipCovConfig(BaseConfig):
 
 @dataclass
 class KLCovConfig(BaseConfig):
-    """Only used when ``policy_loss_type="kl_cov"``."""
 
     kl_cov_frac: float = 0.2
     """Fraction of tokens to apply KL regularization to."""
@@ -279,7 +275,6 @@ class KLCovConfig(BaseConfig):
 
 @dataclass
 class CISPOConfig(BaseConfig):
-    """Only used when ``policy_loss_type="cispo"``."""
 
     cispo_eps_clip_low: float = 0.0
     """Offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
@@ -318,6 +313,8 @@ class AlgorithmConfig(BaseConfig):
     advantage_estimator: str = "grpo"
     """``"grpo"``, ``"gae"``, ``"rloo"``, ``"reinforce++"``, or custom via ``AdvantageEstimatorRegistry``."""
     kl_ctrl: KLCtrlConfig = field(default_factory=KLCtrlConfig)
+    """Only used when ``use_kl_in_reward=True`` (not applied when ``use_kl_loss=True``).
+    Uses ``kl_loss_coef`` as the initial KL coefficient."""
     kl_estimator_type: str = "k3"
     """``"k1"``, ``"k2"``, ``"k3"``, ``"abs"``. See http://joschu.net/blog/kl-approx.html."""
     use_kl_in_reward: bool = False
@@ -357,8 +354,11 @@ class AlgorithmConfig(BaseConfig):
     value_clip: float = 0.2
     dynamic_sampling: DynamicSamplingConfig = field(default_factory=DynamicSamplingConfig)
     clip_cov: ClipCovConfig = field(default_factory=ClipCovConfig)
+    """Only used when ``policy_loss_type="clip_cov"``."""
     kl_cov: KLCovConfig = field(default_factory=KLCovConfig)
+    """Only used when ``policy_loss_type="kl_cov"``."""
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
+    """Only used when ``policy_loss_type="cispo"``."""
     max_seq_len: Optional[int] = None
     """Used for ``seq_mean_token_sum_norm`` loss reduction; set explicitly for multi-turn.
     If ``None``, calculated as ``generator.max_input_length + generator.sampling_params.max_generate_length``."""

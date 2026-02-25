@@ -64,9 +64,11 @@ def _build_skyrl_train_config(
 
     # Apply user overrides from backend_config
     user_overrides = dict(overrides.model_extra)
+    # override base model path
+    # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
+    # that will resolve other attributes such as the reference model path based on the policy model path.
+    user_overrides["trainer.policy.model.path"] = base_model
     cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
-
-    cfg.trainer.policy.model.path = base_model
 
     # Disable scheduler - Tinker manages learning rate externally via set_lr()
     cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
