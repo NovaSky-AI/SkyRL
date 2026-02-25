@@ -446,7 +446,7 @@ class InferenceEngineConfig(BaseConfig):
     enable_http_endpoint: bool = False
     """When ``True``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.
     
-    NOTE: When using HTTP endpoints directly, make sure to set ``generator.sampling_params.temperature`` to the temperature used during generation - the algorithm config temperature (used fo logits scaling) inherits this value.
+    NOTE: When using HTTP endpoints directly, make sure to set ``generator.sampling_params.temperature`` to the temperature used during generation - the algorithm config temperature (used for logits scaling) inherits this value.
     """
     http_endpoint_host: str = "127.0.0.1"
     http_endpoint_port: int = 8000
