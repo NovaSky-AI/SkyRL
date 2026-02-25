@@ -1,0 +1,422 @@
+#include <cuda_runtime.h>
+#include <stdint.h>
+
+#include <optional>
+#include <vector>
+
+#include "xla/ffi/api/c_api.h"
+#include "xla/ffi/api/ffi.h"
+
+#include <cutlass/cutlass.h>
+#include <cutlass/version.h>
+#include <cutlass/layout/matrix.h>
+#include <cutlass/numeric_types.h>
+#include <cutlass/util/packed_stride.hpp>
+
+#include <cute/tensor.hpp>
+#include <cutlass/gemm/collective/collective_builder.hpp>
+#include <cutlass/epilogue/collective/collective_builder.hpp>
+#include <cutlass/gemm/device/gemm_universal_adapter.h>
+#include <cutlass/gemm/kernel/gemm_universal.hpp>
+#include <cutlass/gemm/dispatch_policy.hpp>
+
+#if !defined(CUTLASS_MAJOR) || CUTLASS_MAJOR < 3
+#error "This kernel requires CUTLASS >= 3.x (SM90 grouped GEMM)."
+#endif
+
+namespace ffi = xla::ffi;
+
+// Cache device properties because cudaGetDeviceProperties is slow.
+static std::optional<int> get_sm_count() {
+  static std::vector<cudaDeviceProp> device_props = [] {
+    int num_gpus = 0;
+    if (cudaGetDeviceCount(&num_gpus) != cudaSuccess || num_gpus <= 0) {
+      return std::vector<cudaDeviceProp>{};
+    }
+    std::vector<cudaDeviceProp> props(num_gpus);
+    for (int i = 0; i < num_gpus; ++i) {
+      cudaGetDeviceProperties(&props[i], i);
+    }
+    return props;
+  }();
+
+  int device = 0;
+  if (cudaGetDevice(&device) != cudaSuccess || device < 0 || device >= device_props.size()) {
+    return {};
+  }
+  return device_props[device].multiProcessorCount;
+}
+
+using DtypeA = cutlass::bfloat16_t;
+using DtypeB = cutlass::bfloat16_t;
+using DtypeOutput = cutlass::bfloat16_t;
+using DtypeAccum = float;
+using LayoutA = cutlass::layout::RowMajor;
+using LayoutB = cutlass::layout::RowMajor;
+using LayoutOutput = cutlass::layout::RowMajor;
+constexpr int AlignmentA = 8;
+constexpr int AlignmentB = 8;
+constexpr int AlignmentOutput = 8;
+
+using ArchTag = cutlass::arch::Sm90;
+using OperatorClass = cutlass::arch::OpClassTensorOp;
+using ProblemShape = cutlass::gemm::GroupProblemShape<cute::Shape<int32_t, int32_t, int32_t>>;
+
+// Prefill-optimized kernel config: larger N tile is better for long sequences.
+using TileShape = cute::Shape<cute::_64, cute::_256, cute::_64>;
+using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelSchedule = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+using EpilogueSchedule = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
+
+// Decode-optimized config for large K (e.g. LoRA A pass: K=hidden_size, N=rank).
+// Deeper K tile (128) improves throughput for large reduction dimensions.
+using TileShapeDecode = cute::Shape<cute::_64, cute::_64, cute::_128>;
+using ClusterShapeDecode = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelScheduleDecode = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedPingpong;
+using EpilogueScheduleDecode = cutlass::epilogue::PtrArrayTmaWarpSpecializedPingpong;
+
+// Decode-optimized config for small K (e.g. LoRA B pass: K=rank, N=hidden_size).
+// Cooperative schedule with 128x128 tile improves SM utilization for small-K GEMMs.
+using TileShapeDecodeSmallK = cute::Shape<cute::_128, cute::_128, cute::_32>;
+using ClusterShapeDecodeSmallK = cute::Shape<cute::_1, cute::_1, cute::_1>;
+using KernelScheduleDecodeSmallK = cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative;
+using EpilogueScheduleDecodeSmallK = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
+
+using CollectiveEpilogue =
+    typename cutlass::epilogue::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, TileShape, ClusterShape,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
+        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueSchedule,
+        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
+
+using CollectiveMainloop =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
+        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape, ClusterShape,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+        KernelSchedule>::CollectiveOp;
+
+using GemmKernel = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop, CollectiveEpilogue>;
+using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
+using CollectiveEpilogueDecode =
+    typename cutlass::epilogue::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, TileShapeDecode, ClusterShapeDecode,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
+        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueScheduleDecode,
+        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
+
+using CollectiveMainloopDecode =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
+        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShapeDecode, ClusterShapeDecode,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogueDecode::SharedStorage))>,
+        KernelScheduleDecode>::CollectiveOp;
+
+using GemmKernelDecode =
+    cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopDecode, CollectiveEpilogueDecode>;
+using GemmDecode = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelDecode>;
+
+using CollectiveEpilogueDecodeSmallK =
+    typename cutlass::epilogue::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, TileShapeDecodeSmallK, ClusterShapeDecodeSmallK,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        DtypeAccum, DtypeAccum, void, LayoutOutput*, AlignmentOutput,
+        DtypeOutput, LayoutOutput*, AlignmentOutput, EpilogueScheduleDecodeSmallK,
+        cutlass::epilogue::fusion::LinearCombination<DtypeOutput, DtypeAccum>>::CollectiveOp;
+
+using CollectiveMainloopDecodeSmallK =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA*, AlignmentA,
+        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShapeDecodeSmallK, ClusterShapeDecodeSmallK,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogueDecodeSmallK::SharedStorage))>,
+        KernelScheduleDecodeSmallK>::CollectiveOp;
+
+using GemmKernelDecodeSmallK =
+    cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloopDecodeSmallK, CollectiveEpilogueDecodeSmallK>;
+using GemmDecodeSmallK = cutlass::gemm::device::GemmUniversalAdapter<GemmKernelDecodeSmallK>;
+
+using ProblemShapeType = ProblemShape::UnderlyingProblemShape;
+
+// Backward kernel for d_rhs: computes lhs.T @ grad per group
+// Uses ColumnMajor for A to interpret row-major lhs as transposed
+using LayoutA_Bwd = cutlass::layout::ColumnMajor;
+
+using CollectiveMainloop_Bwd =
+    typename cutlass::gemm::collective::CollectiveBuilder<
+        ArchTag, OperatorClass, DtypeA, LayoutA_Bwd*, AlignmentA,
+        DtypeB, LayoutB*, AlignmentB, DtypeAccum, TileShape, ClusterShape,
+        cutlass::gemm::collective::StageCountAutoCarveout<
+            static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+        KernelSchedule>::CollectiveOp;
+
+using GemmKernel_Bwd = cutlass::gemm::kernel::GemmUniversal<ProblemShape, CollectiveMainloop_Bwd, CollectiveEpilogue>;
+using Gemm_Bwd = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Bwd>;
+
+// 128-byte alignment for TMA requirements on SM90
+constexpr size_t kTmaAlignment = 128;
+
+template <typename T>
+static T* carve_aligned(char*& p, size_t count) {
+  T* out = reinterpret_cast<T*>((reinterpret_cast<uintptr_t>(p) + kTmaAlignment - 1) & ~uintptr_t(kTmaAlignment - 1));
+  p = reinterpret_cast<char*>(out + count);
+  return out;
+}
+
+template <typename GemmT>
+struct GroupedGemmData {
+  using StrideA = typename GemmT::GemmKernel::InternalStrideA;
+  using StrideB = typename GemmT::GemmKernel::InternalStrideB;
+  using StrideOutput = typename GemmT::GemmKernel::InternalStrideD;
+
+  const DtypeA** A_ptrs;
+  const DtypeB** B_ptrs;
+  DtypeOutput** out_ptrs;
+  StrideA* stride_A;
+  StrideB* stride_B;
+  StrideOutput* stride_output;
+  ProblemShapeType* problem_sizes;
+
+  static std::optional<GroupedGemmData> Allocate(ffi::ScratchAllocator& scratch, size_t g) {
+    size_t bytes = 7 * kTmaAlignment +
+                   sizeof(const DtypeA*) * g + sizeof(const DtypeB*) * g + sizeof(DtypeOutput*) * g +
+                   sizeof(StrideA) * g + sizeof(StrideB) * g + sizeof(StrideOutput) * g +
+                   sizeof(ProblemShapeType) * g;
+    auto slab_or = scratch.Allocate(bytes);
+    if (!slab_or.has_value()) {
+      return std::nullopt;
+    }
+    GroupedGemmData data;
+    char* p = reinterpret_cast<char*>(slab_or.value());
+    data.A_ptrs = carve_aligned<const DtypeA*>(p, g);
+    data.B_ptrs = carve_aligned<const DtypeB*>(p, g);
+    data.out_ptrs = carve_aligned<DtypeOutput*>(p, g);
+    data.stride_A = carve_aligned<StrideA>(p, g);
+    data.stride_B = carve_aligned<StrideB>(p, g);
+    data.stride_output = carve_aligned<StrideOutput>(p, g);
+    data.problem_sizes = carve_aligned<ProblemShapeType>(p, g);
+    return data;
+  }
+
+  typename GemmT::Arguments MakeArgs(int32_t g_local) const {
+    typename GemmT::Arguments args{
+        cutlass::gemm::GemmUniversalMode::kGrouped,
+        {g_local, problem_sizes, nullptr},
+        {A_ptrs, stride_A, B_ptrs, stride_B},
+        {{}, nullptr, stride_output, out_ptrs, stride_output}};
+    args.epilogue.thread.alpha = 1.0f;
+    args.epilogue.thread.dAlpha = {cute::_0{}, cute::_0{}, 0};
+    return args;
+  }
+};
+
+enum class GemmDir { Fwd, Bwd };
+
+constexpr int32_t kDecodeTokenThreshold = 256;
+constexpr float kDecodeTokensPerGroupThreshold = 4.0f;
+
+static bool use_decode_kernel(int32_t m, int32_t g_local) {
+  int32_t safe_group_count = g_local > 0 ? g_local : 1;
+  float avg_tokens_per_group = static_cast<float>(m) / static_cast<float>(safe_group_count);
+  return m <= kDecodeTokenThreshold || avg_tokens_per_group <= kDecodeTokensPerGroupThreshold;
+}
+
+// Unified prepare kernel for forward and backward passes
+// Fwd: A[M,K] @ B[G,K,N] -> out[M,N] (ragged by group)
+// Bwd: A.T[K,M] @ B[M,N] -> out[G,K,N] (lhs transposed via ColumnMajor layout)
+// group_offsets_cumsum has length G+1 with cumsum[0]=0 (include_initial=True)
+template <typename GemmT, GemmDir Dir>
+__global__ void prepare_grouped_gemm(
+    const DtypeA* A, const DtypeB* B, DtypeOutput* out,
+    const int32_t* group_offsets_cumsum, const int32_t* group_offset_ptr,
+    int32_t k, int32_t n, GroupedGemmData<GemmT> data) {
+  using Data = GroupedGemmData<GemmT>;
+  int32_t tid = threadIdx.x;
+  int32_t global = group_offset_ptr[0] + tid;
+  int32_t start = group_offsets_cumsum[global];
+  int32_t m = group_offsets_cumsum[global + 1] - start;
+
+  data.A_ptrs[tid] = A + static_cast<int64_t>(start) * k;
+  if constexpr (Dir == GemmDir::Fwd) {
+    data.B_ptrs[tid] = B + static_cast<int64_t>(tid) * n * k;
+    data.out_ptrs[tid] = out + static_cast<int64_t>(start) * n;
+    data.problem_sizes[tid] = ProblemShapeType(m, n, k);
+    data.stride_A[tid] = cutlass::make_cute_packed_stride(typename Data::StrideA{}, {k, k, 1});
+    data.stride_output[tid] = cutlass::make_cute_packed_stride(typename Data::StrideOutput{}, {n, n, 1});
+  } else {
+    data.B_ptrs[tid] = B + static_cast<int64_t>(start) * n;
+    data.out_ptrs[tid] = out + static_cast<int64_t>(tid) * k * n;
+    data.problem_sizes[tid] = ProblemShapeType(k, n, m);
+    data.stride_A[tid] = cutlass::make_cute_packed_stride(typename Data::StrideA{}, {k, k, 1});
+    data.stride_output[tid] = cutlass::make_cute_packed_stride(typename Data::StrideOutput{}, {n, n, 1});
+  }
+  data.stride_B[tid] = cutlass::make_cute_packed_stride(typename Data::StrideB{}, {n, n, 1});
+}
+
+template <typename GemmT, GemmDir Dir>
+ffi::Error ExecuteGroupedGemm(
+    cudaStream_t stream, ffi::ScratchAllocator& scratch,
+    const DtypeA* A, const DtypeB* B, DtypeOutput* out,
+    const int32_t* group_offsets_cumsum, const int32_t* group_offset,
+    int32_t g_local, int32_t k, int32_t n) {
+  if (g_local > 1024) return ffi::Error::InvalidArgument("group_count must be <= 1024.");
+
+  auto data = GroupedGemmData<GemmT>::Allocate(scratch, g_local);
+  if (!data) return ffi::Error::Internal("Failed to allocate grouped GEMM slab.");
+
+  prepare_grouped_gemm<GemmT, Dir><<<1, g_local, 0, stream>>>(
+      A, B, out, group_offsets_cumsum, group_offset, k, n, *data);
+
+  GemmT gemm;
+  auto args = data->MakeArgs(g_local);
+  auto sm_count = get_sm_count();
+  if (!sm_count) return ffi::Error::Internal("Failed to get SM count.");
+  args.hw_info.sm_count = *sm_count;
+
+  if (gemm.can_implement(args) != cutlass::Status::kSuccess) {
+    return ffi::Error::Internal("cutlass cannot implement grouped gemm.");
+  }
+
+  void* workspace = nullptr;
+  if (size_t workspace_size = GemmT::get_workspace_size(args)) {
+    auto workspace_or = scratch.Allocate(workspace_size);
+    if (!workspace_or.has_value()) {
+      return ffi::Error::Internal("Failed to allocate CUTLASS workspace.");
+    }
+    workspace = workspace_or.value();
+  }
+
+  if (gemm(args, workspace, stream) != cutlass::Status::kSuccess) {
+    return ffi::Error::Internal("cutlass grouped gemm failed.");
+  }
+
+  return ffi::Error::Success();
+}
+
+ffi::Error RaggedDotCudaImpl(
+    cudaStream_t stream,
+    ffi::ScratchAllocator scratch,
+    ffi::Buffer<ffi::BF16> lhs,
+    ffi::Buffer<ffi::BF16> rhs,
+    ffi::Buffer<ffi::S32> group_offset,
+    ffi::Buffer<ffi::S32> group_offsets_cumsum,
+    ffi::ResultBuffer<ffi::BF16> out) {
+  auto lhs_dims = lhs.dimensions();
+  auto rhs_dims = rhs.dimensions();
+
+  if (lhs_dims.size() != 2 || rhs_dims.size() != 3 || group_offset.dimensions().size() != 1) {
+    return ffi::Error::InvalidArgument("Unexpected ragged_dot dimensions.");
+  }
+  if (lhs_dims[1] != rhs_dims[1]) {
+    return ffi::Error::InvalidArgument("lhs/rhs K dimension mismatch.");
+  }
+
+  int32_t m = static_cast<int32_t>(lhs_dims[0]);
+  int32_t k = static_cast<int32_t>(lhs_dims[1]);
+  int32_t g_local = static_cast<int32_t>(rhs_dims[0]);
+  int32_t n = static_cast<int32_t>(rhs_dims[2]);
+
+  if (g_local <= 0) {
+    return ffi::Error::InvalidArgument("rhs must have at least one group.");
+  }
+
+  if (cudaMemsetAsync(out->typed_data(), 0, static_cast<size_t>(m) * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
+    return ffi::Error::Internal("Failed to zero output.");
+  }
+
+  if (use_decode_kernel(m, g_local)) {
+    if (k <= 64) {
+      // Small K (e.g. LoRA B pass: K=rank) — use wider N tile, narrower K tile.
+      return ExecuteGroupedGemm<GemmDecodeSmallK, GemmDir::Fwd>(
+          stream, scratch,
+          reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+          reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+          reinterpret_cast<DtypeOutput*>(out->typed_data()),
+          group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+    }
+    // Large K (e.g. LoRA A pass: K=hidden_size) — use wider K tile.
+    return ExecuteGroupedGemm<GemmDecode, GemmDir::Fwd>(
+        stream, scratch,
+        reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+        reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+        reinterpret_cast<DtypeOutput*>(out->typed_data()),
+        group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+  }
+
+  return ExecuteGroupedGemm<Gemm, GemmDir::Fwd>(
+      stream, scratch,
+      reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+      reinterpret_cast<const DtypeB*>(rhs.typed_data()),
+      reinterpret_cast<DtypeOutput*>(out->typed_data()),
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    RaggedDotCuda,
+    RaggedDotCudaImpl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Ctx<ffi::ScratchAllocator>()
+        .Arg<ffi::Buffer<ffi::BF16>>()  // lhs
+        .Arg<ffi::Buffer<ffi::BF16>>()  // rhs
+        .Arg<ffi::Buffer<ffi::S32>>()   // group_offset
+        .Arg<ffi::Buffer<ffi::S32>>()   // group_offsets_cumsum
+        .Ret<ffi::Buffer<ffi::BF16>>(),  // out
+    {ffi::Traits::kCmdBufferCompatible});
+
+// Backward pass for d_rhs: computes lhs.T @ grad per group -> d_rhs[G, K, N]
+ffi::Error RaggedDotBwdCudaImpl(
+    cudaStream_t stream,
+    ffi::ScratchAllocator scratch,
+    ffi::Buffer<ffi::BF16> lhs,
+    ffi::Buffer<ffi::BF16> grad,
+    ffi::Buffer<ffi::S32> group_offset,
+    ffi::Buffer<ffi::S32> group_offsets_cumsum,
+    ffi::ResultBuffer<ffi::BF16> d_rhs) {
+  auto lhs_dims = lhs.dimensions();
+  auto grad_dims = grad.dimensions();
+  auto d_rhs_dims = d_rhs->dimensions();
+
+  if (lhs_dims.size() != 2 || grad_dims.size() != 2 || d_rhs_dims.size() != 3) {
+    return ffi::Error::InvalidArgument("Unexpected ragged_dot_bwd dimensions.");
+  }
+  if (lhs_dims[0] != grad_dims[0]) {
+    return ffi::Error::InvalidArgument("lhs/grad M dimension mismatch.");
+  }
+  if (d_rhs_dims[1] != lhs_dims[1] || d_rhs_dims[2] != grad_dims[1]) {
+    return ffi::Error::InvalidArgument("d_rhs shape must be [G, K, N].");
+  }
+
+  int32_t k = static_cast<int32_t>(lhs_dims[1]);
+  int32_t n = static_cast<int32_t>(grad_dims[1]);
+  int32_t g_local = static_cast<int32_t>(d_rhs_dims[0]);
+
+  if (cudaMemsetAsync(d_rhs->typed_data(), 0, static_cast<size_t>(g_local) * k * n * sizeof(DtypeOutput), stream) != cudaSuccess) {
+    return ffi::Error::Internal("Failed to zero d_rhs output.");
+  }
+
+  return ExecuteGroupedGemm<Gemm_Bwd, GemmDir::Bwd>(
+      stream, scratch,
+      reinterpret_cast<const DtypeA*>(lhs.typed_data()),
+      reinterpret_cast<const DtypeB*>(grad.typed_data()),
+      reinterpret_cast<DtypeOutput*>(d_rhs->typed_data()),
+      group_offsets_cumsum.typed_data(), group_offset.typed_data(), g_local, k, n);
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(
+    RaggedDotBwdCuda,
+    RaggedDotBwdCudaImpl,
+    ffi::Ffi::Bind()
+        .Ctx<ffi::PlatformStream<cudaStream_t>>()
+        .Ctx<ffi::ScratchAllocator>()
+        .Arg<ffi::Buffer<ffi::BF16>>()  // lhs
+        .Arg<ffi::Buffer<ffi::BF16>>()  // grad
+        .Arg<ffi::Buffer<ffi::S32>>()   // group_offset
+        .Arg<ffi::Buffer<ffi::S32>>()   // group_offsets_cumsum
+        .Ret<ffi::Buffer<ffi::BF16>>(),  // d_rhs
+    {ffi::Traits::kCmdBufferCompatible});

@@ -66,7 +66,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     """Configuration specific to the JAX backend."""
 
     max_lora_adapters: int = Field(default=32, description="Maximum number of LoRA adapters")
-    max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
+    max_lora_rank: int = Field(default=8, description="Maximum LoRA rank")
     tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
     expert_parallel_size: int = Field(default=1, description="Expert parallelism degree for MoE layers")
     fully_sharded_data_parallel_size: int = Field(
@@ -211,6 +211,12 @@ class JaxBackendImpl(AbstractBackend):
             gradient_checkpointing=config.gradient_checkpointing,
             mhc_expansion_rate=config.mhc_expansion_rate,
         )
+
+        if config.max_lora_rank % 8 != 0:
+            logger.warning(
+                f"[bold yellow]max_lora_rank={config.max_lora_rank} is not divisible by 8. "
+                "This could lead to degraded performance.[/bold yellow]"
+            )
 
         model_class = get_model_class(self.model_config)
 

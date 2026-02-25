@@ -4,6 +4,14 @@ from jax import lax
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh, PartitionSpec
 
+try:
+    from tx.ffi import ragged_dot_ffi, ragged_dot_ffi_available
+except Exception:  # pragma: no cover - optional GPU extension
+    ragged_dot_ffi = None
+
+    def ragged_dot_ffi_available() -> bool:
+        return False
+
 
 def ragged_dot(
     lhs: jax.Array,
@@ -15,17 +23,30 @@ def ragged_dot(
 ) -> jax.Array:
     """Ragged dot product with group_offset support.
 
-    When group_offset is specified, rhs contains groups [offset, offset + g_local).
-    Tokens outside this range are routed to boundary groups and masked to zero.
+    When group_offset is None, we default to offset 0 and still run through
+    the same fast-path checks. When specified, rhs contains groups
+    [offset, offset + g_local). Tokens outside this range are routed to
+    boundary groups and masked to zero.
     """
     if group_offset is None:
-        return lax.ragged_dot(
-            lhs,
-            rhs,
-            group_sizes,
-            precision=precision,
-            preferred_element_type=preferred_element_type,
-        )
+        group_offset = jnp.zeros((1,), dtype=jnp.int32)
+
+    # CUTLASS kernel requires k and n dimensions divisible by 8
+    k = lhs.shape[-1]
+    n = rhs.shape[-1]
+    cutlass_alignment = 8
+
+    if (
+        ragged_dot_ffi_available()
+        and jax.default_backend() == "gpu"
+        and lhs.dtype == jnp.bfloat16
+        and rhs.dtype == jnp.bfloat16
+        and group_sizes.dtype == jnp.int32
+        and group_offset.dtype == jnp.int32
+        and k % cutlass_alignment == 0
+        and n % cutlass_alignment == 0
+    ):
+        return ragged_dot_ffi(lhs, rhs, group_sizes, group_offset)
 
     assert group_offset.shape == (1,), "group_offset must have shape (1,)"
     offset = group_offset[0]
@@ -112,7 +133,12 @@ def shard_map_ep(module: nnx.Module, func, *args):
     state_specs = jax.tree.map(make_ep_spec, partition_specs, state, is_leaf=lambda x: isinstance(x, PartitionSpec))
     in_specs = (state_specs,) + (PartitionSpec(),) * len(args)
 
-    @jax.shard_map(mesh=get_abstract_mesh(), in_specs=in_specs, out_specs=PartitionSpec(), axis_names={"ep"})
+    @jax.shard_map(
+        mesh=get_abstract_mesh(),
+        in_specs=in_specs,
+        out_specs=PartitionSpec(),
+        axis_names={"ep"},
+    )
     def _body(state, *fn_args):
         module_shard = nnx.merge(graphdef, state)
         return func(module_shard, *fn_args)
