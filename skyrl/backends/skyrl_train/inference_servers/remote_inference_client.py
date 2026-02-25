@@ -655,9 +655,9 @@ class RemoteInferenceClient:
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:
     """Modified version of resp.raise_for_status() that reads the body for the error message.
 
-    Raises aiohttp.ClientResponseError with the error message from the body if the status code is 400 or higher.
+    Raises aiohttp.ClientResponseError with the error message from the body if there is an error
     """
-    if resp.status >= 400 and body is not None:
+    if resp.status >= 300 and body is not None:
         error_detail = body.get("error", {})
         detail_msg = error_detail.get("message", resp.reason) if isinstance(error_detail, dict) else resp.reason
         raise aiohttp.ClientResponseError(

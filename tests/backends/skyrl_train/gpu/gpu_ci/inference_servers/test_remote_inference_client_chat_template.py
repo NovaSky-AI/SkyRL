@@ -1,5 +1,5 @@
 """
-Custom chat template tests for the `RemoteInferenceClient`.
+Custom chat template tests for the the new inference path.
 
 NOTE: This test is separate from `test_remote_inference_client_generation.py` because we use separate engine configurations for each test parametrization.
 
