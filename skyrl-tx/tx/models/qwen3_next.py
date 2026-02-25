@@ -898,3 +898,5 @@ class Qwen3NextForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsP
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
         )
+
+Qwen3_5ForConditionalGeneration = Qwen3NextForCausalLM

@@ -59,7 +59,8 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
         case "torch.float16" | "float16":
             return jnp.float16
         case _:
-            raise ValueError(f"Unsupported torch dtype: {dtype}")
+            return jnp.bfloat16
+            # raise ValueError(f"Unsupported torch dtype: {dtype}")
 
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
