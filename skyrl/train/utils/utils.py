@@ -213,6 +213,7 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         )
 
 
+# TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses
 def validate_cfg(cfg: SkyRLTrainConfig):
     # Validate generation config separately
     validate_generator_cfg(cfg)
@@ -275,17 +276,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
         f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
     )
-
-    if cfg.trainer.algorithm.max_seq_len is None:
-        # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
-        # per batch can be variable based on the prompt length. This is used to normalize the loss for
-        # seq_mean_token_sum_norm loss reduction.
-        # TODO(Charlie): This calculation is not correct for multi-turn and users should use `max_seq_len` instead.
-        # Should we just force users to set max_seq_len if loss reduction is seq_mean_token_sum_norm, regardless of
-        # multi-turn or not?
-        cfg.trainer.algorithm.max_seq_len = (
-            cfg.generator.max_input_length + cfg.generator.sampling_params.max_generate_length
-        )
 
     # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:
@@ -443,7 +433,7 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
                 "to vLLM. "
                 "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
             )
-        if (
+        if cfg.generator.sampling_params.additional_kwargs is not None and (
             "min_new_tokens" in cfg.generator.sampling_params.additional_kwargs
             or "min_new_tokens" in cfg.generator.eval_sampling_params.additional_kwargs
         ):

@@ -327,11 +327,11 @@ class AlgorithmConfig(BaseConfig):
     kl_loss_coef: float = 0.001
     use_entropy_loss: bool = False
     entropy_loss_coef: float = 0.01
-    temperature: float = 1.0
+    temperature: Optional[float] = None
     """Temperature for scaling logits in policy loss computation.
-    Typically set from ``generator.sampling_params.temperature`` during config validation.
+    If ``None``, will be set to the temperature provided by ``generator.sampling_params.temperature`` during config validation.
     
-    NOTE: When using HTTP endpoints directly, make sure to set ``generator.sampling_params.temperature`` to the temperature used during generation - the algorithm config temperature inherits this value.
+    NOTE: When using HTTP endpoints directly, make sure to set this value to the temperature used during generation
     """
     advantage_batch_normalize: bool = False
     value_head_prefix: str = "value_head"
@@ -446,7 +446,7 @@ class InferenceEngineConfig(BaseConfig):
     enable_http_endpoint: bool = False
     """When ``True``, launch an OpenAI-compatible HTTP endpoint for the inference engine client so that generators can send requests to this server instead of using ``.generate()`` Python calls.
     
-    NOTE: When using HTTP endpoints directly, make sure to set ``generator.sampling_params.temperature`` to the temperature used during generation - the algorithm config temperature (used for logits scaling) inherits this value.
+    NOTE: When using HTTP endpoints directly, make sure to set ``trainer.algorithm.temperature`` to the temperature used during generation
     """
     http_endpoint_host: str = "127.0.0.1"
     http_endpoint_port: int = 8000
@@ -696,7 +696,19 @@ class SkyRLTrainConfig(BaseConfig):
             self.generator.rope_theta = self.trainer.rope_theta
         # Copy temperature from generator sampling params to algorithm config
         # so workers can access it without needing the generator config
-        self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+        if self.trainer.algorithm.temperature is None:
+            self.trainer.algorithm.temperature = self.generator.sampling_params.temperature
+
+        if self.trainer.algorithm.max_seq_len is None:
+            # NOTE (erictang000): this is the max sequence length including the prompt, since max response length
+            # per batch can be variable based on the prompt length. This is used to normalize the loss for
+            # seq_mean_token_sum_norm loss reduction.
+            # TODO(Charlie): This calculation is not correct for multi-turn and users should use `max_seq_len` instead.
+            # Should we just force users to set max_seq_len if loss reduction is seq_mean_token_sum_norm, regardless of
+            # multi-turn or not?
+            self.trainer.algorithm.max_seq_len = (
+                self.generator.max_input_length + self.generator.sampling_params.max_generate_length
+            )
 
     @classmethod
     def from_cli_overrides(cls, args: Union[List[str], dict]) -> "SkyRLTrainConfig":
