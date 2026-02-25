@@ -43,6 +43,11 @@ class MegatronModelWrapper:
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
         config.finalize_model_grads_func = finalize_model_grads
+        # Wire up the optimizer's loss scaler so Megatron's pipeline schedule can scale
+        # the loss before backward (critical for fp16 dynamic loss scaling, MoE aux loss
+        # scaling, and any explicit loss_scale configuration).
+        if actor_optimizer is not None:
+            config.grad_scale_func = actor_optimizer.scale_loss
 
     def train(self):
         [module.train() for module in self.actor_module]
