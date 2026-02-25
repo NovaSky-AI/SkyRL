@@ -153,7 +153,6 @@ async def run_generator_end_to_end(
             skyrl_gym_cfg=env_cfg,
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
-            model_name=model,
         )
 
         input_batch: GeneratorInput = get_test_generator_input(
