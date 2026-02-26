@@ -506,11 +506,10 @@ class InferenceEngineClient(InferenceEngineInterface):
 
         # 3. Check for errors.
         # results can be ErrorResponse or CompletionResponse. If one of the sub-requests fails, we
-        # return an error response. That is, there is no partial success, following vLLM and SGLang's behavior.
+        # return an error response. That is, there is no partial success, following vLLM's behavior.
         for result in results:
             if "error" in result or result.get("object", "") == "error":
-                # former is vllm format, latter is sglang format
-                error_details = result.get("error", result)  # resolves vllm/sglang format difference
+                error_details = result.get("error", result)
                 error_code = error_details["code"]
                 error_type = error_details["type"]
                 error_message = error_details["message"]

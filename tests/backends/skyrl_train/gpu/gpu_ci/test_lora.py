@@ -42,21 +42,21 @@ def get_test_actor_config(enable_lora: bool = False) -> SkyRLTrainConfig:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy", "backend", "tp_size"),
+    ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
     [
-        pytest.param(False, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(False, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
+        pytest.param(False, "nccl", "fsdp", 2),
+        pytest.param(True, "nccl", "fsdp", 2),
+        pytest.param(False, "nccl", "fsdp2", 2),
+        pytest.param(True, "nccl", "fsdp2", 2),
     ],
     ids=[
-        "no_colocate_nccl_fsdp_vllm",
-        "colocate_nccl_fsdp_vllm",
-        "no_colocate_nccl_fsdp2_vllm",
-        "colocate_nccl_fsdp2_vllm",
+        "no_colocate_nccl_fsdp",
+        "colocate_nccl_fsdp",
+        "no_colocate_nccl_fsdp2",
+        "colocate_nccl_fsdp2",
     ],
 )
-def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, backend, tp_size):
+def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
@@ -64,7 +64,6 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy
-    cfg.generator.inference_engine.backend = backend
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
@@ -75,7 +74,6 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         async_engine=cfg.generator.inference_engine.async_engine,
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
-        backend=backend,
         sleep_level=1,  # since we explicitly sync weights
         enable_lora=True,  # Enable LoRA for this test
     ) as engines:

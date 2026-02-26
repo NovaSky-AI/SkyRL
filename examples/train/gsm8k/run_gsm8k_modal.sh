@@ -16,7 +16,6 @@ EXPORT_PATH="/root/data/export"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
 
 : "${INFERENCE_BACKEND:=vllm}"
-# : "${INFERENCE_BACKEND:=sglang}"
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \

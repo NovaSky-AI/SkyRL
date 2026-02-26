@@ -20,7 +20,6 @@ secrets:
 envs:
   LOGGER: "wandb"  # change to "console" to print to stdout
   INFERENCE_BACKEND: "vllm"
-  # INFERENCE_BACKEND: "sglang"
   NUM_EPOCHS: 20
 
 # Commands run on each node of the remote cluster to set up the environment (e.g., install dependencies). These are run directly inside Docker.

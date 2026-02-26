@@ -19,7 +19,7 @@ class ServerActorPool:
       - start() -> ServerInfo
       - shutdown() -> None
 
-    This layer is agnostic to the type of server (vLLM, SGLang, etc).
+    This layer is agnostic to the type of server.
     """
 
     def __init__(self, actors: List[Any]):
