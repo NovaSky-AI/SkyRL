@@ -34,6 +34,7 @@ tpu = [
 tinker = [
     "tinker>=0.3.0",
     "fastapi[standard]",
+    "psutil",
     "sqlmodel",
     "sqlalchemy[asyncio]",
     "aiosqlite",
