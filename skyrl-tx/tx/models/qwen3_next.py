@@ -885,3 +885,4 @@ class Qwen3NextForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsP
         )
 
 Qwen3_5ForConditionalGeneration = Qwen3NextForCausalLM
+Qwen3_5MoeForConditionalGeneration = Qwen3NextForCausalLM
