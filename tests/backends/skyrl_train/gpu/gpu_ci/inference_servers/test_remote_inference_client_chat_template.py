@@ -12,7 +12,7 @@ import asyncio
 from pathlib import Path
 
 import skyrl
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 from transformers import AutoTokenizer
 
@@ -22,15 +22,16 @@ TP_SIZE = 1
 TEMPLATE_PATH = str(Path(skyrl.train.utils.__file__).parent / "templates/qwen3_acc_thinking.jinja2")
 
 
-def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig:
+def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
+    cfg.trainer.placement.colocate_all = True
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
     cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = num_inference_engines
-    cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
+    cfg.generator.inference_engine.num_engines = num_inference_engines
+    cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
     cfg.generator.run_engines_locally = True
     cfg.generator.sampling_params.max_generate_length = 256
     return cfg
@@ -43,7 +44,6 @@ def test_custom_chat_template(ray_init_fixture, use_custom_template: bool):
     engines = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
-        cfg.trainer.placement.colocate_all = True
         engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
