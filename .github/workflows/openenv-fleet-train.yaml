@@ -153,6 +153,7 @@ jobs:
           LAUNCH_CMD="$LAUNCH_CMD --cluster ${{ steps.cluster.outputs.name }}"
           LAUNCH_CMD="$LAUNCH_CMD --env WANDB_API_KEY=$WANDB_KEY"
           LAUNCH_CMD="$LAUNCH_CMD --env FLEET_API_KEY=${{ secrets.FLEET_API_KEY }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env LOGFIRE_TOKEN=${{ secrets.LOGFIRE_TOKEN }}"
           LAUNCH_CMD="$LAUNCH_CMD --env MODALITY=$MODALITY"
           LAUNCH_CMD="$LAUNCH_CMD --env DATA_VERSION=${{ inputs.data_version }}"
           LAUNCH_CMD="$LAUNCH_CMD --env AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}"

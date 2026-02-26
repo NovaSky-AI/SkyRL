@@ -161,6 +161,7 @@ jobs:
           TINKER_API_URL: ${{ secrets.TINKER_API_URL }}
           TINKER_API_KEY: ${{ secrets.TINKER_API_KEY }}
           FLEET_API_KEY: ${{ secrets.FLEET_API_KEY }}
+          LOGFIRE_TOKEN: ${{ secrets.LOGFIRE_TOKEN }}
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY_TOOL_USE }}
         run: |
           source .venv/bin/activate

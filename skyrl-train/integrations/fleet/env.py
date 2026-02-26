@@ -22,7 +22,7 @@ from skyrl_gym.envs.base_text_env import (
     ConversationType,
 )
 from envs.fleet_env import FleetTaskEnv as OpenEnvFleetTaskEnv
-from envs.fleet_env import ContextManager
+from envs.fleet_env import ContextManager, configure_fleet_telemetry
 
 # Reduce MCP client log noise
 # - loguru: some MCP libs use loguru
@@ -155,6 +155,11 @@ class FleetTaskEnv(BaseTextEnv):
         self.api_key = env_config.get("api_key") or os.environ.get("FLEET_API_KEY")
         if not self.api_key:
             raise ValueError("FLEET_API_KEY must be set in env_config or environment")
+
+        # Logfire telemetry (no-op if LOGFIRE_TOKEN is not set)
+        logfire_token = os.environ.get("LOGFIRE_TOKEN")
+        if logfire_token:
+            configure_fleet_telemetry(token=logfire_token)
 
         # TTL for Fleet environment instances
         self.ttl_seconds = env_config.get("ttl_seconds", 600)
