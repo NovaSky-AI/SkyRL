@@ -264,13 +264,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         self.conv_kernel_size = config.linear_conv_kernel_dim
         self.conv_dim = self.key_dim * 2 + self.value_dim
 
-        projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
-        projection_size_ba = self.num_v_heads * 2
+        projection_size_a = self.key_dim * 2 + self.value_dim * 2
+        projection_size_b = self.num_v_heads * 2
 
         # Keep linear-attention projections replicated across TP for simplicity/stability.
-        self.in_proj_qkvz = LoRALinear(
+        self.in_proj_a = LoRALinear(
             self.hidden_size,
-            projection_size_qkvz,
+            projection_size_a,
             sharding=("fsdp", None),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
@@ -280,9 +280,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
-        self.in_proj_ba = LoRALinear(
+        self.in_proj_b = LoRALinear(
             self.hidden_size,
-            projection_size_ba,
+            projection_size_b,
             sharding=("fsdp", None),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
@@ -419,8 +419,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
         batch_size, seq_len, _ = hidden_states.shape
 
-        projected_qkvz = self.in_proj_qkvz(hidden_states, adapter_indices=adapter_indices)
-        projected_ba = self.in_proj_ba(hidden_states, adapter_indices=adapter_indices)
+        projected_qkvz = self.in_proj_a(hidden_states, adapter_indices=adapter_indices)
+        projected_ba = self.in_proj_b(hidden_states, adapter_indices=adapter_indices)
         query, key, value, z, b, a = self.fix_query_key_value_ordering(projected_qkvz, projected_ba)
 
         query_flat = query.reshape(batch_size, seq_len, -1)
