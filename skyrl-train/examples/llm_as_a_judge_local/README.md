@@ -2,7 +2,7 @@
 
 This example demonstrates using a **locally-hosted vLLM reward model** (LLM-as-a-Judge) for GRPO training on GSM8K, without requiring any changes to SkyRL core.
 
-Instead of calling an external API (e.g., OpenAI) for reward scoring, it uses a `FrozenRewardInferenceClient` — a subclass of `InferenceEngineClient` that creates vLLM engines without weight-sync capabilities (since the reward model never changes). The reward engine is exposed as a named Ray actor, so environments discover it automatically with no HTTP servers, no port conflicts, and no stale subprocesses.
+Instead of calling an external API (e.g., OpenAI) for reward scoring, it uses a `FrozenRewardInferenceClient` — a subclass of `InferenceEngineClient` that creates vLLM engines without weight-sync capabilities (since the reward model never changes). The reward engine is exposed as a named Ray actor, so environments discover it automatically with no HTTP servers, no port conflicts, and no stale subprocesses. This guide focuses on the process to run the different training configs. [This post](https://non-linear.ai/blog/rl-for-post-training) covers more details about RL infra. 
 
 ## Quick Start
 
