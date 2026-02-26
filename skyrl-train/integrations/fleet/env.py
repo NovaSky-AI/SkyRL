@@ -398,8 +398,8 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
             if result_str.strip().startswith("Error:") or result_str.strip().startswith("error:"):
                 error = result_str
                 tool_result = None
-            elif isinstance(tool_result, dict) and "error" in tool_result:
-                error = tool_result.get("error", str(tool_result))
+            elif isinstance(tool_result, dict) and tool_result.get("error"):
+                error = tool_result["error"]
                 tool_result = None
 
         # Build observation message

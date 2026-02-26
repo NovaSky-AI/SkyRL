@@ -593,6 +593,138 @@ class TestFleetTaskEnvStep:
         assert "No tool call found" in result.observations[0]["content"]
 
 
+class TestStepErrorDetection:
+    """Tests for error detection in tool results.
+
+    Regression tests for the "Action executed." bug where tool results
+    containing {"error": null} were silently dropped.
+    """
+
+    def setup_method(self):
+        """Clear cache before each test."""
+        clear_caches()
+
+    @patch("integrations.fleet.env.OpenEnvFleetTaskEnv")
+    @patch.dict(os.environ, {"FLEET_API_KEY": "test-key"})
+    def test_dict_result_with_error_null_not_dropped(self, mock_openenv_class, tmp_path):
+        """Test that tool results with 'error': null are NOT dropped.
+
+        MCP tools like fostgres return {"results": [...], "error": null}.
+        The old code checked `"error" in dict` (key existence) which is True
+        even when the value is null, causing results to be silently dropped
+        and replaced with "Action executed."
+        """
+        tasks_file = tmp_path / "tasks.json"
+        tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "fostgres"}]))
+
+        mock_openenv_env = MagicMock()
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [{"name": "execute_postgresql"}], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
+
+        async def mock_step_async(action):
+            # Simulate fostgres MCP response: results with error: null
+            return (
+                {
+                    "observation": {
+                        "results": [{"table_name": "orders"}],
+                        "columns": ["table_name"],
+                        "row_count": 1,
+                        "error": None,
+                    }
+                },
+                0.0,
+                False,
+                {},
+            )
+
+        mock_openenv_env.step_async = mock_step_async
+        mock_openenv_class.return_value = mock_openenv_env
+
+        env_config = DictConfig({"tasks_file": str(tasks_file)})
+        env = FleetTaskEnv(env_config, extras={"task_key": "task-1"})
+        env.init([])
+
+        action = '<tool_call>{"name": "execute_postgresql", "arguments": {"sql": "SELECT table_name FROM information_schema.tables"}}</tool_call>'
+        result = env.step(action)
+
+        obs_content = result.observations[0]["content"]
+        assert "Action executed." not in obs_content
+        assert "Tool result:" in obs_content
+        assert "orders" in obs_content
+
+    @patch("integrations.fleet.env.OpenEnvFleetTaskEnv")
+    @patch.dict(os.environ, {"FLEET_API_KEY": "test-key"})
+    def test_dict_result_with_actual_error_detected(self, mock_openenv_class, tmp_path):
+        """Test that tool results with actual error values are still detected."""
+        tasks_file = tmp_path / "tasks.json"
+        tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "fostgres"}]))
+
+        mock_openenv_env = MagicMock()
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [{"name": "execute_postgresql"}], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
+
+        async def mock_step_async(action):
+            # Simulate fostgres MCP response: SQL error
+            return (
+                {"observation": {"results": [], "columns": [], "row_count": 0, "error": 'column "foo" does not exist'}},
+                0.0,
+                False,
+                {},
+            )
+
+        mock_openenv_env.step_async = mock_step_async
+        mock_openenv_class.return_value = mock_openenv_env
+
+        env_config = DictConfig({"tasks_file": str(tasks_file)})
+        env = FleetTaskEnv(env_config, extras={"task_key": "task-1"})
+        env.init([])
+
+        action = '<tool_call>{"name": "execute_postgresql", "arguments": {"sql": "SELECT foo FROM bar"}}</tool_call>'
+        result = env.step(action)
+
+        obs_content = result.observations[0]["content"]
+        assert "Error:" in obs_content
+        assert "column" in obs_content
+        assert env.tool_errors == 1
+
+    @patch("integrations.fleet.env.OpenEnvFleetTaskEnv")
+    @patch.dict(os.environ, {"FLEET_API_KEY": "test-key"})
+    def test_dict_result_without_error_key(self, mock_openenv_class, tmp_path):
+        """Test that dicts without an 'error' key work fine."""
+        tasks_file = tmp_path / "tasks.json"
+        tasks_file.write_text(json.dumps([{"key": "task-1", "prompt": "Test", "env_id": "test"}]))
+
+        mock_openenv_env = MagicMock()
+
+        async def mock_reset_async():
+            return {"prompt": "Test", "tools": [], "step": 0}
+
+        mock_openenv_env.reset_async = mock_reset_async
+
+        async def mock_step_async(action):
+            return ({"observation": {"data": [1, 2, 3]}}, 0.0, False, {})
+
+        mock_openenv_env.step_async = mock_step_async
+        mock_openenv_class.return_value = mock_openenv_env
+
+        env_config = DictConfig({"tasks_file": str(tasks_file)})
+        env = FleetTaskEnv(env_config, extras={"task_key": "task-1"})
+        env.init([])
+
+        action = '<tool_call>{"name": "get_data", "arguments": {}}</tool_call>'
+        result = env.step(action)
+
+        obs_content = result.observations[0]["content"]
+        assert "Tool result:" in obs_content
+        assert "Action executed." not in obs_content
+
+
 class TestFleetTaskEnvClose:
     """Tests for FleetTaskEnv.close() method."""
 
