@@ -45,7 +45,12 @@ SHUTDOWN_TIMEOUT_SECONDS = 10
 
 
 def _get_parent_uv_accelerator_extras() -> list[str]:
-    """Extract `--extra` accelerator flags from the parent process command line."""
+    """Extract parent `uv --extra` accelerator flags for the engine launch.
+
+    `uv run` starts this Python API process as a child. To recover the original
+    `uv run --extra ...` flags, we inspect the parent process command line and
+    pass through only accelerator extras (`gpu`/`tpu`) to the engine subprocess.
+    """
     tokens = psutil.Process(os.getppid()).cmdline()
 
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
