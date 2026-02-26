@@ -39,6 +39,9 @@ from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+# Seed offset per pipeline-parallel rank, matching Megatron's standard practice.
+_PP_SEED_OFFSET = 100
+
 
 class MegatronStrategy(DistributedStrategy):
     """
@@ -67,7 +70,7 @@ class MegatronStrategy(DistributedStrategy):
         # Vary seed by pipeline parallel rank so that different PP stages get
         # different dropout masks and stochastic noise (matches Megatron standard
         # practice).
-        seed = seed + 100 * mpu.get_pipeline_model_parallel_rank()
+        seed = seed + _PP_SEED_OFFSET * mpu.get_pipeline_model_parallel_rank()
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
