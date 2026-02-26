@@ -116,7 +116,7 @@ setup: |
   uv pip install wandb boto3 awscli
 
   # Install OpenEnv for Fleet environment access (from branch with FleetTaskEnv)
-  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
+  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" fleet-python
 
   # Download dataset from S3
   mkdir -p $HOME/data/fleet
@@ -169,7 +169,7 @@ run: |
   # Run GRPO training with Fleet task integration
   uv run --isolated --extra "$INFERENCE_BACKEND" \
     --with "litellm>=1.75.5" \
-    --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" \
+    --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" \
     --with "fleet-python" \
     --with "boto3" \
     -m integrations.fleet.entrypoints.main_fleet \

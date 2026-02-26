@@ -77,7 +77,7 @@ jobs:
           uv pip install "tinker>=0.8.0"
           # Install OpenEnv with [fleet] extra for MCP support (includes mcp and fleet-python)
           # Use --no-cache-dir to always fetch latest from git
-          uv pip install --no-cache-dir "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
+          uv pip install --no-cache-dir "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire"
 
       - name: Configure AWS credentials
         run: |
