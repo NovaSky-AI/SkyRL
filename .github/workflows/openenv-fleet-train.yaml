@@ -116,6 +116,7 @@ jobs:
           CLUSTER_NAME=$(echo "$CLUSTER_NAME" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
           echo "name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
           RUN_ID=$(head -c 4 /dev/urandom | xxd -p)
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
           echo "wandb_run_name=fleet_${{ inputs.modality }}_${RUN_ID}" >> $GITHUB_OUTPUT
 
       - name: Notify Slack - Starting
@@ -163,6 +164,7 @@ jobs:
           [ "${{ inputs.difficulty }}" != "all" ] && LAUNCH_CMD="$LAUNCH_CMD --env DIFFICULTY=${{ inputs.difficulty }}"
           [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
           [ -n "${{ inputs.resume_run_name }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env RESUME_RUN_NAME=${{ inputs.resume_run_name }}"
+          LAUNCH_CMD="$LAUNCH_CMD --env RUN_ID=${{ steps.cluster.outputs.run_id }}"
           LAUNCH_CMD="$LAUNCH_CMD -y"  # No -d flag, run attached to stream logs
 
           echo "Command: $LAUNCH_CMD"
