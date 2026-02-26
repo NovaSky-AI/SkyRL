@@ -112,7 +112,7 @@ setup: |
   uv pip install wandb boto3 awscli
 
   # Install OpenEnv for Fleet environment access (from branch with FleetTaskEnv)
-  uv pip install "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire"
+  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" fleet-python logfire "mcp>=1.0.0"
 
   # Download dataset from S3
   mkdir -p $HOME/data/fleet
@@ -168,7 +168,10 @@ run: |
   # Run GRPO training with Fleet task integration
   uv run --isolated --extra "$INFERENCE_BACKEND" \
     --with "litellm>=1.75.5" \
-    --with "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" \
+    --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" \
+    --with "fleet-python" \
+    --with "logfire" \
+    --with "mcp>=1.0.0" \
     --with "boto3" \
     -m integrations.fleet.entrypoints.main_fleet \
     data.train_data="['${DATA_DIR}/train.parquet']" \

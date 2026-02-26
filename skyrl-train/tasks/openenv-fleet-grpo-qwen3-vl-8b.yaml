@@ -86,7 +86,7 @@ setup: |
   uv sync --extra vllm
   uv pip install wandb boto3 awscli
 
-  uv pip install "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire"
+  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" fleet-python logfire "mcp>=1.0.0"
 
   mkdir -p $HOME/data/fleet
   TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
@@ -136,7 +136,10 @@ run: |
   # VL step-wise training (images accumulate across turns)
   uv run --isolated --extra "$INFERENCE_BACKEND" \
     --with "litellm>=1.75.5" \
-    --with "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" \
+    --with "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" \
+    --with "fleet-python" \
+    --with "logfire" \
+    --with "mcp>=1.0.0" \
     --with "boto3" \
     -m integrations.fleet.entrypoints.main_fleet \
     data.train_data="['${DATA_DIR}/train.parquet']" \
