@@ -1,10 +1,12 @@
 """
 Generation and error handling tests for the new inference path.
 
-Group A: Generation and error handling tests that interact directly with the router's OpenAI-compatible
-endpoints via requests or LiteLLM.
+Includes two groups of tests:
 
-Group B: Data plane and error handling tests that use the `RemoteInferenceClient`.
+Group A: Generation and error handling tests that interact directly with the router's OpenAI-compatible
+endpoints via `requests` or LiteLLM.
+
+Group B: Generation and error handling tests that use the `RemoteInferenceClient`.
 
 # Run with:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_new_inference_generation.py -m vllm -v
@@ -48,6 +50,7 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
+    cfg.trainer.placement.colocate_all = True
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
     cfg.generator.async_engine = True
     cfg.generator.num_inference_engines = num_inference_engines
@@ -68,7 +71,6 @@ def _get_base_url(engines: InferenceEngineState) -> str:
 def vllm_server(module_scoped_ray_init_fixture):
     """Single vLLM server + router. Tests hit the router's HTTP API directly."""
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-    cfg.trainer.placement.colocate_all = True
     engines = InferenceEngineState.create(
         cfg=cfg,
         use_local=True,
@@ -82,7 +84,9 @@ def vllm_server(module_scoped_ray_init_fixture):
     engines.close()
 
 
-def _check_chat_completions_outputs(outputs: List[Dict], test_type: str, num_samples: int, backend: str):
+def _check_chat_completions_outputs(
+    outputs: List[Dict], test_type: Literal["litellm", "request_posting"], num_samples: int, backend: str
+):
     for output in outputs:
         assert not ("error" in output or output.get("object", "") == "error"), f"Error in output: {output}"
     assert len(outputs) == num_samples
@@ -299,6 +303,66 @@ def test_context_length_error_returns_400(vllm_server):
     assert "maximum context length" in error_message or "context" in error_message
 
 
+# NOTE : We use LiteLLM because it supportes sampling params such as min_tokens, skip_special_tokens, etc.,
+# that are used in vllm/sglang, but are not supported by OpenAI.chat.completions.create().
+@pytest.mark.vllm
+def test_chat_completions_via_litellm(vllm_server: InferenceEngineState):
+    """Test chat completions via LiteLLM (OpenAI API client style)."""
+    base_url = _get_base_url(vllm_server)
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
+    sampling_params = _get_test_sampling_params("vllm", cfg, "chat_completions")
+
+    num_samples = 5
+    test_prompts: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
+
+    async def _run():
+        outputs = []
+        for conv in test_prompts:
+            result = await litellm_async_completion(
+                model=f"openai/{SERVED_MODEL_NAME}",
+                messages=conv,
+                api_base=base_url,
+                api_key="DUMMY_KEY",
+                **sampling_params,
+            )
+            outputs.append(result)
+        return outputs
+
+    outputs = asyncio.run(_run())
+    _check_chat_completions_outputs(outputs, "litellm", num_samples, "vllm")
+
+
+@pytest.mark.vllm
+def test_completions_via_litellm(vllm_server: InferenceEngineState):
+    """Test completions via LiteLLM (OpenAI API client style)."""
+    base_url = _get_base_url(vllm_server)
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
+    sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
+
+    num_samples = 5
+    test_prompts_conv: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
+    text_prompts = [
+        tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False) for conv in test_prompts_conv
+    ]
+
+    async def _run():
+        outputs = []
+        for prompt in text_prompts:
+            result = await litellm_async_text_completion(
+                model=f"openai/{SERVED_MODEL_NAME}",
+                prompt=[prompt],
+                api_base=base_url,
+                api_key="DUMMY_KEY",
+                **sampling_params,
+            )
+            outputs.append(result)
+        return outputs
+
+    outputs = asyncio.run(_run())
+    _check_completions_outputs(text_prompts, outputs, "litellm", "vllm")
+
+
 # --- Group B: RemoteInferenceClient ---
 
 
@@ -421,6 +485,8 @@ def test_client_generate(vllm_server: InferenceEngineState):
 @pytest.mark.vllm
 def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngineState):
     """Round-trip: tokenize text, detokenize back, verify."""
+    # NOTE (sumanthrh): This test doesn't work for *any* tokenizer/ text because tokenization is not invertible in general.
+    # but it is valid for this specific case.
     client = vllm_server.client
     text = "Hello, world!"
 
@@ -430,64 +496,3 @@ def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngineState)
 
     decoded = asyncio.run(client.detokenize([token_ids]))[0]
     assert decoded == text
-
-
-# --- Group C: LiteLLM ---
-
-
-@pytest.mark.vllm
-def test_chat_completions_via_litellm(vllm_server: InferenceEngineState):
-    """Test chat completions via LiteLLM (OpenAI API client style)."""
-    base_url = _get_base_url(vllm_server)
-    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-    sampling_params = _get_test_sampling_params("vllm", cfg, "chat_completions")
-
-    num_samples = 5
-    test_prompts: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
-
-    async def _run():
-        outputs = []
-        for conv in test_prompts:
-            result = await litellm_async_completion(
-                model=f"openai/{SERVED_MODEL_NAME}",
-                messages=conv,
-                api_base=base_url,
-                api_key="DUMMY_KEY",
-                **sampling_params,
-            )
-            outputs.append(result)
-        return outputs
-
-    outputs = asyncio.run(_run())
-    _check_chat_completions_outputs(outputs, "litellm", num_samples, "vllm")
-
-
-@pytest.mark.vllm
-def test_completions_via_litellm(vllm_server: InferenceEngineState):
-    """Test completions via LiteLLM (OpenAI API client style)."""
-    base_url = _get_base_url(vllm_server)
-    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-    sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
-
-    num_samples = 5
-    test_prompts_conv: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
-    text_prompts = [
-        tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False) for conv in test_prompts_conv
-    ]
-
-    async def _run():
-        outputs = []
-        for prompt in text_prompts:
-            result = await litellm_async_text_completion(
-                model=f"openai/{SERVED_MODEL_NAME}",
-                prompt=[prompt],
-                api_base=base_url,
-                api_key="DUMMY_KEY",
-                **sampling_params,
-            )
-            outputs.append(result)
-        return outputs
-
-    outputs = asyncio.run(_run())
-    _check_completions_outputs(text_prompts, outputs, "litellm", "vllm")
