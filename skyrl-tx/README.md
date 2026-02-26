@@ -225,7 +225,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m skyrl.tinker.a
     }' > out.log
 
 # Node 1 (worker)
-CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --extra gpu --extra tinker -m skyrl.tinker.backends.jax \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --extra gpu --extra tinker -m skyrl.backends.jax \
     --coordinator-address "node0:7777" \
     --num-processes 2 \
     --process-id 1
