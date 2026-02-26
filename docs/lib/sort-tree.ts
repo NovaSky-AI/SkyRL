@@ -65,11 +65,9 @@ export function sortPageTree(tree: any): any {
         });
       }
       // Recurse into subfolders
-      for (const child of item.children) {
-        if (child.type === 'folder' && child.children) {
-          sortPageTree(child);
-        }
-      }
+      item.children = item.children.map((child: any) =>
+        child.type === 'folder' && child.children ? sortPageTree(child) : child
+      );
     }
   }
 
