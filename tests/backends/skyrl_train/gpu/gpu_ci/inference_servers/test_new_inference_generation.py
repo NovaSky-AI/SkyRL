@@ -55,8 +55,8 @@ def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainC
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
     cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = num_inference_engines
-    cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
+    cfg.generator.inference_engine.num_engines = num_inference_engines
+    cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
     cfg.generator.run_engines_locally = True
     cfg.generator.inference_engine.served_model_name = SERVED_MODEL_NAME
     cfg.generator.sampling_params.max_generate_length = 256
@@ -69,6 +69,7 @@ def _get_base_url(engines: InferenceEngineState) -> str:
     return f"{proxy_url}/v1"
 
 
+# Shared vllm server for all the tests in this file.
 @pytest.fixture(scope="module")
 def vllm_server(module_scoped_ray_init_fixture):
     """Single vLLM server + router. Tests hit the router's HTTP API directly."""
@@ -305,7 +306,7 @@ def test_context_length_error_returns_400(vllm_server):
     assert "maximum context length" in error_message or "context" in error_message
 
 
-# NOTE : We use LiteLLM because it supportes sampling params such as min_tokens, skip_special_tokens, etc.,
+# NOTE : We use LiteLLM because it supports sampling params such as min_tokens, skip_special_tokens, etc.,
 # that are used in vllm/sglang, but are not supported by OpenAI.chat.completions.create().
 @pytest.mark.vllm
 def test_chat_completions_via_litellm(vllm_server: InferenceEngineState):
