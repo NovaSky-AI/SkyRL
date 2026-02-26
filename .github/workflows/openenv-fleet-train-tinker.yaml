@@ -81,7 +81,7 @@ jobs:
           source .venv/bin/activate
           uv pip install -e .
           uv pip install "tinker>=0.8.0"
-          uv pip install --no-cache-dir "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
+          uv pip install --no-cache-dir "openenv[fleet] @ git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire"
 
       - name: Configure AWS credentials
         run: |

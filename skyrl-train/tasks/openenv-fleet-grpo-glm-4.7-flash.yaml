@@ -204,7 +204,7 @@ setup: |
 
   # Step 7: Install runtime deps
   uv pip install "litellm>=1.75.5" boto3 wandb awscli
-  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python
+  uv pip install "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" fleet-python
 
   # Cleanup: Uninstall torchvision (vLLM installs it but text models don't need it)
   uv pip uninstall torchvision || true
