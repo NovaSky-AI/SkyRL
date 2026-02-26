@@ -14,7 +14,6 @@ import asyncio
 import os
 import signal
 import random
-import sys
 import threading
 import time
 
@@ -62,9 +61,15 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = None
         logger.info("Using internal engine for inference")
 
-    # Run the engine in the same Python environment as the API process so the
-    # API startup extras (e.g. uv run --extra gpu/--extra tpu) are reused.
-    cmd = [sys.executable, "-m", "tx.tinker.engine"]
+    # Build subprocess command with engine config parameters.
+    cmd = ["uv", "run", "--isolated", "--extra", "tinker", "--extra", app.state.engine_config.backend]
+    if app.state.engine_config.backend == "jax":
+        import jax
+
+        accelerator = jax.default_backend()
+        if accelerator in ("gpu", "tpu"):
+            cmd.extend(["--extra", accelerator])
+    cmd.extend(["-m", "tx.tinker.engine"])
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = await asyncio.create_subprocess_exec(*cmd)
