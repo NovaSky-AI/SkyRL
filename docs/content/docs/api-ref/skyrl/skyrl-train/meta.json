@@ -1,4 +1,4 @@
 {
   "title": "SkyRL-Train Backend",
-  "pages": ["trainer", "data", "generators", "entrypoints", "registry", "env-vars"]
+  "pages": ["trainer", "data", "generators", "registry"]
 }

@@ -28,9 +28,9 @@ const pageOrder: Record<string, string[]> = {
   'troubleshooting': ['troubleshooting'],
   'skyagent': ['agent-overview'],
   'api-ref': ['index', 'skyrl', 'skyrl-gym'],
-  'skyrl': ['skyrl-train'],
-  'skyrl-train': ['trainer', 'data', 'generators', 'entrypoints', 'registry', 'env-vars'],
-  'skyrl-gym': ['index'],
+  'skyrl': ['backends', 'tinker-engine', 'types', 'tx-models', 'entrypoints', 'config', 'env-vars', 'skyrl-train'],
+  'skyrl-train': ['trainer', 'data', 'generators', 'registry'],
+  'skyrl-gym': ['environment', 'tools'],
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

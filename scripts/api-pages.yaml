@@ -1,0 +1,296 @@
+- path: skyrl
+  pages:
+    - slug: backends
+      title: Backends
+      description: Backend abstractions for training and inference.
+      sections:
+        - heading: Abstract Backend
+          description: The base class all backends implement.
+          objects:
+            - skyrl.backends.backend.AbstractBackend
+        - heading: JAX Backend
+          description: JAX-based backend for training and inference.
+          objects:
+            - skyrl.backends.jax.JaxBackend
+        - heading: SkyRL-Train Backend
+          description: Backend wrapping the SkyRL-Train training pipeline.
+          objects:
+            - skyrl.backends.skyrl_train_backend.SkyRLTrainBackend
+
+    - slug: tinker-engine
+      title: Tinker Engine
+      description: Orchestration engine for RL training.
+      sections:
+        - heading: Engine
+          description: The TinkerEngine orchestrates backends, models, and training loops.
+          objects:
+            - skyrl.tinker.engine.TinkerEngine
+
+    - slug: types
+      title: Types
+      description: Request/response types for the Tinker API.
+      sections:
+        - heading: Enums
+          description: ""
+          objects:
+            - skyrl.tinker.types.RequestType
+            - skyrl.tinker.types.CheckpointType
+        - heading: Configuration
+          description: ""
+          objects:
+            - skyrl.tinker.types.TinkerPath
+            - skyrl.tinker.types.AdamParams
+            - skyrl.tinker.types.LoraConfig
+            - skyrl.tinker.types.SamplingParams
+            - skyrl.tinker.types.ModelMetadata
+        - heading: Model Lifecycle
+          description: ""
+          objects:
+            - skyrl.tinker.types.CreateModelInput
+            - skyrl.tinker.types.CreateModelOutput
+            - skyrl.tinker.types.UnloadModelInput
+            - skyrl.tinker.types.UnloadModelOutput
+        - heading: Forward / Backward
+          description: ""
+          objects:
+            - skyrl.tinker.types.ModelInputChunk
+            - skyrl.tinker.types.ModelInput
+            - skyrl.tinker.types.TensorData
+            - skyrl.tinker.types.LossFnInputs
+            - skyrl.tinker.types.Datum
+            - skyrl.tinker.types.ForwardBackwardInput
+            - skyrl.tinker.types.ForwardBackwardOutput
+        - heading: Optimization
+          description: ""
+          objects:
+            - skyrl.tinker.types.OptimStepInput
+            - skyrl.tinker.types.OptimStepOutput
+        - heading: Checkpointing
+          description: ""
+          objects:
+            - skyrl.tinker.types.SaveWeightsForSamplerInput
+            - skyrl.tinker.types.SaveWeightsForSamplerOutput
+            - skyrl.tinker.types.SaveWeightsInput
+            - skyrl.tinker.types.SaveWeightsOutput
+            - skyrl.tinker.types.LoadWeightsInput
+            - skyrl.tinker.types.LoadWeightsOutput
+        - heading: Sampling
+          description: ""
+          objects:
+            - skyrl.tinker.types.SampleInput
+            - skyrl.tinker.types.GeneratedSequence
+            - skyrl.tinker.types.SampleOutput
+        - heading: Engine Types
+          description: ""
+          objects:
+            - skyrl.tinker.types.ErrorResponse
+            - skyrl.tinker.types.EngineMetrics
+            - skyrl.tinker.types.PreparedModelPassBatch
+            - skyrl.tinker.types.PreparedSampleBatch
+
+    - slug: tx-models
+      title: TX Models
+      description: Model loading and configuration for the JAX backend.
+      sections:
+        - heading: Model Configuration
+          description: ""
+          objects:
+            - skyrl.tx.models.configs.ModelConfig
+        - heading: Model Interface
+          description: ""
+          objects:
+            - skyrl.tx.models.types.ModelForCausalLM
+            - skyrl.tx.models.types.CausalLMOutput
+
+    - slug: entrypoints
+      title: Entrypoint
+      description: Entrypoint API — BasePPOExp, EvalOnlyEntrypoint.
+      sections:
+        - heading: Training Entrypoint
+          description: The main entrypoint is the `BasePPOExp` class which runs the main training loop.
+          objects:
+            - skyrl.train.entrypoints.main_base.BasePPOExp
+        - heading: Evaluation Entrypoint
+          description: The evaluation-only entrypoint is the `EvalOnlyEntrypoint` class which runs evaluation without training.
+          objects:
+            - skyrl.train.entrypoints.main_generate.EvalOnlyEntrypoint
+
+    - slug: config
+      title: Configuration
+      description: Configuration dataclasses for SkyRL training.
+      sections:
+        - heading: Top-Level Config
+          description: The root configuration object and helpers.
+          objects:
+            - skyrl.train.config.config.SkyRLTrainConfig
+            - skyrl.train.config.config.make_config
+            - skyrl.train.config.config.get_config_as_dict
+            - skyrl.train.config.config.get_config_as_yaml_str
+        - heading: Data & Model
+          description: ""
+          objects:
+            - skyrl.train.config.config.DataConfig
+            - skyrl.train.config.config.ModelConfig
+            - skyrl.train.config.config.SkyRLLoraConfig
+        - heading: Training
+          description: ""
+          objects:
+            - skyrl.train.config.config.TrainerConfig
+            - skyrl.train.config.config.OptimizerConfig
+            - skyrl.train.config.config.MixedPrecisionConfig
+        - heading: Backend Config
+          description: ""
+          objects:
+            - skyrl.train.config.config.FSDPConfig
+            - skyrl.train.config.config.MegatronConfig
+            - skyrl.train.config.config.MegatronDDPConfig
+            - skyrl.train.config.config.MegatronLoraConfig
+            - skyrl.train.config.config.MegatronTorchProfilerConfig
+        - heading: Placement
+          description: ""
+          objects:
+            - skyrl.train.config.config.PlacementConfig
+        - heading: Policy & Algorithm
+          description: ""
+          objects:
+            - skyrl.train.config.config.PolicyConfig
+            - skyrl.train.config.config.CriticConfig
+            - skyrl.train.config.config.RefConfig
+            - skyrl.train.config.config.AlgorithmConfig
+            - skyrl.train.config.config.KLCtrlConfig
+        - heading: Algorithm Extensions
+          description: ""
+          objects:
+            - skyrl.train.config.config.SAPOConfig
+            - skyrl.train.config.config.DynamicSamplingConfig
+            - skyrl.train.config.config.ClipCovConfig
+            - skyrl.train.config.config.KLCovConfig
+            - skyrl.train.config.config.CISPOConfig
+            - skyrl.train.config.config.OffPolicyCorrectionConfig
+            - skyrl.train.config.config.FullyAsyncConfig
+        - heading: Inference & Generation
+          description: ""
+          objects:
+            - skyrl.train.config.config.SamplingParams
+            - skyrl.train.config.config.ChatTemplateConfig
+            - skyrl.train.config.config.InferenceEngineConfig
+            - skyrl.train.config.config.GeneratorConfig
+        - heading: Environment
+          description: ""
+          objects:
+            - skyrl.train.config.config.EnvironmentConfig
+            - skyrl.train.config.config.SkyRLGymConfig
+            - skyrl.train.config.config.GSM8kLLMJudgeEnvConfig
+
+    - slug: env-vars
+      title: Environment Variables
+      description: Configuration via environment variables.
+      sections:
+        - heading: null
+          description: ""
+          objects:
+            - skyrl.train.env_vars
+
+- path: skyrl/skyrl-train
+  pages:
+    - slug: trainer
+      title: Trainer
+      description: Trainer API — RayPPOTrainer, Dispatch, Worker APIs.
+      sections:
+        - heading: Trainer Class
+          description: ""
+          objects:
+            - skyrl.train.trainer.RayPPOTrainer
+        - heading: Dispatch APIs
+          description: ""
+          objects:
+            - skyrl.backends.skyrl_train.distributed.dispatch.Dispatch
+            - skyrl.backends.skyrl_train.distributed.dispatch.MeshDispatch
+            - skyrl.backends.skyrl_train.distributed.dispatch.PassThroughDispatch
+        - heading: Worker APIs
+          description: The base worker abstraction in SkyRL.
+          objects:
+            - skyrl.backends.skyrl_train.workers.worker.Worker
+            - skyrl.backends.skyrl_train.workers.worker.PPORayActorGroup
+
+    - slug: data
+      title: Data Interface
+      description: Data Interface — TensorBatch, TrainingInput, GeneratorInput/Output.
+      sections:
+        - heading: Trainer APIs
+          description: ""
+          objects:
+            - skyrl.backends.skyrl_train.training_batch.TensorBatch
+            - skyrl.backends.skyrl_train.training_batch.TrainingInput
+            - skyrl.backends.skyrl_train.training_batch.TrainingInputBatch
+            - skyrl.backends.skyrl_train.training_batch.TrainingOutputBatch
+        - heading: Generator APIs
+          description: ""
+          objects:
+            - skyrl.train.generators.base.GeneratorInput
+            - skyrl.train.generators.base.GeneratorOutput
+            - skyrl.train.generators.base.MetricsOutput
+
+    - slug: generators
+      title: Generator
+      description: Generator API — GeneratorInterface, InferenceEngineInterface.
+      sections:
+        - heading: Core APIs
+          description: ""
+          objects:
+            - skyrl.train.generators.base.GeneratorInterface
+            - skyrl.backends.skyrl_train.inference_engines.base.InferenceEngineInterface
+            - skyrl.backends.skyrl_train.inference_engines.inference_engine_client.InferenceEngineClient
+
+    - slug: registry
+      title: Algorithm Registry
+      description: Algorithm Registry API — Advantage estimators, policy loss registries.
+      sections:
+        - heading: Base Registry Classes
+          description: The registry system provides a way to register and manage custom algorithm functions across distributed Ray environments.
+          objects:
+            - skyrl.backends.skyrl_train.utils.ppo_utils.BaseFunctionRegistry
+            - skyrl.backends.skyrl_train.utils.ppo_utils.RegistryActor
+            - skyrl.backends.skyrl_train.utils.ppo_utils.sync_registries
+        - heading: Advantage Estimator Registry
+          description: The advantage estimator registry manages functions that compute advantages and returns.
+          objects:
+            - skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimatorRegistry
+            - skyrl.backends.skyrl_train.utils.ppo_utils.AdvantageEstimator
+            - skyrl.backends.skyrl_train.utils.ppo_utils.register_advantage_estimator
+        - heading: Policy Loss Registry
+          description: The policy loss registry manages functions that compute policy losses for PPO.
+          objects:
+            - skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossRegistry
+            - skyrl.backends.skyrl_train.utils.ppo_utils.PolicyLossType
+            - skyrl.backends.skyrl_train.utils.ppo_utils.register_policy_loss
+
+- path: skyrl-gym
+  pages:
+    - slug: environment
+      title: Environment
+      description: Environment API — Env, BaseTextEnv, step outputs.
+      sections:
+        - heading: Core Classes
+          description: ""
+          objects:
+            - skyrl_gym.core.Env
+            - skyrl_gym.core.EnvStepOutput
+        - heading: Text Environment
+          description: ""
+          objects:
+            - skyrl_gym.envs.base_text_env.BaseTextEnv
+            - skyrl_gym.envs.base_text_env.BaseTextEnvStepOutput
+
+    - slug: tools
+      title: Tools
+      description: Tools API — ToolGroup, tool decorator.
+      sections:
+        - heading: ToolGroup
+          description: ""
+          objects:
+            - skyrl_gym.tools.core.ToolGroup
+        - heading: Tool Decorator
+          description: ""
+          objects:
+            - skyrl_gym.tools.core.tool

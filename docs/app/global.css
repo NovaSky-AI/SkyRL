@@ -2,9 +2,10 @@
 @import 'fumadocs-ui/css/neutral.css';
 @import 'fumadocs-ui/css/preset.css';
 
-/* Make API reference member headings (h4) render at h3-equivalent size */
-.prose h4:has(> code) {
-  font-size: 1.25em;
+/* Make API reference headings with code (class/method names) larger.
+   Prose h4 defaults to ~1.125rem; bump to h2-equivalent for visibility. */
+.prose :is(h3, h4, h5, h6):has(> code) {
+  font-size: 1.75rem;
 }
 
 /* Collapsible source code blocks — subtle background to visually separate */
