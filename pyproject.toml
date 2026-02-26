@@ -143,6 +143,8 @@ harbor = [
 dev = [
     "mkdocs",
     "mkdocs-material",
+    "mkdocstrings[python]>=0.24.0",
+    "pymdown-extensions>=10.7",
     "pytest",
     "pytest-forked",
     "pytest-asyncio",

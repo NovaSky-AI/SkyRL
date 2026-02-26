@@ -1,6 +1,6 @@
 import pytest
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import InferenceEngineConfig
 from skyrl.backends.skyrl_train.weight_sync import (
     get_transfer_strategy_cls,
     BroadcastTransferStrategy,
@@ -16,13 +16,6 @@ from skyrl.backends.skyrl_train.weight_sync import (
 class TestGetTransferStrategyCls:
     """Tests for get_transfer_strategy_cls function."""
 
-    def _make_cfg(self, weight_sync_backend: str, colocate_all: bool):
-        """Create a config object."""
-        cfg = SkyRLConfig()
-        cfg.generator.weight_sync_backend = weight_sync_backend
-        cfg.trainer.placement.colocate_all = colocate_all
-        return cfg
-
     @pytest.mark.parametrize(
         "backend,colocate_all,expected_strategy",
         [
@@ -34,38 +27,37 @@ class TestGetTransferStrategyCls:
     )
     def test_returns_correct_strategy(self, backend, colocate_all, expected_strategy):
         """Should return correct strategy based on backend and colocate_all."""
-        cfg = self._make_cfg(weight_sync_backend=backend, colocate_all=colocate_all)
-        assert get_transfer_strategy_cls(cfg) is expected_strategy
+        assert get_transfer_strategy_cls(backend, colocate_all) is expected_strategy
 
 
 class TestCreateInitInfo:
     """Tests for create_init_info static methods."""
 
-    def _make_cfg(
+    def _make_ie_cfg(
         self,
         weight_sync_backend: str = "nccl",
         model_dtype: str = "torch.bfloat16",
-        num_inference_engines: int = 1,
+        num_engines: int = 1,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
         data_parallel_size: int = 1,
         override_existing_update_group: str = "enable",
     ):
-        """Create a config object for create_init_info."""
-        cfg = SkyRLConfig()
-        cfg.generator.weight_sync_backend = weight_sync_backend
-        cfg.generator.model_dtype = model_dtype
-        cfg.generator.num_inference_engines = num_inference_engines
-        cfg.generator.inference_engine_tensor_parallel_size = tensor_parallel_size
-        cfg.generator.inference_engine_pipeline_parallel_size = pipeline_parallel_size
-        cfg.generator.inference_engine_data_parallel_size = data_parallel_size
-        cfg.generator.override_existing_update_group = override_existing_update_group
-        return cfg
+        """Create an InferenceEngineConfig for create_init_info."""
+        return InferenceEngineConfig(
+            weight_sync_backend=weight_sync_backend,
+            model_dtype=model_dtype,
+            num_engines=num_engines,
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+            override_existing_update_group=override_existing_update_group,
+        )
 
     def test_cuda_ipc_create_init_info(self):
         """CudaIpcTransferStrategy.create_init_info should create CudaIpcInitInfo with model_dtype_str."""
-        cfg = self._make_cfg(model_dtype="torch.float32")
-        init_info = CudaIpcTransferStrategy.create_init_info(cfg)
+        ie_cfg = self._make_ie_cfg(model_dtype="torch.float32")
+        init_info = CudaIpcTransferStrategy.create_init_info(ie_cfg)
 
         assert isinstance(init_info, CudaIpcInitInfo)
         assert init_info.model_dtype_str == "torch.float32"
@@ -77,16 +69,16 @@ class TestCreateInitInfo:
 
         monkeypatch.setattr(broadcast_module.ray._private.services, "get_node_ip_address", lambda: "192.168.1.1")
 
-        cfg = self._make_cfg(
+        ie_cfg = self._make_ie_cfg(
             weight_sync_backend="gloo",
             model_dtype="torch.bfloat16",
-            num_inference_engines=2,
+            num_engines=2,
             tensor_parallel_size=2,
             pipeline_parallel_size=1,
             data_parallel_size=1,
             override_existing_update_group="enable",
         )
-        init_info = BroadcastTransferStrategy.create_init_info(cfg)
+        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg)
 
         assert isinstance(init_info, BroadcastInitInfo)
         assert init_info.master_addr == "192.168.1.1"
@@ -105,8 +97,8 @@ class TestCreateInitInfo:
 
         monkeypatch.setattr(broadcast_module.ray._private.services, "get_node_ip_address", lambda: "192.168.1.1")
 
-        cfg = self._make_cfg(override_existing_update_group="disable")
-        init_info = BroadcastTransferStrategy.create_init_info(cfg)
+        ie_cfg = self._make_ie_cfg(override_existing_update_group="disable")
+        init_info = BroadcastTransferStrategy.create_init_info(ie_cfg)
 
         assert init_info.override_existing_receiver is False
 

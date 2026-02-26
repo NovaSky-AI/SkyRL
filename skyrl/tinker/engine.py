@@ -164,13 +164,13 @@ def get_backend_classes(backend_name: str):
 
         return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
-        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, FSDPBackendConfig
+        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, FSDPBackendOverrides
 
-        return SkyRLTrainBackend, FSDPBackendConfig
+        return SkyRLTrainBackend, FSDPBackendOverrides
     elif backend_name == "megatron":
-        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, MegatronBackendConfig
+        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, MegatronBackendOverrides
 
-        return SkyRLTrainBackend, MegatronBackendConfig
+        return SkyRLTrainBackend, MegatronBackendOverrides
     else:
         raise ValueError(
             f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "

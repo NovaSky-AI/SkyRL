@@ -185,21 +185,28 @@ We will create a new entrypoint for training with the ``multiply`` environment b
    :linenos:
    :caption: Environment registration at `examples/multiply/main_multiply.py <https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/main_multiply.py>`_
 
+   import sys
+   import ray
+   from skyrl.train.config import SkyRLTrainConfig
+   from skyrl.train.utils import initialize_ray
+   from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
+   from skyrl_gym.envs import register
+
    @ray.remote(num_cpus=1)
-   def skyrl_entrypoint(cfg: DictConfig):
+   def skyrl_entrypoint(cfg: SkyRLTrainConfig):
       # Register the multiply environment
       # this needs to be done inside the entrypoint task
       register(
          id="multiply",  # <-- The name of the environment.
-         entry_point="examples.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
+         entry_point="examples.train.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
       )
 
       # make sure that the training loop is not run on the head node.
       exp = BasePPOExp(cfg)
       exp.run()
 
-   @hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-   def main(cfg: DictConfig) -> None:
+   def main() -> None:
+      cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
       # validate the arguments
       validate_cfg(cfg)
 
@@ -280,9 +287,9 @@ We will use the ``run_multiply.sh`` script to train the model. This script is lo
 First, ensure sure your config matches your available GPUs. You may need to adjust the following parameters to match your GPU count (which we set via an environment variable `NUM_GPUS`):
 
 - ``trainer.placement.policy_num_gpus_per_node``
-- ``generator.num_inference_engines``
+- ``generator.inference_engine.num_engines``
 
-Then, configure how the environment should be executed. For multi-turn environments, we recommend setting ``generator.batched=false`` and ``generator.async_engine=true`` to ensure that each environment is executed asynchronously. If your environment is single-turn, you may get better performance by reversing these settings.
+Then, configure how the environment should be executed. For multi-turn environments, we recommend setting ``generator.batched=false`` and ``generator.inference_engine.async_engine=true`` to ensure that each environment is executed asynchronously. If your environment is single-turn, you may get better performance by reversing these settings.
 
 **Launch Training**
 

@@ -89,4 +89,5 @@ class FullCtxTrainer(RayPPOTrainer):
 
                 logger.info(f"Step {step + 1} completed. Status: {status}")
 
+        self.tracker.finish()
         logger.info("Dummy training completed successfully!")

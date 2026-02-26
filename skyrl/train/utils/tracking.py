@@ -24,7 +24,7 @@ from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 import pprint
 
-from skyrl.train.config import SkyRLConfig, get_config_as_dict
+from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 
 
 # TODO(tgriggs): Test all backends.
@@ -36,7 +36,7 @@ class Tracking:
         project_name,
         experiment_name,
         backends: Union[str, List[str]] = "console",
-        config: Optional[Union[SkyRLConfig, DictConfig]] = None,
+        config: Optional[Union[SkyRLTrainConfig, DictConfig]] = None,
     ):
         if isinstance(backends, str):
             backends = [backends]
@@ -87,20 +87,22 @@ class Tracking:
             else:
                 logger_instance.log(data=data, step=step)
 
+    def finish(self):
+        for logger_name, logger_instance in self.logger.items():
+            # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
+            # This is because wandb often errors out with a BrokenPipeError when closing.
+            # https://github.com/wandb/wandb/issues/6449
+            try:
+                if logger_name == "wandb":
+                    logger_instance.finish(exit_code=0)
+                elif logger_name != "console":
+                    logger_instance.finish()
+            except Exception as e:
+                logger.warning(f"Attempted to finish tracking with logger {logger_name} but got error {e}")
+
     def __del__(self):
-        # NOTE (sumanthrh): We use a try-except block here while finishing tracking.
-        # This is because wandb often errors out with a BrokenPipeError when closing.
-        # https://github.com/wandb/wandb/issues/6449
-        # TODO (sumanthrh): Check if this is really needed. Trackers like wandb will automatically finish at program exit.
         try:
-            if "wandb" in self.logger:
-                self.logger["wandb"].finish(exit_code=0)
-            if "swanlab" in self.logger:
-                self.logger["swanlab"].finish()
-            if "tensorboard" in self.logger:
-                self.logger["tensorboard"].finish()
-            if "mlflow" in self.logger:
-                self.logger["mlflow"].finish()
+            self.finish()
         except Exception as e:
             logger.warning(f"Attempted to finish tracking but got error {e}")
 
@@ -150,7 +152,7 @@ class _TensorboardAdapter:
 
 
 class _MlflowLoggingAdapter:
-    def __init__(self, project_name, experiment_name, config: Optional[Union[SkyRLConfig, DictConfig]] = None):
+    def __init__(self, project_name, experiment_name, config: Optional[Union[SkyRLTrainConfig, DictConfig]] = None):
         import os
 
         import mlflow

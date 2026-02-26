@@ -15,7 +15,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from functools import lru_cache
 import subprocess
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.dataset import PromptDataset
@@ -39,9 +39,9 @@ from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
 
-def get_test_actor_config() -> SkyRLConfig:
+def get_test_actor_config() -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = "Qwen/Qwen2.5-0.5B-Instruct"
     cfg.trainer.logger = "console"
     return cfg
@@ -152,7 +152,7 @@ def init_worker_with_type(
 
     worker_cls = import_worker(cfg.trainer.strategy, worker_type)
     model = PPORayActorGroup(
-        cfg,
+        cfg.trainer,
         num_nodes=num_nodes,
         num_gpus_per_node=num_gpus_per_node,
         ray_actor_type=worker_cls,
@@ -397,7 +397,7 @@ class InferenceEngineState:
     @classmethod
     def create(
         cls,
-        cfg: SkyRLConfig,
+        cfg: SkyRLTrainConfig,
         # optional overrides
         model: Optional[str] = None,
         use_local: Optional[bool] = None,
@@ -417,38 +417,39 @@ class InferenceEngineState:
         """
         # create a cfg copy and apply overrides
         cfg = copy.deepcopy(cfg)
+        ie_cfg = cfg.generator.inference_engine
         if model is not None:
             cfg.trainer.policy.model.path = model
         if backend is not None:
-            cfg.generator.backend = backend
+            ie_cfg.backend = backend
         if use_local is not None:
-            cfg.generator.run_engines_locally = use_local
+            ie_cfg.run_engines_locally = use_local
         if async_engine is not None:
-            cfg.generator.async_engine = async_engine
+            ie_cfg.async_engine = async_engine
         if tp_size is not None:
-            cfg.generator.inference_engine_tensor_parallel_size = tp_size
+            ie_cfg.tensor_parallel_size = tp_size
         if colocate_all is not None:
             cfg.trainer.placement.colocate_all = colocate_all
         if gpu_memory_utilization is not None:
-            cfg.generator.gpu_memory_utilization = gpu_memory_utilization
+            ie_cfg.gpu_memory_utilization = gpu_memory_utilization
         if num_inference_engines is not None:
-            cfg.generator.num_inference_engines = num_inference_engines
+            ie_cfg.num_engines = num_inference_engines
         if max_num_seqs is not None:
-            cfg.generator.max_num_seqs = max_num_seqs
+            ie_cfg.max_num_seqs = max_num_seqs
         if engine_init_kwargs is not None:
-            cfg.generator.engine_init_kwargs = engine_init_kwargs
+            ie_cfg.engine_init_kwargs = engine_init_kwargs
 
-        assert cfg.generator.run_engines_locally, "This test does not yet support remote engines."
+        assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
         if not ray.is_initialized():
             initialize_ray(cfg)
         if cfg.trainer.placement.colocate_all:
             pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
-                * cfg.generator.inference_engine_tensor_parallel_size
-                * cfg.generator.inference_engine_pipeline_parallel_size
-                * cfg.generator.inference_engine_data_parallel_size
-                * cfg.generator.num_inference_engines,
+                * ie_cfg.tensor_parallel_size
+                * ie_cfg.pipeline_parallel_size
+                * ie_cfg.data_parallel_size
+                * ie_cfg.num_engines,
                 strategy="PACK",
             )
             get_ray_pg_ready_with_timeout(pg, timeout=30)
@@ -457,14 +458,13 @@ class InferenceEngineState:
             pg, sleep = None, False
 
         # Extract served_model_name from config if set
-        served_model_name = cfg.generator.served_model_name
+        served_model_name = ie_cfg.served_model_name
 
         tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
 
         # Return both router and server group if created to keep references alive
         router = None
         server_group = None
-
         if _SKYRL_USE_NEW_INFERENCE:
             # init with internal router and servers
             if enable_lora:
@@ -473,9 +473,9 @@ class InferenceEngineState:
             # any special handling for sleep
             server_group = ServerGroup(
                 cli_args=build_vllm_cli_args(cfg),
-                num_servers=cfg.generator.num_inference_engines * cfg.generator.inference_engine_data_parallel_size,
+                num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,
                 placement_group=pg if cfg.trainer.placement.colocate_all else None,
-                enable_dp=cfg.generator.inference_engine_data_parallel_size > 1,
+                enable_dp=ie_cfg.data_parallel_size > 1,
             )
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
@@ -491,28 +491,30 @@ class InferenceEngineState:
             )
         else:
             eps = create_ray_wrapped_inference_engines(
-                num_inference_engines=cfg.generator.num_inference_engines,
-                tensor_parallel_size=cfg.generator.inference_engine_tensor_parallel_size,
+                num_inference_engines=ie_cfg.num_engines,
+                tensor_parallel_size=ie_cfg.tensor_parallel_size,
                 model_dtype="bfloat16",
                 pretrain=cfg.trainer.policy.model.path,
                 seed=42,
                 vllm_v1_disable_multiproc=True,
-                enable_prefix_caching=cfg.generator.enable_prefix_caching,
-                enforce_eager=cfg.generator.enforce_eager,
+                enable_prefix_caching=ie_cfg.enable_prefix_caching,
+                enforce_eager=ie_cfg.enforce_eager,
                 shared_pg=pg,
-                gpu_memory_utilization=cfg.generator.gpu_memory_utilization,
+                gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
                 inference_engine_enable_sleep=sleep,
-                async_engine=cfg.generator.async_engine,
+                async_engine=ie_cfg.async_engine,
                 max_num_batched_tokens=8192,
-                max_num_seqs=cfg.generator.max_num_seqs,
+                max_num_seqs=ie_cfg.max_num_seqs,
                 tokenizer=tokenizer,
-                backend=cfg.generator.backend,
+                backend=ie_cfg.backend,
                 sleep_level=sleep_level,
                 enable_lora=enable_lora,
-                engine_init_kwargs=cfg.generator.engine_init_kwargs,
+                engine_init_kwargs=ie_cfg.engine_init_kwargs,
                 served_model_name=served_model_name,
             )
-            client = InferenceEngineClient(eps, tokenizer, cfg)
+            client = InferenceEngineClient(
+                eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.model.lora, ie_cfg
+            )
             if sleep:
                 asyncio.run(client.wake_up())
         return cls(client=client, pg=pg, router=router, server_group=server_group)
@@ -522,7 +524,7 @@ def init_remote_inference_servers(
     tp_size: int,
     backend: str,
     tokenizer: PreTrainedTokenizerBase,
-    config: SkyRLConfig,
+    config: SkyRLTrainConfig,
     model: str,
 ) -> Tuple[InferenceEngineClient, subprocess.Popen]:
     available_gpus = get_available_gpus()
@@ -552,7 +554,7 @@ def init_remote_inference_servers(
             "run",
             "--isolated",
             "--extra",
-            "vllm",
+            "fsdp",
             "-m",
             "skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server",
             "--model",
@@ -578,30 +580,6 @@ def init_remote_inference_servers(
             "--worker-extension-cls",
             "skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
         ]
-    elif backend == "sglang":
-        remote_server_command = [
-            "uv",
-            "run",
-            "--isolated",
-            "--extra",
-            "sglang",
-            "-m",
-            "skyrl.backends.skyrl_train.inference_engines.sglang.sglang_server",
-            "--model-path",
-            model,
-            "--tp-size",
-            str(tp_size),
-            "--dtype",
-            "bfloat16",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(engine_port),
-            "--mm-attention-backend",
-            "fa3",
-            "--attention-backend",
-            "fa3",
-        ]
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
@@ -625,5 +603,11 @@ def init_remote_inference_servers(
         expert_parallel_size=1,
     )
 
-    client = InferenceEngineClient(engines, tokenizer, config)
+    client = InferenceEngineClient(
+        engines,
+        tokenizer,
+        config.trainer.policy.model.path,
+        config.trainer.policy.model.lora,
+        config.generator.inference_engine,
+    )
     return client, server_process

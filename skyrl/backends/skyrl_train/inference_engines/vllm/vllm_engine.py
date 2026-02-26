@@ -341,8 +341,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             legacy_kwargs["model_config"] = model_config
 
         # Build request logger for debugging (off by default).
-        # Enable via: +generator.engine_init_kwargs.enable_log_requests=true
-        # Optionally limit logged chars: +generator.engine_init_kwargs.max_log_len=256
+        # Enable via: generator.engine_init_kwargs.enable_log_requests=true
+        # Optionally limit logged chars: generator.engine_init_kwargs.max_log_len=256
         request_logger = None
         if enable_log_requests:
             from vllm.entrypoints.logger import RequestLogger
