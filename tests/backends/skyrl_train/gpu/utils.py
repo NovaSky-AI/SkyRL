@@ -489,6 +489,8 @@ class InferenceEngineState:
             client = RemoteInferenceClient(
                 proxy_url=proxy_url, server_urls=server_urls, model_name=cfg.trainer.policy.model.path
             )
+            asyncio.run(client.sleep(level=sleep_level))
+            asyncio.run(client.wake_up())
         else:
             eps = create_ray_wrapped_inference_engines(
                 num_inference_engines=ie_cfg.num_engines,
