@@ -1,3 +1,5 @@
+# API Reference page configuration for Fumadocs
+# This is a custom configuration format modelled after `mkdocstrings`.
 - path: skyrl
   pages:
     - slug: backends
