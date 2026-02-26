@@ -4,7 +4,7 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
-from tx.layers.attention import dot_product_attention
+from tx.layers.attention import dot_product_attention, default_positions
 from tx.layers.lora import LoRAEmbed, LoRALinear
 from tx.layers.rotary_embedding import apply_rope
 from tx.layers.layernorm import RMSNorm
@@ -108,7 +108,15 @@ class Llama3Attention(nnx.Module):
         updated_cache = (k, v)
 
         is_causal = kv_cache is None
-        attn_output = dot_product_attention(q, k, v, attention_mask, is_causal, self.head_dim)
+        attn_output = dot_product_attention(
+            q,
+            k,
+            v,
+            attention_mask,
+            is_causal,
+            self.head_dim,
+            positions=positions,
+        )
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
         return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
@@ -296,7 +304,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
-            positions = jnp.arange(attention_mask.shape[1])[None, :]
+            positions = default_positions(input_ids)
 
         outputs = self.model(
             input_ids,

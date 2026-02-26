@@ -25,6 +25,149 @@ def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS, **config_override
     return JaxBackend(BASE_MODEL, config)
 
 
+def test_context_parallel_forward_backward_runs():
+    """Training path should run with CP>1 via shard_map + ppermute attention."""
+    config = JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32, context_parallel_size=2)
+    backend = JaxBackend(BASE_MODEL, config)
+    model_id = "cp_model"
+    create_model(backend, model_id)
+    reqs = {"1": (model_id, make_fwd_bwd_input([[1, 2, 3, 4]]))}
+
+    results = backend.forward_backward(prepare_model_pass_batch(reqs))
+    assert "1" in results
+
+
+def test_context_parallel_sample_runs():
+    """Sampling should run under CP>1 by disabling CP collectives in decode path."""
+    config = JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32, context_parallel_size=2)
+    backend = JaxBackend(BASE_MODEL, config)
+    reqs = {"1": ("", make_sample_input([1, 2, 3], max_tokens=4))}
+
+    results = backend.sample(prepare_sample_batch(reqs))
+    assert "1" in results
+    assert len(results["1"].sequences) == 1
+
+
+def test_context_parallel_sample_parity():
+    """Sampling outputs should match between CP=1 and CP=2 for identical seeds/prompts."""
+    backend_cp1 = JaxBackend(
+        BASE_MODEL, JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32, context_parallel_size=1)
+    )
+    backend_cp2 = JaxBackend(
+        BASE_MODEL, JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32, context_parallel_size=2)
+    )
+
+    req1 = make_sample_input([1, 2, 3, 4, 5], max_tokens=6)
+    req1.sampling_params = api.SamplingParams(temperature=0.0, max_tokens=6, seed=7).to_types()
+    req2 = make_sample_input([6, 7, 8, 9], max_tokens=5)
+    req2.sampling_params = api.SamplingParams(temperature=1.0, max_tokens=5, seed=11).to_types()
+    reqs = {"r1": ("", req1), "r2": ("", req2)}
+
+    out_cp1 = backend_cp1.sample(prepare_sample_batch(reqs))
+    out_cp2 = backend_cp2.sample(prepare_sample_batch(reqs))
+
+    assert set(out_cp1.keys()) == set(out_cp2.keys()) == {"r1", "r2"}
+    for req_id in ("r1", "r2"):
+        seqs1 = out_cp1[req_id].sequences
+        seqs2 = out_cp2[req_id].sequences
+        assert len(seqs1) == len(seqs2)
+        for s1, s2 in zip(seqs1, seqs2):
+            assert s1.stop_reason == s2.stop_reason
+            assert s1.tokens == s2.tokens
+            np.testing.assert_allclose(np.asarray(s1.logprobs), np.asarray(s2.logprobs), rtol=1e-6, atol=1e-6)
+
+
+def test_context_parallel_sample_prompt_logprobs_parity():
+    """CP=2 sampling should match CP=1 for prompt logprobs and token outputs."""
+    backend_cp1 = JaxBackend(
+        BASE_MODEL, JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32, context_parallel_size=1)
+    )
+    backend_cp2 = JaxBackend(
+        BASE_MODEL, JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32, context_parallel_size=2)
+    )
+
+    req = make_sample_input([1, 2, 3, 4, 5, 6], prompt_logprobs=True, max_tokens=4)
+    req.sampling_params = api.SamplingParams(temperature=0.0, max_tokens=4, seed=17).to_types()
+    reqs = {"r": ("", req)}
+
+    out_cp1 = backend_cp1.sample(prepare_sample_batch(reqs))
+    out_cp2 = backend_cp2.sample(prepare_sample_batch(reqs))
+
+    seq1 = out_cp1["r"].sequences[0]
+    seq2 = out_cp2["r"].sequences[0]
+    assert seq1.stop_reason == seq2.stop_reason
+    assert seq1.tokens == seq2.tokens
+    np.testing.assert_allclose(np.asarray(seq1.logprobs), np.asarray(seq2.logprobs), rtol=1e-6, atol=1e-6)
+
+    assert out_cp1["r"].prompt_logprobs is not None
+    assert out_cp2["r"].prompt_logprobs is not None
+    np.testing.assert_allclose(
+        np.asarray(out_cp1["r"].prompt_logprobs),
+        np.asarray(out_cp2["r"].prompt_logprobs),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def _extract_loss_and_logprobs(results: dict, request_id: str) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    output = results[request_id]
+    losses = []
+    logprobs = []
+    for item in output.loss_fn_outputs:
+        losses.append(np.asarray(item["elementwise_loss"]["data"], dtype=np.float32))
+        logprobs.append(np.asarray(item["logprobs"]["data"], dtype=np.float32))
+    return losses, logprobs
+
+
+def test_context_parallel_parity_forward_and_backward():
+    """CP=2 should match CP=1 numerically for prefill forward/backward."""
+    model_id = "cp_parity_model"
+    reqs = {
+        "1": (
+            model_id,
+            make_fwd_bwd_input(
+                [
+                    [1, 2, 3, 4, 5, 6],
+                    [7, 8, 9, 10, 11, 12],
+                ]
+            ),
+        )
+    }
+
+    backend_cp1 = JaxBackend(
+        BASE_MODEL, JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32, context_parallel_size=1)
+    )
+    backend_cp2 = JaxBackend(
+        BASE_MODEL, JaxBackendConfig(max_lora_adapters=MAX_LORA_ADAPTERS, max_lora_rank=32, context_parallel_size=2)
+    )
+    create_model(backend_cp1, model_id)
+    create_model(backend_cp2, model_id)
+
+    prepared_batch = prepare_model_pass_batch(reqs)
+
+    # Forward parity
+    forward_cp1 = backend_cp1.forward(prepared_batch)
+    forward_cp2 = backend_cp2.forward(prepared_batch)
+    losses_cp1, logprobs_cp1 = _extract_loss_and_logprobs(forward_cp1, "1")
+    losses_cp2, logprobs_cp2 = _extract_loss_and_logprobs(forward_cp2, "1")
+
+    assert len(losses_cp1) == len(losses_cp2)
+    assert len(logprobs_cp1) == len(logprobs_cp2)
+    for a, b in zip(losses_cp1, losses_cp2):
+        np.testing.assert_allclose(a, b, atol=1e-4, rtol=1e-4)
+    for a, b in zip(logprobs_cp1, logprobs_cp2):
+        np.testing.assert_allclose(a, b, atol=1e-4, rtol=1e-4)
+
+    # Backward parity (compare per-adapter mean gradients)
+    backend_cp1.forward_backward(prepared_batch)
+    backend_cp2.forward_backward(prepared_batch)
+    adapter_idx_cp1 = backend_cp1.models[model_id].adapter_index
+    adapter_idx_cp2 = backend_cp2.models[model_id].adapter_index
+    mean_grads_cp1 = backend_cp1.accumulated_grads.get_mean(jnp.int32(adapter_idx_cp1))
+    mean_grads_cp2 = backend_cp2.accumulated_grads.get_mean(jnp.int32(adapter_idx_cp2))
+    _assert_tree_allclose(mean_grads_cp1, mean_grads_cp2, rtol=1e-3, atol=1e-3, min_match_pct=99.0)
+
+
 def create_model(backend: JaxBackend, model_id: str) -> int:
     """Create a model and return its adapter index."""
     lora_config = LoraConfig(rank=LORA_RANK, alpha=16, seed=0)

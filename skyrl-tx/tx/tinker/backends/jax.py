@@ -23,6 +23,7 @@ Usage:
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+import functools
 from typing import Any, Callable, get_type_hints
 
 from cloudpathlib import AnyPath
@@ -69,6 +70,9 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     max_lora_rank: int = Field(default=32, description="Maximum LoRA rank")
     tensor_parallel_size: int = Field(default=1, description="Tensor parallelism degree to use for the model")
     expert_parallel_size: int = Field(default=1, description="Expert parallelism degree for MoE layers")
+    context_parallel_size: int = Field(
+        default=1, ge=1, description="Context parallelism degree across sequence length"
+    )
     fully_sharded_data_parallel_size: int = Field(
         default=1, description="Fully sharded data parallelism degree for the model"
     )
@@ -187,7 +191,7 @@ class JaxBackendImpl(AbstractBackend):
 
     This backend:
     - Uses jax.value_and_grad for gradient computation
-    - Uses 2D mesh (fsdp, tp) for fully sharded data parallelism and tensor parallelism
+    - Uses mesh axes (fsdp, ep, tp, cp) for fully sharded data, expert, tensor, and context parallelism
     - Supports multiple LoRA adapters via AccumulatedGradients with counts array
     - Supports both FORWARD and FORWARD_BACKWARD request types
     """
@@ -207,6 +211,7 @@ class JaxBackendImpl(AbstractBackend):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             shard_attention_heads=config.shard_attention_heads,
+            context_parallel_size=config.context_parallel_size,
             loss_chunk_size=config.loss_chunk_size,
             gradient_checkpointing=config.gradient_checkpointing,
             mhc_expansion_rate=config.mhc_expansion_rate,
@@ -220,9 +225,10 @@ class JaxBackendImpl(AbstractBackend):
                 config.fully_sharded_data_parallel_size,
                 config.expert_parallel_size,
                 config.tensor_parallel_size,
+                config.context_parallel_size,
             ),
-            ("fsdp", "ep", "tp"),
-            axis_types=(jax.sharding.AxisType.Auto,) * 3,
+            ("fsdp", "ep", "tp", "cp"),
+            axis_types=(jax.sharding.AxisType.Auto,) * 4,
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
             self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
@@ -264,6 +270,7 @@ class JaxBackendImpl(AbstractBackend):
             )
 
         self._create_loss_and_grad_fn()
+        self._create_cp_sample_pass()
 
     def _micro_batch_size(self, total: int) -> int:
         """Return effective micro-batch size; 0/absent => disabled (use full fused batch)."""
@@ -455,27 +462,19 @@ class JaxBackendImpl(AbstractBackend):
             self._forward = forward_only
 
         else:
-            # Retrieve the sharding of lora and non_lora params and compute the sharding of inputs and outputs
-            lora_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.lora_params)
-            )
-            non_lora_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.non_lora_params)
-            )
-            # Get sharding for AccumulatedGradients
-            accumulated_grads_shardings = jax.tree.map(
-                lambda spec: jax.NamedSharding(self.mesh, spec), nnx.get_partition_spec(self.accumulated_grads)
-            )
-
-            # Shard batch inputs along the FSDP axis (batch, seq_len)
-            batch_sharded_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
+            # Shared sharding specs for model pass functions.
+            lora_specs = nnx.get_partition_spec(self.lora_params)
+            non_lora_specs = nnx.get_partition_spec(self.non_lora_params)
+            accumulated_grads_specs = nnx.get_partition_spec(self.accumulated_grads)
 
             # JIT the fused function
             # Input order: input_ids, attention_mask, adapter_indices, target_ids,
             #              loss_mask, loss_fn_types, sampling_logprobs, advantages,
             #              loss_fn_config
-            # All batch arrays are sharded along batch dimension
-            batch_sharded_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+            # All batch arrays are sharded along batch dimension (and CP for sequence-shaped inputs).
+            # `shard_map` expects PartitionSpec (`jax.P`) for in/out specs.
+            batch_sharded_1d = jax.P("fsdp")
+            batch_sharded_2d = jax.P("fsdp", "cp")
             loss_fn_config_shardings = LossFnConfig(
                 clip_low_threshold=batch_sharded_1d,
                 clip_high_threshold=batch_sharded_1d,
@@ -490,21 +489,28 @@ class JaxBackendImpl(AbstractBackend):
                 batch_sharded_2d,  # sampling_logprobs
                 batch_sharded_2d,  # advantages
             )
-            self._forward_backward_and_accumulate = jax.jit(
-                forward_backward_and_accumulate,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings)
-                + input_shardings
-                + (loss_fn_config_shardings,),
-                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
-                donate_argnames=("accumulated_grads",),
-            )
-            self._forward = jax.jit(
-                forward_only,
-                in_shardings=(accumulated_grads_shardings, lora_shardings, non_lora_shardings)
-                + input_shardings
-                + (loss_fn_config_shardings,),
-                out_shardings=(accumulated_grads_shardings, batch_sharded_2d, batch_sharded_2d),
-            )
+            def make_sharded_model_pass(model_pass_impl: Callable):
+                @jax.shard_map(
+                    mesh=self.mesh,
+                    in_specs=(accumulated_grads_specs, lora_specs, non_lora_specs)
+                    + input_shardings
+                    + (loss_fn_config_shardings,),
+                    out_specs=(accumulated_grads_specs, batch_sharded_2d, batch_sharded_2d),
+                    axis_names=set(self.mesh.axis_names),
+                    check_vma=False,
+                )
+                def _sharded(
+                    accumulated_grads: AccumulatedGradients,
+                    lora_params: nnx.State,
+                    non_lora_params: nnx.State,
+                    *batch_inputs,
+                ):
+                    return model_pass_impl(accumulated_grads, lora_params, non_lora_params, *batch_inputs)
+
+                return jax.jit(_sharded)
+
+            self._forward_backward_and_accumulate = make_sharded_model_pass(forward_backward_and_accumulate)
+            self._forward = make_sharded_model_pass(forward_only)
 
         # JIT-compiled function to compute full gradients and apply optimizer update
         def compute_grads_and_update(
@@ -625,8 +631,9 @@ class JaxBackendImpl(AbstractBackend):
         # Convert model_ids to adapter_indices
         all_adapter_indices = [self.models[model_id].adapter_index for model_id in prepared_batch.all_model_ids]
 
+        cp_size = self.mesh.shape["cp"]
         # Pad sequences to same length. Also bin it so the JIT has to compile fewer kernels.
-        max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids))
+        max_len = round_up_seq_len(max(len(seq) for seq in all_input_ids), cp=cp_size)
 
         input_ids = pad_batch(all_input_ids, max_len, np.int32)
         target_ids = pad_batch(all_targets, max_len, np.int32)
@@ -650,7 +657,7 @@ class JaxBackendImpl(AbstractBackend):
         seq_len = input_ids.shape[1]
 
         # Sharding specs for batch inputs
-        sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
+        sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", "cp"))
         sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
         fsdp_size = self.mesh.shape["fsdp"]
 
@@ -802,6 +809,65 @@ class JaxBackendImpl(AbstractBackend):
         logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={output_metrics}")
         return types.OptimStepOutput(metrics=output_metrics)
 
+    def _create_cp_sample_pass(self) -> None:
+        """
+        Create a single CP sample pass.
+        Wraps _prefill_and_decode in shard_map to enable cp axis.
+        """
+        lora_specs = nnx.get_partition_spec(self.lora_params)
+        non_lora_specs = nnx.get_partition_spec(self.non_lora_params)
+        batch_sharded_1d = jax.P("fsdp")
+        batch_sharded_2d = jax.P("fsdp", "cp")
+        positions_sharded = jax.P(None, "cp")
+        batch_sharded_2d_rep = jax.P("fsdp", None)
+        prefill_decode_in_specs = (
+            batch_sharded_2d,  # input_ids
+            batch_sharded_2d,  # attention_mask
+            positions_sharded,  # positions
+            None,  # max_length (static)
+            None,  # max_new_tokens (static)
+            batch_sharded_1d,  # adapter_indices
+            batch_sharded_1d,  # temperatures
+            batch_sharded_2d_rep,  # rngs
+            batch_sharded_2d_rep,  # stop_tokens
+            batch_sharded_1d,  # top_k_values
+            batch_sharded_1d,  # top_p_values
+            None,  # max_top_k (static)
+            None,  # use_top_p (static)
+            None,  # prompt_logprobs (static)
+        )
+        sample_output_shardings = (
+            batch_sharded_2d_rep,  # generated tokens
+            batch_sharded_2d_rep,  # generated logprobs
+            batch_sharded_1d,  # stop positions
+            batch_sharded_2d,  # prompt logprobs
+        )
+        static_argnums = (5, 6, 13, 14, 15)
+
+        @jax.shard_map(
+            mesh=self.mesh,
+            in_specs=(lora_specs, non_lora_specs) + prefill_decode_in_specs,
+            out_specs=sample_output_shardings,
+            axis_names=set(self.mesh.axis_names),
+            check_vma=False,
+        )
+        def _cp_sample_pass(
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            *decode_args,
+        ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+            model = nnx.merge(self.graphdef, lora_params, non_lora_params)
+            new_tokens, new_logprobs, stop_pos, prompt_logprobs_array = model._prefill_and_decode(model, *decode_args)
+            if prompt_logprobs_array is None:
+                # Satisfy shard_map output specs
+                prompt_logprobs_array = jnp.zeros((decode_args[0].shape[0], 0), dtype=jnp.float32)
+            return new_tokens, new_logprobs, stop_pos, prompt_logprobs_array
+
+        self._cp_sample_pass = functools.partial(jax.jit, static_argnums=static_argnums)(_cp_sample_pass)
+
+    def _cp_decode_runner(self, _model, *decode_args) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        return self._cp_sample_pass(self.lora_params, self.non_lora_params, *decode_args)
+
     def sample(
         self,
         prepared_batch: types.PreparedSampleBatch,
@@ -837,8 +903,13 @@ class JaxBackendImpl(AbstractBackend):
         all_prompt_logprobs: list[list[float]] = []
 
         # Sharding specs for sampling inputs
-        sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
-        sharding_1d = jax.NamedSharding(self.mesh, jax.P("fsdp"))
+        cp_size = self.mesh.shape["cp"]
+        batch_sharded_1d = jax.P("fsdp")
+        batch_sharded_2d = jax.P("fsdp", "cp")
+        sharding_2d = jax.NamedSharding(self.mesh, batch_sharded_2d)
+        positions_sharding = jax.NamedSharding(self.mesh, jax.P(None, "cp"))
+        sharding_1d = jax.NamedSharding(self.mesh, batch_sharded_1d)
+        decode_runner = self._cp_decode_runner if cp_size > 1 else None
 
         with jax.set_mesh(self.mesh):
             model = nnx.merge(self.graphdef, self.lora_params, self.non_lora_params)
@@ -850,26 +921,26 @@ class JaxBackendImpl(AbstractBackend):
                     all_sampling_params[batch_start:batch_end], max_batch_size, fill=all_sampling_params[batch_start]
                 )
 
-                # Pad sequences to same length within the batch to minimize memory usage.
-                # Also bin it so the JIT has to compile fewer kernels.
                 max_len = round_up_seq_len(max((len(seq) for seq in batch_prompts), default=0))
                 input_ids = pad_batch(batch_prompts, max_len, np.int32)
                 attention_mask = pad_batch([[1] * len(seq) for seq in batch_prompts], max_len, np.int32)
+                positions = np.arange(max_len, dtype=np.int32)[None, :]
 
-                # Shard inputs along FSDP axis (already padded to max_batch_size)
-                input_ids, attention_mask, adapter_indices = jax.device_put(
-                    (input_ids, attention_mask, np.array(batch_adapter_indices, dtype=np.int32)),
-                    (sharding_2d, sharding_2d, sharding_1d),
+                input_ids, attention_mask, positions, adapter_indices = jax.device_put(
+                    (input_ids, attention_mask, positions, np.array(batch_adapter_indices, dtype=np.int32)),
+                    (sharding_2d, sharding_2d, positions_sharding, sharding_1d),
                 )
 
                 with self._jit_timing_context(max_len, mode="sample"):
                     result = model.generate(
                         input_ids,
                         attention_mask,
+                        positions=positions,
                         sampling_params=sampling_params,
                         adapter_indices=adapter_indices,
                         prompt_logprobs=needs_prompt_logprobs,
                         tokenizer=self.tokenizer,
+                        decode_runner=decode_runner,
                     )
                 # Only take the actual results, not the padded ones
                 batch_size = batch_end - batch_start

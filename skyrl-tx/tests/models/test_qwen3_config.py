@@ -13,6 +13,7 @@ def test_config_wraps_pretrained_config():
     assert config.max_lora_adapters == 8
     assert config.max_lora_rank == 16
     assert config.shard_attention_heads is False
+    assert config.context_parallel_size == 1
 
     # Check base config attributes were copied
     assert config.vocab_size > 0
@@ -27,3 +28,17 @@ def test_config_preserves_moe_config():
 
     # Check that MoE-specific attributes are preserved
     assert config.num_experts > 0
+
+
+def test_config_sets_context_parallel_size():
+    """Test that context parallel size is configurable."""
+    hf_config = PretrainedConfig.from_pretrained("Qwen/Qwen3-0.6B")
+    config = Qwen3Config(
+        hf_config,
+        max_lora_adapters=8,
+        max_lora_rank=16,
+        shard_attention_heads=True,
+        context_parallel_size=2,
+    )
+
+    assert config.context_parallel_size == 2
