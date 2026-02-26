@@ -6,10 +6,10 @@ export CI=true
 uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 uv run examples/train/search/searchr1_dataset.py --local_dir $HOME/data/searchR1 --split test
 
-# Run all non-megatron and non-sglang tests
-uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "not (sglang or integrations or megatron)"
+# Run all non-megatron tests
+uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "not (integrations or megatron)"
 
-## TODO: enable integrations and potentially migrate sglang
+## TODO: enable integrations
 # # Run tests for "integrations" folder
 # if add_integrations=$(uv add --active wordle --index https://hub.primeintellect.ai/will/simple/ 2>&1); then
 #     echo "Running integration tests"
@@ -20,11 +20,7 @@ uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backend
 #     echo "$add_integrations"
 # fi
 
-# # Run all SGLang tests
-# uv run --directory . --isolated --extra dev --extra sglang pytest -s tests/gpu/gpu_ci -m "sglang"
-
-
-# Run tests for vllm 0.9.2 
+# Run tests for vllm 0.9.2
 # TODO (sumanthrh): We should have a better way to override without pinning a flash-attn wheel
 uv run --isolated --extra fsdp --extra dev \
     --with vllm==0.9.2 \

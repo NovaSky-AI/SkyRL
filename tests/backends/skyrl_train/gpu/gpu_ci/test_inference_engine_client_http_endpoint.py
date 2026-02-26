@@ -141,7 +141,6 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend):
 
                 ChatCompletionResponse.model_validate(response_data)  # will raise error if invalid
             else:
-                # TODO(Charlie): add sglang checkings once we support it for http endpoint
                 raise ValueError(f"Unsupported backend: {backend}")
 
         for key in ["id", "object", "created", "model", "choices"]:
@@ -282,7 +281,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
-# while these sampling params are used in vllm/sglang. Therefore, we instead use LiteLLM.
+# while these sampling params are used in vllm. Therefore, we instead use LiteLLM.
 @pytest.mark.vllm
 def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
@@ -459,13 +458,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     "backend,tp_size",
     [
         pytest.param("vllm", 2, marks=pytest.mark.vllm),
-        # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        # TODO(Charlie): sglang remote server not supported for /chat/completion
-        # yet because we have skip_tokenizer_init=True. Fix by getting tokens
-        # via return logprobs instead.
-        # pytest.param("sglang", 1, marks=pytest.mark.sglang),
     ],
-    # ids=["vllm", "sglang"],
     ids=["vllm"],
 )
 def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
@@ -613,7 +606,6 @@ def test_structured_generation(ray_init_fixture):
             server_thread.join(timeout=5)
 
 
-# TODO(Charlie): sglang has slightly different error response format. We need to handle it.
 @pytest.mark.vllm
 def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     """

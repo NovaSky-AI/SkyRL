@@ -11,7 +11,7 @@ This client is responsible for BOTH data plane and control plane operations:
 
 1. Data Plane (routed through proxy_url):
    - generate, chat_completion, completion, tokenize, detokenize
-   - Uses proxy_url which points to a router (vllm-router, sglang-router, InferenceRouter)
+   - Uses proxy_url which points to a router (vllm-router, InferenceRouter)
    - Router handles load balancing and session-aware routing
 
 2. Control Plane (fan-out to all server_urls):
@@ -114,7 +114,7 @@ class RemoteInferenceClient:
     - server_urls: List of backend URLs for control plane operations (fan-out)
 
     The router (proxy_url) is expected to be a data-plane-only router (like
-    vllm-router, sglang-router, or InferenceRouter). Control plane operations
+    vllm-router or InferenceRouter). Control plane operations
     are always fanned out to all backends directly by this client.
 
     Usage:

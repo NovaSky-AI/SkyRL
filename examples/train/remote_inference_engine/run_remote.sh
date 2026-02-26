@@ -9,7 +9,7 @@ set -x
 
 DATA_DIR="$HOME/data/gsm8k"
 
-BACKEND="vllm" # or "sglang"
+BACKEND="vllm"
 INF_ENGINE_TP=4
 
 NUM_TRAINING_GPUS=4
