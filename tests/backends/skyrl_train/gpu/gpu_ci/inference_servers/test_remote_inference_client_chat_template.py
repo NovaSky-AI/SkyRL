@@ -1,7 +1,7 @@
 """
 Custom chat template tests for the the new inference path.
 
-NOTE: This test is separate from `test_remote_inference_client_generation.py` because we use separate engine configurations for each test parametrization.
+NOTE: This test is separate from `test_new_inference_generation.py` because we use separate engine configurations for each test parametrization.
 
 # Run with:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_chat_template.py -m vllm -v
