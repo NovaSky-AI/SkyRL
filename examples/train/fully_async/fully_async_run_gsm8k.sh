@@ -70,13 +70,14 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   generator.batched=false \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.8 \
+  generator.gpu_memory_utilization=0.6 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k-async" \
   trainer.run_name=${RUN_NAME} \
-  trainer.resume_mode=latest \
+  trainer.resume_mode=none \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
   generator.enforce_eager=true \
   trainer.flash_attn=false \
   trainer.use_sample_packing=false \
+  +generator.engine_init_kwargs.attention_backend=FLEX_ATTENTION \
   $@

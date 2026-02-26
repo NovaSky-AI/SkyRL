@@ -91,7 +91,7 @@ class HFModelWrapper(nn.Module):
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
@@ -561,7 +561,7 @@ def get_llm_for_sequence_regression(
     assert model_type == "critic", f"Only model_type critic is supported, got: {model_type}."
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True, **model_config_kwargs)
-    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__
