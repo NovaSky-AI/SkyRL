@@ -264,13 +264,23 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         self.conv_kernel_size = config.linear_conv_kernel_dim
         self.conv_dim = self.key_dim * 2 + self.value_dim
 
-        projection_size_a = self.key_dim * 2 + self.value_dim * 2
-        projection_size_b = self.num_v_heads * 2
-
         # Keep linear-attention projections replicated across TP for simplicity/stability.
-        self.in_proj_a = LoRALinear(
+        projection_size_qkv = self.key_dim * 2 + self.value_dim
+        self.in_proj_qkv = LoRALinear(
             self.hidden_size,
-            projection_size_a,
+            projection_size_qkv,
+            sharding=("fsdp", None),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            dtype=dtype,
+            param_dtype=dtype,
+            use_bias=False,
+            kernel_init=nnx.initializers.lecun_normal(),
+            rngs=rngs,
+        )
+        self.in_proj_z = LoRALinear(
+            self.hidden_size,
+            self.value_dim,
             sharding=("fsdp", None),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
@@ -282,7 +292,19 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         )
         self.in_proj_b = LoRALinear(
             self.hidden_size,
-            projection_size_b,
+            self.num_v_heads,
+            sharding=("fsdp", None),
+            max_lora_adapters=config.max_lora_adapters,
+            max_lora_rank=config.max_lora_rank,
+            dtype=dtype,
+            param_dtype=dtype,
+            use_bias=False,
+            kernel_init=nnx.initializers.lecun_normal(),
+            rngs=rngs,
+        )
+        self.in_proj_a = LoRALinear(
+            self.hidden_size,
+            self.num_v_heads,
             sharding=("fsdp", None),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
@@ -375,38 +397,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out = nnx.silu(out_full[..., -seq_len:])
         return out, new_state
 
-    def fix_query_key_value_ordering(
-        self,
-        mixed_qkvz: jax.Array,
-        mixed_ba: jax.Array,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-        qkvz_shape = mixed_qkvz.shape[:-1] + (
-            self.num_k_heads,
-            2 * self.head_k_dim + 2 * self.head_v_dim * self.num_v_heads // self.num_k_heads,
-        )
-        ba_shape = mixed_ba.shape[:-1] + (self.num_k_heads, 2 * self.num_v_heads // self.num_k_heads)
-        mixed_qkvz = mixed_qkvz.reshape(qkvz_shape)
-        mixed_ba = mixed_ba.reshape(ba_shape)
-
-        split_qkvz = [
-            self.head_k_dim,
-            self.head_k_dim,
-            self.num_v_heads // self.num_k_heads * self.head_v_dim,
-            self.num_v_heads // self.num_k_heads * self.head_v_dim,
-        ]
-        split_ba = [self.num_v_heads // self.num_k_heads, self.num_v_heads // self.num_k_heads]
-
-        split_qkvz_idx = [split_qkvz[0], split_qkvz[0] + split_qkvz[1], sum(split_qkvz[:-1])]
-        split_ba_idx = [split_ba[0]]
-        query, key, value, z = jnp.split(mixed_qkvz, split_qkvz_idx, axis=3)
-        b, a = jnp.split(mixed_ba, split_ba_idx, axis=3)
-
-        value = value.reshape(value.shape[0], value.shape[1], -1, self.head_v_dim)
-        z = z.reshape(z.shape[0], z.shape[1], -1, self.head_v_dim)
-        b = b.reshape(b.shape[0], b.shape[1], self.num_v_heads)
-        a = a.reshape(a.shape[0], a.shape[1], self.num_v_heads)
-        return query, key, value, z, b, a
-
     def __call__(
         self,
         hidden_states: jax.Array,
@@ -419,14 +409,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
         batch_size, seq_len, _ = hidden_states.shape
 
-        projected_qkvz = self.in_proj_a(hidden_states, adapter_indices=adapter_indices)
-        projected_ba = self.in_proj_b(hidden_states, adapter_indices=adapter_indices)
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(projected_qkvz, projected_ba)
-
-        query_flat = query.reshape(batch_size, seq_len, -1)
-        key_flat = key.reshape(batch_size, seq_len, -1)
-        value_flat = value.reshape(batch_size, seq_len, -1)
-        mixed_qkv = jnp.concatenate([query_flat, key_flat, value_flat], axis=-1).transpose((0, 2, 1))
+        mixed_qkv = self.in_proj_qkv(hidden_states, adapter_indices=adapter_indices).transpose((0, 2, 1))
+        z = self.in_proj_z(hidden_states, adapter_indices=adapter_indices).reshape(batch_size, seq_len, -1, self.head_v_dim)
+        b = self.in_proj_b(hidden_states, adapter_indices=adapter_indices)
+        a = self.in_proj_a(hidden_states, adapter_indices=adapter_indices)
 
         use_precomputed = conv_state is not None and recurrent_state is not None and seq_len == 1
         if use_precomputed:
