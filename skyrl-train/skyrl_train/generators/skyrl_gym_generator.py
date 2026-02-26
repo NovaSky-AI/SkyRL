@@ -145,6 +145,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             self.base_conversation,
             add_generation_prompt=False,
             tokenize=True,
+            return_dict=False,
             **self.generator_cfg.chat_template_kwargs,
         )
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
@@ -245,6 +246,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             add_generation_prompt=not retokenize_chat_history,
             chat_template=self.custom_chat_template if retokenize_chat_history else None,
             tokenize=True,
+            return_dict=False,
             **self.generator_cfg.chat_template_kwargs,
         )
 
@@ -295,6 +297,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     chat_template=self.custom_chat_template if retokenize_chat_history else None,
                     add_generation_prompt=True,
                     tokenize=True,
+                    return_dict=False,
                     **self.generator_cfg.chat_template_kwargs,
                 )
                 agent_loop_state.loss_mask = []
@@ -532,6 +535,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     [*self.base_conversation, *new_obs],
                     add_generation_prompt=not is_done,
                     tokenize=True,
+                    return_dict=False,
                     **self.generator_cfg.chat_template_kwargs,
                 )[len(self.base_conversation_token_ids) :]
             elif not is_done:
@@ -612,6 +616,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             init_prompts,
             add_generation_prompt=True,
             tokenize=True,
+            return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
