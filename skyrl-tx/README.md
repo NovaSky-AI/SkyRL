@@ -13,6 +13,9 @@
 
 SkyRL tx is an open-source library that implements a backend for the [Tinker API](https://thinkingmachines.ai/tinker/), allowing you to set up your own Tinker-like service running on your own hardware. It provides a unified interface for both training and inference, enabling seamless online learning, cost-effective multi-tenancy through LoRA, and simplified ML infrastructure.
 
+> [!IMPORTANT]
+> **Note:** SkyRL is undergoing a repo reorganization into the [`skyrl/`](../skyrl) folder, which unifies the skyrl libraries into a single package. The code that was previously in the `skyrl-tx` folder can now be found in `skyrl/{backends, tinker, tx, utils}`.
+
 ## ✨ Key Features
 
 - **Unified Training & Inference** — Single engine for forward passes, backward passes, and sampling
@@ -58,13 +61,13 @@ SkyRL tx consists of four main components:
 
 ```bash
 git clone https://github.com/NovaSky-AI/SkyRL
-cd SkyRL/skyrl-tx
+cd SkyRL/
 
 # For GPU
-uv run --extra gpu --extra tinker -m tx.tinker.api --base-model <model>
+uv run --extra gpu --extra tinker -m skyrl.tinker.api --base-model <model>
 
 # For TPU
-uv run --extra tpu --extra tinker -m tx.tinker.api --base-model <model>
+uv run --extra tpu --extra tinker -m skyrl.tinker.api --base-model <model>
 ```
 
 ### Basic Training Example (Pig Latin)
@@ -72,7 +75,7 @@ uv run --extra tpu --extra tinker -m tx.tinker.api --base-model <model>
 Start the server:
 
 ```bash
-uv run --extra gpu --extra tinker -m tx.tinker.api --base-model "Qwen/Qwen3-0.6B"
+uv run --extra gpu --extra tinker -m skyrl.tinker.api --base-model "Qwen/Qwen3-0.6B"
 ```
 
 Run a simple training loop:
@@ -140,7 +143,7 @@ for i, seq in enumerate(result.sequences):
 
 ```bash
 # Start the server
-uv run --extra gpu --extra tinker -m tx.tinker.api \
+uv run --extra gpu --extra tinker -m skyrl.tinker.api \
     --base-model Qwen/Qwen3-8B \
     --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 1}'
 
@@ -155,7 +158,7 @@ uv run --with wandb --with tinker sl_loop.py \
 
 ```bash
 # Start the server
-uv run --extra gpu --extra tinker -m tx.tinker.api \
+uv run --extra gpu --extra tinker -m skyrl.tinker.api \
     --base-model Qwen/Qwen3-30B-A3B \
     --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "expert_parallel_size": 8, "train_micro_batch_size": 1, "shard_attention_heads": false}'
 
@@ -170,7 +173,7 @@ uv run --with wandb --with tinker sl_loop.py \
 
 ```bash
 # Start server
-uv run --extra gpu --extra tinker -m tx.tinker.api \
+uv run --extra gpu --extra tinker -m skyrl.tinker.api \
     --base-model Qwen/Qwen3-8B \
     --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 8, "sample_max_num_sequences": 256}' > out.log
 
@@ -188,7 +191,7 @@ to download the data and set up chroma. You can then use the following commands 
 
 ```bash
 # Start server
-uv run --extra gpu --extra tinker -m tx.tinker.api \
+uv run --extra gpu --extra tinker -m skyrl.tinker.api \
     --port 8001 \
     --base-model Qwen/Qwen3-4B-Instruct-2507 \
     --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 32, "tensor_parallel_size": 8, "train_micro_batch_size": 1, "sample_max_num_sequences": 128}' > out.log
@@ -208,7 +211,7 @@ uv run --extra vector-search --extra wandb python -m tinker_cookbook.recipes.sea
 
 ```bash
 # Node 0 (coordinator + API server)
-CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api \
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m skyrl.tinker.api \
     --base-model Qwen/Qwen3-8B \
     --backend-config '{
         "max_lora_adapters": 3,
@@ -222,7 +225,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api 
     }' > out.log
 
 # Node 1 (worker)
-CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --extra gpu --extra tinker -m tx.tinker.backends.jax \
+CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --extra gpu --extra tinker -m skyrl.backends.jax \
     --coordinator-address "node0:7777" \
     --num-processes 2 \
     --process-id 1
@@ -239,7 +242,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 uv run --with vllm vllm serve Qwen/Qwen3-4B \
     --tensor-parallel-size 4 --port 7999 --enable-lora
 
 # Start SkyRL tx with external inference
-CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m tx.tinker.api \
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --extra gpu --extra tinker -m skyrl.tinker.api \
     --base-model Qwen/Qwen3-4B \
     --external-inference-url "http://0.0.0.0:7999" \
     --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1, "tensor_parallel_size": 4, "train_micro_batch_size": 8}' > out.log
@@ -309,7 +312,7 @@ We welcome contributions! The project is early and hackable — now is a great t
 ## 📬 Contact
 
 - **Slack**: [#skyrl-tx](https://skyrl.slack.com/archives/C09K1JGNPJS)
-- **GitHub**: [NovaSky-AI/SkyRL/skyrl-tx](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-tx)
+- **GitHub**: [NovaSky-AI/SkyRL/skyrl-tx](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-tx/README.md)
 - **Twitter/X**: [@NovaSkyAI](https://x.com/NovaSkyAI)
 
 ## 📄 License
