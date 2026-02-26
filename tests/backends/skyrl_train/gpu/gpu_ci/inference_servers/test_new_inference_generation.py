@@ -385,6 +385,9 @@ def test_completions_via_litellm(vllm_server: InferenceEngineState):
     _check_completions_outputs(text_prompts, outputs, "litellm", "vllm")
 
 
+# NOTE (sumanthrh): This test is mostly redundant with test_context_length_error_returns_400, but
+# serves as a integration test with litellm's error handling. SkyRL x Harbor integration relies
+# on specific litellm errors for context length error detection.
 @pytest.mark.vllm
 def test_client_context_length_error_returns_400_via_litellm(vllm_server: InferenceEngineState):
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
