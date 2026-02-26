@@ -12,6 +12,8 @@ Group B: Generation and error handling tests that use the `RemoteInferenceClient
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_new_inference_generation.py -m vllm -v
 """
 
+# TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): Remove the tests in Group B once we migrate all generation interactions to the router's HTTP API.
+
 import json
 import pytest
 import asyncio
