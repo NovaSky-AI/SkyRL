@@ -168,6 +168,7 @@ def load_safetensors(
         if skip_lora and is_connector_path(path):
             continue
         if key not in tensors:
+            logger.warning(f"Missing key while loading from {checkpoint_dir}: {key}")
             continue
         if "experts" in path:
             tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0)
