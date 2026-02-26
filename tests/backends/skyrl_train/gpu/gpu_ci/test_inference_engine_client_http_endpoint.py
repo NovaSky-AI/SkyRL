@@ -5,7 +5,7 @@ This uses the same workflow as test_policy_local_engines_e2e.py, but with the HT
 the inference client engine. Only requires 1 GPU.
 
 To run:
-uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py -m "vllm"
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
 """
 
 import json
@@ -60,9 +60,9 @@ pytestmark = pytest.mark.skipif(
 litellm.disable_aiohttp_transport = True
 
 
-def _get_test_sampling_params(backend: str, cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str, Any]:
+def _get_test_sampling_params(cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str, Any]:
     assert endpoint in ["chat_completions", "completions"]
-    sampling_params = get_sampling_params_for_backend(backend, cfg.generator.sampling_params)
+    sampling_params = get_sampling_params_for_backend("vllm", cfg.generator.sampling_params)
     sampling_params["logprobs"] = True
     if endpoint == "chat_completions":
         sampling_params["top_logprobs"] = 1
@@ -118,7 +118,7 @@ def set_up_http_server(client: InferenceEngineClient) -> Tuple[threading.Thread,
 # --------------------------------------
 
 
-def _check_chat_completions_outputs(outputs, test_type, num_samples, backend):
+def _check_chat_completions_outputs(outputs, test_type, num_samples, backend: str = "vllm"):
     # check error
     for output in outputs:
         assert not ("error" in output or output.get("object", "") == "error"), f"Error in output: {output}"
@@ -161,7 +161,7 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend):
             assert choice["logprobs"]["content"][0]["token"].split(":")[1].isdigit()
 
 
-def _check_completions_outputs(prompts, outputs, test_type, backend):
+def _check_completions_outputs(prompts, outputs, test_type, backend: str = "vllm"):
     # check error
     for output in outputs:
         assert not ("error" in output or output.get("object", "") == "error"), f"Error in output: {output}"
@@ -213,7 +213,6 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 # ------------------------------
 
 
-@pytest.mark.vllm
 def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
     """
     Since /completions endpoint supports both single and batched requests, and we support
@@ -232,7 +231,7 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         cfg.trainer.placement.colocate_all = True
         cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
+        sampling_params = _get_test_sampling_params(cfg, "completions")
 
         engines = InferenceEngineState.create(
             cfg,
@@ -282,7 +281,6 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
 # while these sampling params are used in vllm. Therefore, we instead use LiteLLM.
-@pytest.mark.vllm
 def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
     Test the HTTP endpoint /chat/completions and /completions with policy weight sync.
@@ -367,12 +365,12 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             if endpoint == "chat_completions":
                 path = "chat/completions"
                 prompt_iterable = test_prompts_conv_list
-                sampling_params = _get_test_sampling_params("vllm", cfg, "chat_completions")
+                sampling_params = _get_test_sampling_params(cfg, "chat_completions")
 
             else:
                 path = "completions"
                 prompt_iterable = test_prompts_half_str_half_tokens_list
-                sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
+                sampling_params = _get_test_sampling_params(cfg, "completions")
 
             if test_type == "request_posting":
 
@@ -455,13 +453,13 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
 
 
 @pytest.mark.parametrize(
-    "backend,tp_size",
+    "tp_size",
     [
-        pytest.param("vllm", 2, marks=pytest.mark.vllm),
+        2,
     ],
-    ids=["vllm"],
+    ids=["tp2"],
 )
-def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
+def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
     """Test sending both /chat/completions and /completions requests to remote servers."""
     endpoints = ["chat_completions", "completions"]
 
@@ -470,10 +468,9 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-        cfg.generator.inference_engine.backend = backend
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
-        client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL_QWEN2_5)
+        client, remote_server_process = init_remote_inference_servers(tp_size, "vllm", tokenizer, cfg, MODEL_QWEN2_5)
 
         # 2. Start HTTP endpoint in background thread using serve function directly
         server_thread, server_port = set_up_http_server(client)
@@ -492,10 +489,10 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 
         def _generate_outputs(endpoint):
             if endpoint == "chat_completions":
-                sampling_params = _get_test_sampling_params(backend, cfg, "chat_completions")
+                sampling_params = _get_test_sampling_params(cfg, "chat_completions")
                 prompt_iterable = test_prompts_conv_list
             else:
-                sampling_params = _get_test_sampling_params(backend, cfg, "completions")
+                sampling_params = _get_test_sampling_params(cfg, "completions")
                 prompt_iterable = test_prompts_half_str_half_tokens_list
 
             # Default concurrency limit is 100 due to HTTP client pool capacity.
@@ -528,9 +525,9 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
         for endpoint in endpoints:
             outputs = _generate_outputs(endpoint)
             if endpoint == "chat_completions":
-                _check_chat_completions_outputs(outputs, "litellm", num_samples, backend)
+                _check_chat_completions_outputs(outputs, "litellm", num_samples, "vllm")
             else:
-                _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, "litellm", backend)
+                _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, "litellm", "vllm")
 
         # 4. Shutdown server
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
@@ -547,7 +544,6 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
             remote_server_process.wait()
 
 
-@pytest.mark.vllm
 def test_structured_generation(ray_init_fixture):
     server_port = None
     server_thread = None
@@ -606,7 +602,6 @@ def test_structured_generation(ray_init_fixture):
             server_thread.join(timeout=5)
 
 
-@pytest.mark.vllm
 def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     """
     Test error handling for various invalid requests and internal server errors.
@@ -773,7 +768,6 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
             server_thread.join(timeout=5)
 
 
-@pytest.mark.vllm
 @pytest.mark.parametrize("use_custom_template", [False, True])
 def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_template):
     """
@@ -861,7 +855,6 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             server_thread.join(timeout=5)
 
 
-@pytest.mark.vllm
 def test_http_endpoint_served_model_name(ray_init_fixture):
     """
     Test that `generator.served_model_name` allows using a different model name in requests
@@ -954,7 +947,6 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
             server_thread.join(timeout=5)
 
 
-@pytest.mark.vllm
 def test_context_length_error_returns_400(ray_init_fixture):
     """
     Test that context length errors return HTTP 400 (Bad Request), not 500.

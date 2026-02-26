@@ -215,7 +215,6 @@ def weight_update_env(ray_init_fixture):
     router.shutdown()
 
 
-@pytest.mark.vllm
 class TestWeightUpdateFlow:
     """Tests for weight synchronization from trainer to inference server (non-colocated)."""
 

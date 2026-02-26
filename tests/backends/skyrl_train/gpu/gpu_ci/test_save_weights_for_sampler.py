@@ -47,8 +47,8 @@ def get_test_config() -> SkyRLTrainConfig:
 @pytest.mark.parametrize(
     ("colocate_all", "strategy", "backend"),
     [
-        pytest.param(False, "fsdp2", "vllm", marks=pytest.mark.vllm),
-        pytest.param(True, "fsdp2", "vllm", marks=pytest.mark.vllm),
+        pytest.param(False, "fsdp2", "vllm"),
+        pytest.param(True, "fsdp2", "vllm"),
     ],
     ids=[
         "no_colocate_fsdp2_vllm",
@@ -134,7 +134,7 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         print(f"Example output: {outputs['responses'][0][:3]}...")
 
 
-@pytest.mark.parametrize("backend", [pytest.param("vllm", marks=pytest.mark.vllm)])
+@pytest.mark.parametrize("backend", ["vllm"])
 def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, backend):
     """
     Test that multiple training steps followed by one save_weights_for_sampler works correctly.

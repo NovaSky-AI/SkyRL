@@ -4,7 +4,6 @@ Test pause and continue generation with inference engine client HTTP endpoint.
 uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_pause_and_continue_generation.py -m "vllm"
 """
 
-import pytest
 import asyncio
 from tests.backends.skyrl_train.gpu.gpu_ci.test_inference_engine_client_http_endpoint import get_test_actor_config
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
@@ -25,7 +24,6 @@ SERVER_PORT = 8123
 SERVER_HOST = "127.0.0.1"
 
 
-@pytest.mark.vllm
 def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
     """
     We send 6 requests via `/chat/completions` to two engines concurrently with vLLM `max_num_seqs=2`
@@ -173,7 +171,6 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
             engines.close()
 
 
-@pytest.mark.vllm
 def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     """
     Identical to `test_continue_generation_vllm_engine_chat_completion` except we use `generate()`
@@ -273,7 +270,6 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
             print(f"Output first 1500 chars: {out['responses'][0][:1500]}...")
 
 
-@pytest.mark.vllm
 def test_abort_generation_vllm_engine(ray_init_fixture):
     """
     We send 4 requests that are really long to `InferenceEngineInterface.engines[0].chat_completion`

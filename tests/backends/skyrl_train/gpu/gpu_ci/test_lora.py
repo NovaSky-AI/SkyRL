@@ -44,10 +44,10 @@ def get_test_actor_config(enable_lora: bool = False) -> SkyRLTrainConfig:
 @pytest.mark.parametrize(
     ("colocate_all", "weight_sync_backend", "strategy", "backend", "tp_size"),
     [
-        pytest.param(False, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(False, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
+        pytest.param(False, "nccl", "fsdp", "vllm", 2),
+        pytest.param(True, "nccl", "fsdp", "vllm", 2),
+        pytest.param(False, "nccl", "fsdp2", "vllm", 2),
+        pytest.param(True, "nccl", "fsdp2", "vllm", 2),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
