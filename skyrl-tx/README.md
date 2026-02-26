@@ -14,7 +14,7 @@
 SkyRL tx is an open-source library that implements a backend for the [Tinker API](https://thinkingmachines.ai/tinker/), allowing you to set up your own Tinker-like service running on your own hardware. It provides a unified interface for both training and inference, enabling seamless online learning, cost-effective multi-tenancy through LoRA, and simplified ML infrastructure.
 
 > [!IMPORTANT]
-> **Note:** SkyRL is undergoing a repo reorganization into the [`skyrl/`](./skyrl) folder, which unifies the skyrl libraries into a single package. The code that was previously in the `skyrl-tx` folder can now be found int `skyrl/{backends, tinker, tx, utils}`.
+> **Note:** SkyRL is undergoing a repo reorganization into the [`skyrl/`](../skyrl) folder, which unifies the skyrl libraries into a single package. The code that was previously in the `skyrl-tx` folder can now be found int `skyrl/{backends, tinker, tx, utils}`.
 
 ## ✨ Key Features
 
