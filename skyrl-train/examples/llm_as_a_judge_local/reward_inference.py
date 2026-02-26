@@ -177,7 +177,7 @@ def create_frozen_vllm_engines(
             vllm_v1_disable_multiproc=True,
             gpu_memory_utilization=gpu_memory_utilization,
             bundle_indices=bundle_indices,
-            num_gpus=per_engine_gpu_count,
+            num_gpus=1,
             enable_sleep_mode=False,
             noset_visible_devices=noset_visible_devices,
             max_num_batched_tokens=max_num_batched_tokens,
