@@ -28,7 +28,7 @@ MEGATRON_EP=4
 MEGATRON_ETP=1
 
 NUM_INFERENCE_ENGINES=1
-INFERENCE_ENGINE_TP=4
+INFERENCE_ENGINE_TP=8
 
 # MLA does not support flash attention in TransformerEngine
 FLASH_ATTN=false
