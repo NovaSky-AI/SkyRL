@@ -167,12 +167,19 @@ def load_safetensors(
         # Skip connector parameters
         if skip_lora and is_connector_path(path):
             continue
-        if key not in tensors:
-            logger.warning(f"Missing key while loading from {checkpoint_dir}: {key}")
-            continue
         if "experts" in path:
-            tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0)
+            num_experts = config.get_num_experts()
+            assert num_experts is not None
+            expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
+            missing_keys = [expert_key for expert_key in expert_keys if expert_key not in tensors]
+            if missing_keys:
+                logger.warning(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+                continue
+            tensor = np.stack([tensors[expert_key].T for expert_key in expert_keys], axis=0)
         else:
+            if key not in tensors:
+                logger.warning(f"Missing key while loading from {checkpoint_dir}: {key}")
+                continue
             tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
         adapter_idx = get_adapter_slice(path, adapter_index, rank)
         if adapter_idx is not None:
