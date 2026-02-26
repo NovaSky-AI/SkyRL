@@ -155,6 +155,7 @@ dev = [
     "ty",
     "cloudpathlib[s3]",
     "alembic",
+    "griffe2md",
 ]
 
 [tool.setuptools]
