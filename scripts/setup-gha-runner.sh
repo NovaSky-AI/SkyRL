@@ -70,7 +70,7 @@ aws --version
 
 # 2. Install SkyPilot
 log "Installing SkyPilot..."
-pip3 install --user "skypilot-nightly[lambda,runpod,vast,nebius,aws]"
+pip3 install --user "skypilot-nightly[lambda,runpod,vast,nebius,primeintellect,aws]"
 # Also install cloud-specific dependencies
 pip3 install --user runpod 2>/dev/null || true
 pip3 install --user prime 2>/dev/null || true

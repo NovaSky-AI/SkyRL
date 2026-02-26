@@ -93,6 +93,7 @@ jobs:
           pip3 install runpod 2>/dev/null || true && runpod config "${{ secrets.RUNPOD_API_KEY }}" || true
           mkdir -p ~/.config/vastai && echo "${{ secrets.VAST_API_KEY }}" > ~/.config/vastai/vast_api_key
           pip3 install prime 2>/dev/null || true && prime config set-api-key "${{ secrets.PRIME_INTELLECT_API_KEY }}" || true
+          pip3 install "skypilot-nightly[primeintellect]" 2>/dev/null || true
           mkdir -p ~/.nebius && echo '${{ secrets.NEBIUS_CREDENTIALS_JSON }}' > ~/.nebius/credentials.json
           echo "${{ secrets.NEBIUS_TENANT_ID }}" > ~/.nebius/NEBIUS_TENANT_ID.txt
 
