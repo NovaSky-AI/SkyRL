@@ -38,8 +38,18 @@ class ModelConfig(PretrainedConfig):
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
     ):
-        # Copy all attributes from the base config
-        super().__init__(**config.to_dict())
+        # Copy attributes from the base config.
+        # Some configs (especially multimodal wrappers) keep language-model fields
+        # under nested dicts like "text_config". Merge these as fallbacks so
+        # model code can consistently access top-level attributes.
+        config_dict = config.to_dict()
+        for nested_key in ("text_config", "language_config"):
+            nested = config_dict.get(nested_key)
+            if isinstance(nested, dict):
+                for key, value in nested.items():
+                    config_dict.setdefault(key, value)
+
+        super().__init__(**config_dict)
 
         # Add LoRA-specific parameters
         self.max_lora_adapters = max_lora_adapters
@@ -56,4 +66,5 @@ class ModelConfig(PretrainedConfig):
 # Model-specific aliases for clarity and backwards compatibility
 Llama3Config = ModelConfig
 Qwen3Config = ModelConfig
+Qwen3_5Config = ModelConfig
 DeepseekV3Config = ModelConfig

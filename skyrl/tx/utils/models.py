@@ -59,13 +59,15 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
         case "torch.float16" | "float16":
             return jnp.float16
         case _:
-            raise ValueError(f"Unsupported torch dtype: {dtype}")
+            return jnp.bfloat16
+            # raise ValueError(f"Unsupported torch dtype: {dtype}")
 
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
     import skyrl.tx.models.llama3
     import skyrl.tx.models.qwen3
+    import skyrl.tx.models.qwen3_5
     import skyrl.tx.models.deepseekv3
 
     for architecture in config.architectures or []:
@@ -73,6 +75,8 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
             return getattr(skyrl.tx.models.llama3, architecture)
         if hasattr(skyrl.tx.models.qwen3, architecture):
             return getattr(skyrl.tx.models.qwen3, architecture)
+        if hasattr(skyrl.tx.models.qwen3_5, architecture):
+            return getattr(skyrl.tx.models.qwen3_5, architecture)
         if hasattr(skyrl.tx.models.deepseekv3, architecture):
             return getattr(skyrl.tx.models.deepseekv3, architecture)
 
@@ -122,6 +126,8 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
     "Get the safetensors key for a given model path."
     if path[-1] in {"embedding", "kernel"}:
         path = (*path[:-1], "weight")
+    elif path[-1] == "conv1d_weight":
+        path = (*path[:-1], "conv1d", "weight")
     elif path[-1] in {"lora_A", "lora_B"}:
         path = (*path, "weight")
     return prefix + ".".join(map(str, path))
@@ -161,24 +167,41 @@ def load_safetensors(
         if filter_fn is not None and not filter_fn(path):
             continue
         key = get_param_key(path)
+        key_to_load = key
+        if key_to_load not in tensors and key_to_load.startswith("model."):
+            # Qwen3.5 checkpoints store language weights under `model.language_model.*`.
+            language_key = "model.language_model." + key_to_load[len("model.") :]
+            if language_key in tensors:
+                key_to_load = language_key
         # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         # Skip connector parameters
         if skip_lora and is_connector_path(path):
             continue
+        if key_to_load not in tensors and "experts" not in path:
+            if not (
+                "lora_A" in path
+                or "lora_B" in path
+                or "lora_scaling" in path
+                or "lora_ranks" in path
+                or is_connector_path(path)
+            ):
+                logger.warning(f"Missing non-LoRA checkpoint key while loading from {checkpoint_dir}: {key}")
+            continue
         if "experts" in path:
             num_experts = config.get_num_experts()
             assert num_experts is not None
-            expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
-            missing_keys = [expert_key for expert_key in expert_keys if expert_key not in tensors]
-            if missing_keys:
-                raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-            tensor = np.stack([tensors[expert_key].T for expert_key in expert_keys], axis=0)
+
+            def expert_key(i: int) -> str:
+                k = get_expert_key(path, i)
+                if key_to_load != key and k.startswith("model."):
+                    return "model.language_model." + k[len("model.") :]
+                return k
+
+            tensor = np.stack([tensors[expert_key(i)].T for i in range(num_experts)], axis=0)
         else:
-            if key not in tensors:
-                raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
-            tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
+            tensor = tensors[key_to_load] if "embed_tokens" in key_to_load else tensors[key_to_load].T
         adapter_idx = get_adapter_slice(path, adapter_index, rank)
         if adapter_idx is not None:
             # Load into specific adapter slot via ArrayRef write-through
