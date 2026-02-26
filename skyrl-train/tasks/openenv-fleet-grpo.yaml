@@ -195,7 +195,7 @@ run: |
     trainer.micro_forward_batch_size_per_gpu=4 \
     trainer.micro_train_batch_size_per_gpu=4 \
     trainer.ckpt_interval=10 \
-    trainer.max_prompt_length=512 \
+    trainer.max_prompt_length=2048 \
     generator.sampling_params.max_generate_length=2048 \
     generator.sampling_params.temperature=0.6 \
     generator.sampling_params.top_p=0.95 \

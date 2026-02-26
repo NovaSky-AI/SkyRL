@@ -93,6 +93,12 @@ def mock_env():
         observations=[{"role": "user", "content": "next"}], reward=1.0, done=True, metadata={}
     )
     mock_env_instance.close.return_value = None
+    # MagicMock has all attributes by default, including init_async/step_async/close_async.
+    # The generator checks hasattr(env, "init_async") to decide whether to await async methods.
+    # BaseTextEnv does NOT have these, so delete them to match real behavior.
+    del mock_env_instance.init_async
+    del mock_env_instance.step_async
+    del mock_env_instance.close_async
     return mock_env_instance
 
 

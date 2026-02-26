@@ -196,7 +196,7 @@ trainer:
   eval_before_train: true
   eval_interval: 5 # Set to -1 to disable evaluation.
   # max prompt length in training dataset
-  max_prompt_length: 512
+  max_prompt_length: 2048
   flash_attn: true
   disable_fast_tokenizer: false
   target_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.target_modules or trainer.critic.model.lora.target_modules instead
