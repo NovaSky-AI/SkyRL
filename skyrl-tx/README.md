@@ -148,7 +148,7 @@ uv run --extra gpu --extra tinker -m tx.tinker.api \
 export TINKER_API_KEY="tml-dummy"
 uv run --with wandb --with tinker sl_loop.py \
     base_url=http://localhost:8000 \
-    model_name=Qwen/Qwen3-8B lora_rank=1
+    model_name=Qwen/Qwen3-8B lora_rank=1 train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
 ### MoE Model Training (Qwen/Qwen3-30B-A3B)
@@ -157,13 +157,13 @@ uv run --with wandb --with tinker sl_loop.py \
 # Start the server
 uv run --extra gpu --extra tinker -m tx.tinker.api \
     --base-model Qwen/Qwen3-30B-A3B \
-    --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "tensor_parallel_size": 8, "train_micro_batch_size": 1, "shard_attention_heads": false}'
+    --backend-config '{"max_lora_adapters": 2, "max_lora_rank": 1, "expert_parallel_size": 8, "train_micro_batch_size": 1, "shard_attention_heads": false}'
 
 # Run training (using tinker-cookbook)
 export TINKER_API_KEY="tml-dummy"
 uv run --with wandb --with tinker sl_loop.py \
     base_url=http://localhost:8000 \
-    model_name=Qwen/Qwen3-30B-A3B lora_rank=1 max_length=512
+    model_name=Qwen/Qwen3-30B-A3B lora_rank=1 max_length=512 train_on_what=LAST_ASSISTANT_MESSAGE
 ```
 
 ### Reinforcement Learning (Qwen/Qwen3-8B)
