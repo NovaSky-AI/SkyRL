@@ -13,23 +13,22 @@ Usage:
     bash examples/llm_as_a_judge_local/run_llm_judge_local_async.sh
 """
 
-import os
-import ray
-import hydra
 import asyncio
 import importlib
+import os
+
+import hydra
+import ray
 from omegaconf import DictConfig
 
-from skyrl_train.utils import initialize_ray
-from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from examples.llm_as_a_judge_local.main_llm_judge_local import start_reward_service
 from skyrl_gym.envs import register
+from skyrl_train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl_train.utils import initialize_ray
 
 # `async` is a Python keyword — use importlib to import from examples.async
 _async_module = importlib.import_module("examples.async.async_trainer")
 AsyncRayPPOTrainer = _async_module.AsyncRayPPOTrainer
-
-# Reuse the reward service setup from the sync entrypoint
-from examples.llm_as_a_judge_local.main_llm_judge_local import start_reward_service
 
 
 class AsyncLLMJudgePPOExp(BasePPOExp):
@@ -88,17 +87,13 @@ def main(cfg: DictConfig) -> None:
     validate_cfg(cfg)
     initialize_ray(cfg)
 
-    hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get(
-        "HUGGING_FACE_HUB_TOKEN", ""
-    )
+    hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
 
     # Propagate PG timeout to worker via runtime_env (env var is read at
     # import time in skyrl_train.env_vars, so it must be set before the
     # worker process loads that module).
     pg_timeout = os.environ.get("SKYRL_RAY_PG_TIMEOUT_IN_S", "600")
-    entrypoint = skyrl_entrypoint.options(
-        runtime_env={"env_vars": {"SKYRL_RAY_PG_TIMEOUT_IN_S": pg_timeout}}
-    )
+    entrypoint = skyrl_entrypoint.options(runtime_env={"env_vars": {"SKYRL_RAY_PG_TIMEOUT_IN_S": pg_timeout}})
     ray.get(entrypoint.remote(cfg, hf_token=hf_token))
 
 

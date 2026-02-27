@@ -34,8 +34,6 @@ Benefits over a plain vLLM subprocess approach:
 """
 
 import logging
-import os
-import threading
 from typing import Any, Dict, List, Optional
 
 import ray
@@ -115,37 +113,27 @@ def create_frozen_vllm_engines(
         ray_noset_visible_devices,
     )
 
-    noset_visible_devices = ray_noset_visible_devices(
-        ray.get(get_all_env_variables.remote())
-    )
+    noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
 
     # For TP=1 use the lightweight "uni" executor; TP>1 needs "ray"
-    distributed_executor_backend = (
-        "uni" if tensor_parallel_size == 1 else "ray"
-    )
+    distributed_executor_backend = "uni" if tensor_parallel_size == 1 else "ray"
     num_gpus_per_actor = 1 if tensor_parallel_size == 1 else 0
     per_engine_gpu_count = tensor_parallel_size
 
     # Create a placement group to pack all engine GPUs together
-    bundles = [
-        {"GPU": 1, "CPU": 1}
-        for _ in range(num_engines * per_engine_gpu_count)
-    ]
+    bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_engines * per_engine_gpu_count)]
     pg = placement_group(bundles, strategy="PACK")
     get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
     logger.info(
-        f"Creating {num_engines} frozen vLLM engine(s) "
-        f"(TP={tensor_parallel_size}, no weight sync) for: {pretrain}"
+        f"Creating {num_engines} frozen vLLM engine(s) " f"(TP={tensor_parallel_size}, no weight sync) for: {pretrain}"
     )
 
     actors = []
     for i in range(num_engines):
         base_pg_index = i * per_engine_gpu_count
         bundle_indices = (
-            list(range(base_pg_index, base_pg_index + per_engine_gpu_count))
-            if per_engine_gpu_count > 1
-            else None
+            list(range(base_pg_index, base_pg_index + per_engine_gpu_count)) if per_engine_gpu_count > 1 else None
         )
         sched = PlacementGroupSchedulingStrategy(
             placement_group=pg,
@@ -276,10 +264,7 @@ class FrozenRewardInferenceClient(InferenceEngineClient):
 
         # Store a dedicated reference for the reward model tokenizer
         self.reward_tokenizer = tokenizer
-        logger.info(
-            f"FrozenRewardInferenceClient ready: "
-            f"{len(engines)} engine(s) for {model}"
-        )
+        logger.info(f"FrozenRewardInferenceClient ready: " f"{len(engines)} engine(s) for {model}")
 
     # ── Scoring API (text-in / text-out) ──────────────────────────
 
@@ -411,10 +396,7 @@ class RewardInferenceService:
             enable_prefix_caching=enable_prefix_caching,
         )
         self._model_name = model
-        print(
-            f"[RewardInferenceService] Ready: "
-            f"{model} × {num_engines} engine(s)"
-        )
+        print(f"[RewardInferenceService] Ready: " f"{model} × {num_engines} engine(s)")
 
     async def score(
         self,
@@ -432,9 +414,7 @@ class RewardInferenceService:
         max_tokens: int = 512,
     ) -> List[str]:
         """Score a batch of chat prompts with automatic load balancing."""
-        return await self.client.score_batch(
-            messages_batch, temperature, max_tokens
-        )
+        return await self.client.score_batch(messages_batch, temperature, max_tokens)
 
     def get_model_name(self) -> str:
         """Return the reward model name."""

@@ -14,17 +14,17 @@ The reward service is started by the training entrypoint before training
 begins (see ``main_llm_judge_local.py``).
 """
 
-from typing import Any, Dict, Union
-
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any, Dict, Union
 
 import ray
 from omegaconf import DictConfig
 
-logger = logging.getLogger(__name__)
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
+
+logger = logging.getLogger(__name__)
 
 PROMPT = """
 You are a strict math evaluation assistant.
@@ -79,9 +79,7 @@ class GSM8kLLMJudgeLocalEnv(BaseTextEnv):
         super().__init__()
 
         assert "reward_spec" in extras, "reward_spec field is required"
-        assert "ground_truth" in extras["reward_spec"], (
-            "ground_truth is required in reward_spec field"
-        )
+        assert "ground_truth" in extras["reward_spec"], "ground_truth is required in reward_spec field"
         self.ground_truth = extras["reward_spec"]["ground_truth"]
 
         self.model = getattr(env_config, "model", "Qwen/Qwen2.5-1.5B-Instruct")
@@ -100,11 +98,7 @@ class GSM8kLLMJudgeLocalEnv(BaseTextEnv):
 
     def _get_reward(self, action: str) -> float:
         # Use system/user role separation to reduce prompt injection risk
-        user_content = (
-            f"GOLD SOLUTION:\n{self.ground_truth}"
-            f"\n\nPREDICTED SOLUTION:\n{action}"
-            f"\n\nAnswer:"
-        )
+        user_content = f"GOLD SOLUTION:\n{self.ground_truth}" f"\n\nPREDICTED SOLUTION:\n{action}" f"\n\nAnswer:"
 
         try:
             messages = [
@@ -146,6 +140,4 @@ class GSM8kLLMJudgeLocalEnv(BaseTextEnv):
     def step(self, action: str) -> BaseTextEnvStepOutput:
         done = True
         reward = self._get_reward(action)
-        return BaseTextEnvStepOutput(
-            observations=[], reward=reward, done=done, metadata={}
-        )
+        return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})

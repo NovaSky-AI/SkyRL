@@ -26,9 +26,7 @@ def extract_solution(solution_str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--output_dir", default="~/data/gsm8k_llm_judge_local"
-    )
+    parser.add_argument("--output_dir", default="~/data/gsm8k_llm_judge_local")
 
     args = parser.parse_args()
     args.output_dir = os.path.expanduser(args.output_dir)

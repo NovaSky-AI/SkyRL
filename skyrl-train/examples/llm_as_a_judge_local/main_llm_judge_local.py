@@ -47,20 +47,22 @@ def _cleanup_stale_reward_services() -> None:
         try:
             result = subprocess.run(
                 [
-                    "ray", "list", "actors",
-                    "--filter", "state=ALIVE",
-                    "--filter", f"class_name={class_name}",
-                    "-f", "json",
+                    "ray",
+                    "list",
+                    "actors",
+                    "--filter",
+                    "state=ALIVE",
+                    "--filter",
+                    f"class_name={class_name}",
+                    "-f",
+                    "json",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=15,
             )
         except subprocess.TimeoutExpired:
-            logger.warning(
-                f"Timeout while listing Ray actors for cleanup. "
-                f"Skipping cleanup for {class_name}."
-            )
+            logger.warning(f"Timeout while listing Ray actors for cleanup. " f"Skipping cleanup for {class_name}.")
             continue
         try:
             actors = json.loads(result.stdout) if result.stdout.strip() else []
@@ -70,23 +72,16 @@ def _cleanup_stale_reward_services() -> None:
         if not actors:
             continue
 
-        logger.info(
-            f"Found {len(actors)} stale {class_name} actor(s) — cleaning up"
-        )
+        logger.info(f"Found {len(actors)} stale {class_name} actor(s) — cleaning up")
         for a in actors:
             name = a.get("name", "")
             ns = a.get("ray_namespace", "")
             try:
                 handle = ray.get_actor(name, namespace=ns)
                 ray.kill(handle, no_restart=True)
-                logger.info(
-                    f"  Killed stale {class_name} in namespace {ns[:12]}.. "
-                    f"(job {a.get('job_id', '')})"
-                )
+                logger.info(f"  Killed stale {class_name} in namespace {ns[:12]}.. " f"(job {a.get('job_id', '')})")
             except Exception as e:
-                logger.warning(
-                    f"  Could not kill {class_name} in ns {ns[:12]}..: {e}"
-                )
+                logger.warning(f"  Could not kill {class_name} in ns {ns[:12]}..: {e}")
 
     # Give actors a moment to release GPU resources
     time.sleep(2)
@@ -136,11 +131,7 @@ def start_reward_service(cfg: DictConfig, hf_token: str = "") -> None:
 
     # Pass HF_TOKEN via runtime_env (needed for gated models)
     actor_env_vars = {}
-    effective_token = (
-        hf_token
-        or os.environ.get("HF_TOKEN")
-        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    )
+    effective_token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if effective_token:
         actor_env_vars["HF_TOKEN"] = effective_token
         actor_env_vars["HUGGING_FACE_HUB_TOKEN"] = effective_token
@@ -160,14 +151,10 @@ def start_reward_service(cfg: DictConfig, hf_token: str = "") -> None:
     # Block until the service is ready
     healthy = ray.get(service.health_check.remote())
     if not healthy:
-        raise RuntimeError(
-            "Reward inference service started but health check failed"
-        )
+        raise RuntimeError("Reward inference service started but health check failed")
 
     model_name = ray.get(service.get_model_name.remote())
-    logger.info(
-        f"Reward inference service ready: {model_name} × {num_engines} engine(s)"
-    )
+    logger.info(f"Reward inference service ready: {model_name} × {num_engines} engine(s)")
 
 
 @ray.remote(num_cpus=1)
@@ -200,9 +187,7 @@ def main(cfg: DictConfig) -> None:
     initialize_ray(cfg)
 
     # Capture HF_TOKEN on the head node and pass it explicitly.
-    hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get(
-        "HUGGING_FACE_HUB_TOKEN", ""
-    )
+    hf_token = os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGING_FACE_HUB_TOKEN", "")
 
     ray.get(skyrl_entrypoint.remote(cfg, hf_token=hf_token))
 
