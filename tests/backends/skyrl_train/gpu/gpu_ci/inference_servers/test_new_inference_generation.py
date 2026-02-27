@@ -23,6 +23,7 @@ from http import HTTPStatus
 from typing import Any, Dict, List, Literal
 from pydantic import BaseModel
 
+
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType, InferenceEngineInput
 from tests.backends.skyrl_train.gpu.utils import get_test_prompts, InferenceEngineState
@@ -195,6 +196,40 @@ def test_chat_completions(vllm_server: InferenceEngineState):
         outputs.append(response.json())
 
     _check_chat_completions_outputs(outputs, "request_posting", num_samples, "vllm")
+
+
+@pytest.mark.vllm
+def test_chat_completions_streaming(vllm_server: InferenceEngineState):
+    base_url = _get_base_url(vllm_server)
+
+    # Test streaming
+    response = requests.post(
+        f"{base_url}/chat/completions",
+        json={
+            "model": SERVED_MODEL_NAME,
+            "messages": [{"role": "user", "content": "hello "}],
+            "max_tokens": 10,
+            "stream": True,
+        },
+    )
+
+    # streaming should work
+    assert response.status_code == HTTPStatus.OK
+
+    full_content = ""
+    for line in response.iter_lines():
+        if line:
+            decoded_line = line.decode("utf-8")
+            if decoded_line.startswith("data:"):
+                data = decoded_line[5:].strip()
+                if data == "[DONE]":
+                    break
+                # should load without errors
+                chunk = json.loads(data)
+                content = chunk["choices"][0]["delta"].get("content", "")
+                full_content += content
+    # Non-null response from API server
+    assert len(full_content) > 0
 
 
 @pytest.mark.vllm
