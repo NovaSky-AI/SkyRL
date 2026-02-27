@@ -45,17 +45,17 @@ def get_test_config() -> SkyRLTrainConfig:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "strategy", "backend"),
+    ("colocate_all", "strategy"),
     [
-        pytest.param(False, "fsdp2", "vllm", marks=pytest.mark.vllm),
-        pytest.param(True, "fsdp2", "vllm", marks=pytest.mark.vllm),
+        pytest.param(False, "fsdp2"),
+        pytest.param(True, "fsdp2"),
     ],
     ids=[
-        "no_colocate_fsdp2_vllm",
-        "colocate_fsdp2_vllm",
+        "no_colocate_fsdp2",
+        "colocate_fsdp2",
     ],
 )
-def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all, strategy, backend):
+def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all, strategy):
     """
     Test that save_weights_for_sampler() correctly syncs weights before sampling.
 
@@ -67,7 +67,6 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
     cfg = get_test_config()
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.trainer.strategy = strategy
-    cfg.generator.inference_engine.backend = backend
 
     with InferenceEngineState.create(
         cfg=cfg,
@@ -76,7 +75,6 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         async_engine=cfg.generator.inference_engine.async_engine,
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
-        backend=backend,
         sleep_level=2,  # Full sleep since we explicitly sync weights
     ) as engines:
         client, pg = engines.client, engines.pg
@@ -134,22 +132,19 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         print(f"Example output: {outputs['responses'][0][:3]}...")
 
 
-@pytest.mark.parametrize("backend", [pytest.param("vllm", marks=pytest.mark.vllm)])
-def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, backend):
+def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
     """
     Test that multiple training steps followed by one save_weights_for_sampler works correctly.
     """
     cfg = get_test_config()
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.strategy = "fsdp2"
-    cfg.generator.inference_engine.backend = backend
 
     # Initialize inference engine (uses 1 GPU)
     with InferenceEngineState.create(
         cfg=cfg,
         model=MODEL,
         use_local=True,
-        backend=backend,
         sleep_level=2,
     ) as engines:
         client, pg = engines.client, engines.pg

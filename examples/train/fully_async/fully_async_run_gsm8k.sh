@@ -21,7 +21,6 @@ set -x
 : "${LOGGER:=wandb}" # change to "console" to print to stdout / or use wandb
 
 : "${INFERENCE_BACKEND:=vllm}"
-# : "${INFERENCE_BACKEND:=sglang}"
 
 # Fully async specific configuration knobs:
 : "${MINI_BATCH_SIZE:=256}"

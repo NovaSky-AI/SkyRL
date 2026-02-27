@@ -131,9 +131,6 @@ def create_ray_wrapped_inference_engines(
         # if a dev version is being used, skip the version check
         if "dev" not in vllm.__version__:
             assert version.parse(vllm.__version__) >= version.parse("0.8.3"), "SkyRL-Train only supports vLLM >= 0.8.3"
-    elif backend == "sglang":
-        # We import SGLang later to avoid importing vllm. See `get_sglang_engine` for more.
-        pass
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
@@ -259,80 +256,13 @@ def create_ray_wrapped_inference_engines(
                     **other_kwargs,
                 )
                 inference_engine_actors.append(engine)
-        elif backend == "sglang":
-            # NOTE: there is no async / sync engine distinction in SGLang
-
-            bundle_indices = None
-            if per_engine_gpu_count > 1:
-                bundle_indices = list(range(i * per_engine_gpu_count, (i + 1) * per_engine_gpu_count))
-
-            scheduling_strategy = PlacementGroupSchedulingStrategy(
-                placement_group=shared_pg,
-                placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=i * per_engine_gpu_count,
-            )
-
-            # NOTE(Charlie): We need `torch.cuda.is_available()` to be True to import SGLang. Otherwise, it requires
-            # importing vllm. See https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/layers/quantization/utils.py#L11-L17
-            # Similar comment: https://github.com/volcengine/verl/blob/9cc307767b0c787e8f5ef581dac929f7bde044ef/verl/workers/fsdp_workers.py#L520-L527
-            @ray.remote
-            def get_sglang_engine():
-                # A workaround to avoid importing vllm is to give this task a GPU.
-                import os
-
-                before_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-                os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-                from skyrl.backends.skyrl_train.inference_engines.sglang.sglang_engine import (
-                    SGLangRayActor,
-                )
-
-                os.environ["CUDA_VISIBLE_DEVICES"] = before_cuda_visible_devices
-
-                actor_class = SGLangRayActor
-                engine = actor_class.options(
-                    num_cpus=num_gpus_per_actor,
-                    num_gpus=num_gpus_per_actor,
-                    scheduling_strategy=scheduling_strategy,
-                ).remote(
-                    model_path=pretrain,
-                    tp_size=tensor_parallel_size,
-                    mem_fraction_static=gpu_memory_utilization,
-                    random_seed=seed + i,
-                    disable_radix_cache=not enable_prefix_caching,
-                    dtype=model_dtype,
-                    trust_remote_code=True,
-                    max_prefill_tokens=max_num_batched_tokens,
-                    max_running_requests=max_num_seqs,
-                    # Borrowed from veRL's SGLang rollout
-                    mm_attention_backend="fa3",
-                    attention_backend="fa3",
-                    enable_memory_saver=inference_engine_enable_sleep,
-                    # Will be popped before instantiating sgl.Engine
-                    distributed_executor_backend=distributed_executor_backend,
-                    noset_visible_devices=noset_visible_devices,
-                    bundle_indices=bundle_indices,
-                    num_gpus=0.2 if use_hybrid_engine else 1,
-                    tokenizer=tokenizer,
-                    **engine_init_kwargs,
-                )
-                return engine
-
-            engine = ray.get(get_sglang_engine.remote())
-
-            inference_engine_actors.append(engine)
 
     engines = [RayWrappedInferenceEngine(actor_handle) for actor_handle in inference_engine_actors]
 
     if inference_engine_enable_sleep:
-        if backend == "vllm":
-            # NOTE(shu): set to 1 for LoRA
-            sleep_level = 1 if enable_lora else sleep_level
-            sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
-        elif backend == "sglang":
-            # NOTE(Charlie): we always need to sync weights after waking up,
-            # see: https://github.com/sgl-project/sglang/issues/7939 for more details.
-            assert sleep_level == 2, "SGLang always discards weights, so sleep_level is not applicable."
-            sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
+        # NOTE(shu): set to 1 for LoRA
+        sleep_level = 1 if enable_lora else sleep_level
+        sleep_refs = [engine.inference_engine_actor.sleep.remote(level=sleep_level) for engine in engines]
         ray.get(sleep_refs)
 
     return engines

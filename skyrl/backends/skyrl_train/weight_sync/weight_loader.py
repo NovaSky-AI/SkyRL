@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 class WeightLoader(ABC):
     """Loads received weights into inference engine.
 
-    Implementations are engine-specific (vLLM, SGLang, etc.) and handle
+    Implementations are engine-specific and handle
     the mechanics of coordinating weight transfer and applying weights
     to the inference model.
     """

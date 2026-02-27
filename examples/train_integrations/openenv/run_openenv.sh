@@ -21,7 +21,6 @@ set -x
 : "${LOGGER:=wandb}" # change to "console" to print to stdout
 
 : "${INFERENCE_BACKEND:=vllm}"
-# : "${INFERENCE_BACKEND:=sglang}"
 : "${MAX_TURNS:=1}"
 
 uv run --isolated --extra fsdp --with "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m examples.train_integrations.openenv.entrypoints.main_openenv \
