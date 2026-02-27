@@ -22,6 +22,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     generator.inference_engine.remote_urls="['127.0.0.1:8001']" \
     generator.inference_engine.tensor_parallel_size="$INF_ENGINE_TP" \
     generator.inference_engine.backend="$BACKEND" \
+    generator.sampling_params.logprobs=null \
     generator.sampling_params.temperature=0.6 \
     generator.sampling_params.top_p=0.95 \
     trainer.algorithm.advantage_estimator="grpo" \
