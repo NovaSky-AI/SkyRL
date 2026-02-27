@@ -112,7 +112,9 @@ class SkyRLTrainBackend(AbstractBackend):
         self._model_metadata: types.ModelMetadata | None = None
         self._cfg = None
         self._dispatch: WorkerDispatch | None = None
-        self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
+        self._tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(self.base_model)
+        if not self._tokenizer.pad_token_id:
+            self._tokenizer.pad_token_id = self._tokenizer.eos_token_id
         self._inference_engine_client = None
         self._inference_engines_initialized = False
 
