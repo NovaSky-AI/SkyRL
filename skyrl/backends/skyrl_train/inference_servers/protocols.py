@@ -15,7 +15,7 @@ class ServerActorProtocol(Protocol):
     """
     Protocol defining the interface for server actor classes.
 
-    Any server actor class (vLLM, SGLang, etc.) must implement this interface
+    Any server actor class must implement this interface
     to be usable with ServerGroup.
 
     Example:

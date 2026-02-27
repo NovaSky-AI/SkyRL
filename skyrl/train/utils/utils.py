@@ -316,10 +316,6 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             )
             cfg.generator.sampling_params.logprobs = 1
 
-        if cfg.generator.inference_engine.backend == "sglang":
-            raise NotImplementedError(
-                "`trainer.algorithm.off_policy_correction` doesn't support Sglang backend, please use vLLM"
-            )
         if cfg.trainer.algorithm.policy_loss_type in ["clip_cov", "kl_cov"]:
             raise NotImplementedError(
                 "`trainer.algorithm.off_policy_correction` doesn't support clip_cov or kl_cov policy loss types"
@@ -367,7 +363,7 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
         cfg (SkyRLTrainConfig): config to validate
 
     Raises:
-        NotImplementedError: if feature is not supported, such as sglang for multiturn generation
+        NotImplementedError: if feature is not supported
         ValueError: when cfg.generator.sampling_params.logprobs > 1
     """
     ie_cfg = cfg.generator.inference_engine
@@ -399,18 +395,8 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             # remote engines can be launched separately so we `enable` by default
             ie_cfg.override_existing_update_group = "enable"
         else:
-            # for local engines or sglang, we disable
+            # for local engines, we disable
             ie_cfg.override_existing_update_group = "disable"
-
-    # TODO: fix once we support these features with SGLang
-    if ie_cfg.backend == "sglang" and ie_cfg.run_engines_locally:
-        assert ie_cfg.tensor_parallel_size == 1, (
-            "As of now, We do not support tensor parallel inference engine with SGLang when running engines locally. "
-            "Please set `tensor_parallel_size` to 1."
-        )
-
-    if ie_cfg.backend == "sglang" and not cfg.generator.use_conversation_multi_turn:
-        raise NotImplementedError("`use_conversation_multi_turn=False` is not supported for SGLang backend")
 
     if cfg.generator.sampling_params.logprobs is not None:
         assert isinstance(cfg.generator.sampling_params.logprobs, int)
@@ -424,26 +410,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
-    if ie_cfg.backend == "sglang":
-        # Some sampling parameters are not supported in SGLang when `skip_tokenizer_init` is True.
-        if cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None:
-            raise ValueError(
-                "`sampling_params.stop` and `eval_sampling_params.stop` are not supported for SGLang backend "
-                "since we always set `skip_tokenizer_init` to True. If you have to use these parameters, you can switch "
-                "to vLLM. "
-                "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
-            )
-        if cfg.generator.sampling_params.additional_kwargs is not None and (
-            "min_new_tokens" in cfg.generator.sampling_params.additional_kwargs
-            or "min_new_tokens" in cfg.generator.eval_sampling_params.additional_kwargs
-        ):
-            raise ValueError(
-                "`sampling_params.min_new_tokens` and `eval_sampling_params.min_new_tokens` are not "
-                "supported for SGLang backend since we always set `skip_tokenizer_init` to True. "
-                "If you have to use these parameters, you can switch to vLLM. "
-                "See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087"
-            )
-
     if cfg.generator.use_conversation_multi_turn:
         if (
             cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None
@@ -456,15 +422,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             )
 
     if ie_cfg.enable_http_endpoint:
-        if ie_cfg.backend == "sglang":
-            # TODO(Charlie): sglang_server.py not supported for /chat/completion yet because we have
-            # skip_tokenizer_init=True in engine creation. Fix by getting tokens via return logprobs
-            # instead. sglang_engine.py not supported yet because we still need to figure out how
-            # to make SGLang Python engine take OAI request.
-            raise ValueError(
-                "inference_engine.enable_http_endpoint is not supported for SGLang backend yet. "
-                'Please set inference_engine.backend="vllm".'
-            )
         if not ie_cfg.async_engine:
             raise ValueError(
                 "inference_engine.async_engine must be True when inference_engine.enable_http_endpoint==True."
@@ -474,9 +431,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
     ep_size = ie_cfg.expert_parallel_size
     dp_size = ie_cfg.data_parallel_size
     tp_size = ie_cfg.tensor_parallel_size
-    if ie_cfg.backend == "sglang":
-        assert dp_size == 1, "Inference data parallelism is not yet supported for SGLang backend."
-        assert ep_size == 1, "Inference expert parallelism is not yet supported for SGLang backend."
     if ep_size > 1:
         assert dp_size * tp_size == ep_size, (
             f"If inference expert parallel is enabled, data parallel size * tensor parallel size must equal expert "
@@ -578,7 +532,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
 
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
-    # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
     if cfg.generator.inference_engine.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
@@ -808,9 +761,6 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     return pg_reordered_bundle_indices
 
 
-# NOTE (sumanthrh): For SGLang, the string representations here should also match those used by
-# (and supported by) SGLang. This is because we do not control the update weight implementation
-# with SGLang backend. With VLLM, we use a custom Worker extension to have a custom update weight implementation.
 def torch_dtype_to_str(dtype: torch.dtype) -> str:
     if dtype == torch.bfloat16:
         return "bfloat16"

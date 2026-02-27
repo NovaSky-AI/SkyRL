@@ -2,6 +2,26 @@
 @import 'fumadocs-ui/css/neutral.css';
 @import 'fumadocs-ui/css/preset.css';
 
+/* Include generated API reference pages in Tailwind's content scan */
+@source "../content/docs/api-ref/**/*.mdx";
+
+/* Make API reference headings with code (class/method names) larger.
+   Prose h4 defaults to ~1.125rem; bump to h2-equivalent for visibility. */
+.prose :is(h3, h4, h5, h6):has(> code) {
+  font-size: 1.75rem;
+}
+
+/* Collapsible source code blocks — subtle background to visually separate */
+.prose details {
+  background-color: rgb(245, 245, 245);
+  border-radius: 0.375rem;
+  padding: 0.75rem 1rem;
+  margin-top: 0.5rem;
+}
+.dark .prose details {
+  background-color: rgb(38, 38, 38);
+}
+
 /* Fix table styling in dark mode */
 .dark table,
 .dark table thead,

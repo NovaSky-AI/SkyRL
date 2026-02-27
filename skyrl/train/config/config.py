@@ -420,7 +420,7 @@ class InferenceEngineConfig(BaseConfig):
     run_engines_locally: bool = True
     num_engines: int = 1
     backend: str = "vllm"
-    """``"vllm"`` or ``"sglang"``."""
+    """``"vllm"``."""
     weight_sync_backend: str = "nccl"
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
@@ -454,7 +454,7 @@ class InferenceEngineConfig(BaseConfig):
     """Model name for HTTP endpoint validation. If set, must be used in the ``model`` field of
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
-    """Pass-through kwargs for the vLLM/SGLang engine. Names must match the engine's args."""
+    """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     override_existing_update_group: str = "auto"
     """``"auto"``, ``"enable"``, or ``"disable"``."""
     external_proxy_url: Optional[str] = None

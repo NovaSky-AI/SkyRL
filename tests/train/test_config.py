@@ -131,7 +131,7 @@ def test_legacy_config_translation():
     # Use legacy-style paths (flat under generator instead of nested in inference_engine)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        cfg = SkyRLTrainConfig.from_cli_overrides(["generator.backend=sglang"])
+        cfg = SkyRLTrainConfig.from_cli_overrides(["generator.backend=vllm"])
 
         # Should have issued a deprecation warning (filter for DeprecationWarning only)
         deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
@@ -139,12 +139,12 @@ def test_legacy_config_translation():
         assert "legacy" in str(deprecation_warnings[0].message).lower()
 
     # Value should be translated to the new nested location
-    assert cfg.generator.inference_engine.backend == "sglang"
+    assert cfg.generator.inference_engine.backend == "vllm"
 
     # test with full YAML
     full_legacy_cfg = get_legacy_config()
     # custom override
-    full_legacy_cfg.generator.backend = "sglang"
+    full_legacy_cfg.generator.backend = "vllm"
 
     # convert to CLI overrides
     def traverse_and_convert(cfg: DictConfig, parent_key: str = "") -> List[str]:
@@ -160,7 +160,7 @@ def test_legacy_config_translation():
 
     # should pass without error
     translated_cfg = SkyRLTrainConfig.from_cli_overrides(full_legacy_cfg_as_overrides)
-    assert translated_cfg.generator.inference_engine.backend == "sglang"
+    assert translated_cfg.generator.inference_engine.backend == "vllm"
 
 
 def test_legacy_config_field_rename():

@@ -1,3 +1,4 @@
+import argparse
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
 import os
+import psutil
 import signal
 import random
 import threading
@@ -42,6 +44,21 @@ ID_MAX_LENGTH = 255
 SHUTDOWN_TIMEOUT_SECONDS = 10
 
 
+def _get_parent_uv_accelerator_extras() -> list[str]:
+    """Extract parent `uv --extra` accelerator flags for the engine launch.
+
+    `uv run` starts this Python API process as a child. To recover the original
+    `uv run --extra ...` flags, we inspect the parent process command line and
+    pass through only accelerator extras (`gpu`/`tpu`) to the engine subprocess.
+    """
+    tokens = psutil.Process(os.getppid()).cmdline()
+
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--extra", action="append", default=[])
+    parsed, _ = parser.parse_known_args(tokens)
+    return list({extra for extra in parsed.extra if extra in {"gpu", "tpu"}})
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
@@ -61,18 +78,12 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = None
         logger.info("Using internal engine for inference")
 
-    # Build subprocess command with engine config parameters
-    cmd = [
-        "uv",
-        "run",
-        "--isolated",
-        "--extra",
-        "tinker",
-        "--extra",
-        app.state.engine_config.backend,
-        "-m",
-        "skyrl.tinker.engine",
-    ]
+    # Build subprocess command with engine config parameters.
+    cmd = ["uv", "run", "--isolated", "--extra", "tinker", "--extra", app.state.engine_config.backend]
+    if app.state.engine_config.backend == "jax":
+        for extra in _get_parent_uv_accelerator_extras():
+            cmd.extend(["--extra", extra])
+    cmd.extend(["-m", "skyrl.tinker.engine"])
     cmd.extend(config_to_argv(app.state.engine_config))
 
     background_engine = await asyncio.create_subprocess_exec(*cmd)

@@ -62,7 +62,6 @@ azure = [
 
 jax = [
     "jax>=0.8,<1.0",
-    "jax[cuda12]>=0.7.2; sys_platform == 'linux'",
     "flax>=0.12.2",
     "optax>=0.2.5",
 ]
@@ -155,6 +154,7 @@ dev = [
     "ty",
     "cloudpathlib[s3]",
     "alembic",
+    "griffe2md",
 ]
 
 [tool.setuptools]
@@ -228,6 +228,10 @@ explicit = true
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
+
+[[tool.uv.index]]
+name = "jax-tpu"
+url = "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
 
 [[tool.uv.index]]
 name = "flashinfer-cu128"

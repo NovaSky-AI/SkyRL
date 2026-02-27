@@ -1,9 +1,6 @@
 """
-# Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "vllm"
-
-# Run only sglang tests (requires sglang extra):
-uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py -m "sglang"
+To run:
+uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py
 """
 
 import pytest
@@ -39,19 +36,14 @@ def get_test_actor_config() -> SkyRLTrainConfig:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy", "backend", "tp_size"),
+    ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
     [
-        pytest.param(False, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(False, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "gloo", "fsdp", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(False, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
-        pytest.param(True, "nccl", "fsdp2", "vllm", 2, marks=pytest.mark.vllm),
-        # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param(False, "nccl", "fsdp2", "sglang", 1, marks=pytest.mark.sglang),
-        pytest.param(True, "nccl", "fsdp2", "sglang", 1, marks=pytest.mark.sglang),
-        pytest.param(False, "gloo", "fsdp", "sglang", 1, marks=pytest.mark.sglang),
-        pytest.param(True, "gloo", "fsdp", "sglang", 1, marks=pytest.mark.sglang),
+        pytest.param(False, "nccl", "fsdp", 2),
+        pytest.param(True, "nccl", "fsdp", 2),
+        pytest.param(False, "gloo", "fsdp", 2),
+        pytest.param(True, "gloo", "fsdp", 2),
+        pytest.param(False, "nccl", "fsdp2", 2),
+        pytest.param(True, "nccl", "fsdp2", 2),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -60,13 +52,9 @@ def get_test_actor_config() -> SkyRLTrainConfig:
         "colocate_gloo_fsdp_vllm",
         "no_colocate_nccl_fsdp2_vllm",
         "colocate_nccl_fsdp2_vllm",
-        "no_colocate_nccl_fsdp2_sglang",
-        "colocate_nccl_fsdp2_sglang",
-        "no_colocate_gloo_fsdp_sglang",
-        "colocate_gloo_fsdp_sglang",
     ],
 )
-def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, backend, tp_size):
+def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
@@ -74,7 +62,6 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy
-    cfg.generator.inference_engine.backend = backend
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -87,7 +74,6 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         async_engine=cfg.generator.inference_engine.async_engine,
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
-        backend=backend,
         sleep_level=2,  # since we explicitly sync weights
     ) as engines:
         client, pg = engines.client, engines.pg

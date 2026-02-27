@@ -2,6 +2,7 @@ from flax import nnx
 import jax
 from jax import numpy as jnp
 
+from skyrl.tx.layers.connectors import LoRAConnector, is_connector_path
 from skyrl.tx.utils.models import filter_lora, get_adapter_idx
 from skyrl.tx.layers.util import Param, prepare_routing, ragged_dot
 from skyrl.tx.models.types import ModelForCausalLM
@@ -350,6 +351,8 @@ def init_lora_adapter(model: ModelForCausalLM, adapter_index: int, lora_config: 
         idx = get_adapter_idx(path, adapter_index)
 
         key_name = path[-2].key
+        if is_connector_path(path):
+            return value.at[idx].set(LoRAConnector.reset_adapter_slot(key_name, value[idx]))
         if key_name == "lora_ranks":
             return value.at[idx].set(effective_rank)
         if key_name == "lora_scaling":
@@ -379,9 +382,14 @@ def clear_lora_adapter(model: ModelForCausalLM, adapter_index: int):
 
     def clear_adapter(path, value):
         key = path[-2].key
+        idx = get_adapter_idx(path, adapter_index)
+
+        # Connector parameters are reset to identity-style defaults so the adapter slot
+        # remains behaviorally neutral for mHC before being reinitialized.
+        if is_connector_path(path):
+            return value.at[idx].set(LoRAConnector.reset_adapter_slot(key, value[idx]))
         if key not in ("lora_ranks", "lora_scaling", "lora_A", "lora_B"):
             return value
-        idx = get_adapter_idx(path, adapter_index)
         return value.at[idx].set(0 if key == "lora_ranks" else 0.0)
 
     updated_state = jax.tree.map_with_path(clear_adapter, state)

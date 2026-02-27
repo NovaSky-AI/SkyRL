@@ -680,7 +680,7 @@ For more details on how different placement options work, please refer to the [p
 
 ### Inference Engine Configuration
 
-- `generator.inference_engine.backend`: Backend to use for the inference engine. We support `vllm` and `sglang`. `sglang` is supported only for remote inference engines at the moment.
+- `generator.inference_engine.backend`: Backend to use for the inference engine. We support `vllm`.
 - `generator.inference_engine.model_dtype`: Dtype used for the inference engine. This is also used during weight transfer - the policy model weights are casted to this dtype before being sent to the inference engine during weight transfer.
 - `generator.inference_engine.async_engine`:  Whether to use an asynchronous/ offline inference engine. Applicable only when `backend="vllm"`.
 - `generator.inference_engine.tensor_parallel_size`: Tensor parallel size for the inference engine.
@@ -695,7 +695,7 @@ For more details on how different placement options work, please refer to the [p
 - `generator.inference_engine.max_num_batched_tokens`: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
 - `generator.inference_engine.enforce_eager`: Whether to disable CUDA graphs. Default is `true` for stability. Set to `false` for higher performance, but this may affect convergence for long-running or long-context training jobs.
 - `generator.inference_engine.enable_ray_prometheus_stats`: Whether to enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only). When enabled, uses `vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger`.
-- `generator.inference_engine.engine_init_kwargs`: Inference engine arguments passed directly to the vLLM or SGLang engine. If duplicate kwargs are passed or kwargs clash with existing inference engine arguments (e.g., `tensor_parallel_size`), an error is raised.
+- `generator.inference_engine.engine_init_kwargs`: Inference engine arguments passed directly to the vLLM engine. If duplicate kwargs are passed or kwargs clash with existing inference engine arguments (e.g., `tensor_parallel_size`), an error is raised.
 
 ### Generation Parameters
 

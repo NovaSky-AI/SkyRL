@@ -1,3 +1,4 @@
+import copy
 import os
 import torch
 from typing import List, Tuple, Union, Optional, Dict, Any
@@ -379,7 +380,7 @@ def prepare_generator_input(
     ]
 
     # all the other columns are env_extras
-    env_extras = [prompt["env_extras"] for prompt in prompts for _ in range(n_samples_per_prompt)]
+    env_extras = [copy.deepcopy(prompt["env_extras"]) for prompt in prompts for _ in range(n_samples_per_prompt)]
 
     # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
     trajectory_ids = []

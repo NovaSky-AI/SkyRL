@@ -19,9 +19,9 @@ MAX_LORA_ADAPTERS = 4
 LORA_RANK = 8
 
 
-def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS):
+def create_backend(max_lora_adapters: int = MAX_LORA_ADAPTERS, **config_overrides):
     """Create a JaxBackend."""
-    config = JaxBackendConfig(max_lora_adapters=max_lora_adapters, max_lora_rank=32)
+    config = JaxBackendConfig(max_lora_adapters=max_lora_adapters, max_lora_rank=32, **config_overrides)
     return JaxBackend(BASE_MODEL, config)
 
 
@@ -102,23 +102,50 @@ def test_max_adapters_after_delete():
 
 def test_clear_lora_adapter():
     """Test that clear_lora_adapter zeros out adapter state."""
-    backend = create_backend()
+    backend = create_backend(mhc_expansion_rate=4)
     model_id = "test_model"
     adapter_idx = create_model(backend, model_id)
 
     # Verify adapter has non-zero rank after creation
     model = backend.model
     lora_layer: LoRALinear = model.model.layers[0].self_attn.q_proj
+    connector = model.model.layers[0].attn_connector
     assert lora_layer.lora_ranks[adapter_idx] > 0
+
+    # Mutate connector state to ensure clear_lora_adapter actively resets it.
+    connector.alpha_pre[...] = connector.alpha_pre[...].at[adapter_idx].set(0.0)
+    connector.b_pre[...] = connector.b_pre[...].at[adapter_idx].set(0.0)
+    connector.b_post[...] = connector.b_post[...].at[adapter_idx].set(0.0)
+    connector.b_res[...] = connector.b_res[...].at[adapter_idx].set(0.0)
+    connector.phi_pre[...] = connector.phi_pre[...].at[adapter_idx].set(1.0)
 
     # Delete the model (calls clear_lora_adapter internally)
     backend.delete_model(model_id)
 
-    # Verify adapter state is zeroed
+    # Verify LoRA adapter state is zeroed
     assert lora_layer.lora_ranks[adapter_idx] == 0
     assert lora_layer.lora_scaling[adapter_idx] == 0.0
     assert (lora_layer.lora_A[adapter_idx] == 0.0).all()
     assert (lora_layer.lora_B[adapter_idx] == 0.0).all()
+
+    # Verify connector state is reset to identity-style defaults.
+    n = connector.b_pre[adapter_idx].shape[-1]
+    target_h_pre = np.array(1.0 / n, dtype=np.float32)
+    clamped = np.clip(target_h_pre, 1e-6, 1.0 - 1e-6)
+    expected_b_pre = np.log(clamped) - np.log(1.0 - clamped)
+
+    expected_b_post = np.linspace(-0.2, 0.2, n, dtype=np.float32)
+
+    np.testing.assert_allclose(np.asarray(connector.alpha_pre[adapter_idx]), 1.0, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(np.asarray(connector.b_pre[adapter_idx]), expected_b_pre, rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(connector.b_post[adapter_idx]), expected_b_post, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(np.asarray(connector.phi_pre[adapter_idx]), 0.0)
+    np.testing.assert_allclose(
+        np.asarray(connector.b_res[adapter_idx]),
+        10.0 * np.eye(n, dtype=np.float32),
+        rtol=1e-3,
+        atol=1e-2,
+    )
 
 
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:
@@ -330,7 +357,7 @@ def test_process_optim_step_hyperparams_behavior():
 
 def test_optim_step_returns_metrics():
     """optim_step should return learning rate and grad norm metrics."""
-    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32)
+    config = JaxBackendConfig(max_lora_adapters=8, max_lora_rank=32, mhc_expansion_rate=4)
     backend = JaxBackend(BASE_MODEL, config)
 
     model_id = "adapter_metrics"
@@ -348,6 +375,7 @@ def test_optim_step_returns_metrics():
     assert step_output.metrics is not None
     assert step_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(learning_rate, rel=2e-3)
     assert step_output.metrics["skyrl.ai/grad_norm"] > 0
+    assert step_output.metrics["skyrl.ai/mhc_gradient_norm"] >= 0
 
     no_grad_output = backend.optim_step(
         model_id,
@@ -355,6 +383,7 @@ def test_optim_step_returns_metrics():
     )
     assert no_grad_output.metrics["skyrl.ai/learning_rate"] == pytest.approx(2e-4, rel=2e-3)
     assert no_grad_output.metrics["skyrl.ai/grad_norm"] == pytest.approx(0.0)
+    assert no_grad_output.metrics["skyrl.ai/mhc_gradient_norm"] == pytest.approx(0.0)
 
 
 def test_gradient_checkpointing():

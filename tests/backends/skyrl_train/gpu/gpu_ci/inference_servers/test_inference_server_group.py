@@ -112,7 +112,6 @@ def server_group_and_router(ray_init_fixture):
     group.shutdown()
 
 
-@pytest.mark.vllm
 @pytest.mark.asyncio(loop_scope="class")
 class TestServerGroupAndRouter:
     """Tests for ServerGroup + InferenceRouter with 2 TP=2 servers."""

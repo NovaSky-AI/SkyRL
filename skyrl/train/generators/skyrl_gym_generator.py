@@ -735,7 +735,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
-            # TODO: this might have to change when we support logprobs for sglang
             get_logprobs = sampling_params.get("logprobs", None) is not None
         else:
             get_logprobs = self.generator_cfg.sampling_params.logprobs is not None

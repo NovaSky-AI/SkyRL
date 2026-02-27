@@ -13,7 +13,7 @@ ENV_CLASS="gsm8k_multi_turn"
 NUM_GPUS=1
 LOGGER="wandb"  # or "console" to print to stdout
 
-INFERENCE_BACKEND="vllm"  # or "sglang"
+INFERENCE_BACKEND="vllm"
 
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
