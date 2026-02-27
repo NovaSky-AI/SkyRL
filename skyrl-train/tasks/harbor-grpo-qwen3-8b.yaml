@@ -82,7 +82,9 @@ setup: |
 
   uv venv --python 3.12 --seed
   source .venv/bin/activate
-  uv sync --extra vllm --extra harbor
+  uv sync --extra vllm
+  # Install harbor separately to avoid datasets version conflict with core SkyRL deps
+  pip install "harbor @ git+https://github.com/laude-institute/harbor@8c040e1bb010201fd3c75bee3dede2407b9f57cd"
 
   # Prepare datasets from HuggingFace
   DATA_DIR="$HOME/data/harbor"
@@ -128,8 +130,7 @@ run: |
 
   CHAT_TEMPLATE_PATH="skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
 
-  uv run --isolated --extra vllm --extra harbor \
-    -m examples.harbor.entrypoints.main_harbor \
+  python -m examples.harbor.entrypoints.main_harbor \
     data.train_data="['$DATA_DIR/$TRAIN_DIR']" \
     data.val_data="['$DATA_DIR/$EVAL_DIR']" \
     trainer.policy.model.path=Qwen/Qwen3-8B \
