@@ -381,7 +381,10 @@ class VLLMServerActor(ServerActorProtocol):
             return {"status": "ok"}
 
     async def shutdown(self) -> None:
-        """Gracefully shutdown the server."""
+        """Gracefully shutdown the server.
+
+        Note: This doesn't shutdown the engine instance
+        """
         if self._server_task:
             self._server_task.cancel()
             try:
