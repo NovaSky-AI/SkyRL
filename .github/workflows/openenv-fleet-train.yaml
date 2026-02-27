@@ -49,6 +49,7 @@ on:
           - openenv-fleet-grpo-qwen3-vl-8b
           - openenv-fleet-grpo-xlam-70b
           - openenv-fleet-grpo-glm-4.7-flash
+          - harbor-grpo-qwen3-8b
         default: "openenv-fleet-grpo-qwen3-8b"
       data_version:
         description: "Dataset version in S3 (v3=20,557 tasks, v4=15,169 tasks recommended)"
