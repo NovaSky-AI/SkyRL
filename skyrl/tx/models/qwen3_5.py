@@ -16,7 +16,6 @@ from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from skyrl.tx.utils.generator import GeneratorMixin, KVCache
 from skyrl.tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
-
 def apply_partial_rope(
     q: jax.Array,
     k: jax.Array,
@@ -832,22 +831,23 @@ class Qwen3_5Model(nnx.Module):
 class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProcessorMixin):
 
     def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.config = config
-        self.model = Qwen3_5Model(config, dtype=dtype, rngs=rngs)
+        model_config = config.get_text_config()
+        self.config = model_config
+        self.model = Qwen3_5Model(model_config, dtype=dtype, rngs=rngs)
 
-        if config.tie_word_embeddings:
+        if model_config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens.T
         else:
             self.lm_head = LoRALinear(
-                config.hidden_size,
-                config.vocab_size,
+                model_config.hidden_size,
+                model_config.vocab_size,
                 sharding=(None, "tp"),
                 use_bias=False,
                 dtype=dtype,
                 param_dtype=dtype,
                 kernel_init=nnx.initializers.lecun_normal(),
-                max_lora_adapters=config.max_lora_adapters,
-                max_lora_rank=config.max_lora_rank,
+                max_lora_adapters=model_config.max_lora_adapters,
+                max_lora_rank=model_config.max_lora_rank,
                 rngs=rngs,
             )
 

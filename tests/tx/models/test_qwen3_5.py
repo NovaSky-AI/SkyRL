@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 import torch
 from transformers import PretrainedConfig
-from transformers.models.qwen3_next.configuration_qwen3_next import Qwen3NextConfig as HFQwen3NextConfig
-from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextForCausalLM as HFQwen3NextForCausalLM
+from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig as HFQwen3_5Config
+from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM as HFQwen3_5ForCausalLM
 
 from skyrl.tx.models.configs import Qwen3_5Config
 from skyrl.tx.models.qwen3_5 import Qwen3_5ForCausalLM
@@ -16,8 +16,8 @@ from skyrl.tinker.types import SamplingParams
 from skyrl.tx.utils.models import load_safetensors
 
 
-def make_small_hf_config() -> HFQwen3NextConfig:
-    return HFQwen3NextConfig(
+def make_small_hf_config() -> HFQwen3_5Config:
+    return HFQwen3_5Config(
         vocab_size=128,
         hidden_size=32,
         intermediate_size=64,
@@ -44,9 +44,14 @@ def make_small_hf_config() -> HFQwen3NextConfig:
     )
 
 
-def make_small_tx_config(base_config: HFQwen3NextConfig, *, shard_attention_heads: bool = False) -> Qwen3_5Config:
+def make_small_tx_config(base_config: HFQwen3_5Config, *, shard_attention_heads: bool = False) -> Qwen3_5Config:
+    wrapped_base_config = PretrainedConfig(
+        architectures=["Qwen3_5ForCausalLM"],
+        model_type=getattr(base_config, "model_type", "qwen3_5_moe"),
+        text_config=base_config.to_dict(),
+    )
     return Qwen3_5Config(
-        base_config,
+        wrapped_base_config,
         max_lora_adapters=2,
         max_lora_rank=8,
         shard_attention_heads=shard_attention_heads,
@@ -59,7 +64,7 @@ def test_qwen3_5_end_to_end(tp: int):
         pytest.skip(f"Need at least {tp} JAX devices for tp={tp}, found {jax.device_count()}")
 
     hf_config = make_small_hf_config()
-    hf_model = HFQwen3NextForCausalLM(hf_config)
+    hf_model = HFQwen3_5ForCausalLM(hf_config)
     hf_model.eval()
 
     input_ids = torch.tensor([[1, 2, 3, 4, 0], [5, 6, 7, 0, 0]], dtype=torch.long)
@@ -98,6 +103,7 @@ def test_qwen3_5_end_to_end(tp: int):
 
 def test_qwen3_5_prefill_cache_shapes():
     config = make_small_tx_config(make_small_hf_config())
+    model_config = config.get_text_config()
     mesh = jax.make_mesh((1, 1, 1), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
 
     with jax.set_mesh(mesh):
@@ -106,18 +112,18 @@ def test_qwen3_5_prefill_cache_shapes():
         attention_mask = jnp.array([[1, 1, 1, 1, 0], [1, 1, 1, 0, 0]], dtype=jnp.int32)
         outputs = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
 
-    assert outputs.last_hidden_state.shape == (2, 5, config.hidden_size)
+    assert outputs.last_hidden_state.shape == (2, 5, model_config.hidden_size)
     assert outputs.hidden_states is not None
-    assert len(outputs.hidden_states) == config.num_hidden_layers + 1
+    assert len(outputs.hidden_states) == model_config.num_hidden_layers + 1
     assert outputs.kv_cache is not None
-    assert len(outputs.kv_cache.keys) == config.num_hidden_layers
+    assert len(outputs.kv_cache.keys) == model_config.num_hidden_layers
     assert outputs.kv_cache.conv_states is not None
     assert outputs.kv_cache.recurrent_states is not None
     assert outputs.kv_cache.keys[0].shape[1] == 0
     assert outputs.kv_cache.keys[1].shape[1] == 5
     assert outputs.kv_cache.keys[3].shape[1] == 5
-    assert outputs.kv_cache.conv_states[0].shape[-1] == config.linear_conv_kernel_dim
-    assert outputs.kv_cache.recurrent_states[0].shape[1] == config.linear_num_value_heads
+    assert outputs.kv_cache.conv_states[0].shape[-1] == model_config.linear_conv_kernel_dim
+    assert outputs.kv_cache.recurrent_states[0].shape[1] == model_config.linear_num_value_heads
 
 
 def test_qwen3_5_decode_updates_cache_position():
@@ -209,6 +215,7 @@ def test_qwen3_5_nested_rope_parameters_without_top_level_rope_theta():
         max_lora_rank=8,
         shard_attention_heads=False,
     )
+    assert getattr(config, "hidden_size", None) is None
 
     mesh = jax.make_mesh((1, 1, 1), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
     with jax.set_mesh(mesh):
@@ -217,4 +224,20 @@ def test_qwen3_5_nested_rope_parameters_without_top_level_rope_theta():
         attention_mask = jnp.array([[1, 1, 1]], dtype=jnp.int32)
         outputs = model(input_ids, attention_mask=attention_mask)
 
-    assert outputs.last_hidden_state.shape == (1, 3, config.hidden_size)
+    hidden_size = (
+        config.text_config["hidden_size"] if isinstance(config.text_config, dict) else config.text_config.hidden_size
+    )
+    assert model.config.hidden_size == hidden_size
+    assert model.config.max_lora_adapters == 2
+    assert outputs.last_hidden_state.shape == (1, 3, hidden_size)
+
+
+def test_get_text_config_requires_text_config():
+    config = Qwen3_5Config(
+        PretrainedConfig(hidden_size=32, num_hidden_layers=2),
+        max_lora_adapters=2,
+        max_lora_rank=8,
+        shard_attention_heads=False,
+    )
+    with pytest.raises(RuntimeError, match="text_config"):
+        config.get_text_config()

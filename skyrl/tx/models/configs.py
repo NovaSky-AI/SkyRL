@@ -27,6 +27,27 @@ class ModelConfig(PretrainedConfig):
     gradient_checkpointing: bool
     mhc_expansion_rate: int
 
+    def get_text_config(self) -> "ModelConfig":
+        """Return a wrapped config built from `self.text_config`.
+
+        Raises:
+            RuntimeError: If `self.text_config` is missing.
+        """
+        text_config = getattr(self, "text_config", None)
+        if text_config is None:
+            raise RuntimeError("ModelConfig.get_text_config() requires `text_config` to be present on the config.")
+
+        base_config = PretrainedConfig(**text_config) if isinstance(text_config, dict) else text_config
+        return type(self)(
+            base_config,
+            max_lora_adapters=self.max_lora_adapters,
+            max_lora_rank=self.max_lora_rank,
+            shard_attention_heads=self.shard_attention_heads,
+            loss_chunk_size=self.loss_chunk_size,
+            gradient_checkpointing=self.gradient_checkpointing,
+            mhc_expansion_rate=self.mhc_expansion_rate,
+        )
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -38,18 +59,7 @@ class ModelConfig(PretrainedConfig):
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
     ):
-        # Copy attributes from the base config.
-        # Some configs (especially multimodal wrappers) keep language-model fields
-        # under nested dicts like "text_config". Merge these as fallbacks so
-        # model code can consistently access top-level attributes.
-        config_dict = config.to_dict()
-        for nested_key in ("text_config", "language_config"):
-            nested = config_dict.get(nested_key)
-            if isinstance(nested, dict):
-                for key, value in nested.items():
-                    config_dict.setdefault(key, value)
-
-        super().__init__(**config_dict)
+        super().__init__(**config.to_dict())
 
         # Add LoRA-specific parameters
         self.max_lora_adapters = max_lora_adapters
@@ -60,11 +70,29 @@ class ModelConfig(PretrainedConfig):
         self.mhc_expansion_rate = mhc_expansion_rate
 
     def get_num_experts(self):
-        return getattr(self, "num_experts", None) or getattr(self, "n_routed_experts", None)
+        for key in ("num_experts", "n_routed_experts"):
+            value = getattr(self, key, None)
+            if value is not None:
+                return value
+
+        for nested_key in ("text_config", "language_config"):
+            nested = getattr(self, nested_key, None)
+            if nested is None:
+                continue
+            for key in ("num_experts", "n_routed_experts"):
+                if isinstance(nested, dict):
+                    value = nested.get(key)
+                else:
+                    value = getattr(nested, key, None)
+                if value is not None:
+                    return value
+
+        return None
 
 
 # Model-specific aliases for clarity and backwards compatibility
 Llama3Config = ModelConfig
 Qwen3Config = ModelConfig
 Qwen3_5Config = ModelConfig
+Qwen3_5TextConfig = ModelConfig
 DeepseekV3Config = ModelConfig
