@@ -368,7 +368,7 @@ def add_source_blocks(md: str, obj, search_paths: list) -> str:
     member_source = {}
     for name, member in obj.members.items():
         try:
-            if member.lineno and member.endlineno:
+            if member.kind.value == "function" and member.lineno and member.endlineno:
                 member_source[name] = (member.lineno, member.endlineno)
         except Exception:
             continue
