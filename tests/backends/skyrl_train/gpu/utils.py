@@ -35,6 +35,7 @@ from skyrl.backends.skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT, _SKYRL_
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+from skyrl.utils.tok import get_tokenizer
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -460,7 +461,7 @@ class InferenceEngineState:
         # Extract served_model_name from config if set
         served_model_name = ie_cfg.served_model_name
 
-        tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
+        tokenizer = get_tokenizer(cfg.trainer.policy.model.path)
 
         # Return both router and server group if created to keep references alive
         router = None
