@@ -34,7 +34,7 @@ dependencies = [
     "debugpy==1.8.0",
     "hf_transfer",
     "wandb",
-    "datasets==4.0.0",
+    "datasets>=4.0.0",
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
