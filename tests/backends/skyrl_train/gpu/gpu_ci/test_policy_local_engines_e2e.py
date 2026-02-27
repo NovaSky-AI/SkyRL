@@ -29,6 +29,9 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.run_engines_locally = True
+    # NOTE: We reduce the gpu memory used by vLLM because of the colocated tests
+    # that can OOM on L4s. For more details, see: https://github.com/NovaSky-AI/SkyRL/pull/1221
+    cfg.generator.inference_engine.gpu_memory_utilization = 0.7
     return cfg
 
 
