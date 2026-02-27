@@ -69,7 +69,7 @@ class SearchEnv(BaseTextEnv):
         stop_tags = ["</search>", "</answer>"]
         # TODO (sumanthrh): This assertion should really be that the *last token* generated contains <answer>.
         # The last token generated can have additional punctuation characters like periods, etc.
-        action = action.rstrip("\n").rstrip(".")  # strip out any trailing newlines and periods
+        action = action.rstrip("\n")  # strip out any trailing newlines and periods
         for tag in stop_tags:
             if tag in action:
                 assert action.split(tag, 1)[1] == "", (
