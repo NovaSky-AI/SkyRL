@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.distributed
 import ray
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
 import os
@@ -42,7 +42,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk
-
+from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
@@ -205,7 +205,7 @@ class MegatronWorker:
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
         override_config_kwargs = {
