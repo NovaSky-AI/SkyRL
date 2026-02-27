@@ -265,7 +265,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
         if config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens.T
+            self.lm_head = None
         else:
             self.lm_head = LoRALinear(
                 config.hidden_size,
@@ -282,6 +282,11 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
 
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
+        if self.config.tie_word_embeddings:
+            # Resolve tied embeddings from the current merged model state so jitted
+            # functions do not close over initialization-time global arrays.
+            return self.model.embed_tokens.T
+        assert self.lm_head is not None
         return self.lm_head
 
     def __call__(
