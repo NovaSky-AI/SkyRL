@@ -84,15 +84,15 @@ setup: |
   source .venv/bin/activate
   uv sync --extra vllm
   # Install harbor separately to avoid datasets version conflict with core SkyRL deps
-  pip install "harbor @ git+https://github.com/laude-institute/harbor@8c040e1bb010201fd3c75bee3dede2407b9f57cd"
+  pip install --no-deps "harbor @ git+https://github.com/laude-institute/harbor@8c040e1bb010201fd3c75bee3dede2407b9f57cd"
 
   # Prepare datasets from HuggingFace
   DATA_DIR="$HOME/data/harbor"
   mkdir -p "$DATA_DIR"
   echo "Preparing training dataset: $TRAIN_DATASET"
-  uv run python examples/harbor/prepare_harbor_dataset.py --dataset "$TRAIN_DATASET"
+  python examples/harbor/prepare_harbor_dataset.py --dataset "$TRAIN_DATASET"
   echo "Preparing eval dataset: $EVAL_DATASET"
-  uv run python examples/harbor/prepare_harbor_dataset.py --dataset "$EVAL_DATASET"
+  python examples/harbor/prepare_harbor_dataset.py --dataset "$EVAL_DATASET"
 
 run: |
   set -euo pipefail
