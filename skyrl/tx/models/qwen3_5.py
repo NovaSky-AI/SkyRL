@@ -16,6 +16,7 @@ from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from skyrl.tx.utils.generator import GeneratorMixin, KVCache
 from skyrl.tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 
+
 def apply_partial_rope(
     q: jax.Array,
     k: jax.Array,
@@ -151,12 +152,10 @@ class Qwen3_5Attention(nnx.Module):
 
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
         rope_parameters = getattr(config, "rope_parameters", None)
-        assert isinstance(
-            rope_parameters, dict
-        ), "Qwen3_5Attention requires config.rope_parameters to be a dict."
-        assert "partial_rotary_factor" in rope_parameters, (
-            "Qwen3_5Attention requires rope_parameters['partial_rotary_factor']."
-        )
+        assert isinstance(rope_parameters, dict), "Qwen3_5Attention requires config.rope_parameters to be a dict."
+        assert (
+            "partial_rotary_factor" in rope_parameters
+        ), "Qwen3_5Attention requires rope_parameters['partial_rotary_factor']."
         assert "rope_theta" in rope_parameters, "Qwen3_5Attention requires rope_parameters['rope_theta']."
         partial_rotary_factor = rope_parameters["partial_rotary_factor"]
         rope_theta = rope_parameters["rope_theta"]
@@ -233,7 +232,9 @@ class Qwen3_5Attention(nnx.Module):
         gate = gate.reshape(bsz, seq_len, self.num_heads * self.head_dim)
 
         q = self.q_norm(q)
-        k = self.k_norm(self.k_proj(x, adapter_indices=adapter_indices).reshape(bsz, seq_len, self.num_kv_heads, self.head_dim))
+        k = self.k_norm(
+            self.k_proj(x, adapter_indices=adapter_indices).reshape(bsz, seq_len, self.num_kv_heads, self.head_dim)
+        )
         v = self.v_proj(x, adapter_indices=adapter_indices).reshape(bsz, seq_len, self.num_kv_heads, self.head_dim)
 
         q, k = apply_partial_rope(q, k, positions, self.rotary_dim, self.rope_theta)
@@ -409,7 +410,9 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
         batch_size, seq_len, _ = hidden_states.shape
 
         mixed_qkv = self.in_proj_qkv(hidden_states, adapter_indices=adapter_indices).transpose((0, 2, 1))
-        z = self.in_proj_z(hidden_states, adapter_indices=adapter_indices).reshape(batch_size, seq_len, -1, self.head_v_dim)
+        z = self.in_proj_z(hidden_states, adapter_indices=adapter_indices).reshape(
+            batch_size, seq_len, -1, self.head_v_dim
+        )
         b = self.in_proj_b(hidden_states, adapter_indices=adapter_indices)
         a = self.in_proj_a(hidden_states, adapter_indices=adapter_indices)
 
@@ -500,7 +503,9 @@ class Qwen3_5MLP(nnx.Module):
         )
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
-        return self.down_proj(nnx.silu(self.gate_proj(x, adapter_indices)) * self.up_proj(x, adapter_indices), adapter_indices)
+        return self.down_proj(
+            nnx.silu(self.gate_proj(x, adapter_indices)) * self.up_proj(x, adapter_indices), adapter_indices
+        )
 
 
 class Qwen3_5Experts(nnx.Module):

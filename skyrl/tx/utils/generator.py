@@ -55,7 +55,9 @@ class KVCache:
             keys=keys,
             values=values,
             cache_position=cache_position,
-            conv_states=conv_states if conv_states is not None else (kv_cache.conv_states if kv_cache is not None else None),
+            conv_states=(
+                conv_states if conv_states is not None else (kv_cache.conv_states if kv_cache is not None else None)
+            ),
             recurrent_states=(
                 recurrent_states
                 if recurrent_states is not None
@@ -93,15 +95,11 @@ class KVCache:
         """
         return KVCache(
             keys=[
-                jnp.pad(k, ((0, 0), (0, max_length - k.shape[1]), (0, 0), (0, 0)))
-                if k.shape[1] < max_length
-                else k
+                jnp.pad(k, ((0, 0), (0, max_length - k.shape[1]), (0, 0), (0, 0))) if k.shape[1] < max_length else k
                 for k in self.keys
             ],
             values=[
-                jnp.pad(v, ((0, 0), (0, max_length - v.shape[1]), (0, 0), (0, 0)))
-                if v.shape[1] < max_length
-                else v
+                jnp.pad(v, ((0, 0), (0, max_length - v.shape[1]), (0, 0), (0, 0))) if v.shape[1] < max_length else v
                 for v in self.values
             ],
             cache_position=self.cache_position,
