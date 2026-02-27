@@ -200,6 +200,7 @@ def test_chat_completions(vllm_server: InferenceEngineState):
 
 @pytest.mark.vllm
 def test_chat_completions_streaming(vllm_server: InferenceEngineState):
+    """Basic test for streaming response support from the router's API server"""
     base_url = _get_base_url(vllm_server)
 
     # Test streaming
