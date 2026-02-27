@@ -298,33 +298,52 @@ def sanitize_for_mdx(md: str) -> str:
     return md
 
 
-def add_source_blocks(md: str, obj, search_paths: list) -> str:
-    """Add a single collapsible source code block for the top-level object (class/function)."""
+def _resolve_source_path(obj, search_paths):
+    """Return (rel_path, search_path, src_lines) for an object, or Nones."""
     try:
         fp = obj.filepath
-        start = obj.lineno
-        end = obj.endlineno
-        if not (fp and start and end):
-            return md
+        if not (fp and obj.lineno and obj.endlineno):
+            return None, None, None
     except Exception:
-        return md
+        return None, None, None
 
-    # Find the relative path
-    rel_path = None
-    sp_found = None
     for sp in search_paths:
         abs_sp = os.path.abspath(sp)
         abs_fp = os.path.abspath(str(fp))
         if abs_fp.startswith(abs_sp):
             rel_path = os.path.relpath(abs_fp, abs_sp)
-            sp_found = sp
-            break
+            try:
+                with open(os.path.join(sp, rel_path)) as f:
+                    return rel_path, sp, f.readlines()
+            except Exception:
+                return None, None, None
+    return None, None, None
 
+
+def _source_detail(rel_path, src_lines, start, end):
+    """Build a collapsible source block string."""
+    src = "".join(src_lines[start - 1 : end])
+    return (
+        "\n<details>\n"
+        f"<summary>Source code in `{rel_path}:{start}-{end}`</summary>\n\n"
+        f"```python\n{src.rstrip()}\n```\n\n"
+        "</details>\n"
+    )
+
+
+def _insert_before_line(md, line_idx, block):
+    """Insert a block of text before the given line index."""
+    lines = md.split("\n")
+    return "\n".join(lines[:line_idx]) + block + "\n".join(lines[line_idx:])
+
+
+def add_source_blocks(md: str, obj, search_paths: list) -> str:
+    """Add collapsible source code blocks for the top-level object and each member."""
+    rel_path, _, src_lines = _resolve_source_path(obj, search_paths)
     if not rel_path:
         return md
 
-    # Insert the source block just before the first member heading
-    # (one level deeper than root), i.e. after the parameters table.
+    # Pass 1: insert top-level source block before the first member heading
     lines = md.split("\n")
     root_level = None
     insert_idx = None
@@ -335,34 +354,54 @@ def add_source_blocks(md: str, obj, search_paths: list) -> str:
             if root_level is None:
                 root_level = level
             elif level > root_level:
-                # First member heading — insert just before it
                 insert_idx = idx
                 break
 
-    if insert_idx is None:
+    if insert_idx is not None:
+        block = _source_detail(rel_path, src_lines, obj.lineno, obj.endlineno)
+        md = _insert_before_line(md, insert_idx, block)
+
+    # Pass 2: insert member source blocks at the end of each member section
+    if not hasattr(obj, "members") or root_level is None:
         return md
 
-    # Build the source block
-    try:
-        with open(os.path.join(sp_found, rel_path)) as sf:
-            src_lines = sf.readlines()
-        src = "".join(src_lines[start - 1 : end])
-        source_block = [
-            "",
-            "<details>",
-            f"<summary>Source code in `{rel_path}:{start}-{end}`</summary>",
-            "",
-            "```python",
-            src.rstrip(),
-            "```",
-            "",
-            "</details>",
-            "",
-        ]
-    except Exception:
+    member_source = {}
+    for name, member in obj.members.items():
+        try:
+            if member.kind.value == "function" and member.lineno and member.endlineno:
+                member_source[name] = (member.lineno, member.endlineno)
+        except Exception:
+            continue
+
+    if not member_source:
         return md
 
-    return "\n".join(lines[:insert_idx] + source_block + lines[insert_idx:])
+    # Re-split after pass 1 modifications
+    lines = md.split("\n")
+    # Find member headings (deeper than root) and their section boundaries
+    member_headings = []
+    for idx, line in enumerate(lines):
+        m = re.match(r"^(#{2,6})\s.*`([^`]+)`", line)
+        if m and len(m.group(1)) > root_level:
+            member_headings.append((idx, len(m.group(1)), m.group(2)))
+
+    # Insert in reverse order so indices stay valid
+    for i in range(len(member_headings) - 1, -1, -1):
+        idx, level, name = member_headings[i]
+        if name not in member_source:
+            continue
+        # Section ends at the next heading of same or higher level, or EOF
+        section_end = len(lines)
+        for j in range(idx + 1, len(lines)):
+            nm = re.match(r"^(#{2,6})\s", lines[j])
+            if nm and len(nm.group(1)) <= level:
+                section_end = j
+                break
+        start, end = member_source[name]
+        block_lines = _source_detail(rel_path, src_lines, start, end).split("\n")
+        lines[section_end:section_end] = block_lines
+
+    return "\n".join(lines)
 
 
 def render_object(loader, obj_path, kind_map, labels_map, obj_slug_map, page):
