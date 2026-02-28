@@ -34,7 +34,7 @@ class SkyRLBackend(AsyncInferBackend):
 
 class SkyRLGeneratorOutput(GeneratorOutput):
     def __init__(self, result: Any):
-        from skyrl_train.generators.utils import get_rollout_metrics
+        from skyrl.train.generators.utils import get_rollout_metrics
 
         # Add more skyrl-specific rollout metrics.
         assert "rollout_metrics" in result, "rollout_metrics should be in the result"

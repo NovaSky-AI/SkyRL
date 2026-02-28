@@ -18,30 +18,31 @@ from torch.utils.data import RandomSampler, SequentialSampler
 from torchdata.stateful_dataloader import StatefulDataLoader
 import torch
 
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.generators.base import (
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
     TrajectoryID,
     BatchMetadata,
     TrainingPhase,
 )
-from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl_train.dataset import PromptDataset
+from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl.train.dataset import PromptDataset
 
 import asyncio
 from pathlib import Path
 import ray
 from tqdm import tqdm
 
-from skyrl_train.training_batch import TrainingInputBatch
-from skyrl_train.generators.utils import prepare_generator_input, get_metrics_from_generator_output
-from skyrl_train.utils import Timer
-from skyrl_train.utils.ppo_utils import (
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.train.generators.utils import prepare_generator_input, get_metrics_from_generator_output
+from skyrl.train.utils import Timer
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
     get_kl_controller,
     normalize_advantages_dict,
 )
-from skyrl_train.utils.trainer_utils import (
+from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     ResumeMode,
     build_dataloader,
@@ -50,7 +51,7 @@ from skyrl_train.utils.trainer_utils import (
     concatenate_generator_outputs,
 )
 
-from skyrl_train.utils.ppo_utils import register_advantage_estimator
+from skyrl.backends.skyrl_train.utils.ppo_utils import register_advantage_estimator
 
 
 @register_advantage_estimator("loop")
@@ -145,33 +146,41 @@ def validate_generator_output(input_batch: GeneratorInput, generator_output: Gen
         logger.warning("All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!")
 
 
-def build_dataloader(cfg: DictConfig, dataset: PromptDataset, is_train=True) -> StatefulDataLoader:
+def build_dataloader(
+    cfg: SkyRLTrainConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
+) -> StatefulDataLoader:
     """
-    Build the dataloader for the training or evaluation dataset
+    Build the dataloader for the training or evaluation dataset.
+
+    Args:
+        cfg: Config object
+        dataset: Dataset object
+        is_train: Whether to build the dataloader for training or evaluation
+        is_fully_async: If is_train, whether to build the dataloader for fully async training, which
+            mainly makes the batch size 1.
     """
     # prepare dataloader
     batch_size = cfg.trainer.train_batch_size if is_train else cfg.trainer.eval_batch_size
 
     # Seed the dataloader for reproducibility.
-    # NOTE: We seed the dataloader in the same fashion as VERL for exact reproducibility
     seeded_generator = torch.Generator()
     seeded_generator.manual_seed(cfg.trainer.seed)
-    if is_train:
-        sampler = RandomSampler(dataset, generator=seeded_generator)
-    else:
-        sampler = SequentialSampler(dataset)
 
     dataloader = StatefulDataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=batch_size if not is_fully_async else 1,
+        shuffle=True if is_train else False,
         collate_fn=dataset.collate_fn,
         # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        num_workers=0 if cfg.generator.inference_engine.enable_http_endpoint else 8,
         drop_last=True if is_train else False,
-        sampler=sampler,
+        generator=seeded_generator,
     )
     if is_train:
-        logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
+        if not is_fully_async:
+            logger.info(f"Total steps: {len(dataloader) * cfg.trainer.epochs}")
+        else:
+            logger.info(f"Total steps: {len(dataloader) // cfg.trainer.train_batch_size * cfg.trainer.epochs}")
     else:
         logger.info(f"Validation set size: {len(dataloader)}")
 
@@ -285,7 +294,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
         # Load checkpoint state if resumption is enabled.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
-                self.global_step = self.load_checkpoints()
+                self.global_step, _ = self.load_checkpoints()
 
         if self.colocate_all:
             self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
@@ -320,7 +329,9 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                     generator_input, uids = prepare_generator_input(
                         rand_prompts,
                         self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        get_sampling_params_for_backend(
+                            self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
+                        ),
                         self.cfg.environment.env_class,
                         "train",
                         self.global_step,
@@ -487,7 +498,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
             generator_input, uids = prepare_generator_input(
                 prompts,
                 cfg.generator.eval_n_samples_per_prompt,
-                get_sampling_params_for_backend(cfg.generator.backend, sampling_params),
+                get_sampling_params_for_backend(cfg.generator.inference_engine.backend, sampling_params),
                 cfg.environment.env_class,
                 "eval",
                 global_step,
