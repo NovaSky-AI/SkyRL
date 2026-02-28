@@ -2,6 +2,9 @@
 title: "Multi-Turn RL for Search with SkyRL"
 ---
 
+<Callout type="info">
+This example uses the `fsdp` backend.
+</Callout>
 
 In this example, we walk through an example for training a multi-turn search agent with Qwen2.5-3B-Instruct and GRPO (with VLLM async rollouts), using the dataset and recipe
 from [Search-R1](https://arxiv.org/pdf/2503.09516).
@@ -40,7 +43,7 @@ Let's walk through configuration for running GRPO to train a 4-turn search agent
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
 
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
     # - Dataset: train/val data paths
     data.train_data="['${DATA_DIR}/train.parquet']" \
     data.val_data="['${DATA_DIR}/validation.parquet']" \
@@ -94,7 +97,7 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
     generator.n_samples_per_prompt=5 \
     # this is used to set the max turns for the environment
     generator.max_turns=4 \
-    # multi-turn generation format - see `skyrl_train/generators/skyrl_gym_generator.py` for more details
+    # multi-turn generation format - see `skyrl/train/generators/skyrl_gym_generator.py` for more details
     generator.use_conversation_multi_turn=false \
     generator.sampling_params.temperature=1.0 \
     generator.sampling_params.top_p=1.0 \

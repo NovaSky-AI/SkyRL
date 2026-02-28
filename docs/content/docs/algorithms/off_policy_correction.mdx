@@ -2,6 +2,10 @@
 title: "Off Policy Correction in SkyRL"
 ---
 
+<Callout type="info">
+Off-policy correction is supported with the `fsdp` and `megatron` backends.
+</Callout>
+
 SkyRL provides built-in utilities for correcting off-policy drift from trainer/inference mismatch and AsyncRL. This guide covers:
 
 1. **Sources of off-policy drift** — why training and inference policies diverge

@@ -2,6 +2,10 @@
 title: "Configuration Overview"
 ---
 
+<Callout type="info">
+This page covers configuration for the `fsdp` and `megatron` backends.
+</Callout>
+
 
 ## Data Configuration
 
@@ -148,7 +152,7 @@ fsdp_config:
 
     In FSDP, `cpu_offload` will offload parameter and optimizer state to CPU memory and only copy over model parameters to GPU during model forward pass.
 
-    In `skyrl-train`, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on [model placement and colocation](placement)
+    In the SkyRL-Train backend, we offload worker state in certain colocation settings - however this happens only after the training step/ log probability computation - thus optimizer step and model forward pass happen as usual with sharded parameters on GPU. For more details, refer to the guide on [model placement and colocation](placement)
 
 ### Megatron Configuration
 
@@ -676,7 +680,7 @@ For more details on how different placement options work, please refer to the [p
 
 - `generator.inference_engine.weight_sync_backend`: Backend to use for weight synchronization. Currently, we support `nccl` and `gloo`.
 - `generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB`: When using `cuda_ipc` weight sync, send weights in batches of this size (in GB). Default: `1.0`.
-- `generator.inference_engine.override_existing_update_group`: Whether to override the existing update group for the inference engine. This is applicable only for remote inference engines. During training, `skyrl-train` forms a custom process group ("update group") with the rank 0 training worker and all the inference engine ranks.  If `override_existing_update_group=enable`, then during initialization, a previous weight update group will be overriden in the inference engine. For example, if you have a remote server setup and you run training for the same model multiple times, it is helpful to override the previous update group. We recommend leaving this to `auto` - since it will automatically determine if the previous update group should be overridden based on `run_engines_locally`.
+- `generator.inference_engine.override_existing_update_group`: Whether to override the existing update group for the inference engine. This is applicable only for remote inference engines. During training, the SkyRL-Train backend forms a custom process group ("update group") with the rank 0 training worker and all the inference engine ranks.  If `override_existing_update_group=enable`, then during initialization, a previous weight update group will be overriden in the inference engine. For example, if you have a remote server setup and you run training for the same model multiple times, it is helpful to override the previous update group. We recommend leaving this to `auto` - since it will automatically determine if the previous update group should be overridden based on `run_engines_locally`.
 
 ### Inference Engine Configuration
 
@@ -718,7 +722,7 @@ For more details on how different placement options work, please refer to the [p
 - `generator.use_conversation_multi_turn`: Whether to use conversation format for multi-turn generation. If set to `true` then observations are appended to the chat history as a new turn. If set to `false` then observations are appended as-is to the assistant response in token space and generation is continued  (after removing any EOS token in the response).  We've observed some cases where model can be sensitive to chat history format (ex: in SkyRL-SQL), and thus `false` can be used for full control over the exact tokens added after environment interaction.
 - `generator.chat_template`: Custom chat template configuration if needed.
     - `generator.chat_template.source`: Source of the chat template. Can be either `name` or `file`.
-    - `generator.chat_template.name_or_path`: Name or path of the chat template. If the source is `name`, then it should be one of the supported templates in `skyrl_train/generators/utils.py`. If the source is `file`, then this field should be a path to a Jinja2 template file.
+    - `generator.chat_template.name_or_path`: Name or path of the chat template. If the source is `name`, then it should be one of the supported templates in `skyrl/train/generators/utils.py`. If the source is `file`, then this field should be a path to a Jinja2 template file.
 - `generator.chat_template_kwargs`: Chat templating kwargs to pass to `tokenizer.apply_chat_template`. Applicable only for non-batched generation with `generator.batched=false`.
 
 ### Misc Configuration

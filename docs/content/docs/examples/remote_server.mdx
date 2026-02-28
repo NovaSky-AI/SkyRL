@@ -2,6 +2,9 @@
 title: "Remote Inference Engine"
 ---
 
+<Callout type="info">
+This example uses the `fsdp` backend.
+</Callout>
 
 This example shows how to run GRPO training on GSM8K using a standalone inference engine instance behind an HTTP server. 
 
@@ -13,19 +16,19 @@ First, make sure you are familiar with the standard setup process for running GR
 
 ## Starting the Remote Inference Engine
 
-We provide an example remote server implementation at `skyrl_train/inference_engines/vllm/vllm_server.py`.
+We provide an example remote server implementation at `skyrl/backends/skyrl_train/inference_engines/vllm/vllm_server.py`.
 In addition to the standard OpenAI-compatible generation endpoints (`/v1/chat/completions` and `/v1/completions`), the remote server simply needs to expose endpoints for the following operations:
 
 - `/sleep` and `/wake_up` to sleep and wake up the inference engine (only needed if you want to colocate the inference engine with the training process)
 - `/init_weight_update_communicator` to create a process group for weight updates
 - `/update_weight` to update the model weights
 
-That's it! We use a custom `WorkerWrap` class at `skyrl_train/inference_engines/vllm/vllm_engine.py` with VLLM's worker extension API to enable efficient NCCL weight updates.
+That's it! We use a custom `WorkerWrap` class at `skyrl/backends/skyrl_train/inference_engines/vllm/vllm_engine.py` with VLLM's worker extension API to enable efficient NCCL weight updates.
 
 To launch the server, run the following command (the full script is at `examples/remote_inference_engine/run_vllm_server.sh`):
 
 ```bash
-uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server \
+uv run --isolated --extra fsdp -m skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server \
     # model and tensor parallel size
     --model Qwen/Qwen2.5-1.5B-Instruct \
     --tensor-parallel-size 4 \
@@ -54,7 +57,7 @@ uv run --isolated --extra vllm -m skyrl_train.inference_engines.vllm.vllm_server
     --distributed-executor-backend ray \
 
     # worker extension class for handling weight updates
-    --worker-extension-cls skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap
+    --worker-extension-cls skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap
 
 ```
 
@@ -65,7 +68,7 @@ Now that we've started our remote inference engine (located behind `127.0.0.1:80
 To start training, we need to set up our training script. You can find a complete example in `examples/remote_inference_engine/run_remote.sh`:
 
 ```bash
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     # Setup for training with a remote inference engine
     generator.run_engines_locally=False \
     generator.remote_inference_engine_urls="['127.0.0.1:8001']" \

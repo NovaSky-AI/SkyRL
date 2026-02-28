@@ -109,7 +109,7 @@ With your correctly formatted datasets, you can pass the dataset file paths to t
 
 ```bash
 # Dataset file paths
-uv run -m skyrl_train.entrypoints.main_base \
+uv run -m skyrl.train.entrypoints.main_base \
   data.train_data="['path/to/train.parquet']" \
   data.val_data="['path/to/validation.parquet']" \
 
@@ -119,7 +119,7 @@ or specify HuggingFace dataset(s) prepared in the expected format:
 
 ```bash
 # Huggingface dataset
-uv run -m skyrl_train.entrypoints.main_base \
+uv run -m skyrl.train.entrypoints.main_base \
   data.train_data="['username/my_dataset:train']" \
   data.val_data="['username/my_dataset:validation']" \
 
@@ -129,5 +129,5 @@ uv run -m skyrl_train.entrypoints.main_base \
 
 Use the following scripts as a template to prepare your dataset:
 
-- [gsm8k_dataset.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/gsm8k/gsm8k_dataset.py)
-- [multiply_dataset.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/multiply/multiply_dataset.py)
+- [gsm8k_dataset.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/gsm8k/gsm8k_dataset.py)
+- [multiply_dataset.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/multiply_dataset.py)

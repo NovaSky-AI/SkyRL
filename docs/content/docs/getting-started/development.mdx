@@ -10,10 +10,10 @@ Follow the [installation guide](installation). Make sure that the installation w
 ## Modifying the code
 
 **Adding a new environment or task?**
-Follow the [new task tutorial](../tutorials/new_env). Your custom code can be placed anywhere - building on top of `skyrl_train` as a package - but we recommend structuring it as a folder similar to `examples/multiply`.
+Follow the [new task tutorial](../tutorials/new_env). Your custom code can be placed anywhere - building on top of `skyrl` as a package - but we recommend structuring it as a folder similar to `examples/multiply`.
 
 **Creating a custom Generator (ex: porting an agent harness, implementing custom trajectory generation logic, etc.)?**
-Same as the above: your custom code can be placed anywhere and we typically use `skyrl-train/examples/` for this. See `examples/mini_swe_agent` for an example of creating a custom `Generator` for [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent).
+Same as the above: your custom code can be placed anywhere and we typically use `examples/train/` for this. See `examples/mini_swe_agent` for an example of creating a custom `Generator` for [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent).
 
 **Looking to add a new algorithm by changing your advantage estimator or policy loss?**
 Follow the guide for [implementing custom algorithms](../algorithms/custom_algorithms). See `examples/algorithms` for examples of various custom algorithm implementations.
@@ -37,7 +37,6 @@ For code contributions, we recommend running unit tests before submitting a pull
 ### CPU tests
 
 ```bash
-cd skyrl-train # make sure you are in the correct directory
 uv run --isolated --extra dev pytest tests/cpu
 
 ```
@@ -47,8 +46,6 @@ uv run --isolated --extra dev pytest tests/cpu
 The GPU tests require a node with atleast 8 GPUs. They have been tested on a 8xH100 node, but should work even on 8xA100 nodes. We are actively working on making these more accessible.
 
 ```bash
-cd skyrl-train # make sure you are in the correct directory 
-
 ```
 
 The tests assume that the GSM8K dataset is downloaded to `~/data/gsm8k`. If you have not downloaded the dataset, you can do so by running the following command:
@@ -61,7 +58,7 @@ uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir ~/data/gsm8k
 Finally, you can run the tests by running the following command:
 
 ```bash
-uv run --isolated --extra dev --extra vllm pytest tests/gpu
+uv run --isolated --extra dev --extra fsdp pytest tests/gpu
 
 ```
 

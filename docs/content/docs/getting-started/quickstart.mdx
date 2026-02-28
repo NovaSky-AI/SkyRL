@@ -24,7 +24,7 @@ uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 Next, let's set up the training configuration. You can find a complete example in `examples/gsm8k/run_gsm8k.sh`, and we highlight some key parameters here:
 
 ```bash
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
    # Data setup
    data.train_data="['$HOME/data/gsm8k/train.parquet']" \
    data.val_data="['$HOME/data/gsm8k/validation.parquet']" \

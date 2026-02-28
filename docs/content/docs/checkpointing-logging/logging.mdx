@@ -61,7 +61,7 @@ SkyRL uses OS-level file descriptor redirection (`os.dup2`) to route each Ray ac
 
 Because redirection happens at the file descriptor level, it captures all output — including logs from vLLM's `EngineCore` subprocess (model loading, KV cache setup) that would bypass Python-level logging intercepts.
 
-The redirect logic lives in `skyrl_train/utils/ray_logging.py` and is called from:
+The redirect logic lives in `skyrl/train/utils/ray_logging.py` and is called from:
 
 - `BaseVLLMInferenceEngine.__init__()` — covers both sync and async vLLM engines
 - `DistributedTorchRayActor.__init__()` — covers policy and reference model workers
