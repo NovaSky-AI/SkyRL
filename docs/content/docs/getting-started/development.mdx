@@ -42,10 +42,6 @@ uv run --extra tinker --extra jax --extra dev pytest --forked -s tests \
 # FSDP and Megatron backend
 uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ \
   --ignore=tests/backends/skyrl_train/gpu
-
-# SkyRL-Gym
-cd skyrl-gym
-uv run --isolated --extra dev pytest tests/
 ```
 
 ### GPU tests
@@ -76,7 +72,7 @@ uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "megatron"
 ```
 
-#### SkyRL-Gym
+### SkyRL-Gym
 
 You can run the tests for the `skyrl-gym` package by running the following command:
 
