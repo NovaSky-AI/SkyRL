@@ -279,7 +279,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
         return generator_output
 
-    def train(self):
+    async def train(self):
         """
         Main training loop for PPO
         """
