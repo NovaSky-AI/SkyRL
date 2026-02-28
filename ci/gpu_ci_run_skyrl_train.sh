@@ -30,7 +30,7 @@ uv run --isolated --extra fsdp --extra dev \
     -- pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py::test_token_based_generation
 
 # Run tests for new inference layer
-# TODO (sumanthrh): Migrate the remaining tests: test_verifiers_generator.py , test_pause_and_continue_generation.py and the relevant tests in test_inference_engine_client_http_endpoint.py
+# TODO (sumanthrh): Migrate the remaining tests: test_verifiers_generator.py , test_pause_and_continue_generation.py
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
 _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_skyrl_gym_generator.py

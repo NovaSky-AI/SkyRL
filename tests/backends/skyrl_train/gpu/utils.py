@@ -412,9 +412,12 @@ class InferenceEngineState:
         enable_lora: bool = False,
         max_num_seqs: Optional[int] = None,
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
+        use_new_inference_servers: Optional[bool] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
+
+        if `use_new_inference_servers` is not None, it will be used in favour of the `_SKYRL_USE_NEW_INFERENCE` environment variable.
         """
         # create a cfg copy and apply overrides
         cfg = copy.deepcopy(cfg)
@@ -466,7 +469,7 @@ class InferenceEngineState:
         # Return both router and server group if created to keep references alive
         router = None
         server_group = None
-        if _SKYRL_USE_NEW_INFERENCE:
+        if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
             # init with internal router and servers
             if enable_lora:
                 raise ValueError("LoRA is not supported with new inference backend")
@@ -488,7 +491,9 @@ class InferenceEngineState:
                 f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={cfg.trainer.placement.colocate_all}"
             )
             client = RemoteInferenceClient(
-                proxy_url=proxy_url, server_urls=server_urls, model_name=cfg.trainer.policy.model.path
+                proxy_url=proxy_url,
+                server_urls=server_urls,
+                model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
             )
         else:
             eps = create_ray_wrapped_inference_engines(
