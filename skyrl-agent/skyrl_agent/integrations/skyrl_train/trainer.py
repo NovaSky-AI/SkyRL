@@ -29,7 +29,6 @@ from skyrl.train.generators.base import (
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl.train.dataset import PromptDataset
 
-import asyncio
 from pathlib import Path
 import ray
 from tqdm import tqdm
