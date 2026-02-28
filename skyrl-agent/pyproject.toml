@@ -86,6 +86,7 @@ conflicts = [
 openhands-ai = { git = "https://github.com/NovaSky-AI/SkyRL-OpenHands.git", rev = "main" }
 tevatron = { git = "https://github.com/texttron/tevatron.git", rev = "main" }
 verl = { git = "https://github.com/NovaSky-AI/verl-fork", rev = "main" }
+# TODO (sumanthrh): Improve dependency management here. We should use the skyrl package from the local version of the repo.
 skyrl = { git = "https://github.com/NovaSky-AI/SkyRL", rev = "main" }
 
 [tool.uv.extra-build-dependencies]
