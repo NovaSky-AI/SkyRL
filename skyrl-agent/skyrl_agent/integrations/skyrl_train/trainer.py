@@ -29,7 +29,6 @@ from skyrl.train.generators.base import (
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl.train.dataset import PromptDataset
 
-import asyncio
 from pathlib import Path
 import ray
 from tqdm import tqdm
@@ -298,18 +297,18 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
         if self.colocate_all:
             self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-            asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
+            await self.inference_engine_client.wake_up(tags=["weights"])
         with Timer("sync_weights"):
             ray.get(self.sync_policy_weights_to_inference_engines())
         if self.colocate_all:
             with Timer("offload_policy_model_to_cpu"):
                 self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-            asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
+            await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
         # Eval before training
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
-                eval_metrics = asyncio.run(self.eval())
+                eval_metrics = await self.eval()
                 self.tracker.log(eval_metrics, step=self.global_step, commit=True)
 
         # initialize kl controller
@@ -339,7 +338,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
                     # 1.1 generation phase
                     with Timer("generate", self.all_timings):
-                        generator_output: GeneratorOutput = asyncio.run(self.generate(generator_input))
+                        generator_output: GeneratorOutput = await self.generate(generator_input)
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
@@ -349,8 +348,9 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                             pbar.update(1)
                             continue
 
-                    # if we are not continuing sampling, we sleep the inference engine
-                    asyncio.run(self.inference_engine_client.sleep())
+                    if self.colocate_all:
+                        # if we are not continuing sampling, we sleep the inference engine
+                        await self.inference_engine_client.sleep()
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
@@ -418,13 +418,13 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                     # 7. sync weights to inference engines
                     if self.colocate_all:
                         self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
-                        asyncio.run(self.inference_engine_client.wake_up(tags=["weights"]))
+                        await self.inference_engine_client.wake_up(tags=["weights"])
                     with Timer("sync_weights", self.all_timings):
                         ray.get(self.sync_policy_weights_to_inference_engines())
                     if self.colocate_all:
                         with Timer("offload_policy_model_to_cpu"):
                             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-                        asyncio.run(self.inference_engine_client.wake_up(tags=["kv_cache"]))
+                        await self.inference_engine_client.wake_up(tags=["kv_cache"])
 
                 # 8. set logs
                 logger.info(status)
@@ -435,7 +435,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
                     or self.global_step == self.total_training_steps
                 ):
                     with Timer("eval", self.all_timings):
-                        eval_metrics = asyncio.run(self.eval())
+                        eval_metrics = await self.eval()
                         self.all_metrics.update(eval_metrics)
 
                 log_payload = {
@@ -455,7 +455,7 @@ class SkyRLAgentPPOTrainer(RayPPOTrainer):
 
         pbar.close()
         if self.colocate_all:
-            asyncio.run(self.inference_engine_client.sleep())
+            await self.inference_engine_client.sleep()
             self.policy_model.backload_to_gpu()
         if self.cfg.trainer.ckpt_interval > 0:
             with Timer("save_checkpoints", self.all_timings):
