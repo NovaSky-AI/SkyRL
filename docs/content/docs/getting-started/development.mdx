@@ -30,46 +30,59 @@ We welcome all forms of contributions to SkyRL, including bug reports, feature r
 
 ## Testing
 
-For code contributions, we recommend running unit tests before submitting a pull request. 
-
-#### SkyRL-train
+For code contributions, we recommend running unit tests before submitting a pull request. All commands below should be run from the repository root.
 
 ### CPU tests
 
 ```bash
-uv run --isolated --extra dev pytest tests/cpu
+# SkyRL core (includes Tinker and Jax backend tests)
+uv run --extra tinker --extra jax --extra dev pytest --forked -s tests \
+  --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train
 
+# FSDP and Megatron backend
+uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ \
+  --ignore=tests/backends/skyrl_train/gpu
+
+# SkyRL-Gym
+cd skyrl-gym
+uv run --isolated --extra dev pytest tests/
 ```
 
 ### GPU tests
 
-The GPU tests require a node with atleast 8 GPUs. They have been tested on a 8xH100 node, but should work even on 8xA100 nodes. We are actively working on making these more accessible.
+The GPU tests require a node with at least 8 GPUs. They have been tested on 8xH100 nodes, but should work on 8xA100 nodes as well. We are actively working on making these more accessible.
+
+The FSDP and Megatron backend tests assume that the GSM8K dataset is downloaded to `~/data/gsm8k`. If you have not downloaded the dataset, you can do so by running the following command:
 
 ```bash
+uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir ~/data/gsm8k
 ```
 
-The tests assume that the GSM8K dataset is downloaded to `~/data/gsm8k`. If you have not downloaded the dataset, you can do so by running the following command:
+#### Jax backend
 
 ```bash
-uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir ~/data/gsm8k
-
+uv run --extra gpu --extra tinker --extra dev pytest tests/tx/gpu
 ```
 
-Finally, you can run the tests by running the following command:
+#### FSDP backend
 
 ```bash
-uv run --isolated --extra dev --extra fsdp pytest tests/gpu
-
+uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "not (integrations or megatron)"
 ```
 
-#### SkyRL-gym
+#### Megatron backend
+
+```bash
+uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "megatron"
+```
+
+#### SkyRL-Gym
 
 You can run the tests for the `skyrl-gym` package by running the following command:
 
 ```bash
-cd skyrl-gym # make sure you are in the correct directory
+cd skyrl-gym
 uv run --isolated --extra dev pytest tests/
-
 ```
 
 ## Linting and Formatting
