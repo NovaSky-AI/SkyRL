@@ -2,6 +2,9 @@
 title: "LoRA Training in SkyRL"
 ---
 
+<Callout type="info">
+LoRA training is supported with the `fsdp` and `megatron` backends.
+</Callout>
 
 This guide demonstrates how to use Low-Rank Adaptation (LoRA) for efficient reinforcement learning training in SkyRL. LoRA allows you to train large language models with significantly reduced memory footprint and computational requirements by only updating a small set of parameters.
 
@@ -73,7 +76,7 @@ NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 INFERENCE_BACKEND="vllm"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

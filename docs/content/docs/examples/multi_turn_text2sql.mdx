@@ -2,6 +2,9 @@
 title: "Multi-Turn GRPO Text2SQL with Async Rollouts"
 ---
 
+<Callout type="info">
+This example uses the `fsdp` backend.
+</Callout>
 
 In this example, we walk through how to train an effective multi-turn Text2SQL model (beating GPT-4o) with SkyRL using async rollouts.
 
@@ -80,7 +83,7 @@ DATA_DIR="$HOME/data/sql"
 # path for .db files for environment interaction
 DB_PATH="$HOME/path/to/db_files"
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     #### Environment configuration
     environment.env_class=text2sql \
     environment.skyrl_gym.text2sql.db_path=$DB_PATH \
@@ -101,7 +104,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     # generator.sampling_params.max_generate_length is the max length of the generated response for EACH turn
     generator.sampling_params.max_generate_length=3000 \
 
-    #### multi-turn generation format - see `skyrl_train/generators/skyrl_gym_generator.py` for more details
+    #### multi-turn generation format - see `skyrl/train/generators/skyrl_gym_generator.py` for more details
     generator.use_conversation_multi_turn=false \
 
     #### data configuration
@@ -153,7 +156,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     of the training recipe.
   - If you are using `generator.use_conversation_multi_turn=true`, you might want to append an EOS token ID to the end of the response after these stop strings to adhere to the model's behavior (i.e. ending generation with an EOS token ID rather than say `</solution>`). This can be done by setting `generator.append_eos_token_after_stop_str_in_multi_turn=true` in the generator config. The full script is available in `examples/text_to_sql/run_skyrl_sql_conversation_format.sh`.
   - If you want to use a conversation-based format, you can set `use_conversation_multi_turn=true` and the model will generate a separate assistant response for each turn. This is supported only with `backend="vllm"` as of now.
-  - See `skyrl_train/generators/skyrl_gym_generator.py` for more details on both options!
+  - See `skyrl/train/generators/skyrl_gym_generator.py` for more details on both options!
 
 ## Launching Your Training Run
 

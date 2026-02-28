@@ -2,12 +2,15 @@
 title: "(Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout"
 ---
 
+<Callout type="info">
+Fully async training is supported with the `fsdp` and `megatron` backends.
+</Callout>
 
 SkyRL supports fully async training for any generator that implements the `GeneratorInterface`, including your **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
 
 We treat "fully async training" synonymous to the terms **"in-flight weight update"** and **"multi-turn partial rollout"**, as discussed in works like AReal, PipelineRL, ScaleRL, etc.
 
-The core logic of fully async training lives in [fully_async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/fully_async_trainer.py), a subclass of the synchronous trainer class in [trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/trainer.py). This `fully_async_trainer.py` works out-of-the-box with any generator that the user implements -- so users do not need to implement any additional logic for fully async training.
+The core logic of fully async training lives in [fully_async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/fully_async_trainer.py), a subclass of the synchronous trainer class in [trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/trainer.py). This `fully_async_trainer.py` works out-of-the-box with any generator that the user implements -- so users do not need to implement any additional logic for fully async training.
 
 ![Systems Diagram of Fully Async Training in SkyRL](/images/tutorials/skyrl_fully_async.png)
 
@@ -63,17 +66,17 @@ We break down the usage into two simple steps.
 
 ### Step 1: Define your `main_async.py`
 
-Following [examples/fully_async/main_async.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/main_async.py), subclass the base entrypoint class `BasePPOExp`:
+Following [examples/fully_async/main_fully_async.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/fully_async/main_fully_async.py), subclass the base entrypoint class `BasePPOExp`:
 
 - Override `get_trainer()` to use fully async trainer class `FullyAsyncRayPPOTrainer`
 - Override `get_generator()` to use your custom generator class. Note that currently we only support generators that use `/chat/completions` (hence the `SkyRLGymHTTPGenerator` used in the example).
 
 ### Step 2: Config knobs to tune for fully async training
 
-Following [examples/fully_async/async_run_gsm8k.sh](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/async_run_gsm8k.sh), update the training configuration to use your new entrypoint `main_async.py`:
+Following [examples/fully_async/fully_async_run_gsm8k.sh](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/fully_async/fully_async_run_gsm8k.sh), update the training configuration to use your new entrypoint `main_async.py`:
 
 ```bash
-uv run --isolated --extra vllm -m examples.fully_async.main_async \
+uv run --isolated --extra fsdp -m examples.fully_async.main_async \
 ...
 
 ```

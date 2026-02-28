@@ -2,10 +2,13 @@
 title: "Async Training: One-Step Off-Policy Pipelining"
 ---
 
+<Callout type="info">
+Async training is supported with the `fsdp` and `megatron` backends.
+</Callout>
 
 This example demonstrates how to implement asynchronous training with one-off pipelining, showcasing the flexibility of the training framework to support different execution plans with minimal code changes.
 
-The complete code from this example is available at [examples/async](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/async).
+The complete code from this example is available at [examples/async](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/async).
 
 ## Overview
 
@@ -32,7 +35,7 @@ The original `train()` method performs generation and training sequentially, so 
 
 The generation loop passes the training loop completed trajectories via an `asyncio.Queue` and coordinates weight synchronization using asyncio events.
 
-We include a minimal version here, please see [examples/async/async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/async/async_trainer.py) for full details:
+We include a minimal version here, please see [examples/async/async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/async/async_trainer.py) for full details:
 
 ```python
 class AsyncRayPPOTrainer(RayPPOTrainer):
@@ -92,7 +95,7 @@ That's it! The rest of the entrypoint logic for launching the training run remai
 Finally, we modify the training configuration to use our new entrypoint and disable model colocation:
 
 ```bash
-uv run --isolated --extra vllm -m examples.async.main_async \
+uv run --isolated --extra fsdp -m examples.async.main_async \
   trainer.placement.colocate_all=false \
   trainer.placement.colocate_policy_ref=true \
   trainer.placement.policy_num_gpus_per_node=4 \
