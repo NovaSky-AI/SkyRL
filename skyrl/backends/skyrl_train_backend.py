@@ -30,6 +30,7 @@ from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine i
     create_ray_wrapped_inference_engines,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.utils.tok import get_tokenizer
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -112,7 +113,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self._model_metadata: types.ModelMetadata | None = None
         self._cfg = None
         self._dispatch: WorkerDispatch | None = None
-        self._tokenizer = AutoTokenizer.from_pretrained(self.base_model)
+        self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
 

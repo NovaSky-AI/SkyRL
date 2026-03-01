@@ -565,7 +565,9 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
         self.config = config
         self.model = DeepseekV3Model(config, dtype=dtype, rngs=rngs)
 
-        if not self.config.tie_word_embeddings:
+        if self.config.tie_word_embeddings:
+            self.lm_head = None
+        else:
             self.lm_head = LoRALinear(
                 config.hidden_size,
                 config.vocab_size,
@@ -581,7 +583,7 @@ class DeepseekV3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, Logits
 
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
-        return self.lm_head
+        return self.lm_head or self.model.embed_tokens.T
 
     def __call__(
         self,

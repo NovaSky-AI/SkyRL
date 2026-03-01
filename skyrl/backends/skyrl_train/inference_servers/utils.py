@@ -32,6 +32,12 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         enable_sleep_mode=cfg.trainer.placement.colocate_all,
         # NOTE (sumanthrh): We set generation config to be vLLM so that the generation behaviour of the server is same as using the vLLM Engine APIs directly
         generation_config="vllm",
+        # NOTE: vllm expects a list entry for served_model_name
+        served_model_name=(
+            [cfg.generator.inference_engine.served_model_name]
+            if cfg.generator.inference_engine.served_model_name
+            else None
+        ),
     )
     for key, value in overrides.items():
         setattr(args, key, value)

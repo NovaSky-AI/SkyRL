@@ -270,8 +270,8 @@ class RemoteInferenceClient:
                 headers["X-Session-ID"] = str(session_id)
 
             async with session.post(url, json=payload, headers=headers) as resp:
-                resp.raise_for_status()
                 response = await resp.json()
+                raise_for_status(resp, response)
 
             choice = response["choices"][0]
             new_token_ids = choice["token_ids"]
@@ -321,8 +321,9 @@ class RemoteInferenceClient:
         url = f"{self.proxy_url}/v1/chat/completions"
 
         async with session.post(url, json=body, headers=headers) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+            response = await resp.json()
+            raise_for_status(resp, response)
+            return response
 
     async def completion(
         self,
@@ -352,8 +353,9 @@ class RemoteInferenceClient:
         url = f"{self.proxy_url}/v1/completions"
 
         async with session.post(url, json=body, headers=headers) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+            response = await resp.json()
+            raise_for_status(resp, response)
+            return response
 
     async def tokenize(
         self,
@@ -382,8 +384,8 @@ class RemoteInferenceClient:
                 "add_special_tokens": add_special_tokens,
             }
             async with session.post(url, json=payload) as resp:
-                resp.raise_for_status()
                 result = await resp.json()
+                raise_for_status(resp, result)
                 results.append(result.get("tokens", []))
 
         return results
@@ -412,8 +414,8 @@ class RemoteInferenceClient:
                 "tokens": ids,
             }
             async with session.post(url, json=payload) as resp:
-                resp.raise_for_status()
                 result = await resp.json()
+                raise_for_status(resp, result)
                 results.append(result.get("prompt", ""))
 
         return results
@@ -444,8 +446,8 @@ class RemoteInferenceClient:
         async def call_server(server_url: str) -> tuple:
             url = f"{server_url}{endpoint}"
             async with session.request(method, url, json=json) as resp:
-                resp.raise_for_status()
                 body = await resp.json() if resp.content_length else None
+                raise_for_status(resp, body)
                 return server_url, {"status": resp.status, "body": body}
 
         results = await asyncio.gather(*[call_server(url) for url in self.server_urls])
@@ -648,3 +650,23 @@ class RemoteInferenceClient:
         """Restore state after unpickling."""
         self.__dict__.update(state)
         self._session = None
+
+
+def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:
+    """Modified version of resp.raise_for_status() that reads the body for the error message.
+
+    Raises aiohttp.ClientResponseError with the error message from the body if there is an error
+
+    The standard `raise_for_status()` only uses the HTTP reason phrase (e.g. "Bad Request"), which is often unhelpful. APIs typically put more descriptive error details in the response body. This function bridges that gap by surfacing the body's error message in the exception.
+    """
+    if resp.status >= 400 and body is not None:
+        error_detail = body.get("error", {})
+        detail_msg = error_detail.get("message", resp.reason) if isinstance(error_detail, dict) else resp.reason
+        raise aiohttp.ClientResponseError(
+            resp.request_info,
+            resp.history,
+            status=resp.status,
+            message=detail_msg,
+            headers=resp.headers,
+        )
+    resp.raise_for_status()

@@ -35,6 +35,7 @@ from skyrl.backends.skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT, _SKYRL_
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+from skyrl.utils.tok import get_tokenizer
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
 
@@ -411,9 +412,12 @@ class InferenceEngineState:
         enable_lora: bool = False,
         max_num_seqs: Optional[int] = None,
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
+        use_new_inference_servers: Optional[bool] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
+
+        if `use_new_inference_servers` is not None, it will be used in favour of the `_SKYRL_USE_NEW_INFERENCE` environment variable.
         """
         # create a cfg copy and apply overrides
         cfg = copy.deepcopy(cfg)
@@ -460,12 +464,12 @@ class InferenceEngineState:
         # Extract served_model_name from config if set
         served_model_name = ie_cfg.served_model_name
 
-        tokenizer = AutoTokenizer.from_pretrained(cfg.trainer.policy.model.path)
+        tokenizer = get_tokenizer(cfg.trainer.policy.model.path)
 
         # Return both router and server group if created to keep references alive
         router = None
         server_group = None
-        if _SKYRL_USE_NEW_INFERENCE:
+        if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
             # init with internal router and servers
             if enable_lora:
                 raise ValueError("LoRA is not supported with new inference backend")
@@ -487,7 +491,9 @@ class InferenceEngineState:
                 f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={cfg.trainer.placement.colocate_all}"
             )
             client = RemoteInferenceClient(
-                proxy_url=proxy_url, server_urls=server_urls, model_name=cfg.trainer.policy.model.path
+                proxy_url=proxy_url,
+                server_urls=server_urls,
+                model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
             )
         else:
             eps = create_ray_wrapped_inference_engines(

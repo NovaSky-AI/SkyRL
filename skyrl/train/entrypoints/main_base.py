@@ -4,7 +4,7 @@ Main entrypoint for training.
 
 from ray.util.placement_group import placement_group, PlacementGroup
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import PreTrainedTokenizerBase
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.utils import validate_cfg
 
@@ -24,6 +24,7 @@ import sys
 import os
 from loguru import logger
 from skyrl.train.utils.tracking import Tracking
+from skyrl.utils.tok import get_tokenizer
 import multiprocessing as mp
 import asyncio
 
@@ -122,7 +123,12 @@ class BasePPOExp:
             cfg: The fully resolved SkyRLTrainConfig instance.
         """
         self.cfg = cfg
-        self.tokenizer = self.get_tokenizer()
+        self.tokenizer = get_tokenizer(
+            self.cfg.trainer.policy.model.path,
+            trust_remote_code=True,
+            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
+            padding_side="left",
+        )
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
@@ -134,19 +140,6 @@ class BasePPOExp:
     @staticmethod
     def get_cfg_as_str(cfg: SkyRLTrainConfig) -> str:
         return get_config_as_yaml_str(cfg)
-
-    def get_tokenizer(self, padding_side="left"):
-        """Initializes a tokenizer for the given model."""
-        tokenizer = AutoTokenizer.from_pretrained(
-            self.cfg.trainer.policy.model.path,
-            trust_remote_code=True,
-            use_fast=not self.cfg.trainer.disable_fast_tokenizer,
-        )
-        tokenizer.padding_side = padding_side
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-        return tokenizer
 
     def get_train_dataset(self):
         """Initializes the training dataset.
