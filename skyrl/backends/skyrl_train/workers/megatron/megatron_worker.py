@@ -48,6 +48,29 @@ if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
     from skyrl.train.config.config import InferenceEngineConfig
 
+# ---------------------------------------------------------------------------
+# Register additional model bridges for architectures not yet in the upstream
+# Megatron-Bridge package. GLM-4.7-Flash uses the same architecture as
+# DeepSeek-V3 (MLA + MoE) so we reuse that bridge with a trivial subclass.
+# ---------------------------------------------------------------------------
+try:
+    from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
+    from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
+    from megatron.bridge.models.mla_provider import MLAModelProvider
+    from megatron.core.models.gpt.gpt_model import GPTModel
+
+    @MegatronModelBridge.register_bridge(
+        source="Glm4MoeLiteForCausalLM",
+        target=GPTModel,
+        provider=MLAModelProvider,
+        model_type="glm4_moe_lite",
+    )
+    class _GLM47FlashBridge(DeepSeekV3Bridge):
+        pass
+
+except ImportError:
+    pass  # megatron-bridge not installed (e.g. CPU-only environment)
+
 
 class MegatronWeightExtractor(WeightExtractor):
     """Extracts weights from Megatron model-parallel models.
