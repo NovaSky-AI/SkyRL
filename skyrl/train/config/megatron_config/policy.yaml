@@ -5,6 +5,15 @@ context_parallel_size: 1
 expert_model_parallel_size: 1
 expert_tensor_parallel_size: null
 
+# MoE runtime configuration flags.
+# These are set on the Megatron provider before finalization.
+# For additional MoE flags not listed here, use transformer_config_kwargs.
+moe_token_dispatcher_type: "alltoall"
+moe_router_load_balancing_type: "none"
+moe_grouped_gemm: false
+moe_router_score_function: null
+moe_router_enable_expert_bias: null
+
 # pass-through config to Megatron's `DistributedDataParallelConfig` object
 # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/distributed/distributed_data_parallel_config.py#L8
 ddp_config:
