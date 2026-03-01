@@ -228,14 +228,3 @@ def test_qwen3_5_nested_rope_parameters_without_top_level_rope_theta():
     assert model.config.hidden_size == hidden_size
     assert model.config.max_lora_adapters == 2
     assert outputs.last_hidden_state.shape == (1, 3, hidden_size)
-
-
-def test_get_text_config_requires_text_config():
-    config = Qwen3_5Config(
-        PretrainedConfig(hidden_size=32, num_hidden_layers=2),
-        max_lora_adapters=2,
-        max_lora_rank=8,
-        shard_attention_heads=False,
-    )
-    with pytest.raises(RuntimeError, match="text_config"):
-        config.get_text_config()

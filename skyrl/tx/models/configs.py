@@ -28,17 +28,9 @@ class ModelConfig(PretrainedConfig):
     mhc_expansion_rate: int
 
     def get_text_config(self) -> "ModelConfig":
-        """Return a wrapped config built from `self.text_config`.
-
-        Raises:
-            RuntimeError: If `self.text_config` is missing.
-        """
-        text_config = getattr(self, "text_config", None)
-        if text_config is None:
-            raise RuntimeError("ModelConfig.get_text_config() requires `text_config` to be present on the config.")
-
+        """Return a wrapped config built from `self.text_config`."""
         return type(self)(
-            text_config,
+            self.text_config,
             max_lora_adapters=self.max_lora_adapters,
             max_lora_rank=self.max_lora_rank,
             shard_attention_heads=self.shard_attention_heads,
