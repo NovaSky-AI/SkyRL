@@ -23,7 +23,7 @@ set -x
 : "${INFERENCE_BACKEND:=vllm}"
 : "${MAX_TURNS:=1}"
 
-uv run --isolated --extra fsdp --with "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m examples.train_integrations.openenv.entrypoints.main_openenv \
+uv run --isolated --extra fsdp --with "openenv-core@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m examples.train_integrations.openenv.entrypoints.main_openenv \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

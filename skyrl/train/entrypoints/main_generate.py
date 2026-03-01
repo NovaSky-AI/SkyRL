@@ -3,17 +3,16 @@ Main entrypoint for evaluation-only.
 """
 
 import asyncio
+import sys
 
-import hydra
 import ray
 from loguru import logger
-from omegaconf import DictConfig
 from typing import Any
 
 from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
-    config_dir,
 )
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_generator_cfg, initialize_ray
 from skyrl.train.evaluate import evaluate
 from skyrl.train.utils.trainer_utils import build_dataloader
@@ -46,13 +45,13 @@ class EvalOnlyEntrypoint(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def eval_entrypoint(cfg: DictConfig) -> dict:
+def eval_entrypoint(cfg: SkyRLTrainConfig) -> dict:
     exp = EvalOnlyEntrypoint(cfg)
     return asyncio.run(exp.run())
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     validate_generator_cfg(cfg)
     initialize_ray(cfg)
     metrics = ray.get(eval_entrypoint.remote(cfg))
