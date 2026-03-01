@@ -282,12 +282,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
 
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
-        if self.config.tie_word_embeddings:
-            # Resolve tied embeddings from the current merged model state so jitted
-            # functions do not close over initialization-time global arrays.
-            return self.model.embed_tokens.T
-        assert self.lm_head is not None
-        return self.lm_head
+        return self.lm_head or self.model.embed_tokens.T
 
     def __call__(
         self,
