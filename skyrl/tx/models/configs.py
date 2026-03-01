@@ -27,18 +27,6 @@ class ModelConfig(PretrainedConfig):
     gradient_checkpointing: bool
     mhc_expansion_rate: int
 
-    def get_text_config(self) -> "ModelConfig":
-        """Return a wrapped config built from `self.text_config`."""
-        return type(self)(
-            self.text_config,
-            max_lora_adapters=self.max_lora_adapters,
-            max_lora_rank=self.max_lora_rank,
-            shard_attention_heads=self.shard_attention_heads,
-            loss_chunk_size=self.loss_chunk_size,
-            gradient_checkpointing=self.gradient_checkpointing,
-            mhc_expansion_rate=self.mhc_expansion_rate,
-        )
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -50,6 +38,7 @@ class ModelConfig(PretrainedConfig):
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
     ):
+        # Copy all attributes from the base config
         super().__init__(**config.__dict__)
 
         # Add LoRA-specific parameters
@@ -59,6 +48,18 @@ class ModelConfig(PretrainedConfig):
         self.loss_chunk_size = loss_chunk_size
         self.gradient_checkpointing = gradient_checkpointing
         self.mhc_expansion_rate = mhc_expansion_rate
+
+    def get_text_config(self) -> "ModelConfig":
+        """Return a wrapped config built from `self.text_config`."""
+        return type(self)(
+            self.text_config,
+            max_lora_adapters=self.max_lora_adapters,
+            max_lora_rank=self.max_lora_rank,
+            shard_attention_heads=self.shard_attention_heads,
+            loss_chunk_size=self.loss_chunk_size,
+            gradient_checkpointing=self.gradient_checkpointing,
+            mhc_expansion_rate=self.mhc_expansion_rate,
+        )
 
     def get_num_experts(self):
         for key in ("num_experts", "n_routed_experts"):
