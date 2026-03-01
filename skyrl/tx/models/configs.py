@@ -62,21 +62,9 @@ class ModelConfig(PretrainedConfig):
         )
 
     def get_num_experts(self):
-        for key in ("num_experts", "n_routed_experts"):
-            value = getattr(self, key, None)
-            if value is not None:
-                return value
-
-        for nested_key in ("text_config", "language_config"):
-            nested = getattr(self, nested_key, None)
-            if nested is None:
-                continue
-            for key in ("num_experts", "n_routed_experts"):
-                value = getattr(nested, key, None)
-                if value is not None:
-                    return value
-
-        return None
+        # TODO: Change this if there can be different numbers of experts in text_config and vision_config
+        config = getattr(self, "text_config", self)
+        return getattr(config, "num_experts", None) or getattr(config, "n_routed_experts", None)
 
 
 # Model-specific aliases for clarity and backwards compatibility
