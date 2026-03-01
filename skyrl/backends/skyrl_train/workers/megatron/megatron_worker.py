@@ -56,14 +56,11 @@ if TYPE_CHECKING:
 try:
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
     from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
-    from megatron.bridge.models.mla_provider import MLAModelProvider
     from megatron.core.models.gpt.gpt_model import GPTModel
 
     @MegatronModelBridge.register_bridge(
         source="Glm4MoeLiteForCausalLM",
         target=GPTModel,
-        provider=MLAModelProvider,
-        model_type="glm4_moe_lite",
     )
     class _GLM47FlashBridge(DeepSeekV3Bridge):
         pass
