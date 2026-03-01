@@ -99,15 +99,18 @@ class KVCache:
         Returns:
             New KVCache with padded keys and values.
         """
+
+        def pad_kv(x):
+            # x has shape [B, T, num_heads, head_dim]
+            # Linear attention layers use placeholder tensors with T=0; pad each layer independently
+            if x.shape[1] >= max_length:
+                return x
+            pad_spec = ((0, 0), (0, max_length - x.shape[1]), (0, 0), (0, 0))
+            return jnp.pad(x, pad_spec)
+
         return KVCache(
-            keys=[
-                jnp.pad(k, ((0, 0), (0, max_length - k.shape[1]), (0, 0), (0, 0))) if k.shape[1] < max_length else k
-                for k in self.keys
-            ],
-            values=[
-                jnp.pad(v, ((0, 0), (0, max_length - v.shape[1]), (0, 0), (0, 0))) if v.shape[1] < max_length else v
-                for v in self.values
-            ],
+            keys=[pad_kv(k) for k in self.keys],
+            values=[pad_kv(v) for v in self.values],
             cache_position=self.cache_position,
             conv_states=self.conv_states,
             recurrent_states=self.recurrent_states,
