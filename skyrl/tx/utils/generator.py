@@ -19,7 +19,11 @@ class KVCache:
     keys: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
     values: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
     cache_position: jax.Array  # Per-sequence positions of shape (batch,)
+    # list of (batch, conv_dim, conv_kernel_size) for linear-attention layers
+    # full-attention layers use placeholder tensors with shape (batch, 0, 0)
     conv_states: list[jax.Array] | None = None
+    # list of (batch, num_heads, k_head_dim, v_head_dim) for linear-attention layers
+    # full-attention layers use placeholder tensors with shape (batch, 0, 0, 0)
     recurrent_states: list[jax.Array] | None = None
 
     @staticmethod
@@ -41,6 +45,10 @@ class KVCache:
             values: List of value arrays per layer.
             positions: Position indices with shape [B, seq_len].
             attention_mask: Attention mask with shape [B, seq_len].
+            conv_states: Optional list of linear-attention conv states per layer.
+                Expected shape per linear-attention layer: [B, conv_dim, conv_kernel_size].
+            recurrent_states: Optional list of linear-attention recurrent states per layer.
+                Expected shape per linear-attention layer: [B, num_heads, k_head_dim, v_head_dim].
 
         Returns:
             New KVCache with computed cache_position.
