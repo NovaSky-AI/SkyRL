@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any, Dict, List
 
 import ray
+from loguru import logger
 from packaging import version
 from ray.actor import ActorHandle
 
@@ -108,11 +109,63 @@ def create_ray_wrapped_inference_engines(
     rope_theta: float | None = None,
     enable_ray_prometheus_stats: bool = False,
     served_model_name: str | None = None,
+    frozen_model: bool = False,
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
     instances.
+
+    Args:
+        num_inference_engines: Number of inference engines to create.
+        tensor_parallel_size: Tensor parallelism size per engine.
+        model_dtype: Model data type (e.g., "bfloat16").
+        pretrain: Model path or HuggingFace model name.
+        seed: Random seed for reproducibility.
+        vllm_v1_disable_multiproc: Disable multiprocessing in vLLM v1.
+        enable_prefix_caching: Enable prefix caching for faster inference.
+        enforce_eager: Disable CUDA graphs for reliability.
+        expert_parallel_size: Expert parallelism size (for MoE models).
+        pipeline_parallel_size: Pipeline parallelism size.
+        data_parallel_size: Data parallelism size.
+        shared_pg: Shared placement group for colocation.
+        gpu_memory_utilization: GPU memory utilization fraction.
+        inference_engine_enable_sleep: Enable sleep mode for colocation.
+        async_engine: Use async engine.
+        max_num_batched_tokens: Max tokens per batch.
+        max_num_seqs: Max concurrent sequences.
+        tokenizer: Tokenizer instance.
+        backend: Backend type ("vllm" or "sglang").
+        sleep_level: Sleep level for memory offloading.
+        enable_lora: Enable LoRA adapter support.
+        max_lora_rank: Maximum LoRA rank.
+        max_loras: Maximum number of LoRA adapters.
+        fully_sharded_loras: Use fully sharded LoRA.
+        engine_init_kwargs: Additional engine initialization kwargs.
+        rope_scaling: RoPE scaling configuration.
+        rope_theta: RoPE theta value.
+        enable_ray_prometheus_stats: Enable Ray Prometheus metrics.
+        served_model_name: Model name for HTTP endpoint.
+        frozen_model: If True, create engines without weight sync capabilities.
+                     Use for reward models, LLM judges, verifiers, or any frozen LLM.
+                     When True:
+                     - No worker_extension_cls (no weight sync)
+                     - No sleep mode (always active)
+                     - No LoRA support (frozen weights)
+                     Defaults to False for backward compatibility.
+
+    Returns:
+        List of InferenceEngineInterface instances.
     """
+    # Handle frozen_model flag - disable weight sync features
+    if frozen_model:
+        # Frozen models don't need weight sync, sleep mode, or LoRA
+        inference_engine_enable_sleep = False
+        enable_lora = False
+        # worker_extension_cls will be omitted below
+        logger.info(
+            f"Creating {num_inference_engines} frozen model inference engines "
+            f"(no weight sync, no sleep mode) for model: {pretrain}"
+        )
     from skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
     from skyrl_train.utils import (
         get_all_env_variables,
@@ -226,38 +279,44 @@ def create_ray_wrapped_inference_engines(
                     else {}
                 )
 
-                engine = actor_class.options(
-                    num_cpus=num_gpus_per_actor,
-                    num_gpus=num_gpus_per_actor,
-                    scheduling_strategy=dp_rank_sched,
-                ).remote(
-                    model=pretrain,
-                    enforce_eager=enforce_eager,
-                    worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
-                    tensor_parallel_size=tensor_parallel_size,
-                    pipeline_parallel_size=pipeline_parallel_size,
-                    enable_expert_parallel=expert_parallel_size > 1,
-                    distributed_executor_backend=distributed_executor_backend,
-                    seed=seed + i * data_parallel_size + dp_rank,
-                    enable_prefix_caching=enable_prefix_caching,
-                    dtype=model_dtype,
-                    trust_remote_code=True,
-                    vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
-                    gpu_memory_utilization=gpu_memory_utilization,
-                    bundle_indices=dp_rank_bundles,
-                    num_gpus=0.2 if use_hybrid_engine else 1,
-                    enable_sleep_mode=inference_engine_enable_sleep,
-                    noset_visible_devices=noset_visible_devices,
-                    max_num_batched_tokens=max_num_batched_tokens,
-                    max_num_seqs=max_num_seqs,
-                    max_logprobs=1,  # only need chosen-token logprobs
-                    enable_ray_prometheus_stats=enable_ray_prometheus_stats,
+                # Build engine kwargs - conditionally include worker extension for weight sync
+                engine_kwargs = {
+                    "model": pretrain,
+                    "enforce_eager": enforce_eager,
+                    "tensor_parallel_size": tensor_parallel_size,
+                    "pipeline_parallel_size": pipeline_parallel_size,
+                    "enable_expert_parallel": expert_parallel_size > 1,
+                    "distributed_executor_backend": distributed_executor_backend,
+                    "seed": seed + i * data_parallel_size + dp_rank,
+                    "enable_prefix_caching": enable_prefix_caching,
+                    "dtype": model_dtype,
+                    "trust_remote_code": True,
+                    "vllm_v1_disable_multiproc": vllm_v1_disable_multiproc,
+                    "gpu_memory_utilization": gpu_memory_utilization,
+                    "bundle_indices": dp_rank_bundles,
+                    "num_gpus": 0.2 if use_hybrid_engine else 1,
+                    "enable_sleep_mode": inference_engine_enable_sleep,
+                    "noset_visible_devices": noset_visible_devices,
+                    "max_num_batched_tokens": max_num_batched_tokens,
+                    "max_num_seqs": max_num_seqs,
+                    "max_logprobs": 1,  # only need chosen-token logprobs
+                    "enable_ray_prometheus_stats": enable_ray_prometheus_stats,
                     **dp_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,
                     **rope_engine_kwargs,
                     **other_kwargs,
-                )
+                }
+
+                # Only add worker extension for weight sync if not a frozen model
+                if not frozen_model:
+                    engine_kwargs["worker_extension_cls"] = "skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap"
+
+                engine = actor_class.options(
+                    num_cpus=num_gpus_per_actor,
+                    num_gpus=num_gpus_per_actor,
+                    scheduling_strategy=dp_rank_sched,
+                ).remote(**engine_kwargs)
                 inference_engine_actors.append(engine)
         elif backend == "sglang":
             # NOTE: there is no async / sync engine distinction in SGLang

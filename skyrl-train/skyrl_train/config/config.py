@@ -57,6 +57,9 @@ class SkyRLLoraConfig(BaseConfig):
     target_modules: str = "all-linear"
     exclude_modules: Optional[str] = None
     init_method: str = "kaiming"
+    # Path to pre-trained LoRA adapter to continue training from (e.g., from SFT)
+    # If set, loads existing adapter weights instead of initializing new ones
+    pretrained_lora_path: Optional[str] = None
 
 
 @dataclass
@@ -407,11 +410,32 @@ class GSM8kLLMJudgeEnvConfig(BaseConfig):
 
 
 @dataclass
+class PlacementGenerationEnvConfig(BaseConfig):
+    """Configuration for Placement Generation environment with LLM-as-judge reward."""
+
+    reward_model_name: str = "Qwen/Qwen2.5-7B-Instruct"
+    reward_model_device: str = "cuda"
+    use_vllm: bool = True
+    use_llm_judge: bool = True  # Use LLM-as-judge for relevance scoring
+    # External API reward model settings (takes precedence over local LLM)
+    use_api_reward: bool = False  # Use external API (OpenAI, Anthropic, Gemini, DeepSeek, Kimi)
+    api_provider: str = "openai"  # One of: "openai", "anthropic", "gemini", "deepseek", "kimi"
+    api_model_name: str = ""  # Empty means use provider default
+    # Ray actor settings for local LLM reward model (recommended)
+    use_reward_actor: bool = True  # Use Ray actor with dedicated GPU
+    reward_actor_gpu_memory_utilization: float = 0.8  # GPU memory fraction for reward model
+    invalid_keyword_score: float = 0.0
+    parsing_error_score: float = 0.0
+    empty_output_score: float = 0.0
+
+
+@dataclass
 class SkyRLGymConfig(BaseConfig):
     max_env_workers: int = 32
     text2sql: Text2SQLEnvConfig = field(default_factory=Text2SQLEnvConfig)
     llm_as_a_judge: GSM8kLLMJudgeEnvConfig = field(default_factory=GSM8kLLMJudgeEnvConfig)
     search: SearchEnvConfig = field(default_factory=SearchEnvConfig)
+    placement_generation: PlacementGenerationEnvConfig = field(default_factory=PlacementGenerationEnvConfig)
 
 
 @dataclass
@@ -472,6 +496,48 @@ class TrainerConfig(BaseConfig):
 
 
 # ---------------------------------------------------------------------------
+# Reward Inference Config (LLM-as-Judge, Verifiers, Frozen Reward Models)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RewardInferenceConfig(BaseConfig):
+    """
+    Configuration for dedicated reward model inference engines.
+
+    These engines use frozen_model=True (no weight sync, always active).
+    This enables scalable LLM-as-Judge patterns with automatic load balancing.
+
+    Use cases:
+    - LLM-as-Judge (RLAIF, Constitutional AI)
+    - Process Reward Models (verifiers)
+    - Frozen reward models
+    - Any frozen LLM for scoring/evaluation
+    """
+
+    # Enable dedicated reward inference engines
+    enabled: bool = False
+
+    # Model configuration
+    model_path: str = "Qwen/Qwen2.5-3B-Instruct"
+    model_dtype: str = "bfloat16"
+
+    # Scaling configuration
+    num_engines: int = 2
+    tensor_parallel_size: int = 1
+
+    # Engine settings
+    gpu_memory_utilization: float = 0.85
+    max_num_batched_tokens: int = 4096
+    max_num_seqs: int = 256
+    enable_prefix_caching: bool = True
+    enforce_eager: bool = True
+
+    # Async batching settings
+    max_concurrent_requests: int = 32
+
+
+# ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
 
@@ -481,6 +547,7 @@ class SkyRLConfig(BaseConfig):
     data: DataConfig = field(default_factory=DataConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
+    reward_inference: RewardInferenceConfig = field(default_factory=RewardInferenceConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
 
