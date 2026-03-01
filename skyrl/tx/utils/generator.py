@@ -56,6 +56,10 @@ class KVCache:
         if kv_cache is not None:
             # Decode: next position is current position + 1
             cache_position = positions[:, 0] + 1
+            if conv_states is None:
+                conv_states = kv_cache.conv_states
+            if recurrent_states is None:
+                recurrent_states = kv_cache.recurrent_states
         else:
             # Prefill: next position is the sequence length (number of real tokens)
             cache_position = attention_mask.sum(axis=1)
@@ -63,14 +67,8 @@ class KVCache:
             keys=keys,
             values=values,
             cache_position=cache_position,
-            conv_states=(
-                conv_states if conv_states is not None else (kv_cache.conv_states if kv_cache is not None else None)
-            ),
-            recurrent_states=(
-                recurrent_states
-                if recurrent_states is not None
-                else (kv_cache.recurrent_states if kv_cache is not None else None)
-            ),
+            conv_states=conv_states,
+            recurrent_states=recurrent_states,
         )
 
     @staticmethod
