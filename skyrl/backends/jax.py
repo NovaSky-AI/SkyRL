@@ -1070,6 +1070,7 @@ class JaxBackend(JaxBackendImpl):
                 coordinator_address=config.coordinator_address,
                 num_processes=config.num_processes,
                 process_id=0,
+                local_device_ids=range(config.tensor_parallel_size),
             )
             logger.info(
                 f"JAX distributed initialized: process_id={jax.process_index()} ({jax.process_count()} total), "
@@ -1120,7 +1121,7 @@ class JaxBackend(JaxBackendImpl):
         self._broadcast_and_call("save_sampler_checkpoint", output_path=output_path, model_id=model_id, persist=persist)
 
 
-def run_worker(coordinator_address: str, num_processes: int, process_id: int):
+def run_worker(coordinator_address: str, num_processes: int, process_id: int, tensor_parallel_size: int):
     """Entry point for worker processes.
 
     Initializes JAX distributed, receives config from coordinator, then runs
@@ -1134,12 +1135,13 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
     if process_id == 0:
         raise ValueError("Worker process_id must be > 0 (process 0 is the coordinator)")
 
-    # Initialize JAX distributed first (before any other JAX operations)
     jax.distributed.initialize(
         coordinator_address=coordinator_address,
         num_processes=num_processes,
         process_id=process_id,
+        local_device_ids=range(tensor_parallel_size),
     )
+
     logger.info(
         f"Worker process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
     )
@@ -1191,9 +1193,15 @@ def main():
         required=True,
         help="This process's ID (must be > 0 for workers)",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=1,
+        help="Tensor parallelism degree to use for the model",
+    )
 
     args = parser.parse_args()
-    run_worker(args.coordinator_address, args.num_processes, args.process_id)
+    run_worker(args.coordinator_address, args.num_processes, args.process_id, args.tensor_parallel_size)
 
 
 if __name__ == "__main__":
