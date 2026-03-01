@@ -37,9 +37,8 @@ class ModelConfig(PretrainedConfig):
         if text_config is None:
             raise RuntimeError("ModelConfig.get_text_config() requires `text_config` to be present on the config.")
 
-        base_config = PretrainedConfig(**text_config) if isinstance(text_config, dict) else text_config
         return type(self)(
-            base_config,
+            text_config,
             max_lora_adapters=self.max_lora_adapters,
             max_lora_rank=self.max_lora_rank,
             shard_attention_heads=self.shard_attention_heads,
@@ -59,7 +58,7 @@ class ModelConfig(PretrainedConfig):
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
     ):
-        super().__init__(**config.to_dict())
+        super().__init__(**config.__dict__)
 
         # Add LoRA-specific parameters
         self.max_lora_adapters = max_lora_adapters
@@ -80,10 +79,7 @@ class ModelConfig(PretrainedConfig):
             if nested is None:
                 continue
             for key in ("num_experts", "n_routed_experts"):
-                if isinstance(nested, dict):
-                    value = nested.get(key)
-                else:
-                    value = getattr(nested, key, None)
+                value = getattr(nested, key, None)
                 if value is not None:
                     return value
 

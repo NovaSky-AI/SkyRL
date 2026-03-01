@@ -48,7 +48,7 @@ def make_small_tx_config(base_config: HFQwen3_5Config, *, shard_attention_heads:
     wrapped_base_config = PretrainedConfig(
         architectures=["Qwen3_5ForCausalLM"],
         model_type=getattr(base_config, "model_type", "qwen3_5_moe"),
-        text_config=base_config.to_dict(),
+        text_config=base_config,
     )
     return Qwen3_5Config(
         wrapped_base_config,
@@ -178,32 +178,32 @@ def test_qwen3_5_generate():
 
 
 def test_qwen3_5_nested_rope_parameters_without_top_level_rope_theta():
-    text_config = {
-        "vocab_size": 128,
-        "hidden_size": 32,
-        "intermediate_size": 64,
-        "num_hidden_layers": 4,
-        "num_attention_heads": 4,
-        "num_key_value_heads": 2,
-        "head_dim": 8,
-        "rms_norm_eps": 1e-6,
-        "max_position_embeddings": 128,
-        "tie_word_embeddings": False,
-        "linear_conv_kernel_dim": 3,
-        "linear_key_head_dim": 4,
-        "linear_value_head_dim": 4,
-        "linear_num_key_heads": 2,
-        "linear_num_value_heads": 2,
-        "layer_types": ["linear_attention", "full_attention", "linear_attention", "full_attention"],
-        "num_experts": 0,
-        "num_experts_per_tok": 1,
-        "decoder_sparse_step": 1,
-        "rope_parameters": {
+    text_config = HFQwen3_5Config(
+        vocab_size=128,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        rms_norm_eps=1e-6,
+        max_position_embeddings=128,
+        tie_word_embeddings=False,
+        linear_conv_kernel_dim=3,
+        linear_key_head_dim=4,
+        linear_value_head_dim=4,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        layer_types=["linear_attention", "full_attention", "linear_attention", "full_attention"],
+        num_experts=0,
+        num_experts_per_tok=1,
+        decoder_sparse_step=1,
+        rope_parameters={
             "rope_type": "default",
             "rope_theta": 10_000_000,
             "partial_rotary_factor": 0.25,
         },
-    }
+    )
     base_config = PretrainedConfig(
         architectures=["Qwen3_5ForCausalLM"],
         model_type="qwen3_5_moe",
@@ -224,9 +224,7 @@ def test_qwen3_5_nested_rope_parameters_without_top_level_rope_theta():
         attention_mask = jnp.array([[1, 1, 1]], dtype=jnp.int32)
         outputs = model(input_ids, attention_mask=attention_mask)
 
-    hidden_size = (
-        config.text_config["hidden_size"] if isinstance(config.text_config, dict) else config.text_config.hidden_size
-    )
+    hidden_size = config.text_config.hidden_size
     assert model.config.hidden_size == hidden_size
     assert model.config.max_lora_adapters == 2
     assert outputs.last_hidden_state.shape == (1, 3, hidden_size)

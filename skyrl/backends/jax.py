@@ -34,7 +34,7 @@ import optax
 from flax import nnx
 from flax.training import checkpoints
 from pydantic import BaseModel, Field, TypeAdapter
-from transformers import AutoTokenizer, PretrainedConfig
+from transformers import AutoConfig, AutoTokenizer
 
 from skyrl.tx.layers.connectors import is_connector_path
 from skyrl.tx.models.configs import Qwen3Config
@@ -201,7 +201,7 @@ class JaxBackendImpl(AbstractBackend):
         # Initialize the shared base model with LoRA config
         checkpoint_path = resolve_model_path(base_model)
         self.tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
-        base_config = PretrainedConfig.from_pretrained(checkpoint_path)
+        base_config = AutoConfig.from_pretrained(checkpoint_path, trust_remote_code=True)
         self.model_config = Qwen3Config(
             base_config,
             max_lora_adapters=config.max_lora_adapters,
