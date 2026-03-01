@@ -833,15 +833,22 @@ class Qwen3_5Model(nnx.Module):
         )
 
 
+class Qwen3_5Backbone(nnx.Module):
+
+    def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
+        # Keep the nested `model.language_model.*` parameter structure used by HF checkpoints.
+        self.language_model = Qwen3_5Model(config, dtype=dtype, rngs=rngs)
+
+
 class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProcessorMixin):
 
     def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         model_config = config.get_text_config()
         self.config = model_config
-        self.model = Qwen3_5Model(model_config, dtype=dtype, rngs=rngs)
+        self.model = Qwen3_5Backbone(model_config, dtype=dtype, rngs=rngs)
 
         if model_config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens.T
+            self.lm_head = self.model.language_model.embed_tokens.T
         else:
             self.lm_head = LoRALinear(
                 model_config.hidden_size,
@@ -873,7 +880,7 @@ class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsPro
         if positions is None:
             positions = jnp.arange(attention_mask.shape[1])[None, :]
 
-        outputs = self.model(
+        outputs = self.model.language_model(
             input_ids,
             attention_mask=attention_mask,
             positions=positions,

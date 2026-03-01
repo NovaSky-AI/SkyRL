@@ -167,19 +167,13 @@ def load_safetensors(
         if filter_fn is not None and not filter_fn(path):
             continue
         key = get_param_key(path)
-        key_to_load = key
-        if key_to_load not in tensors and key_to_load.startswith("model."):
-            # Qwen3.5 checkpoints store language weights under `model.language_model.*`.
-            language_key = "model.language_model." + key_to_load[len("model.") :]
-            if language_key in tensors:
-                key_to_load = language_key
         # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
         # Skip connector parameters
         if skip_lora and is_connector_path(path):
             continue
-        if key_to_load not in tensors and "experts" not in path:
+        if key not in tensors and "experts" not in path:
             if not (
                 "lora_A" in path
                 or "lora_B" in path
@@ -194,14 +188,11 @@ def load_safetensors(
             assert num_experts is not None
 
             def expert_key(i: int) -> str:
-                k = get_expert_key(path, i)
-                if key_to_load != key and k.startswith("model."):
-                    return "model.language_model." + k[len("model.") :]
-                return k
+                return get_expert_key(path, i)
 
             tensor = np.stack([tensors[expert_key(i)].T for i in range(num_experts)], axis=0)
         else:
-            tensor = tensors[key_to_load] if "embed_tokens" in key_to_load else tensors[key_to_load].T
+            tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
         adapter_idx = get_adapter_slice(path, adapter_index, rank)
         if adapter_idx is not None:
             # Load into specific adapter slot via ArrayRef write-through
