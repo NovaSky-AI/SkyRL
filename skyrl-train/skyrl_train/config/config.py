@@ -389,6 +389,7 @@ class GeneratorConfig(BaseConfig):
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
     step_wise_trajectories: bool = False
+    previous_observation_only: bool = False
 
     external_proxy_url: Optional[str] = None
     external_server_urls: Optional[List[str]] = None
