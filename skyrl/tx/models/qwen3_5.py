@@ -892,17 +892,3 @@ class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsPro
 
 Qwen3_5ForConditionalGeneration = Qwen3_5ForCausalLM
 Qwen3_5MoeForConditionalGeneration = Qwen3_5ForCausalLM
-
-# Backward compatibility aliases
-Qwen3NextRMSNorm = Qwen3_5RMSNorm
-Qwen3NextRMSNormGated = Qwen3_5RMSNormGated
-Qwen3NextAttention = Qwen3_5Attention
-Qwen3NextGatedDeltaNet = Qwen3_5GatedDeltaNet
-Qwen3NextMLP = Qwen3_5MLP
-Qwen3NextExperts = Qwen3_5Experts
-Qwen3NextSparseMoeBlock = Qwen3_5SparseMoeBlock
-Qwen3NextDecoderLayer = Qwen3_5DecoderLayer
-Qwen3NextModel = Qwen3_5Model
-Qwen3NextForCausalLM = Qwen3_5ForCausalLM
-Qwen3NextForConditionalGeneration = Qwen3_5ForCausalLM
-Qwen3NextMoeForConditionalGeneration = Qwen3_5ForCausalLM
