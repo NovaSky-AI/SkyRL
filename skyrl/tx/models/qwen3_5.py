@@ -173,7 +173,7 @@ class Qwen3_5Attention(nnx.Module):
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
-            use_bias=getattr(config, "attention_bias", False),
+            use_bias=config.attention_bias,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
@@ -185,7 +185,7 @@ class Qwen3_5Attention(nnx.Module):
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
-            use_bias=getattr(config, "attention_bias", False),
+            use_bias=config.attention_bias,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
@@ -197,7 +197,7 @@ class Qwen3_5Attention(nnx.Module):
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
-            use_bias=getattr(config, "attention_bias", False),
+            use_bias=config.attention_bias,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
@@ -209,7 +209,7 @@ class Qwen3_5Attention(nnx.Module):
             max_lora_rank=config.max_lora_rank,
             dtype=dtype,
             param_dtype=dtype,
-            use_bias=getattr(config, "attention_bias", False),
+            use_bias=config.attention_bias,
             kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
