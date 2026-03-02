@@ -66,11 +66,11 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
-  trainer.policy.megatron_config.moe_token_dispatcher_type=$MOE_TOKEN_DISPATCHER \
-  trainer.policy.megatron_config.moe_router_load_balancing_type=$MOE_ROUTER_LB \
-  trainer.policy.megatron_config.moe_grouped_gemm=$MOE_GROUPED_GEMM \
-  trainer.policy.megatron_config.moe_router_score_function=$MOE_ROUTER_SCORE_FN \
-  trainer.policy.megatron_config.moe_router_enable_expert_bias=$MOE_ROUTER_EXPERT_BIAS \
+  +trainer.policy.megatron_config.transformer_config_kwargs.moe_token_dispatcher_type=$MOE_TOKEN_DISPATCHER \
+  +trainer.policy.megatron_config.transformer_config_kwargs.moe_router_load_balancing_type=$MOE_ROUTER_LB \
+  +trainer.policy.megatron_config.transformer_config_kwargs.moe_grouped_gemm=$MOE_GROUPED_GEMM \
+  +trainer.policy.megatron_config.transformer_config_kwargs.moe_router_score_function=$MOE_ROUTER_SCORE_FN \
+  +trainer.policy.megatron_config.transformer_config_kwargs.moe_router_enable_expert_bias=$MOE_ROUTER_EXPERT_BIAS \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_CPU_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
   trainer.policy.megatron_config.empty_cuda_cache=true \
