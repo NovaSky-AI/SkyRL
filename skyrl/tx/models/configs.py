@@ -29,7 +29,7 @@ class ModelConfig(PretrainedConfig):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PretrainedConfig | dict,
         *,
         max_lora_adapters: int,
         max_lora_rank: int,
@@ -38,8 +38,8 @@ class ModelConfig(PretrainedConfig):
         gradient_checkpointing: bool = False,
         mhc_expansion_rate: int = 1,
     ):
-        # Copy all attributes from the base config
-        super().__init__(**config.__dict__)
+        # `text_config` can come through as a raw dict from HF configs.
+        super().__init__(**(config if isinstance(config, dict) else config.__dict__))
 
         # Add LoRA-specific parameters
         self.max_lora_adapters = max_lora_adapters
