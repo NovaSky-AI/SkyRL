@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev --extra mcore -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py
 """
 
 import ray

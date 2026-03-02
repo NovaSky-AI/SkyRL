@@ -105,20 +105,18 @@ fsdp = [
     "torchvision; sys_platform == 'linux'",
 ]
 
-# megatron is pinned to python 3.12, relax this constraint once numpy >= 2.0.0 is supported
-# for megatron-core
 megatron = [
-    "skyrl[skyrl-train]; python_version == '3.12'",
-    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
-    "flash-attn==2.8.1; sys_platform == 'linux' and python_version == '3.12'",
-    "vllm==0.16.0; sys_platform == 'linux' and python_version == '3.12'",
-    "torch==2.9.1; sys_platform == 'linux' and python_version == '3.12'",
-    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
-    "torchvision; sys_platform == 'linux' and python_version == '3.12'",
-    "megatron-bridge; sys_platform == 'linux' and python_version == '3.12'",
-    "megatron-core==0.16.0; sys_platform == 'linux' and python_version == '3.12'",
-    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
-    "nvidia-modelopt; sys_platform == 'linux' and python_version == '3.12'",
+    "skyrl[skyrl-train]",
+    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
+    "flash-attn==2.8.1; sys_platform == 'linux'",
+    "vllm==0.16.0; sys_platform == 'linux'",
+    "torch==2.9.1; sys_platform == 'linux'",
+    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64' ",
+    "torchvision; sys_platform == 'linux'",
+    "megatron-bridge; sys_platform == 'linux'",
+    "megatron-core==0.16.0; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
 flashrl = [
@@ -200,16 +198,14 @@ no-build-isolation-package = [
     "nv-grouped-gemm",
 ]
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
-# unpinned dependencies. Also set ml_dtypes>=0.5.0 for python 3.12, since megatron-core
-# declares numpy<2.0.0, which conflicts with ml_dtypes>=0.5.0 in uv's resolver.
+# unpinned dependencies.
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.16.0; sys_platform == 'linux'",
-    "ml_dtypes>=0.5.0; sys_platform == 'linux' and python_version == '3.12'",
-    "numpy>=2.0.0; sys_platform == 'linux'",
+    "ml_dtypes>=0.5.0; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
