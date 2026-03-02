@@ -112,7 +112,11 @@ class OHCodeActAgent(CodeActAgent):
             )
         else:
             input_ids = self.tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=True, return_dict=False, enable_thinking=self.qwen3_enable_thinking
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=False,
+                enable_thinking=self.qwen3_enable_thinking,
             )
         return input_ids
 
