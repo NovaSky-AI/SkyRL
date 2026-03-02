@@ -9,9 +9,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
-_has_megatron = "megatron" in sys.modules or not (
-    __import__("importlib").util.find_spec("megatron") is None
-)
+_has_megatron = "megatron" in sys.modules or not (__import__("importlib").util.find_spec("megatron") is None)
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +86,14 @@ class TestGradScaleFunc:
 class TestSeedVariation:
     """Verify set_seed varies the seed by PP rank."""
 
-    @pytest.mark.parametrize("pp_rank, expected_seed", [
-        (0, 42),   # PP=1: seed unchanged
-        (1, 142),  # 42 + 100*1
-        (3, 342),  # 42 + 100*3
-    ])
+    @pytest.mark.parametrize(
+        "pp_rank, expected_seed",
+        [
+            (0, 42),  # PP=1: seed unchanged
+            (1, 142),  # 42 + 100*1
+            (3, 342),  # 42 + 100*3
+        ],
+    )
     def test_seed_offset_by_pp_rank(self, pp_rank, expected_seed):
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
             MegatronStrategy,
@@ -160,15 +161,9 @@ class TestWeightSyncPauseFlush:
         dispatch = WorkerDispatch.__new__(WorkerDispatch)
         dispatch.colocate_all = False
         dispatch._inference_engine_client = AsyncMock()
-        dispatch._inference_engine_client.pause_generation = AsyncMock(
-            side_effect=lambda: call_order.append("pause")
-        )
-        dispatch._inference_engine_client.resume_generation = AsyncMock(
-            side_effect=lambda: call_order.append("resume")
-        )
-        dispatch.broadcast_to_inference_engines = MagicMock(
-            side_effect=lambda _: call_order.append("broadcast")
-        )
+        dispatch._inference_engine_client.pause_generation = AsyncMock(side_effect=lambda: call_order.append("pause"))
+        dispatch._inference_engine_client.resume_generation = AsyncMock(side_effect=lambda: call_order.append("resume"))
+        dispatch.broadcast_to_inference_engines = MagicMock(side_effect=lambda _: call_order.append("broadcast"))
         dispatch.prepare_for_weight_sync = MagicMock()
         dispatch.finish_weight_sync = MagicMock()
 
