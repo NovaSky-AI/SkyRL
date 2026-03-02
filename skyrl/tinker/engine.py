@@ -55,6 +55,7 @@ def prepare_sample_batch(
         PreparedSampleBatch with all data extracted from requests
     """
     all_prompts = []
+    all_prompt_inputs = []
     all_sampling_params = []
     all_model_ids = []
     all_checkpoint_ids = []
@@ -75,6 +76,7 @@ def prepare_sample_batch(
             )
         for sample_idx in range(request_data.num_samples):
             all_prompts.append(prompt_tokens)
+            all_prompt_inputs.append(request_data.prompt)
             # Derive a unique seed per sample so that num_samples > 1 produces
             # diverse sequences, matching vLLM's behavior (seed + index).
             sample_params = request_data.sampling_params.model_copy(
@@ -91,6 +93,7 @@ def prepare_sample_batch(
 
     return types.PreparedSampleBatch(
         all_prompts=all_prompts,
+        all_prompt_inputs=all_prompt_inputs,
         all_sampling_params=all_sampling_params,
         all_model_ids=all_model_ids,
         all_checkpoint_ids=all_checkpoint_ids,
@@ -115,6 +118,7 @@ def prepare_model_pass_batch(
         PreparedModelPassBatch with all data extracted from requests
     """
     all_input_ids = []
+    all_model_inputs = []
     all_targets = []
     all_token_weights = []
     all_model_ids = []
@@ -133,6 +137,7 @@ def prepare_model_pass_batch(
         for item in request_data.data:
             tokens = item.model_input.to_token_list()
             all_input_ids.append(tokens)
+            all_model_inputs.append(item.model_input)
             loss_fn_inputs = item.loss_fn_inputs
             all_targets.append(loss_fn_inputs.target_tokens.data)
             all_token_weights.append(loss_fn_inputs.weights.data)
@@ -146,6 +151,7 @@ def prepare_model_pass_batch(
 
     return types.PreparedModelPassBatch(
         all_input_ids=all_input_ids,
+        all_model_inputs=all_model_inputs,
         all_targets=all_targets,
         all_token_weights=all_token_weights,
         all_sampling_logprobs=all_sampling_logprobs,

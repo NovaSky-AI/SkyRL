@@ -266,6 +266,9 @@ class PreparedModelPassBatch(BaseModel):
     all_loss_fns: list[str]
     all_loss_fn_configs: list[dict[str, float] | None]
 
+    # Per-example raw model inputs (includes image chunks for multimodal)
+    all_model_inputs: list[ModelInput]
+
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
     request_batch_slices: list[tuple[str, str, int, int]]
 
@@ -282,6 +285,9 @@ class PreparedSampleBatch(BaseModel):
     all_model_ids: list[str]
     all_checkpoint_ids: list[str]
     all_checkpoint_paths: list[str]
+
+    # Per-sample raw prompt inputs (includes image chunks for multimodal)
+    all_prompt_inputs: list[ModelInput]
 
     # Whether any request needs prompt logprobs
     needs_prompt_logprobs: bool
