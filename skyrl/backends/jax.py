@@ -1041,22 +1041,25 @@ def _broadcast_command(cmd: RpcPayload | None, process_id: int) -> RpcPayload:
     On coordinator (process 0): serializes and broadcasts the payload.
     On workers: receives and deserializes the payload (pass None).
     """
-    if process_id == 0:
+    is_source = (process_id == 0)
+
+    if is_source:
         assert cmd is not None, "Coordinator must provide a command to broadcast."
         data = RpcPayloadAdapter.dump_json(cmd)
         size = np.array([len(data)], dtype=np.int64)
-
-        size = multihost_utils.broadcast_one_to_all(size, is_source=True)
-
-        data_arr = np.frombuffer(data, dtype=np.uint8)
-        data_arr = multihost_utils.broadcast_one_to_all(data_arr, is_source=True)
     else:
         size = np.array([0], dtype=np.int64)
 
-        size = multihost_utils.broadcast_one_to_all(size, is_source=False)
+    # Broadcast size first
+    size = multihost_utils.broadcast_one_to_all(size, is_source=is_source)
 
+    if is_source:
+        data_arr = np.frombuffer(data, dtype=np.uint8)
+    else:
         data_arr = np.zeros(size[0], dtype=np.uint8)
-        data_arr = multihost_utils.broadcast_one_to_all(data_arr, is_source=False)
+
+    # Broadcast data
+    data_arr = multihost_utils.broadcast_one_to_all(data_arr, is_source=is_source)
 
     return RpcPayloadAdapter.validate_json(data_arr.tobytes())
 
