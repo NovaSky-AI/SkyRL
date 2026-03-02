@@ -5,8 +5,7 @@ uv run --isolated --extra dev pytest tests/cpu/test_eval.py
 from unittest.mock import MagicMock
 
 import pytest
-from omegaconf import OmegaConf
-
+from skyrl_train.config import SamplingParams, EnvironmentConfig
 from skyrl_train.evaluate import evaluate
 from skyrl_train.generators.base import GeneratorInterface, GeneratorOutput
 from tests.cpu.util import example_dummy_config
@@ -42,19 +41,17 @@ class DummyGenerator(GeneratorInterface):
 async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     cfg = dummy_config
     cfg.generator.backend = "vllm"
-    cfg.generator.eval_sampling_params = OmegaConf.create(
-        {
-            "max_generate_length": 20,
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "top_k": -1,
-            "min_p": 0.0,
-            "logprobs": None,
-            "stop": None,
-        }
+    cfg.generator.eval_sampling_params = SamplingParams(
+        max_generate_length=20,
+        temperature=0.0,
+        top_p=1.0,
+        top_k=-1,
+        min_p=0.0,
+        logprobs=None,
+        stop=None,
     )
     cfg.generator.eval_n_samples_per_prompt = 1
-    cfg.environment = OmegaConf.create({"env_class": "gsm8k"})
+    cfg.environment = EnvironmentConfig(env_class="gsm8k")
     cfg.trainer.dump_eval_results = False
     cfg.trainer.export_path = str(tmp_path)
 

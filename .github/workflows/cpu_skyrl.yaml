@@ -1,0 +1,51 @@
+name: SkyRL-CPU
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ci/**'
+      - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/cpu_skyrl.yaml'
+  pull_request:
+    paths:
+      - 'ci/**'
+      - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/cpu_skyrl.yaml'
+  workflow_dispatch:
+
+permissions:
+  checks: write   # for status checks to appear
+  contents: read
+
+# Cancel runs for previous commits on the same branch
+concurrency:
+  group: skyrl-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  skyrl_tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: .
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install uv
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+    - name: Run lint
+      run: |
+        uvx ruff check
+    - name: Run pytest
+      run: |
+        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train
+    - name: Run engine benchmarks
+      run: |
+        uv run --extra tinker --extra dev python skyrl/benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16
+

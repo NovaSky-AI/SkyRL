@@ -4,17 +4,11 @@ uv run --isolated --extra dev pytest tests/cpu/dataset/test_preprocess.py
 
 import pytest
 import torch
-from omegaconf import OmegaConf
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
 
 from unittest.mock import MagicMock
-
-
-@pytest.fixture
-def cfg():
-    return OmegaConf.create({"trainer": {"max_prompt_length": 10}, "generator": {"max_generate_length": 5}})
 
 
 # NOTE (sumanthrh): the tests in this file are hardcoded to use the below character-level tokenizer
@@ -61,7 +55,7 @@ def tokenizer():
     return mock_tokenizer
 
 
-def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
+def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer):
     prompts = ["abc", "12345"]
     outputs = ["def", "67890"]
     prompts = tokenizer(prompts)["input_ids"]
@@ -89,7 +83,7 @@ def test_convert_prompts_responses_to_batch_tensors_exact(tokenizer, cfg):
     assert torch.equal(ret_rewards[1], torch.tensor([1, 0, 0, 0, 0]))
 
 
-def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, tokenizer):
+def test_convert_prompts_responses_to_batch_tensors_different_lengths(tokenizer):
     # Test with inputs of different lengths
     prompts = ["Short", "This is a longer prompt"]
     outputs = ["Long response here", "Short"]
@@ -125,7 +119,7 @@ def test_convert_prompts_responses_to_batch_tensors_different_lengths(cfg, token
     assert sequences[1, -1] == tokenizer.pad_token_id
 
 
-def test_convert_prompts_responses_to_batch_tensors_empty_input(cfg, tokenizer):
+def test_convert_prompts_responses_to_batch_tensors_empty_input(tokenizer):
     # Test with empty input
     prompts = []
     outputs = []
@@ -142,7 +136,7 @@ def test_convert_prompts_responses_to_batch_tensors_empty_input(cfg, tokenizer):
         )
 
 
-def test_convert_prompts_responses_to_batch_tensors_mismatched_lengths(cfg, tokenizer):
+def test_convert_prompts_responses_to_batch_tensors_mismatched_lengths(tokenizer):
     # Test with mismatched input lengths
     prompts = ["Hello", "World"]
     outputs = ["Response"]

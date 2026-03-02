@@ -2,7 +2,7 @@ set -x
 
 # The exact same script as `run_search.sh` but with `use_conversation_multi_turn=true`
 # and hence `append_eos_token_after_stop_str_in_multi_turn=true`
-# See https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html on the
+# See https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator on the
 # difference between the two options. You might want to change the data generation prompt
 # to let the model know that we are doing multi-turn conversations (i.e. user will provide
 # the search result for each turn).
@@ -18,7 +18,7 @@ DATA_DIR="$HOME/data/searchR1"
 
 RUN_NAME="skyrl-search_4turns_maxgeneratelen_500"
 
-USE_TIS=true
+TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
 
 uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
@@ -30,8 +30,8 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.policy.optimizer_config.num_warmup_steps=94 \
   trainer.algorithm.use_kl_loss=true \
   trainer.algorithm.kl_loss_coef=0.001 \
-  trainer.algorithm.use_tis=$USE_TIS \
-  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \
+  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-3B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \

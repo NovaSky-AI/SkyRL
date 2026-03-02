@@ -6,25 +6,25 @@ if TYPE_CHECKING:
 from dataclasses import dataclass
 from http import HTTPStatus
 import ray
-import torch
 import asyncio
 import vllm
 from types import SimpleNamespace
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ErrorResponse,
+)
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.lora.request import LoRARequest
 from uuid import uuid4
-import warnings
 from skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
     InferenceEngineInput,
@@ -66,76 +66,22 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         logger.info(f"creating LLM with bundle_indices={bundle_indices}")
 
 
-class WorkerWrap:
-    def test_rpc(self, *args, **kwargs):
-        """Test RPC call to worker"""
-        return args, kwargs
-
-    def init_weight_update_communicator(self, init_info: bytes):
-        """Init weight update communicator from init info.
-
-        Args:
-            init_info: Pickled bytes of WeightSyncInitInfo from the sender.
-        """
-        import pickle
-
-        assert torch.distributed.is_initialized(), "default torch process group must be initialized"
-
-        # Unpickle init_info to restore the original object type
-        assert isinstance(init_info, bytes), f"Expected bytes, got {type(init_info).__name__}"
-        init_info = pickle.loads(init_info)
-
-        strategy_cls = init_info.strategy_type()
-
-        if hasattr(self, "_weight_receiver") and self._weight_receiver is not None:
-            # TODO(haochen): we should get rid of this flag and override existing receiver.
-            if init_info.override_existing_receiver:
-                self._weight_receiver.teardown()
-                self._weight_receiver = None
-            else:
-                warnings.warn(
-                    "Detected an existing weight receiver. "
-                    "For overriding, use `generator.override_existing_update_group=enable`"
-                )
-                return
-
-        self._weight_receiver = strategy_cls.create_receiver(init_info)
-
-    def load_weights(self, request: bytes) -> None:
-        """Load weights using the receiver.
-
-        This method is called via collective_rpc from VLLMWeightLoader.
-
-        Args:
-            request: Pickled bytes of WeightUpdateRequest.
-        """
-        import pickle
-
-        # Unpickle request to restore the original object type
-        assert isinstance(request, bytes), f"Expected bytes, got {type(request).__name__}"
-        request = pickle.loads(request)
-
-        weight_list = []
-        for name, tensor in self._weight_receiver.receive_weights(request):
-            weight_list.append((name, tensor))
-
-        self.model_runner.model.load_weights(weights=weight_list)
-
-        for weight in weight_list:
-            del weight
-
-    # TODO (sumanthrh): Add destroy process group RPC as a atexit handler to Trainer code.
-    def teardown_weight_receiver(self):
-        if not hasattr(self, "_weight_receiver") or self._weight_receiver is None:
-            warnings.warn("No weight receiver to teardown")
-            return
-        self._weight_receiver.teardown()
+# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
+# This alias preserves the old import path for existing scripts/configs.
+# TODO (Kourosh): Remove this alias once all references are updated.
+from skyrl_train.inference_servers.vllm_worker import WorkerWrap  # noqa: F401, E402
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
     """Base class containing shared logic between sync and async VLLM engines."""
 
     def __init__(self, *args, bundle_indices: list = None, **kwargs):
+        # Redirect infrastructure output to log file before any engine initialization.
+        # Done here in the base class so all subclasses get it automatically.
+        from skyrl_train.utils.ray_logging import redirect_actor_output_to_file
+
+        redirect_actor_output_to_file()
+
         setup_envvars_for_vllm(kwargs, bundle_indices)
         vllm_v1_disable_multiproc = kwargs.pop("vllm_v1_disable_multiproc", False)
         if vllm_v1_disable_multiproc or vllm.__version__ == "0.8.2":
@@ -246,6 +192,13 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
                 "Please set `generator.async_engine=true` in your config."
             )
+        # Pop enable_ray_prometheus_stats - only supported for async engine
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+        if enable_ray_prometheus_stats:
+            logger.warning(
+                "enable_ray_prometheus_stats is only supported with AsyncVLLMInferenceEngine. "
+                "Set `generator.async_engine=true` to enable Ray Prometheus stats logging."
+            )
         return vllm.LLM(*args, **kwargs)
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -350,31 +303,62 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
-        # TODO (erictang000): potentially enable log requests for a debugging mode
+
+        # Logging kwargs
+        enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+        enable_log_requests = kwargs.pop("enable_log_requests", False)
+        max_log_len = kwargs.pop("max_log_len", None)
+
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-            engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
+            engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
         else:
-            engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
-        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+            engine_args = vllm.AsyncEngineArgs(disable_log_requests=not enable_log_requests, **kwargs)
+
+        # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
+        stat_loggers = None
+        if enable_ray_prometheus_stats:
+            stat_loggers = self._create_ray_prometheus_stat_loggers()
+
+        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
         model_path = kwargs.get("model")
-        # TODO(Charlie): add a config similar to vllm's `served_model_name`. See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
-        model_name = model_path
+        # Use served_model_name if provided (from generator.served_model_name config),
+        # otherwise fall back to model_path. This allows using a different model name
+        # in HTTP endpoint requests than the actual model path.
+        # See: https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
+        served_model_name = kwargs.get("served_model_name", None)
+        model_name = served_model_name if served_model_name is not None else model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-        models = OpenAIServingModels(engine, model_config, base_model_paths)
-        # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
-        # support OAI-style tool calling; and `request_logger` for better debugging.
+
+        # vllm >= 0.11.2 removed model_config from OpenAI serving APIs
+        is_new_api = version.parse(vllm.__version__) >= version.parse("0.11.2")
+        legacy_kwargs = {}
+        if is_new_api:
+            models = OpenAIServingModels(engine, base_model_paths)
+        else:
+            models = OpenAIServingModels(engine, model_config, base_model_paths)
+            legacy_kwargs["model_config"] = model_config
+
+        # Build request logger for debugging (off by default).
+        # Enable via: +generator.engine_init_kwargs.enable_log_requests=true
+        # Optionally limit logged chars: +generator.engine_init_kwargs.max_log_len=256
+        request_logger = None
+        if enable_log_requests:
+            from vllm.entrypoints.logger import RequestLogger
+
+            request_logger = RequestLogger(max_log_len=max_log_len)
+
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
-            model_config=model_config,
             models=models,
             response_role="assistant",
-            request_logger=None,
-            chat_template=None,
+            request_logger=request_logger,
+            chat_template=openai_kwargs.pop("chat_template", None),  # used to template /chat/completions requests
             chat_template_content_format="auto",
+            **legacy_kwargs,
             **openai_kwargs,
         )
 
@@ -382,11 +366,35 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
-            model_config=model_config,
             models=models,
-            request_logger=None,
+            request_logger=request_logger,
+            **legacy_kwargs,
         )
         return engine
+
+    def _create_ray_prometheus_stat_loggers(self):
+        """Create Ray Prometheus stat loggers for vLLM metrics.
+
+        Returns stat_loggers in the format expected by vLLM's from_engine_args().
+        For vLLM v1 (0.9.0+), this returns a list of StatLoggerFactory callables.
+        For older versions where the v1 API is not available, this returns `None`.
+
+        See: https://docs.vllm.ai/en/latest/api/vllm/v1/metrics/ray_wrappers/
+        """
+        try:
+            # Try vLLM v1 API first (0.9.0+)
+            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+
+            logger.info("Enabling RayPrometheusStatLogger for vLLM inference engine metrics")
+            # For v1, stat_loggers is a list of factory callables
+            return [RayPrometheusStatLogger]
+        except ImportError:
+            logger.warning(
+                "RayPrometheusStatLogger not available in this vLLM version. "
+                "For Ray-integrated metrics, upgrade to vLLM >= 0.9.0. "
+                "Stat logging will be disabled."
+            )
+            return None
 
     async def _load_lora_from_disk(self, lora_path: str):
         """Load LoRA adapters from disk using vLLM's native add_lora method."""
@@ -513,8 +521,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
-
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
@@ -543,21 +549,37 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         except Exception as e:
             # Handle it here so we can surface the error from a ray worker.
-            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
 
+            # Determine appropriate HTTP status code based on error message to mimic vllm serve error
+            # handling. Here, we handle context length errors, which should return 400 according to
+            # vllm serve error handling, so that downstream users can handle these properly rather
+            # than seeing a 500 SkyRL INTERNAL_SERVER_ERROR. For instance, LiteLLM can wraps them as
+            # BadRequestError, enabling Harbor to detect ContextLengthExceededError.
+            # NOTE(Charlie): This is hacky. With the refactored inference stack, we
+            # should be able to directly reuse the error handling from the served vllm.
+            error_message = str(e).lower()
+            is_context_length_error = (
+                "maximum context length" in error_message or "maximum model length" in error_message
+            )
+
+            if is_context_length_error:
+                http_status = HTTPStatus.BAD_REQUEST
+            else:
+                http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
+            if version.parse(vllm.__version__) >= version.parse("0.10.0"):
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
-                        type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                        code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                        type=http_status.phrase,
+                        code=http_status.value,
                     ),
                 ).model_dump()
             else:
                 return ErrorResponse(
                     message=str(e),
-                    type=HTTPStatus.INTERNAL_SERVER_ERROR.phrase,
-                    code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                    type=http_status.phrase,
+                    code=http_status.value,
                 ).model_dump()
 
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:

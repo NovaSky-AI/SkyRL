@@ -1,5 +1,0 @@
-# @package terminal_bench_config
-
-trials_dir: "~/trials"
-agent_name: "terminus"
-max_episodes: 16

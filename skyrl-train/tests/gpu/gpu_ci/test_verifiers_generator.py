@@ -4,12 +4,11 @@ uv run --isolated --extra dev --extra vllm --with verifiers pytest tests/gpu/gpu
 
 import pytest
 import ray
-from omegaconf import DictConfig
 from transformers import AutoTokenizer
 import socket
 
-from tests.gpu.utils import get_test_actor_config, init_inference_engines
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from tests.gpu.utils import get_test_actor_config, InferenceEngineState
+from skyrl_train.config import GeneratorConfig, SamplingParams
 from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 # Mark all tests in this file as "integrations"
@@ -38,7 +37,7 @@ def verifiers_runtime():
     cfg.generator.sampling_params.max_generate_length = 256
 
     # Reuse shared initializer for local engines and client
-    client, _ = init_inference_engines(
+    engines = InferenceEngineState.create(
         cfg=cfg,
         model=model,
         use_local=True,
@@ -53,14 +52,15 @@ def verifiers_runtime():
     tokenizer = AutoTokenizer.from_pretrained(model)
 
     try:
-        yield {"client": client, "tokenizer": tokenizer, "http_port": http_port, "model": model}
+        yield {"client": engines.client, "tokenizer": tokenizer, "http_port": http_port, "model": model}
     finally:
+        engines.close()
         ray.shutdown()
 
 
 async def _run_verifiers_end_to_end(
     *,
-    existing_client: InferenceEngineClient,
+    existing_client,
     model: str = "Qwen/Qwen2.5-1.5B-Instruct",
     num_prompts: int = 2,
     http_host: str = "127.0.0.1",
@@ -78,15 +78,13 @@ async def _run_verifiers_end_to_end(
 
     await client.wake_up()
 
-    generator_cfg = DictConfig(
-        {
-            "sampling_params": {"max_generate_length": max_generate_length, "logprobs": None},
-            "max_input_length": max_input_length,
-            "backend": "vllm",
-            "enable_http_endpoint": True,
-            "http_endpoint_host": http_host,
-            "http_endpoint_port": http_port,
-        }
+    generator_cfg = GeneratorConfig(
+        sampling_params=SamplingParams(max_generate_length=max_generate_length, logprobs=None),
+        max_input_length=max_input_length,
+        backend="vllm",
+        enable_http_endpoint=True,
+        http_endpoint_host=http_host,
+        http_endpoint_port=http_port,
     )
 
     from integrations.verifiers.verifiers_generator import VerifiersGenerator
@@ -112,22 +110,19 @@ async def _run_verifiers_end_to_end(
         for i in range(num_prompts)
     ]
 
-    base_sampling = DictConfig(
-        {
-            "temperature": 0.7,
-            "top_p": 0.95,
-            "top_k": -1,
-            "max_generate_length": max_generate_length,
-            "min_p": 0.0,
-            "logprobs": None,
-            "stop": None,
-        }
+    base_sampling = SamplingParams(
+        temperature=0.7,
+        top_p=0.95,
+        top_k=-1,
+        max_generate_length=max_generate_length,
+        min_p=0.0,
+        logprobs=None,
+        stop=None,
     )
-    if sampling_overrides:
-        for k, v in sampling_overrides.items():
-            base_sampling[k] = v
 
     sampling_params = get_sampling_params_for_backend("vllm", base_sampling)
+    if sampling_overrides:
+        sampling_params.update(sampling_overrides)
 
     input_batch = {
         "prompts": prompts,

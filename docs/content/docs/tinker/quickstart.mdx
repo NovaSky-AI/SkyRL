@@ -1,0 +1,73 @@
+---
+title: "Quickstart"
+---
+
+This guide walks you through starting a Tinker API server using the SkyRL backend, and running a training script against it.
+
+If you run into any issues, please [open an issue](https://github.com/NovaSky-AI/SkyRL/issues/new) or [message us on Slack](https://join.slack.com/t/skyrl/shared_invite/zt-3f6ncn5b8-QawzK3uks6ka3KWoLwsi5Q).
+
+## Prerequisites
+
+- CUDA 12.8
+- [uv](https://docs.astral.sh/uv/) package manager
+
+## 1. Clone and Install SkyRL
+
+```bash
+git clone https://github.com/NovaSky-AI/SkyRL.git
+cd SkyRL
+uv venv --python 3.12
+uv sync --extra tinker --extra fsdp
+```
+
+## 2. Start the Tinker Server
+
+The server hosts the Tinker API and manages a background engine that processes training requests.
+
+```bash
+uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
+    --base-model "Qwen/Qwen3-0.6B" \
+    --backend fsdp
+```
+
+This will:
+1. Start the FastAPI server on port 8000
+2. Initialize the training workers
+3. Load the base model and set up inference engines 
+
+The server is ready when you see `Uvicorn running on http://0.0.0.0:8000`.
+
+### Server Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--base-model` | (required) | HuggingFace model name or path |
+| `--backend` | (required) | Backend type (`fsdp` or `megatron`) |
+| `--port` | 8000 | API server port |
+| `--checkpoints-base` | `/tmp/skyrl_checkpoints` | Directory for checkpoint storage |
+| `--database-url` | `sqlite:///...tinker.db` | Database URL for request tracking |
+
+## 3. Run a Training Script
+
+In a separate terminal, run the supervised learning loop from the [tinker-cookbook](https://github.com/thinking-machines-lab/tinker-cookbook):
+
+```bash
+git clone https://github.com/thinking-machines-lab/tinker-cookbook.git
+cd tinker-cookbook
+
+TINKER_API_KEY=tml-dummy uv run --with tinker --with datasets \
+    python -m tinker_cookbook.recipes.sl_loop \
+    base_url=http://localhost:8000 \
+    model_name="Qwen/Qwen3-0.6B" \
+    train_on_what=LAST_ASSISTANT_MESSAGE
+```
+
+You should see training metrics (loss, grad_norm) printed after each batch.
+
+Congratulations! You've run your first Tinker training script on SkyRL.
+
+## 4. More Recipes
+
+In general, **zero** code changes are required to execute [tinker-cookbook](https://github.com/thinking-machines-lab/tinker-cookbook) scripts on SkyRL. Simply update the `base_url` to point to your local Tinker server (e.g., `http://localhost:8000` above).
+
+See [Cookbook Scripts](./cookbook) for a few example commands and recipes that have been validated on SkyRL.

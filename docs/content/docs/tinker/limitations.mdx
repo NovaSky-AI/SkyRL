@@ -1,0 +1,36 @@
+---
+title: "Limitations & Roadmap"
+---
+
+The Tinker integration is under active development. This page documents current limitations.
+
+## Current Limitations
+
+### Single Model
+
+Only one training model and one set of sampling weights can be loaded at a time. Calling `create_model` when a model already exists will return an error. After a weight sync, all subsequent `sample()` calls use the updated weights — there is no support for maintaining multiple sampling snapshots concurrently. To switch models, restart the server.
+
+### Single-tenant LoRA
+Related to the above limitation, even when training with LoRA adaptors, the SkyRL-Train backend only supports one training model and one set of sampling weights. We plan to support training and sampling on multiple LoRA adaptors concurrently in the future.
+
+### Vision Language Models
+
+Vision language models (VLMs) are not yet supported through the Tinker integration. Only text-based models can be used for training and sampling.
+
+
+### Batch Size Constraint
+
+The batch size must be evenly divisible by the data parallelism size (number of GPUs). For example, with 4 GPUs you cannot use a batch size of 5.
+
+### No Prompt Logprobs
+
+The `sample()` API does not yet return prompt logprobs, even when requested. A warning is logged but no error is raised. This may affect scripts that rely on prompt logprobs for KL penalty computation.
+
+### KL Penalty
+
+KL penalty (`kl_penalty_coef > 0`) is not yet supported. This requires prompt logprobs from vLLM (not wired yet) and a way to serve frozen base model logprobs after weight sync. This is disabled by default in cookbook recipes, so it is not a blocker for most workflows.
+
+### RL Loss Functions
+
+Only `cross_entropy` and `importance_sampling` are currently wired through the Tinker data conversion path. SkyRL's `PolicyLossRegistry` contains implementations for PPO (`regular`), `cispo`, and others, but these are not yet validated through the Tinker API.
+

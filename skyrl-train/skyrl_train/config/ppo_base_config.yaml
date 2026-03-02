@@ -14,11 +14,11 @@ trainer:
     colocate_all: true
     colocate_policy_ref: true
     policy_num_nodes: 1
-    policy_num_gpus_per_node: 4
+    policy_num_gpus_per_node: 1
     critic_num_nodes: 1
-    critic_num_gpus_per_node: 4
+    critic_num_gpus_per_node: 1
     ref_num_nodes: 1
-    ref_num_gpus_per_node: 4
+    ref_num_gpus_per_node: 1
   sequence_parallel_backend: "ulysses"
   strategy: fsdp2
   policy:
@@ -96,8 +96,6 @@ trainer:
       kl_target: 0.1 # target KL divergence for adaptive KL controller
       horizon: 10000 # controls the update rate of the adaptive KL controller
     kl_estimator_type: "k3" # "k1", "k2", "k3", "abs" - see http://joschu.net/blog/kl-approx.html for details
-    use_kl_estimator_k3: false # to be deprecated, use kl_estimator_type="k3" instead
-    use_abs_kl: false # to be deprecated, use kl_estimator_type="abs" instead
     # note: use_kl_in_reward and use_kl_loss should be mutually exclusive
     use_kl_in_reward: false # apply kl loss to rewards
     use_kl_loss: true # used in policy model
@@ -120,9 +118,52 @@ trainer:
     eps_clip_high: 0.2
     # dual clip parameters
     clip_ratio_c: 3.0
-    # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
+
+    # To be deprecated in favor of off_policy_correction.tis_ratio_type = "token"
+    # and "token_tis_ratio_clip_high"
     tis_imp_ratio_cap: -1.0
     use_tis: false
+
+    # Used for seq_mean_token_sum_norm loss reduction. Users should set this value for multi-turn for that loss.
+    # If not set, will be calculated as generator.max_input_length + generator.sampling_params.max_generate_length.
+    max_seq_len: null
+
+    # references
+    # - https://github.com/szrlee/verl/blob/yingru/rollout_correction/docs/advance/rollout_corr_math.md
+    # - https://fengyao.notion.site/off-policy-rl
+    # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
+    off_policy_correction:
+      # type of importance sampling ratio to use for ppo loss correction
+      # here importance sampling ratio refers to exp(logprobs_{policy_old} - logprobs_{rollout_policy})
+      tis_ratio_type: null # null, "token", "sequence"
+
+      # used if tis_ratio_type = "token", 1.5-5.0 is recommended for "token" tis_ratio_type
+      token_tis_ratio_clip_high: 2.0
+      # used if tis_ratio_type = "sequence", 2.0-10.0 is recommended for "sequence" tis_ratio_type
+      sequence_tis_ratio_clip_high: 5.0
+
+      # method of masking out sequences with cumulative importance sampling ratios outside the cap
+      # "product" masks out sequences with product of importance ratios outside the cap
+      # "geometric" masks out sequences with geometric mean of importance ratios outside the cap
+      sequence_mask_metric: null # null, "product", "geometric"
+
+      # used if sequence_mask_metric = "geometric"
+      # values around 0.99-1.01 are recommended for "geometric" sequence_mask_metric - MoE models may need larger allowed ranges due to higher mismatch
+      geo_mask_high: 1.01
+      geo_mask_low: 0.99
+
+      # used if sequence_mask_metric = "product"
+      # values around 0.5-2.0 are recommended for "product" sequence_mask_metric
+      product_mask_high: 2.0
+      product_mask_low: 0.5
+
+      # separate from sequence_mask_metric and tis_ratio_type 
+      # if any off_policy_correction is enabled, masks out sequences with any token having importance ratio
+      # far outside an acceptable range (low and high thresholds) - set to null to disable
+      # suggested values: 1e-4 for low and 100 for high
+      outlier_token_is_threshold_low: null
+      outlier_token_is_threshold_high: null
+
     # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
     sapo:
       tau_pos: 1.0
@@ -151,7 +192,7 @@ trainer:
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
   
-  # Fully async specific knobs. For more see http://skyrl.readthedocs.io/en/latest/tutorials/fully_async.html#step-2-config-knobs-to-tune-for-fully-async-training
+  # Fully async specific knobs. For more see https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:
     # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,
     # and it is used to train at step j, it is guaranteed that j - i <= max_staleness_steps.
@@ -171,6 +212,10 @@ trainer:
   seed: 42
   resume_mode: latest # null/"none", "latest", "from_path"
   resume_path: null
+  # Path for infrastructure log files ({log_path}/infra-YYMMDD_HHMMSS.log).
+  # For multi-node, use a shared filesystem path to consolidate logs into a single file. Otherwise,
+  # each node writes to its own local path.
+  log_path: "/tmp/skyrl-logs"
   ckpt_path: "${oc.env:HOME}/ckpts/" # Path for resumable training checkpoints (model state, optimizer state, etc.)
   max_ckpts_to_keep: -1 # -1 to keep all checkpoints, N to keep the last N checkpoints
   ckpt_interval: 10  # Save full training checkpoint every `ckpt_interval` steps.
@@ -193,8 +238,6 @@ trainer:
   max_prompt_length: 512
   flash_attn: true
   disable_fast_tokenizer: false
-  target_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.target_modules or trainer.critic.model.lora.target_modules instead
-  exclude_modules: null # NOTE: these are now deprecated, use trainer.policy.model.lora.exclude_modules or trainer.critic.model.lora.exclude_modules instead
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
@@ -216,10 +259,19 @@ generator:
   run_engines_locally: true
   num_inference_engines: 1
   backend: "vllm"
+  
+  # Weight sync configuration
   weight_sync_backend: "nccl"
   # if using cuda_ipc, we send in batches of this size in GB
   weight_transfer_threshold_cuda_ipc_GB: 1.0
-  inference_engine_tensor_parallel_size: 4
+
+  # New inference layer configuration (used with _SKYRL_USE_NEW_INFERENCE=1)
+  # If both are null, servers are built internally based on placement group config.
+  # See docs for valid combinations.
+  external_proxy_url: null       # Data plane URL (load-balanced router)
+  external_server_urls: null     # Control plane URLs (direct backend access)
+
+  inference_engine_tensor_parallel_size: 1
   inference_engine_pipeline_parallel_size: 1
   inference_engine_expert_parallel_size: 1
   inference_engine_data_parallel_size: 1
@@ -235,15 +287,27 @@ generator:
   # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
   fully_sharded_loras: false
+  # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only)
+  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger
+  enable_ray_prometheus_stats: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]
   enable_http_endpoint: false
   http_endpoint_host: "127.0.0.1"
   http_endpoint_port: 8000
+  # served_model_name: The model name to use for HTTP endpoint validation. If set, this name
+  # must be used in the `model` field of /chat/completions and /completions requests instead
+  # of the model path. This is useful when:
+  # - The model path differs from the desired API model name (e.g., local paths vs API names)
+  # - Using LiteLLM or other clients that expect a specific model name format
+  # If null (default), the model path (trainer.policy.model.path) is used for validation.
+  served_model_name: null
   max_turns: 1
 
-  # chat template configuration
+  # chat template configuration for SkyRLGymGenerator.
+  # For `/chat/completions` with vllm via the HTTP endpoint for rollout, instead use say
+  # `+generator.engine_init_kwargs.chat_template=/path/to/templates/qwen3_acc_thinking.jinja2`
   chat_template:
     source: "name"  # "name" or "file"
     name_or_path: null  # e.g., "qwen3_with_thinking" or "/path/to/template.j2"
@@ -264,7 +328,7 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
-    logprobs: 0
+    logprobs: 1
     stop: null
 
   # whether to use a conversation based format for multi-turn generations
@@ -285,7 +349,7 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
-    logprobs: 0
+    logprobs: 1
     stop: null
 
   # number of samples per prompt for evaluation

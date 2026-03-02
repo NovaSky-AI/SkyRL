@@ -1,14 +1,17 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from datasets import Dataset
 from skyrl_train.dataset import PromptDataset
 
 
+class SimpleTokenizer:
+    def apply_chat_template(self, x, add_generation_prompt=False):
+        return x
+
+
 @pytest.fixture
 def mock_tokenizer():
-    tokenizer = MagicMock()
-    tokenizer.apply_chat_template.side_effect = lambda x, add_generation_prompt: x
-    return tokenizer
+    return SimpleTokenizer()
 
 
 @pytest.fixture

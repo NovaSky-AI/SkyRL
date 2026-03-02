@@ -1,0 +1,115 @@
+---
+title: "Development Guide"
+---
+
+
+## Pre-requisities
+
+Follow the [installation guide](installation). Make sure that the installation works with our [quick start example](quickstart).
+
+## Modifying the code
+
+**Adding a new environment or task?**
+Follow the [new task tutorial](../tutorials/new_env). Your custom code can be placed anywhere - building on top of `skyrl` as a package - but we recommend structuring it as a folder similar to `examples/multiply`.
+
+**Creating a custom Generator (ex: porting an agent harness, implementing custom trajectory generation logic, etc.)?**
+Same as the above: your custom code can be placed anywhere and we typically use `examples/train/` for this. See `examples/mini_swe_agent` for an example of creating a custom `Generator` for [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent).
+
+**Looking to add a new algorithm by changing your advantage estimator or policy loss?**
+Follow the guide for [implementing custom algorithms](../algorithms/custom_algorithms). See `examples/algorithms` for examples of various custom algorithm implementations.
+
+**Looking to modify the training loop for full control?**
+Follow the guide for [creating a custom trainer](../algorithms/custom_algorithms#creating-a-custom-trainer). See `examples/algorithms/dapo/main_dapo.py` for an example of how to modify the Trainer class for DAPO.
+
+**Modifying the existing environment code (ex: adding a custom method for all Env classes, improving the SearchEnv implementation)?**
+You would modify the code in [skyrl-gym](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym/). Note: you do **not** have to modify the `skyrl-gym` package for adding a new environment or task. 
+
+## Contributing to SkyRL
+
+We welcome all forms of contributions to SkyRL, including bug reports, feature requests, documentation improvements, code contributions etc. 
+
+## Testing
+
+For code contributions, we recommend running unit tests before submitting a pull request. Unless otherwise specified, all commands below should be run from the repository root.
+
+### CPU tests
+
+```bash
+# SkyRL core (includes Tinker and Jax backend tests)
+uv run --extra tinker --extra jax --extra dev pytest --forked -s tests \
+  --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train
+
+# FSDP and Megatron backend
+uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ \
+  --ignore=tests/backends/skyrl_train/gpu
+```
+
+### GPU tests
+
+The GPU tests require a node with at least 8 GPUs. They have been tested on 8xH100 nodes, but should work on 8xA100 nodes as well. We are actively working on making these more accessible.
+
+The FSDP and Megatron backend tests assume that the GSM8K dataset is downloaded to `~/data/gsm8k`. If you have not downloaded the dataset, you can do so by running the following command:
+
+```bash
+uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir ~/data/gsm8k
+```
+
+#### Jax backend
+
+```bash
+uv run --extra gpu --extra tinker --extra dev pytest tests/tx/gpu
+```
+
+#### FSDP backend
+
+```bash
+uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "not (integrations or megatron)"
+```
+
+#### Megatron backend
+
+```bash
+uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci -m "megatron"
+```
+
+### SkyRL-Gym
+
+You can run the tests for the `skyrl-gym` package by running the following command:
+
+```bash
+cd skyrl-gym
+uv run --isolated --extra dev pytest tests/
+```
+
+## Linting and Formatting
+
+We use pre-commit hooks to automatically lint and format the code. You can install the pre-commit hooks by running the following command:
+
+```bash
+uv pip install pre-commit
+pre-commit install
+
+```
+
+If you wish to manually run linting and formatting:
+
+```bash
+bash format.sh # run from the root directory
+
+```
+
+## Documentation
+
+We welcome contributions to the documentation. The documentation is stored in the `docs/` folder and uses [fumadocs](https://fumadocs.vercel.app/). 
+
+### Developing locally
+
+We recommend building the documentation locally to preview your changes.
+
+```bash
+cd docs
+npm install
+npm run dev
+```
+
+This will start the development server at [http://localhost:3000](http://localhost:3000).

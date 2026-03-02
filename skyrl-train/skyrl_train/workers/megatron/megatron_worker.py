@@ -7,18 +7,18 @@ from huggingface_hub import snapshot_download
 
 import os
 from datetime import timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from collections import defaultdict
-from tqdm import tqdm
 from omegaconf import OmegaConf
 
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 import megatron.core.parallel_state as mpu
-from megatron.core.optimizer import DistributedOptimizer
+from megatron.core.optimizer import DistributedOptimizer, ChainedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+from skyrl_train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl_train.distributed.megatron.optimizer import (
     init_megatron_optim_config,
     get_megatron_optimizer,
@@ -28,9 +28,9 @@ from skyrl_train.distributed.dispatch import MeshRank
 from skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
 from skyrl_train.distributed.megatron.megatron_utils import print_model_size, broadcast_object_across_pp_ranks
 from skyrl_train.utils.utils import update_model_config, str_to_torch_dtype
-from skyrl_train.utils.constants import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
-from skyrl_train.training_batch import TrainingOutputBatch
-from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics
+from skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -39,6 +39,68 @@ from skyrl_train.workers.worker import (
 from skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl_train.utils.profiler import Profiler
 from skyrl_train.weight_sync import WeightExtractor, WeightChunk
+
+
+# ---------------------------------------------------------------------------
+# Register additional model bridges for architectures not yet in the upstream
+# Megatron-Bridge package. GLM-4.7-Flash uses the same architecture as
+# DeepSeek-V3 (MLA + MoE) so we reuse that bridge with a trivial subclass.
+# ---------------------------------------------------------------------------
+try:
+    from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
+    from megatron.bridge.models.deepseek.common import get_common_configs
+    from megatron.bridge.models.deepseek.deepseek_provider import DeepSeekV3ModelProvider
+    from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
+    from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
+    from megatron.core.models.gpt.gpt_model import GPTModel
+
+    @MegatronModelBridge.register_bridge(
+        source="Glm4MoeLiteForCausalLM",
+        target=GPTModel,
+    )
+    class _GLM47FlashBridge(DeepSeekV3Bridge):
+        """Bridge for GLM-4.7-Flash (Glm4MoeLiteForCausalLM).
+
+        GLM-4.7-Flash is architecturally identical to DeepSeek-V3 (MLA + MoE)
+        but its HF config differs in rope_scaling format:
+        - DeepSeek: rope_scaling has factor/mscale/mscale_all_dim, top-level rope_theta
+        - GLM-4.7-Flash: rope_scaling has rope_theta/rope_type, no mscale fields
+        """
+
+        def provider_bridge(self, hf_pretrained: PreTrainedCausalLM) -> DeepSeekV3ModelProvider:
+            hf_config = hf_pretrained.config
+
+            # Temporarily normalize rope_scaling so get_common_configs works.
+            # GLM-4.7-Flash uses default rope (no scaling), so set factor=1.0.
+            orig_rope_scaling = hf_config.rope_scaling
+            orig_rope_theta = getattr(hf_config, "rope_theta", None)
+            rope_theta = orig_rope_scaling.get("rope_theta", 10000.0) if orig_rope_scaling else 10000.0
+            hf_config.rope_scaling = None  # triggers the else branch (defaults to 1.0)
+            hf_config.rope_theta = rope_theta
+
+            try:
+                configs = get_common_configs(hf_pretrained)
+            finally:
+                hf_config.rope_scaling = orig_rope_scaling
+                if orig_rope_theta is None:
+                    delattr(hf_config, "rope_theta")
+                else:
+                    hf_config.rope_theta = orig_rope_theta
+
+            configs["fp16"] = self.dtype_from_hf(hf_config, default=torch.float32) == torch.float16
+            configs["bf16"] = self.dtype_from_hf(hf_config, default=torch.float32) == torch.bfloat16
+            configs["params_dtype"] = self.dtype_from_hf(hf_config, default=torch.float32)
+
+            configs["make_vocab_size_divisible_by"] = 1280
+            configs["moe_router_score_function"] = "sigmoid"
+            configs["moe_router_enable_expert_bias"] = True
+            if hasattr(hf_config, "aux_loss_alpha"):
+                configs["moe_aux_loss_coeff"] = hf_config.aux_loss_alpha
+
+            return DeepSeekV3ModelProvider(**configs)
+
+except ImportError:
+    pass  # megatron-bridge not installed (e.g. CPU-only environment)
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -209,7 +271,11 @@ class MegatronWorker:
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
         # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
-        transformer_config_kwargs = OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+        transformer_config_kwargs = (
+            transformer_config_kwargs
+            if isinstance(transformer_config_kwargs, dict)
+            else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
+        )
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         if not self.cfg.trainer.gradient_checkpointing:
@@ -283,7 +349,7 @@ class MegatronWorker:
     def make_megatron_module(
         self,
         wrap_with_ddp: bool = True,
-        ddp_config: Optional[Dict[str, Any]] = None,
+        ddp_config: Optional[Union[MegatronDDPConfig, Dict[str, Any]]] = None,
         lora_config: Optional[Dict[str, Any]] = None,
         lora_type: Optional[str] = "lora",
         bf16: bool = True,
@@ -308,14 +374,14 @@ class MegatronWorker:
         if wrap_with_ddp:
             default_ddp_config.use_distributed_optimizer = True
         if ddp_config is not None:
-            for k, v in ddp_config.items():
+            for k, v in get_config_as_dict(ddp_config).items():
                 setattr(default_ddp_config, k, v)
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
         return model
 
-    def forward(self, data):
+    def forward(self, data: TrainingInputBatch):
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
@@ -473,8 +539,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
-        self._normalize_mini_batch_size()
-
         # create scheduler
         self.scheduler = get_megatron_optimizer_param_scheduler(
             optimizer=self.optimizer,
@@ -505,136 +569,151 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
 
-    def ppo_train(self, train_data) -> "TrainingOutputBatch":
+    def forward_backward(
+        self,
+        data: TrainingInputBatch,
+        loss_fn: Optional[str] = None,
+        loss_fn_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, float]:
         """
-        Overrides `PolicyWorkerBase.ppo_train` for megatron.
+        Perform forward and backward passes for a batch, handling micro-batching internally.
 
-        Since we want megatron to handle gradient accumulation over micro batches, we directly pass mini batches into the
-        worker MegatronModelWrapper.forward_backward_mini_batch method.
+        The batch is split into micro batches based on micro_train_batch_size_per_gpu.
+        Megatron Core's forward_backward_func handles gradient accumulation internally.
+
+        Args:
+            data: TrainingInputBatch (already DP-sharded by WorkerDispatch/MeshDispatch)
+            loss_fn: Optional loss function name (e.g., "cross_entropy", "ppo").
+                     If provided, overrides the config's policy_loss_type.
+            loss_fn_config: Optional config overrides for the loss function.
+
+        Returns:
+            Aggregated metrics dict across all micro batches
         """
-        dataloader = BatchIterator(
-            train_data, sample_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu, drop_last=False
-        )
+        self.model.train()
+        for chunk in self.actor_module:
+            # if use distributed optimizer, zero grad buffer will be handled by optimizer
+            chunk.zero_grad_buffer()
 
-        micro_batches_per_mini_batch = (
-            self.policy_mini_batch_size_per_gpu // self.cfg.trainer.micro_train_batch_size_per_gpu
-        )
-
-        status_list = []
+        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
-        policy_update_steps = 0
 
-        if self.profiler is not None:
-            self.profiler.start()
+        # Move data to GPU
+        data.to(torch.cuda.current_device())
 
-        for epoch in range(self.cfg.trainer.update_epochs_per_batch):
-            self.optimizer.zero_grad()
-            pbar = tqdm(
-                dataloader,
-                desc=f"Policy Train epoch [{epoch + 1}/{self.cfg.trainer.update_epochs_per_batch}]",
-                disable=not self.strategy.is_rank_0(),
+        # Build micro-batch dicts expected by forward_backward_mini_batch
+        micro_buffer = []
+        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
+            sequences = experience.sequences
+            attention_mask = experience.attention_mask
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 0)
+
+            micro_buffer.append(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": experience.num_actions,
+                    "old_action_log_probs": experience.action_log_probs,
+                    "base_action_log_probs": experience.base_action_log_probs,
+                    "advantages": experience.advantages,
+                    "loss_mask": experience.loss_mask,
+                    "rollout_action_logprobs": experience.rollout_logprobs,
+                    "action_mask": experience.action_mask,
+                }
             )
 
-            # TODO: Convert this into 2 loops for minibatches and microbatches.
-            micro_buffer = []
-            for local_step, microbatch in enumerate(pbar):
-                experience = BatchIterator.batch_to_experience(microbatch)
-                experience.to_device(torch.cuda.current_device())
-                sequences = experience.sequences
-                attention_mask = experience.attention_mask
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids.masked_fill_(attention_mask == 0, 0)
+        if not micro_buffer:
+            return {}
 
-                micro_buffer.append(
-                    {
-                        "sequences": sequences,
-                        "attention_mask": attention_mask,
-                        "position_ids": position_ids,
-                        "num_actions": experience.num_actions,
-                        "old_action_log_probs": experience.action_log_probs,
-                        "base_action_log_probs": experience.base_action_log_probs,
-                        "advantages": experience.advantages,
-                        "loss_mask": experience.loss_mask,
-                        "rollout_action_logprobs": experience.rollout_logprobs,
-                    }
-                )
+        seq_len = micro_buffer[0]["sequences"].shape[1]
+        micro_bsz = micro_buffer[0]["sequences"].shape[0]
 
-                if len(micro_buffer) == micro_batches_per_mini_batch:
-                    # run mini-batch forward-backward and then one optimizer step
-                    self.model.train()
-                    for chunk in self.actor_module:
-                        # if use distributed optimizer, zero grad buffer will be handled by optimizer
-                        chunk.zero_grad_buffer()
-                    seq_len = micro_buffer[0]["sequences"].shape[1]
-                    micro_bsz = micro_buffer[0]["sequences"].shape[0]
+        metrics_list = self.model.forward_backward_mini_batch(
+            micro_batches=micro_buffer,
+            seq_len=seq_len,
+            micro_batch_size=micro_bsz,
+            temperature=self.cfg.generator.sampling_params.temperature,
+            loss_fn=loss_fn,
+            loss_fn_config=loss_fn_config,
+        )
 
-                    metrics_list = self.model.forward_backward_mini_batch(
-                        micro_batches=micro_buffer,
-                        seq_len=seq_len,
-                        micro_batch_size=micro_bsz,
-                        temperature=self.cfg.generator.sampling_params.temperature,
-                    )
+        if self.empty_cuda_cache:
+            torch.cuda.empty_cache()
 
-                    if self.empty_cuda_cache:
-                        torch.cuda.empty_cache()
+        # Track number of micro-batches for metrics
+        self._micro_batches_accumulated += len(micro_buffer)
 
-                    grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        # Aggregate metrics across micro-batches
+        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        for metrics in metrics_list:
+            # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
+            if "loss_fn_outputs" in metrics:
+                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            for k, v in metrics.items():
+                all_metrics[k].append(v)
 
-                    # within a DP group, metrics are already the same across all workers - we then just all reduce across
-                    # the whole world size to get the metrics for the global micro batch
-                    for i, metrics in enumerate(metrics_list):
-                        status = {
-                            "final_loss": metrics["final_loss"],
-                            "policy_loss": metrics["policy_loss"],
-                            "policy_lr": self.optimizer.param_groups[0]["lr"],
-                            "ppo_clip_ratio": metrics["ppo_clip_ratio"],
-                            "policy_entropy": metrics["policy_entropy"],
-                        }
-                        if self.cfg.trainer.algorithm.use_kl_loss:
-                            status["policy_kl"] = metrics["policy_kl"]
+        # Reduce and all-reduce metrics
+        status = reduce_metrics(dict(all_metrics))
+        status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+        status = all_reduce_metrics(status, self.strategy)
 
-                        # Attach grad norm only for the last micro in the mini-batch
-                        if i == len(metrics_list) - 1 and grad_norm is not None:
-                            status["raw_grad_norm"] = grad_norm
+        # Add loss_fn_outputs back (not reduced, kept as list)
+        if all_loss_fn_outputs:
+            status["loss_fn_outputs"] = all_loss_fn_outputs
 
-                        # attach response_length
-                        status["response_length"] = micro_buffer[i]["num_actions"]
+        return status
 
-                        status = self.strategy.all_reduce(status)
-                        status_list.append(status)
-                        for k, v in status.items():
-                            all_metrics[k].append(v)
+    def optim_step(self) -> Optional[float]:
+        """
+        Perform optimizer step.
 
-                    short_status = {
-                        "pg": status_list[-1]["policy_loss"],
-                        "glen": status_list[-1]["response_length"],
-                        "policy_lr": status_list[-1]["policy_lr"],
-                        "ent": status_list[-1]["policy_entropy"],
-                    }
-                    if "raw_grad_norm" in status_list[-1]:
-                        short_status["grad_norm"] = status_list[-1]["raw_grad_norm"]
-                    pbar.set_postfix(short_status)
+        Note: Unlike FSDP workers, Megatron doesn't need manual gradient scaling here
+        because Megatron Core's forward_backward_func handles loss scaling internally.
 
-                    policy_update_steps += 1
-                    micro_buffer = []
+        Returns:
+            The gradient norm (before scaling, after clipping), or None if unavailable.
+        """
+        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 
-            # drop any trailing micros that don't fill a mini-batch (keep behavior consistent)
-            micro_buffer = []
+        # Reset counter for next accumulation cycle
+        self._micro_batches_accumulated = 0
 
-        torch.distributed.barrier()
-        if self.profiler is not None:
-            self.profiler.stop_and_save()
-            self.profiler.stop_trace()
+        if grad_norm is not None:
+            grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
+        return grad_norm
 
-        # not needed beyond status logging
-        all_metrics.pop("response_length", None)
+    def get_lr(self) -> float:
+        """
+        Get current learning rate from optimizer.
 
-        status_mean = reduce_metrics(all_metrics)
-        status_mean["policy_update_steps"] = policy_update_steps
+        Handles both regular optimizers and ChainedOptimizer.
+        """
+        if isinstance(self.optimizer, ChainedOptimizer):
+            return self.optimizer.chained_optimizers[0].param_groups[0]["lr"]
+        return self.optimizer.param_groups[0]["lr"]
 
-        output = TrainingOutputBatch()
-        output.metadata = {"train_status": status_mean}
-        return output
+    def set_lr(self, learning_rate: float) -> None:
+        """
+        Set learning rate for the optimizer.
+
+        Handles both regular optimizers and ChainedOptimizer (used with
+        distributed optimizer). Updates all param_groups across all
+        underlying optimizers.
+
+        Note: This bypasses the scheduler. The next scheduler.step() call
+        will override this value unless the scheduler is configured for
+        constant LR.
+        """
+        if isinstance(self.optimizer, ChainedOptimizer):
+            # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
+            for opt in self.optimizer.chained_optimizers:
+                for param_group in opt.param_groups:
+                    param_group["lr"] = learning_rate
+        else:
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = learning_rate
 
     async def broadcast_to_inference_engines(self, inference_engine_client):
         use_prefix_cache = self.cfg.generator.enable_prefix_caching

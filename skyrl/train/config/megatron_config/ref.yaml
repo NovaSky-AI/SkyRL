@@ -1,0 +1,18 @@
+# @package megatron_config.ref
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+context_parallel_size: 1
+expert_model_parallel_size: 1
+expert_tensor_parallel_size: 1
+
+# MoE runtime configuration flags (should match policy for model consistency)
+moe_token_dispatcher_type: "alltoall"
+moe_router_load_balancing_type: "none"
+moe_grouped_gemm: true
+moe_router_score_function: null
+moe_router_enable_expert_bias: null
+
+model_config_kwargs: {}
+
+# kwargs to override the Megatron TransformerConfig object
+transformer_config_kwargs: {}

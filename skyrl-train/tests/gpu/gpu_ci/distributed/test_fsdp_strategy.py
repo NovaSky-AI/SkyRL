@@ -7,8 +7,9 @@ import os
 import torch.distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.distributed_c10d import init_process_group
+
+from skyrl_train.config import SkyRLConfig
 from skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl_train.config.utils import get_default_config
 from skyrl_train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
 from skyrl_train.utils.utils import get_free_port
 
@@ -16,9 +17,10 @@ MODEL_NAME = "llamafactory/tiny-random-Llama-3"
 
 
 def test_fsdp1_wrap_policy():
-    cfg = get_default_config()
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.strategy = "fsdp"
+
     os.environ["RANK"] = "0"
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(get_free_port())

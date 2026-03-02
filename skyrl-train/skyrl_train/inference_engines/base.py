@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, TypedDict, Any, Optional, Hashable, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
     from skyrl_train.weight_sync import WeightUpdateRequest
+    from skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
@@ -36,6 +36,56 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         raise NotImplementedError
+
+    async def sample(
+        self,
+        prompt_token_ids: List[int],
+        num_samples: int,
+        sampling_params: Dict[str, Any],
+    ) -> InferenceEngineOutput:
+        """Generate multiple independent samples from a single prompt.
+
+        This method provides Tinker-compatible token-in/token-out sampling semantics.
+
+        Args:
+            prompt_token_ids: Token IDs for a single prompt.
+            num_samples: Number of independent samples to generate.
+            sampling_params: Sampling parameters.
+
+        Returns:
+            InferenceEngineOutput containing num_samples results:
+                - response_ids: List of num_samples token ID lists
+                - responses: List of num_samples decoded strings
+                - stop_reasons: List of num_samples stop reasons
+                - response_logprobs: Optional list of num_samples logprob lists
+        """
+        all_response_ids = []
+        all_responses = []
+        all_stop_reasons = []
+        all_response_logprobs = []
+
+        for _ in range(num_samples):
+            input_batch: InferenceEngineInput = {
+                "prompts": None,
+                "prompt_token_ids": [prompt_token_ids],  # Wrap in list for batch of 1
+                "sampling_params": sampling_params,
+                "session_ids": None,
+            }
+            output = await self.generate(input_batch)
+
+            # Extract single result from batch of 1
+            all_response_ids.append(output["response_ids"][0])
+            all_responses.append(output["responses"][0])
+            all_stop_reasons.append(output["stop_reasons"][0])
+            if output.get("response_logprobs") is not None:
+                all_response_logprobs.append(output["response_logprobs"][0])
+
+        return {
+            "response_ids": all_response_ids,
+            "responses": all_responses,
+            "stop_reasons": all_stop_reasons,
+            "response_logprobs": all_response_logprobs if all_response_logprobs else None,
+        }
 
     @abstractmethod
     async def chat_completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:

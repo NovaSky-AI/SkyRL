@@ -1,9 +1,10 @@
 """Weight synchronization abstractions for distributed RL training."""
 
-from typing import Type, TYPE_CHECKING
+from typing import Type, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
+    from skyrl_train.config import SkyRLConfig
 
 from .base import WeightChunk, WeightUpdateRequest, LoraLoadRequest
 from .weight_extractor import WeightExtractor
@@ -30,7 +31,7 @@ from .cuda_ipc_strategy import (
 )
 
 
-def get_transfer_strategy_cls(cfg: "DictConfig") -> Type[WeightTransferStrategy]:
+def get_transfer_strategy_cls(cfg: "Union[SkyRLConfig, DictConfig]") -> Type[WeightTransferStrategy]:
     """Get the appropriate transfer strategy class based on config.
 
     Uses CUDA IPC when:

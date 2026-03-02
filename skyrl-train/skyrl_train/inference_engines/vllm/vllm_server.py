@@ -2,7 +2,8 @@ import os
 import signal
 import uvloop
 from vllm import AsyncLLMEngine
-from vllm.utils import FlexibleArgumentParser, set_ulimit
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.system_utils import set_ulimit
 from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
@@ -121,8 +122,7 @@ class VllmServer:
             )
             return {"status": "ok"}
 
-        vllm_config = await engine.get_vllm_config()
-        await init_app_state(engine, vllm_config, app.state, args)
+        await init_app_state(engine, app.state, args)
 
         shutdown_task = await serve_http(
             app,

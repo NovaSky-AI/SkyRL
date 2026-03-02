@@ -5,23 +5,24 @@ uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_mega
 
 import ray
 import pytest
-import hydra
-from omegaconf import DictConfig
 import torch
 import asyncio
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from omegaconf import OmegaConf
 from tests.gpu.utils import (
     init_worker_with_type,
     ray_init_for_tests,
     get_rank_0_memory,
-    init_inference_engines,
+    InferenceEngineState,
     run_inference,
     get_test_prompts,
     Timer,
 )
 from skyrl_train.utils.utils import print_mem, validate_cfg
-from skyrl_train.entrypoints.main_base import config_dir
+from skyrl_train.config import (
+    SkyRLConfig,
+    SkyRLLoraConfig,
+    MegatronTorchProfilerConfig,
+)
 from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl_train.training_batch import TrainingInputBatch
@@ -35,19 +36,17 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 
-def get_test_actor_config(model_name=MODEL_NAME) -> DictConfig:
-    with hydra.initialize_config_dir(config_dir=config_dir):
-        cfg = hydra.compose(config_name="ppo_base_config")
-
+def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLConfig:
+    cfg = SkyRLConfig()
     cfg.trainer.policy.model.path = model_name
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.use_sample_packing = False
     cfg.trainer.logger = "console"
     if "moonlight" in model_name:
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs = OmegaConf.create(
-            {"num_layers_in_last_pipeline_stage": 13}
-        )
+        if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers_in_last_pipeline_stage"] = 13
     if "Qwen3-30B" in model_name or "Qwen1.5-MoE" in model_name:
         cfg.trainer.gradient_checkpointing_use_reentrant = True
 
@@ -117,7 +116,7 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 )
 @pytest.mark.megatron
 def test_megatron_policy_weight_sync(
-    colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+    ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
@@ -125,8 +124,7 @@ def test_megatron_policy_weight_sync(
     try:
         cfg = get_test_actor_config(model_name=MODEL_NAME)
         if lora:
-            cfg.trainer.policy.model.lora.rank = 16
-            cfg.trainer.policy.model.lora.alpha = 16
+            cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
         cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
@@ -140,41 +138,38 @@ def test_megatron_policy_weight_sync(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg = init_inference_engines(
-            model=MODEL_NAME,
+        with InferenceEngineState.create(
             cfg=cfg,
+            model=MODEL_NAME,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             sleep_level=2,  # since we explicitly sync weights
-        )
+        ) as engines:
+            client, pg = engines.client, engines.pg
+            asyncio.run(client.sleep())
 
-        asyncio.run(client.sleep())
+            policy = init_worker_with_type(
+                "policy",
+                shared_pg=pg,
+                colocate_all=cfg.trainer.placement.colocate_all,
+                num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+                cfg=cfg,
+            )
+            ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+            asyncio.run(client.wake_up(tags=["weights"]))
+            # TODO (erictang000): improve this timing
+            # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
+            # or ~20 seconds on 8xH100
+            # ~75 seconds on 8xH100 for Qwen3-30B-A3B
+            with Timer("sync_weights"):
+                ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
 
-        policy = init_worker_with_type(
-            "policy",
-            shared_pg=pg,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
-            cfg=cfg,
-        )
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        asyncio.run(client.wake_up(tags=["weights"]))
-        # TODO (erictang000): improve this timing
-        # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
-        # or ~20 seconds on 8xH100
-        # ~75 seconds on 8xH100 for Qwen3-30B-A3B
-        with Timer("sync_weights"):
-            ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+            policy.offload_to_cpu()
+            asyncio.run(client.wake_up(tags=["kv_cache"]))
+            sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+            outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
 
-        policy.offload_to_cpu()
-        asyncio.run(client.wake_up(tags=["kv_cache"]))
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
-
-        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
+            print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
         ray.shutdown()
 
@@ -224,15 +219,12 @@ async def test_megatron_forward(
     batch = get_test_training_batch(max(4, gpus_per_node))
 
     if ep > 1:
-        transformer_config_kwargs = OmegaConf.to_container(
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
-        )
-        transformer_config_kwargs["num_layers"] = 2
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+        if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
 
     if lora:
-        cfg.trainer.policy.model.lora.rank = 16
-        cfg.trainer.policy.model.lora.alpha = 16
+        cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
 
     actor_group = init_worker_with_type(
         worker_type,
@@ -347,11 +339,9 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
     batch = get_test_training_batch(max(4, gpus_per_node))
 
     if ep > 1:
-        transformer_config_kwargs = OmegaConf.to_container(
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
-        )
-        transformer_config_kwargs["num_layers"] = 4
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+        if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 4
 
     actor_group = init_worker_with_type(
         "policy",
@@ -382,15 +372,12 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
     batch = get_test_training_batch(max(4, gpus_per_node))
 
     # set lora this time
-    cfg.trainer.policy.model.lora.rank = 16
-    cfg.trainer.policy.model.lora.alpha = 16
+    cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
 
     if ep > 1:
-        transformer_config_kwargs = OmegaConf.to_container(
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
-        )
-        transformer_config_kwargs["num_layers"] = 4
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+        if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 4
 
     actor_group = init_worker_with_type(
         "policy",
@@ -463,15 +450,17 @@ async def test_megatron_train(
         cfg.trainer.algorithm.use_entropy_loss = True
         cfg.trainer.algorithm.entropy_loss_coef = 0.01
     if lora:
-        cfg.trainer.policy.model.lora.rank = 16
-        cfg.trainer.policy.model.lora.alpha = 16
+        cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
 
     if ep > 1:
-        transformer_config_kwargs = OmegaConf.to_container(
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
-        )
-        transformer_config_kwargs["num_layers"] = 2
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+        if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
+        # test off policy correction config propagates correctly
+        cfg.trainer.algorithm.off_policy_correction.tis_ratio_type = "sequence"
+        cfg.trainer.algorithm.off_policy_correction.sequence_mask_metric = "geometric"
+        cfg.trainer.algorithm.off_policy_correction.geo_mask_high = 1.02
+        cfg.trainer.algorithm.off_policy_correction.geo_mask_low = 0.98
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = gpus_per_node
@@ -488,10 +477,15 @@ async def test_megatron_train(
         cfg=cfg,
     )
 
+    # Use forward_backward + optim_step (unified interface for both megatron and FSDP)
     with Timer(f"megatron training step tp{tp} pp{pp} cp{cp} ep{ep} etp{etp}"):
         batch.metadata["global_step"] = 0
-        results_megatron = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
-    results_megatron = [results_megatron[i].metadata["train_status"] for i in range(len(results_megatron))]
+        results_megatron = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+        ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+        # Get learning rate from worker
+        lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+        for i, result in enumerate(results_megatron):
+            result["policy_lr"] = lr_results[i]
 
     memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
     memory = memory[0]
@@ -501,9 +495,11 @@ async def test_megatron_train(
         assert isinstance(result, dict), "Result should be a dictionary of training stats"
         assert "policy_loss" in result
         assert "policy_lr" in result
-        assert "ppo_clip_ratio" in result
+        assert "loss_metrics/clip_ratio" in result
         assert "policy_entropy" in result
         for k, v in result.items():
+            if k == "loss_fn_outputs":
+                continue
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
@@ -515,13 +511,10 @@ async def test_megatron_train(
     # this shouldn't be the case, but tracking here: https://github.com/NovaSky-AI/SkyRL/issues/211
     # + tested that this does not affect convergence
     cfg.trainer.use_sample_packing = False
-    if ep > 1:
-        cfg.trainer.policy.fsdp_config.cpu_offload = True
 
     if ep > 1:
-        model_config_kwargs = OmegaConf.to_container(cfg.trainer.policy.model_config_kwargs, resolve=True)
-        model_config_kwargs["num_hidden_layers"] = 2
-        cfg.trainer.policy.model_config_kwargs = model_config_kwargs
+        cfg.trainer.policy.fsdp_config.cpu_offload = True
+        cfg.trainer.policy.model_config_kwargs["num_hidden_layers"] = 2
     actor_group = init_worker_with_type(
         "policy",
         shared_pg=None,
@@ -531,15 +524,35 @@ async def test_megatron_train(
         cfg=cfg,
     )
 
+    # Both FSDP and Megatron use forward_backward + optim_step (unified interface)
     batch.metadata["global_step"] = 0
-    results_fsdp = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
-    results_fsdp = [results_fsdp[i].metadata["train_status"] for i in range(len(results_fsdp))]
+    results_fsdp = ray.get(actor_group.async_run_ray_method("pass_through", "forward_backward", batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+    # Get learning rate from worker
+    lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+    for i, result in enumerate(results_fsdp):
+        result["policy_lr"] = lr_results[i]
 
     print("megatron results: ", results_megatron[0])
     print("\n\n")
     print("fsdp results: ", results_fsdp[0])
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl", "final_loss"]
+    keys_to_compare = [
+        "policy_loss",
+        "policy_lr",
+        "loss_metrics/clip_ratio",
+        "policy_entropy",
+        "policy_kl",
+        "final_loss",
+    ]
+    if ep > 1:
+        keys_to_compare.extend(
+            [
+                "loss_metrics/is_ratio_mean",
+                "loss_metrics/outlier_seq_masked_ratio",
+                "loss_metrics/geo_sequence_mask_masked_ratio",
+            ]
+        )
     for i, result in enumerate(results_fsdp):
         for k in keys_to_compare:
             if k == "policy_entropy":
@@ -580,9 +593,9 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     cfg.trainer.micro_train_batch_size_per_gpu = 4
 
     # set torch profiler config
-    cfg.trainer.policy.megatron_config.torch_profiler_config.enable = False
-    cfg.trainer.policy.megatron_config.torch_profiler_config.ranks = [0]
-    cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = f"/home/ray/megatron_prof/tp{tp}_pp{pp}/"
+    cfg.trainer.policy.megatron_config.torch_profiler_config = MegatronTorchProfilerConfig(
+        enable=False, ranks=[0], save_path=f"/home/ray/megatron_prof/tp{tp}_pp{pp}/"
+    )
 
     actor_group = init_worker_with_type(
         "policy",
@@ -592,10 +605,13 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
         cfg=cfg,
     )
 
-    # call ppo_train with a batch of size 4 per gpu
+    # Use forward_backward + optim_step (unified interface)
     batch.metadata["global_step"] = 0
-    results_megatron = ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", batch))
-    results_megatron = [results_megatron[i].metadata["train_status"] for i in range(len(results_megatron))]
+    results_megatron = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+    lr_results = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+    for i, result in enumerate(results_megatron):
+        result["policy_lr"] = lr_results[i]
 
     memory = ray.get(actor_group.async_run_ray_method("pass_through", "get_cuda_memory"))
     memory = memory[0]
@@ -605,9 +621,11 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
         assert isinstance(result, dict), "Result should be a dictionary of training stats"
         assert "policy_loss" in result
         assert "policy_lr" in result
-        assert "ppo_clip_ratio" in result
+        assert "loss_metrics/clip_ratio" in result
         assert "policy_entropy" in result
         for k, v in result.items():
+            if k == "loss_fn_outputs":
+                continue
             assert isinstance(v, (int, float)), f"{k} should be an int or float"
 
     ray.shutdown()
@@ -618,7 +636,9 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
 
     # set torch profiler config
-    cfg.trainer.policy.megatron_config.torch_profiler_config.save_path = "/home/ray/megatron_prof/dp4/"
+    cfg.trainer.policy.megatron_config.torch_profiler_config = MegatronTorchProfilerConfig(
+        enable=False, ranks=[0], save_path="/home/ray/megatron_prof/dp4/"
+    )
 
     # set batch sizes correctly
     cfg.trainer.train_batch_size = 64
@@ -634,14 +654,23 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
         cfg=cfg,
     )
 
-    results_megatron_dp = ray.get(actor_group.async_run_ray_method("mesh", "ppo_train", batch))
-    results_megatron_dp = [results_megatron_dp[i].metadata["train_status"] for i in range(len(results_megatron_dp))]
+    results_megatron_dp = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
+    lr_results_dp = ray.get(actor_group.async_run_ray_method("pass_through", "get_lr"))
+    for i, result in enumerate(results_megatron_dp):
+        result["policy_lr"] = lr_results_dp[i]
 
     print("megatron results: ", results_megatron)
     print("\n\n")
     print("megatron results dp: ", results_megatron_dp)
 
-    keys_to_compare = ["policy_loss", "policy_lr", "ppo_clip_ratio", "policy_entropy", "policy_kl", "raw_grad_norm"]
+    keys_to_compare = [
+        "policy_loss",
+        "policy_lr",
+        "loss_metrics/clip_ratio",
+        "policy_entropy",
+        "policy_kl",
+    ]
     for i, result in enumerate(results_megatron_dp):
         for k in keys_to_compare:
             assert isinstance(result[k], (int, float)), f"{k} should be an int or float"
@@ -682,12 +711,10 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
     cfg.trainer.policy.megatron_config.expert_model_parallel_size = 2
     cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
-    cfg.trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer = False
-    transformer_config_kwargs = OmegaConf.to_container(
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs, resolve=True
-    )
-    transformer_config_kwargs["num_layers"] = 2
-    cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+    cfg.trainer.policy.megatron_config.optimizer_config_kwargs = dict(use_precision_aware_optimizer=False)
+    if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
     actor_group = init_worker_with_type(
         worker_type,
         shared_pg=None,
@@ -706,7 +733,9 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     get_rank_0_memory(actor_group, "Before training")
 
     batch = get_test_training_batch()
-    results = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
+    # Use forward_backward + optim_step (unified interface)
+    results = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
     after_training = get_rank_0_memory(actor_group, "After training")
 
@@ -751,7 +780,8 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     get_rank_0_memory(actor_group, "After backload")
 
     # Run training again and ensure output consistency
-    results_backload = ray.get(actor_group.async_run_ray_method("pass_through", "ppo_train", batch))
+    results_backload = ray.get(actor_group.async_run_ray_method("mesh", "forward_backward", batch))
+    ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
     for i, result in enumerate(results):
         result_backload = results_backload[i]

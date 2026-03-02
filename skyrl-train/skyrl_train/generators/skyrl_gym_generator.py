@@ -2,23 +2,25 @@
 This file implements ``SkyRLGymGenerator``, an implementation of the `GeneratorInterface` that
 uses SkyRL-Gym as the environment.
 
-For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html
+For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 """
 
 import asyncio
 import copy
 from uuid import uuid4
+from dataclasses import asdict
 import skyrl_gym
+from omegaconf import DictConfig, OmegaConf
 from typing import List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from tqdm.asyncio import tqdm
 from dataclasses import dataclass
 from loguru import logger
 
+from skyrl_train.config import GeneratorConfig, SkyRLGymConfig
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
-from omegaconf import DictConfig
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 from skyrl_train.generators.utils import (
     get_custom_chat_template,
@@ -100,8 +102,8 @@ class TurnOutput:
 class SkyRLGymGenerator(GeneratorInterface):
     def __init__(
         self,
-        generator_cfg: DictConfig,
-        skyrl_gym_cfg: DictConfig,
+        generator_cfg: Union[GeneratorConfig, DictConfig],
+        skyrl_gym_cfg: Union[SkyRLGymConfig, DictConfig],
         inference_engine_client: InferenceEngineClient,
         tokenizer,
         model_name: str,
@@ -146,7 +148,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             **self.generator_cfg.chat_template_kwargs,
         )
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
-        # For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_generator.html#multi-turn-tokenization-and-ti-to
+        # For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator#multi-turn-tokenization-and-ti-to
         if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
             last_eos_token_index = (
                 len(self.base_conversation_token_ids)
@@ -155,7 +157,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             )
             self.base_conversation_token_ids = self.base_conversation_token_ids[: last_eos_token_index + 1]
 
-    def _validate_cfg(self, generator_cfg: DictConfig):
+    def _validate_cfg(self, generator_cfg: Union[GeneratorConfig, DictConfig]):
         if len(generator_cfg.chat_template_kwargs) and generator_cfg.batched:
             raise ValueError(
                 "`chat_template_kwargs` is not compatible with `batched=True` since the chat templating is handled by the inference engine"
@@ -222,7 +224,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         # Create a new environment instance
         env_extras["max_turns"] = self.max_turns  # TODO(shu): move this to config
-        env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+        env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
         env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extras)
 
         session_id = (
@@ -250,7 +252,17 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask = []  # this excludes the prompt
         rollout_logprobs = None
 
-        current_sampling_params = sampling_params if sampling_params is not None else self.generator_cfg.sampling_params
+        # `sampling_params` if provided is a dict in the format expected by the inference engine backend
+        # we cast default config to a dict for consistency
+        current_sampling_params: dict = (
+            sampling_params
+            if sampling_params is not None
+            else (
+                OmegaConf.to_container(self.generator_cfg.sampling_params, resolve=True)
+                if isinstance(self.generator_cfg, DictConfig)
+                else asdict(self.generator_cfg.sampling_params)
+            )
+        )
 
         # Accumulate per-step rewards. Format: (reward, response_end_token_idx)
         per_step_rewards: List[Tuple[float, Optional[int]]] = []
@@ -589,14 +601,19 @@ class SkyRLGymGenerator(GeneratorInterface):
         init_prompts = []
         for env_class, env_extra, prompt in zip(env_classes, env_extras, prompts):
             env_extra["max_turns"] = self.max_turns
-            env_config = self.skyrl_gym_cfg.get(env_class, DictConfig({}))
+            env_config = getattr(self.skyrl_gym_cfg, env_class, dict())
             env = skyrl_gym.make(env_class, env_config=env_config, extras=env_extra)
             init_prompt, _ = await self._run_in_executor_if_available(env.init, prompt)
             init_prompts.append(init_prompt)
             envs.append(env)
 
-        # For single-turn generation, we can use text-in-token-out, since we do not need to re-tokenize.
-        engine_input = InferenceEngineInput(prompts=init_prompts, sampling_params=sampling_params)
+        # for consistency, use token-in-token-out
+        prompt_token_ids = self.tokenizer.apply_chat_template(
+            init_prompts,
+            add_generation_prompt=True,
+            tokenize=True,
+        )
+        engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
         outputs = engine_output["responses"]
         responses = engine_output["response_ids"]
@@ -628,11 +645,6 @@ class SkyRLGymGenerator(GeneratorInterface):
             # Close the environment
             await self._run_in_executor_if_available(env.close)
 
-        prompt_token_ids = self.tokenizer.apply_chat_template(
-            init_prompts,
-            add_generation_prompt=True,
-            tokenize=True,
-        )
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.apply_overlong_filtering:

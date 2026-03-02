@@ -16,6 +16,7 @@ from torch import distributed as dist
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
 
+from skyrl_train.config import FSDPConfig, OptimizerConfig, ModelConfig
 from skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl_train.model_wrapper import HFModelWrapper
 from skyrl_train.distributed.utils import ModelOrModelOptimPair
@@ -58,9 +59,9 @@ class FSDPStrategy(DistributedStrategy):
 
     def __init__(
         self,
-        fsdp_config,
-        optimizer_config=None,
-        model_config=None,
+        fsdp_config: FSDPConfig,
+        optimizer_config: Optional[OptimizerConfig] = None,
+        model_config: Optional[ModelConfig] = None,
         fsdp_strategy: str = "fsdp",
         seed: int = 42,
         micro_train_batch_size_per_gpu=1,
@@ -79,11 +80,9 @@ class FSDPStrategy(DistributedStrategy):
         self.total_training_steps: Optional[int] = num_training_steps
 
         # if we are using fsdp 1 or cpu offload is off for fsdp2, then we need to manually offload weights/optimizer to cpu
-        self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.get("cpu_offload")
+        self.manual_offload = self.fsdp_strategy == "fsdp" or not self.fsdp_config.cpu_offload
         if self.optimizer_config is not None:
-            self.manual_offload_optimizer = (
-                self.optimizer_config.get("offload_after_step", True) and self.manual_offload
-            )
+            self.manual_offload_optimizer = self.optimizer_config.offload_after_step and self.manual_offload
         else:
             self.manual_offload_optimizer = False
 
@@ -209,16 +208,16 @@ class FSDPStrategy(DistributedStrategy):
         # Initialize FSDP wrapping policy
         wrap_policy = get_fsdp_wrap_policy(
             module=model.model if is_wrapped else model,
-            config=self.fsdp_config.get("wrap_policy", None),
+            config=getattr(self.fsdp_config, "wrap_policy", None),
             is_lora=self.is_lora,
         )
 
         # Setup mixed precision
-        mixed_precision_config = self.fsdp_config.get("mixed_precision", None)
+        mixed_precision_config = getattr(self.fsdp_config, "mixed_precision", None)
         if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
-            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
-            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.param_dtype)
+            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.reduce_dtype)
+            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.buffer_dtype)
         else:
             param_dtype = torch.bfloat16
             reduce_dtype = torch.float32
@@ -236,7 +235,7 @@ class FSDPStrategy(DistributedStrategy):
         if self.fsdp_strategy == "fsdp":
             # cpu offloading will always be none for models that train with FSDP due to correctness issues with gradient accumulation -
             # see https://docs.pytorch.org/docs/stable/fsdp.html
-            if not is_train and self.fsdp_config.get("cpu_offload", False):
+            if not is_train and self.fsdp_config.cpu_offload:
                 cpu_offload = CPUOffload(offload_params=True)
             fsdp_module = FSDP(
                 model.model if is_wrapped else model,
@@ -256,14 +255,14 @@ class FSDPStrategy(DistributedStrategy):
             mp_policy = MixedPrecisionPolicy(
                 param_dtype=param_dtype, reduce_dtype=reduce_dtype, cast_forward_inputs=True
             )
-            if self.fsdp_config.get("cpu_offload", False):
+            if self.fsdp_config.cpu_offload:
                 cpu_offload = CPUOffloadPolicy(pin_memory=True)
 
             fsdp_kwargs = {
                 "mesh": fsdp_mesh,
                 "mp_policy": mp_policy,
                 "offload_policy": cpu_offload,
-                "reshard_after_forward": self.fsdp_config.get("reshard_after_forward", True),
+                "reshard_after_forward": self.fsdp_config.reshard_after_forward,
             }
             module = model.model if is_wrapped else model
             full_state = module.state_dict()

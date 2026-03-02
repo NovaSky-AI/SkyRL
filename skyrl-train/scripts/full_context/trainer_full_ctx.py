@@ -14,7 +14,7 @@ class FullCtxTrainer(RayPPOTrainer):
     This helps catch OOM issues early before running full training.
     """
 
-    def train(self):
+    async def train(self):
         """Run a few training steps with max sequence length."""
         logger.info("Starting dummy training with max sequence length...")
 
@@ -80,7 +80,6 @@ class FullCtxTrainer(RayPPOTrainer):
                 # 4. train policy/critic model
                 with Timer("train_critic_and_policy", self.all_timings):
                     status = self.train_critic_and_policy(training_input)
-                self.policy_model.offload_to_cpu(offload_optimizer=True, offload_model=False)
 
                 self.tracker.log(self.all_metrics, step=self.global_step)
                 self.all_metrics = {}

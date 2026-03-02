@@ -9,8 +9,7 @@ from unittest.mock import MagicMock
 
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.generators.base import GeneratorOutput
-from skyrl_train.config.utils import get_default_config
-from omegaconf import OmegaConf
+from skyrl_train.config import SkyRLConfig
 
 
 class DummyDataset:
@@ -25,26 +24,14 @@ class DummyDataset:
 
 
 def create_config(batch_size):
-    default_config = get_default_config()
-    OmegaConf.update(
-        default_config,
-        "trainer",
-        {
-            "train_batch_size": batch_size,
-            "eval_batch_size": batch_size,
-            "resume_mode": "none",
-            "seed": 42,
-            "epochs": 1,
-        },
-    )
-    OmegaConf.update(
-        default_config,
-        "generator",
-        {
-            "n_samples_per_prompt": 1,
-        },
-    )
-    return default_config
+    cfg = SkyRLConfig()
+    cfg.trainer.train_batch_size = batch_size
+    cfg.trainer.eval_batch_size = batch_size
+    cfg.trainer.resume_mode = "none"
+    cfg.trainer.seed = 42
+    cfg.trainer.epochs = 1
+    cfg.generator.n_samples_per_prompt = 1
+    return cfg
 
 
 def test_response_level_rewards():

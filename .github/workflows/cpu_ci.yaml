@@ -5,7 +5,15 @@ on:
     branches: 
       - main 
       - rc/**
+    paths:
+      - 'skyrl-train/**'
+      - 'skyrl-gym/**'
+      - '.github/workflows/cpu_ci.yaml'
   pull_request:
+    paths:
+      - 'skyrl-train/**'
+      - 'skyrl-gym/**'
+      - '.github/workflows/cpu_ci.yaml'
 
 permissions:
   checks: write   # for status checks to appear

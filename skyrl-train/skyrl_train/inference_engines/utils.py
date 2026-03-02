@@ -1,7 +1,9 @@
 from typing import Dict, Any, Optional, Union
 import random
 import hashlib
+
 from omegaconf import DictConfig, ListConfig
+from skyrl_train.config import SamplingParams
 from skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
 from typing import List
 from http import HTTPStatus
@@ -10,8 +12,8 @@ import ray
 from ray.util.placement_group import PlacementGroupSchedulingStrategy
 
 
-def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
-    stop_val = sampling_params.get("stop", None)
+def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
+    stop_val = sampling_params.stop
     vllm_sampling_params = {
         "min_tokens": 1,
         "skip_special_tokens": True,
@@ -24,17 +26,23 @@ def get_vllm_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
         "logprobs": sampling_params.logprobs,
         "stop": list(stop_val) if stop_val is not None else None,
     }
-    exclude_keys = ["max_generate_length"]
-    for key, value in sampling_params.items():
-        if key not in vllm_sampling_params and key not in exclude_keys:
-            # Convert OmegaConf ListConfig to regular list if needed
-            if isinstance(value, ListConfig):
-                value = list(value)
-            vllm_sampling_params[key] = value
+    if isinstance(sampling_params, DictConfig):
+        exclude_keys = ["max_generate_length"]
+        for key, value in sampling_params.items():
+            if key not in vllm_sampling_params and key not in exclude_keys:
+                # Convert OmegaConf ListConfig to regular list if needed
+                if isinstance(value, ListConfig):
+                    value = list(value)
+                vllm_sampling_params[key] = value
+    else:
+        if sampling_params.additional_kwargs is not None:
+            for key, value in sampling_params.additional_kwargs.items():
+                if key not in vllm_sampling_params:
+                    vllm_sampling_params[key] = value
     return vllm_sampling_params
 
 
-def get_sglang_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
+def get_sglang_sampling_params(sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
     # `min_tokens` in vllm is equivalent to `min_new_tokens` in sglang. However `min_new_tokens` and
     # `stop` are not supported when `skip_tokenizer_init` is True, which we need for token-in-token-out.
     # See this issue for more: https://github.com/sgl-project/sglang/issues/9039#issuecomment-3218331087
@@ -47,18 +55,24 @@ def get_sglang_sampling_params(sampling_params: DictConfig) -> Dict[str, Any]:
         "top_k": sampling_params.top_k,
         "min_p": sampling_params.min_p,
     }
-    # logprobs not supported with sglang for now
-    exclude_keys = ["max_generate_length", "logprobs"]
-    for key, value in sampling_params.items():
-        if key not in sglang_sampling_params and key not in exclude_keys:
-            # Convert OmegaConf ListConfig to regular list if needed
-            if isinstance(value, ListConfig):
-                value = list(value)
-            sglang_sampling_params[key] = value
+    if isinstance(sampling_params, DictConfig):
+        # logprobs not supported with sglang for now
+        exclude_keys = ["max_generate_length", "logprobs"]
+        for key, value in sampling_params.items():
+            if key not in sglang_sampling_params and key not in exclude_keys:
+                # Convert OmegaConf ListConfig to regular list if needed
+                if isinstance(value, ListConfig):
+                    value = list(value)
+                sglang_sampling_params[key] = value
+    else:
+        if sampling_params.additional_kwargs is not None:
+            for key, value in sampling_params.additional_kwargs.items():
+                if key not in sglang_sampling_params:
+                    sglang_sampling_params[key] = value
     return sglang_sampling_params
 
 
-def get_sampling_params_for_backend(backend: str, sampling_params: DictConfig) -> Dict[str, Any]:
+def get_sampling_params_for_backend(backend: str, sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
     if backend == "vllm":
         return get_vllm_sampling_params(sampling_params)
     elif backend == "sglang":
