@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 
 import pytest
 
-_has_megatron = "megatron" in sys.modules or not (__import__("importlib").util.find_spec("megatron") is None)
+_has_megatron = "megatron" in sys.modules or __import__("importlib").util.find_spec("megatron") is not None
 
 
 # ---------------------------------------------------------------------------
