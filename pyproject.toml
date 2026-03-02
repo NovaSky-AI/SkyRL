@@ -248,7 +248,7 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 # pin megatron bridge commit to fix for MoE + LoRA merging. Update this when an official release is cut
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "b058b662f64c97e40985d90f3808d33a9516d918", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "02b5fccab5e5b21856d36c2e357839e0123b4b8f", marker = "sys_platform == 'linux'"}
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
 
 [tool.black]
