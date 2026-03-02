@@ -38,10 +38,8 @@ def l2norm(x: jax.Array, axis: int = -1, eps: float = 1e-6) -> jax.Array:
     return x * inv_norm
 
 
-def apply_mask_to_padding_states(hidden_states: jax.Array, attention_mask: jax.Array | None) -> jax.Array:
-    if attention_mask is not None and attention_mask.shape[1] > 1 and attention_mask.shape[0] > 1:
-        hidden_states = hidden_states * attention_mask[..., None].astype(hidden_states.dtype)
-    return hidden_states
+def apply_mask_to_padding_states(x: jax.Array, mask: jax.Array | None) -> jax.Array:
+    return x if mask is None else x * mask[..., None].astype(x.dtype)
 
 
 def recurrent_gated_delta_rule(
@@ -58,7 +56,7 @@ def recurrent_gated_delta_rule(
 
     query = query * (1.0 / math.sqrt(query.shape[-1]))
 
-    # [B, T, H, D] -> [T, B, H, D]
+    # [B, T, H, D] -> [T, B, H, D] so we can use jax.lax.scan
     query = jnp.swapaxes(query, 0, 1)
     key = jnp.swapaxes(key, 0, 1)
     value = jnp.swapaxes(value, 0, 1)
