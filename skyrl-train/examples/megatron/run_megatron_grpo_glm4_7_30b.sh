@@ -6,7 +6,6 @@ set -x
 #
 # Runs on 1 node of 8 GPUs (TP=1 EP=8 for Megatron, 2x TP=4 vLLM engines).
 # GLM-4.7-Flash has 20 attention heads, so vLLM TP must divide 20 (use TP=4).
-# For 16 GPUs, change NUM_NODES=2 and adjust inference engines.
 #
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
