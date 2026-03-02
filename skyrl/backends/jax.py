@@ -1080,7 +1080,7 @@ class JaxBackend(JaxBackendImpl):
                 local_device_ids=range(config.tensor_parallel_size),
             )
             logger.info(
-                f"JAX distributed initialized: tpu_worker_id={tpu_worker_id}, "
+                f"JAX distributed initialized: input_process_id=0, "
                 f"rocess_id={jax.process_index()} ({jax.process_count()} total), "
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
@@ -1152,7 +1152,7 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int, te
     )
 
     logger.info(
-        f"Worker tpu_worker_id={tpu_worker_id} process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
+        f"Worker input_process_id={process_id} process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
     )
 
     # Receive INIT payload with base_model and config from coordinator
