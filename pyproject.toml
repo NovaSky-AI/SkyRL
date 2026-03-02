@@ -111,7 +111,7 @@ megatron = [
     "flash-attn==2.8.1; sys_platform == 'linux'",
     "vllm==0.16.0; sys_platform == 'linux'",
     "torch==2.9.1; sys_platform == 'linux'",
-    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64' ",
+    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core==0.16.0; sys_platform == 'linux'",

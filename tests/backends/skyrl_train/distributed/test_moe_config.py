@@ -18,7 +18,7 @@ class TestMegatronConfigMoEFields:
         cfg = MegatronConfig()
         assert cfg.moe_token_dispatcher_type == "alltoall"
         assert cfg.moe_router_load_balancing_type == "none"
-        assert cfg.moe_grouped_gemm is False
+        assert cfg.moe_grouped_gemm is True
         assert cfg.moe_router_score_function is None
         assert cfg.moe_router_enable_expert_bias is None
 
