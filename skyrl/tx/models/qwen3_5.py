@@ -422,10 +422,7 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
             key = jnp.repeat(key, repeats, axis=2)
 
         core_out, new_recurrent_state = recurrent_gated_delta_rule(query, key, value, g, beta, recurrent_state)
-
-        z_shape = z.shape
-        core_out = self.norm(core_out.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim))
-        core_out = core_out.reshape(z_shape).reshape(batch_size, seq_len, -1)
+        core_out = self.norm(core_out, z).reshape(batch_size, seq_len, -1)
         out = self.out_proj(core_out, adapter_indices=adapter_indices)
         return out, new_conv_state, new_recurrent_state
 
