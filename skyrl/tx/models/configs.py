@@ -49,6 +49,10 @@ class ModelConfig(PretrainedConfig):
         self.gradient_checkpointing = gradient_checkpointing
         self.mhc_expansion_rate = mhc_expansion_rate
 
+    def get_config(self) -> PretrainedConfig:
+        """Return `text_config` when present, otherwise return this config."""
+        return getattr(self, "text_config", self)
+
     def get_text_config(self) -> "ModelConfig":
         """Return a wrapped config built from `self.text_config`."""
         return type(self)(
@@ -63,7 +67,7 @@ class ModelConfig(PretrainedConfig):
 
     def get_num_experts(self):
         # TODO: Change this if there can be different numbers of experts in text_config and vision_config
-        config = getattr(self, "text_config", self)
+        config = self.get_config()
         return getattr(config, "num_experts", None) or getattr(config, "n_routed_experts", None)
 
 

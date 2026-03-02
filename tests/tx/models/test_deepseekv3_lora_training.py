@@ -29,7 +29,7 @@ def test_lora_training_moe_rank_normalized():
         axis_types=(jax.sharding.AxisType.Auto,) * 3,
     )
     with jax.set_mesh(mesh):
-        model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
+        model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.get_config().dtype), rngs=nnx.Rngs(0))
         load_safetensors(checkpoint_path, config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
@@ -110,7 +110,7 @@ def test_lora_training_high_rank():
         axis_types=(jax.sharding.AxisType.Auto,) * 3,
     )
     with jax.set_mesh(mesh):
-        model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
+        model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.get_config().dtype), rngs=nnx.Rngs(0))
         load_safetensors(checkpoint_path, config, model)
 
         init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16, seed=0))
