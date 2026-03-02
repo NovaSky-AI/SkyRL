@@ -97,11 +97,11 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.13.0; sys_platform == 'linux'",
+    "vllm==0.16.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.9.0; sys_platform == 'linux'",
-    "flashinfer-python; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.9.1; sys_platform == 'linux'",
+    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -111,13 +111,13 @@ megatron = [
     "skyrl[skyrl-train]; python_version == '3.12'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
     "flash-attn==2.8.1; sys_platform == 'linux' and python_version == '3.12'",
-    "vllm==0.13.0; sys_platform == 'linux' and python_version == '3.12'",
-    "torch==2.9.0; sys_platform == 'linux' and python_version == '3.12'",
-    "flashinfer-python==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+    "vllm==0.16.0; sys_platform == 'linux' and python_version == '3.12'",
+    "torch==2.9.1; sys_platform == 'linux' and python_version == '3.12'",
+    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
     "torchvision; sys_platform == 'linux' and python_version == '3.12'",
     "megatron-bridge; sys_platform == 'linux' and python_version == '3.12'",
     "megatron-core==0.15.0; sys_platform == 'linux' and python_version == '3.12'",
-    "flashinfer-jit-cache==0.5.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
     "nvidia-modelopt; sys_platform == 'linux' and python_version == '3.12'",
 ]
 
@@ -174,7 +174,7 @@ required-environments = [
 ]
 
 constraint-dependencies = [
-    "flashinfer-jit-cache==0.5.3",
+    "flashinfer-jit-cache==0.6.3",
 ]
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras
@@ -209,6 +209,7 @@ override-dependencies = [
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.15.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux' and python_version == '3.12'",
+    "numpy>=2.0.0; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
