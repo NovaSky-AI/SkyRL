@@ -8,9 +8,9 @@ from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
 from skyrl.tx.layers.attention import dot_product_attention
-from skyrl.tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
+from skyrl.tx.layers.lora import LoRAEmbed, LoRALinear
 from skyrl.tx.layers.rotary_embedding import apply_rope
-from skyrl.tx.layers.util import Param, prepare_routing, shard_map_ep
+from skyrl.tx.layers.util import Param
 from skyrl.tx.models.configs import Qwen3_5Config
 from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from skyrl.tx.utils.generator import GeneratorMixin, KVCache
@@ -502,132 +502,6 @@ class Qwen3_5MLP(nnx.Module):
         )
 
 
-class Qwen3_5Experts(nnx.Module):
-
-    def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.config = config
-        self.gate_proj = LoRAExpert(
-            config.num_experts,
-            config.hidden_size,
-            config.moe_intermediate_size,
-            sharding=("ep", "fsdp", "tp"),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            rngs=rngs,
-        )
-        self.up_proj = LoRAExpert(
-            config.num_experts,
-            config.hidden_size,
-            config.moe_intermediate_size,
-            sharding=("ep", "fsdp", "tp"),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            rngs=rngs,
-        )
-        self.down_proj = LoRAExpert(
-            config.num_experts,
-            config.moe_intermediate_size,
-            config.hidden_size,
-            sharding=("ep", "tp", "fsdp"),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            rngs=rngs,
-        )
-
-    def __call__(
-        self,
-        hidden_states: jax.Array,
-        selected_experts: jax.Array,
-        routing_weights: jax.Array,
-        adapter_indices: jax.Array | None = None,
-    ) -> jax.Array:
-        num_experts = self.config.num_experts
-        top_k = self.config.num_experts_per_tok
-        hidden_size = self.config.hidden_size
-
-        ep = get_abstract_mesh().shape.get("ep", 1)
-        assert num_experts % ep == 0, f"num_experts={num_experts} must be divisible by ep={ep}"
-
-        hidden_expanded = jnp.repeat(hidden_states, top_k, axis=0)
-        adapter_expanded = jnp.repeat(adapter_indices, top_k) if adapter_indices is not None else None
-        hidden_sorted, group_sizes, unsort_indices, adapter_sorted = prepare_routing(
-            hidden_expanded, selected_experts.ravel(), num_experts, adapter_indices=adapter_expanded
-        )
-
-        def forward(experts, hidden_sorted, group_sizes, unsort_indices, adapter_sorted, routing_weights):
-            ep_rank = jax.lax.axis_index("ep")
-            experts_per_rank = num_experts // jax.lax.axis_size("ep")
-            group_offset = jnp.array([ep_rank * experts_per_rank], dtype=jnp.int32)
-
-            gate = experts.gate_proj(hidden_sorted, group_sizes, adapter_sorted, group_offset=group_offset)
-            up = experts.up_proj(hidden_sorted, group_sizes, adapter_sorted, group_offset=group_offset)
-            down = experts.down_proj(nnx.silu(gate) * up, group_sizes, adapter_sorted, group_offset=group_offset)
-
-            out = down[unsort_indices].reshape(-1, top_k, hidden_size)
-            local_out = jnp.sum(out * routing_weights[..., None], axis=1)
-            return jax.lax.psum(local_out, axis_name="ep")
-
-        return shard_map_ep(self, forward, hidden_sorted, group_sizes, unsort_indices, adapter_sorted, routing_weights)
-
-
-class Qwen3_5SparseMoeBlock(nnx.Module):
-
-    def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
-        self.config = config
-        self.gate = nnx.Linear(
-            config.hidden_size,
-            config.num_experts,
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.with_partitioning(nnx.initializers.lecun_normal(), (None, None)),
-            rngs=rngs,
-        )
-        self.experts = Qwen3_5Experts(config, dtype=dtype, rngs=rngs)
-        self.shared_expert = Qwen3_5MLP(
-            config,
-            dtype=dtype,
-            rngs=rngs,
-            intermediate_size=config.shared_expert_intermediate_size,
-        )
-        self.shared_expert_gate = LoRALinear(
-            config.hidden_size,
-            1,
-            sharding=("fsdp", None),
-            use_bias=False,
-            dtype=dtype,
-            param_dtype=dtype,
-            kernel_init=nnx.initializers.lecun_normal(),
-            max_lora_adapters=config.max_lora_adapters,
-            max_lora_rank=config.max_lora_rank,
-            rngs=rngs,
-        )
-
-    def __call__(self, hidden_states: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
-        batch_size, seq_len, hidden_dim = hidden_states.shape
-        hidden_states_flat = hidden_states.reshape(-1, hidden_dim)
-        adapter_flat = jnp.repeat(adapter_indices, seq_len) if adapter_indices is not None else None
-
-        router_logits = self.gate(hidden_states_flat)
-        routing_weights = nnx.softmax(router_logits, axis=-1)
-        routing_weights, selected_experts = jax.lax.top_k(routing_weights, k=self.config.num_experts_per_tok)
-        routing_weights = routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
-        routing_weights = routing_weights.astype(hidden_states_flat.dtype)
-
-        expert_output = self.experts(hidden_states_flat, selected_experts, routing_weights, adapter_flat)
-        shared_output = self.shared_expert(hidden_states_flat, adapter_indices=adapter_flat)
-        shared_gate = nnx.sigmoid(self.shared_expert_gate(hidden_states_flat, adapter_indices=adapter_flat))
-
-        final_hidden_states = expert_output + shared_gate * shared_output
-        return final_hidden_states.reshape(batch_size, seq_len, hidden_dim)
-
-
 class Qwen3_5DecoderLayer(nnx.Module):
 
     def __init__(self, config: Qwen3_5Config, layer_idx: int, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
@@ -642,15 +516,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         else:
             self.self_attn = Qwen3_5Attention(config, dtype=dtype, rngs=rngs)
 
-        use_moe = (
-            layer_idx not in getattr(config, "mlp_only_layers", [])
-            and getattr(config, "num_experts", 0) > 0
-            and (layer_idx + 1) % getattr(config, "decoder_sparse_step", 1) == 0
-        )
-        if use_moe:
-            self.mlp = Qwen3_5SparseMoeBlock(config, dtype=dtype, rngs=rngs)
-        else:
-            self.mlp = Qwen3_5MLP(config, dtype=dtype, rngs=rngs)
+        self.mlp = Qwen3_5MLP(config, dtype=dtype, rngs=rngs)
 
     def __call__(
         self,
@@ -893,4 +759,3 @@ class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsPro
 
 
 Qwen3_5ForConditionalGeneration = Qwen3_5ForCausalLM
-Qwen3_5MoeForConditionalGeneration = Qwen3_5ForCausalLM
