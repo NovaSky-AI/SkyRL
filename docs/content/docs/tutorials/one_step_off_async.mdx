@@ -100,8 +100,8 @@ uv run --isolated --extra fsdp -m examples.async.main_async \
   trainer.placement.colocate_policy_ref=true \
   trainer.placement.policy_num_gpus_per_node=4 \
   trainer.placement.ref_num_gpus_per_node=4 \
-  generator.num_inference_engines=4 \
-  generator.inference_engine_tensor_parallel_size=1
+  generator.inference_engine.num_engines=4 \
+  generator.inference_engine.tensor_parallel_size=1
 
 ```
 

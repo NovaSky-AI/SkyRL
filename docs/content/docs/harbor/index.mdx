@@ -216,7 +216,7 @@ agent:
     temperature: 1.0                  # Sampling temperature (higher = more exploration)
     enable_summarize: false           # Context summarization when nearing token limits
     model_info:
-      max_input_tokens: 32768        # Should match generator.engine_init_kwargs.max_model_len
+      max_input_tokens: 32768        # Should match generator.inference_engine.engine_init_kwargs.max_model_len
       max_output_tokens: 32768
 ```
 
@@ -338,7 +338,7 @@ You must run `prepare_harbor_dataset.py` before launching training. The launch s
 - **Sandbox access**: Daytona API key (`DAYTONA_API_KEY`) or Modal credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`), or other sandbox providers that Harbor supports.
 - **Dataset**: Harbor task directories, each with `instruction.md` and `tests/test.sh`
 - **GPUs**: Typically 4-8 for combined training and inference
-- **vLLM HTTP endpoint**: Enabled via `generator.enable_http_endpoint=true`
+- **vLLM HTTP endpoint**: Enabled via `generator.inference_engine.enable_http_endpoint=true`
 
 ### Launch
 
@@ -359,7 +359,7 @@ uv run --isolated --extra fsdp --extra harbor \
   -m examples.train_integrations.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
-  generator.served_model_name=Qwen3-8B \
+  generator.inference_engine.served_model_name=Qwen3-8B \
   hydra.searchpath=['file://examples/train_integrations/harbor'] \
   +harbor_trial_config=default \
   ++harbor_trial_config.trials_dir=$TRIALS_DIR \
@@ -369,7 +369,7 @@ uv run --isolated --extra fsdp --extra harbor \
   generator.n_samples_per_prompt=8 \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.train_batch_size=64 \
-  generator.enable_http_endpoint=true \
+  generator.inference_engine.enable_http_endpoint=true \
   +generator.rate_limit.enabled=true \
   +generator.rate_limit.trajectories_per_second=5 \
   +generator.rate_limit.max_concurrency=512

@@ -279,9 +279,9 @@ We will use the `run_multiply.sh` script to train the model. This script is loca
 First, ensure sure your config matches your available GPUs. You may need to adjust the following parameters to match your GPU count (which we set via an environment variable `NUM_GPUS`):
 
 - `trainer.placement.policy_num_gpus_per_node`
-- `generator.num_inference_engines`
+- `generator.inference_engine.num_engines`
 
-Then, configure how the environment should be executed. For multi-turn environments, we recommend setting `generator.batched=false` and `generator.async_engine=true` to ensure that each environment is executed asynchronously. If your environment is single-turn, you may get better performance by reversing these settings.
+Then, configure how the environment should be executed. For multi-turn environments, we recommend setting `generator.batched=false` and `generator.inference_engine.async_engine=true` to ensure that each environment is executed asynchronously. If your environment is single-turn, you may get better performance by reversing these settings.
 
 **Launch Training**
 

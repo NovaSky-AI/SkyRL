@@ -70,9 +70,9 @@ To start training, we need to set up our training script. You can find a complet
 ```bash
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     # Setup for training with a remote inference engine
-    generator.run_engines_locally=False \
-    generator.remote_inference_engine_urls="['127.0.0.1:8001']" \
-    generator.override_existing_update_group=True \
+    generator.inference_engine.run_engines_locally=False \
+    generator.inference_engine.remote_urls="['127.0.0.1:8001']" \
+    generator.inference_engine.override_existing_update_group=True \
 
     # sampling parameters for generation
     generator.sampling_params.temperature=0.6 \
@@ -111,7 +111,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
 ```
 
 <Callout type="info">
-With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `run_engines_locally=True` to maximize throughput.
+With remote servers, there can be non-trivial HTTP overhead during generation. When running training and inference in the same Ray cluster, it is recommended to use `generator.inference_engine.run_engines_locally=True` to maximize throughput.
 </Callout>
 
 ## Launching Your Training Run

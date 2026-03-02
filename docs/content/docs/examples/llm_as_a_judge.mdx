@@ -112,9 +112,9 @@ uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_ju
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
 
   # Generator configuration
-  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine_tensor_parallel_size=$TP_SIZE \
-  generator.backend=vllm \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$TP_SIZE \
+  generator.inference_engine.backend=vllm \
   generator.n_samples_per_prompt=5 \
 
   # Environment and LLM judge configuration
