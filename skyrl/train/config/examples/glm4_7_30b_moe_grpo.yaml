@@ -14,10 +14,10 @@
 #   bash examples/megatron/run_megatron_grpo_glm4_7_30b.sh
 
 defaults:
-  - _self_
   - megatron_config@trainer.policy.megatron_config: policy
   - megatron_config@trainer.ref.megatron_config: ref
   - skyrl_gym_config: default
+  - _self_
 
 data:
   # Replace with your dataset paths
