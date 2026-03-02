@@ -7,9 +7,17 @@ set -x
 # Runs on 1 node of 8 GPUs (TP=1 EP=8 for Megatron, 2x TP=4 vLLM engines).
 # GLM-4.7-Flash has 20 attention heads, so vLLM TP must divide 20 (use TP=4).
 #
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-# export WANDB_API_KEY=<your_key_here>
-# bash examples/megatron/run_megatron_grpo_glm4_7_30b.sh
+# Setup:
+#   1. Install deps:
+#        uv sync --extra megatron   # or: uv sync --extra mcore (from skyrl-train/)
+#   2. GLM-4.7-Flash needs transformers>=5.0.0 (for Glm4MoeLiteConfig).
+#      If not yet available via uv sync, install manually:
+#        uv pip install "transformers>=5.0.0"
+#   3. Prepare data:
+#        uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+#   4. Run:
+#        export WANDB_API_KEY=<your_key_here>  # or set LOGGER=console below
+#        bash examples/megatron/run_megatron_grpo_glm4_7_30b.sh
 
 MODEL_NAME="zai-org/GLM-4.7-Flash"
 DATA_DIR="$HOME/data/gsm8k"
