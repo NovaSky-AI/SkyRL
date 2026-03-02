@@ -607,52 +607,40 @@ class Qwen3_5TextModel(nnx.Module):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
-            layer_type = self.layer_types[layer_idx]
-            if layer_type == "full_attention":
-                layer_kv = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]) if kv_cache is not None else None
-                hidden_states, updated_kv, new_conv_state, new_recurrent_state = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    positions=positions,
-                    adapter_indices=adapter_indices,
-                    kv_cache=layer_kv,
+            has_cache = kv_cache is not None
+            has_conv_cache = has_cache and kv_cache.conv_states is not None and kv_cache.recurrent_states is not None
+
+            if self.layer_types[layer_idx] == "full_attention":
+                layer_kv = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]) if has_cache else None
+                hidden_states, updated_kv, _, _ = layer(
+                    hidden_states, attention_mask=attention_mask, positions=positions,
+                    adapter_indices=adapter_indices, kv_cache=layer_kv,
                 )
                 assert updated_kv is not None
                 updated_keys.append(updated_kv[0])
                 updated_values.append(updated_kv[1])
-
-                if kv_cache is not None and kv_cache.conv_states is not None and kv_cache.recurrent_states is not None:
-                    updated_conv_states.append(kv_cache.conv_states[layer_idx])
-                    updated_recurrent_states.append(kv_cache.recurrent_states[layer_idx])
-                else:
-                    updated_conv_states.append(jnp.zeros((batch_size, 0, 0), dtype=dtype))
-                    updated_recurrent_states.append(jnp.zeros((batch_size, 0, 0, 0), dtype=dtype))
+                updated_conv_states.append(
+                    kv_cache.conv_states[layer_idx] if has_conv_cache else jnp.zeros((batch_size, 0, 0), dtype=dtype)
+                )
+                updated_recurrent_states.append(
+                    kv_cache.recurrent_states[layer_idx] if has_conv_cache else jnp.zeros((batch_size, 0, 0, 0), dtype=dtype)
+                )
             else:
-                layer_conv_state = None
-                layer_recurrent_state = None
-                if kv_cache is not None and kv_cache.conv_states is not None and kv_cache.recurrent_states is not None:
-                    layer_conv_state = kv_cache.conv_states[layer_idx]
-                    layer_recurrent_state = kv_cache.recurrent_states[layer_idx]
-
-                linear_mask = None if kv_cache is not None else attention_mask
+                conv_state = kv_cache.conv_states[layer_idx] if has_conv_cache else None
+                recurrent_state = kv_cache.recurrent_states[layer_idx] if has_conv_cache else None
                 hidden_states, _, new_conv_state, new_recurrent_state = layer(
-                    hidden_states,
-                    attention_mask=linear_mask,
-                    positions=positions,
-                    adapter_indices=adapter_indices,
-                    conv_state=layer_conv_state,
-                    recurrent_state=layer_recurrent_state,
+                    hidden_states, attention_mask=None if has_cache else attention_mask, positions=positions,
+                    adapter_indices=adapter_indices, conv_state=conv_state, recurrent_state=recurrent_state,
                 )
                 assert new_conv_state is not None and new_recurrent_state is not None
                 updated_conv_states.append(new_conv_state)
                 updated_recurrent_states.append(new_recurrent_state)
-
-                if kv_cache is not None:
-                    updated_keys.append(kv_cache.keys[layer_idx])
-                    updated_values.append(kv_cache.values[layer_idx])
-                else:
-                    updated_keys.append(jnp.zeros((batch_size, 0, 0, 0), dtype=dtype))
-                    updated_values.append(jnp.zeros((batch_size, 0, 0, 0), dtype=dtype))
+                updated_keys.append(
+                    kv_cache.keys[layer_idx] if has_cache else jnp.zeros((batch_size, 0, 0, 0), dtype=dtype)
+                )
+                updated_values.append(
+                    kv_cache.values[layer_idx] if has_cache else jnp.zeros((batch_size, 0, 0, 0), dtype=dtype)
+                )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
