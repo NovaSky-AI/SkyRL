@@ -74,11 +74,7 @@ try:
             # GLM-4.7-Flash uses default rope (no scaling), so set factor=1.0.
             orig_rope_scaling = hf_config.rope_scaling
             orig_rope_theta = getattr(hf_config, "rope_theta", None)
-            rope_theta = (
-                orig_rope_scaling.get("rope_theta", 10000.0)
-                if orig_rope_scaling
-                else 10000.0
-            )
+            rope_theta = orig_rope_scaling.get("rope_theta", 10000.0) if orig_rope_scaling else 10000.0
             hf_config.rope_scaling = None  # triggers the else branch (defaults to 1.0)
             hf_config.rope_theta = rope_theta
 
