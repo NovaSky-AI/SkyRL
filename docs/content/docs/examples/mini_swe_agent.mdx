@@ -2,6 +2,9 @@
 title: "SkyRL + Mini-SWE-Agent: Training a SWE-Agent for SWE-Bench"
 ---
 
+<Callout type="info">
+This example uses the `fsdp` backend.
+</Callout>
 
 In this example, we walk through a simple example on how to train a SWE-Agent on the SWE-Bench task by leveraging [Mini-SWE-Agent](https://github.com/SWE-agent/mini-swe-agent)
 
@@ -78,7 +81,7 @@ For training, we use [SWE-Gym](https://huggingface.co/SWE-Gym), and more specifi
 Execute the following command: 
 
 ```bash
-# execute from skyrl-train directory
+# execute from SkyRL root directory
 uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
 
 ```
@@ -90,7 +93,7 @@ Prerequisites: Ensure that you have the required environment backend installed f
 We provide two example scripts: One for Qwen3-8B model and another for the [Qwen/Qwen3-Coder-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct) model. While the first script for Qwen3-8B requires a single 8xH100 node, the script for the 30B model requires 2 8xH100 nodes for training.
 
 ```bash
-# execute from skyrl-train directory
+# execute from SkyRL root directory
 bash examples/mini_swe_agent/run_mini_swe_8B.sh
 # or for 30B:
 # bash examples/mini_swe_agent/run_mini_swe_30B.sh

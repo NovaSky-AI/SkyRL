@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-0.5B-Instruct on OpenEnv.
 
-# uv run examples/openenv/dummy_openenv_dataset.py --output_dir $HOME/data/openenv --env_name echo_env
+# uv run examples/train_integrations/openenv/dummy_openenv_dataset.py --output_dir $HOME/data/openenv --env_name echo_env
 # Env name: echo_env, coding_env, openspiel-env, atari-env, sumo-rl-env, finrl-env
 
 # Prestart the docker environment with 
@@ -12,7 +12,7 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/openenv/run_dummy_openenv.sh
 
-# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/openenv/run_dummy_openenv.sh`.
+# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/train_integrations/openenv/run_dummy_openenv.sh`.
 
 : "${ENV_NAME:="echo_env"}"
 : "${DATA_DIR:="$HOME/data/openenv/$ENV_NAME"}"
@@ -23,7 +23,7 @@ set -x
 : "${INFERENCE_BACKEND:=vllm}"
 : "${MAX_TURNS:=1}"
 
-uv run --isolated --extra fsdp --with "openenv@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m examples.train_integrations.openenv.entrypoints.main_openenv \
+uv run --isolated --extra fsdp --with "openenv-core@git+https://github.com/meta-pytorch/OpenEnv.git" --with "litellm>=1.75.5" -m examples.train_integrations.openenv.entrypoints.main_openenv \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \

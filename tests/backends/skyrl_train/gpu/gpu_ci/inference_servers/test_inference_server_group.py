@@ -8,7 +8,7 @@ Tests:
     - Health, completions, get_server_info, session affinity, pause/resume
 
 Run:
-    uv run pytest tests/gpu/gpu_ci/test_inference_server_group.py -v -s
+    uv run pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_inference_server_group.py -v -s
 """
 
 import asyncio

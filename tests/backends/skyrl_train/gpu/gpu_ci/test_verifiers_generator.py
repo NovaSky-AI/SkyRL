@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra dev --extra vllm --with verifiers pytest tests/gpu/gpu_ci/test_verifiers_generator.py
+uv run --isolated --extra dev --extra fsdp --with verifiers pytest tests/backends/skyrl_train/gpu/gpu_ci/test_verifiers_generator.py
 """
 
 import pytest

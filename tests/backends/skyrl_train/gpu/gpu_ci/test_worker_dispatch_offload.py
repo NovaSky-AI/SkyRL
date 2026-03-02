@@ -2,7 +2,7 @@
 Test WorkerDispatch automatic offload/onload with colocation policies.
 
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_worker_dispatch_offload.py -v
+uv run --isolated --extra dev -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_worker_dispatch_offload.py -v
 
 These tests validate that WorkerDispatch correctly manages GPU memory when
 multiple models share the same GPU (colocate_all=True or colocate_policy_ref=True).

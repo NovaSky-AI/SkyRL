@@ -1,6 +1,6 @@
 """
-# Run vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_lora.py
+# Run tests (requires fsdp extra):
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py
 """
 
 import pytest

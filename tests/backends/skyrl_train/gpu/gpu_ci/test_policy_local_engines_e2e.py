@@ -1,6 +1,6 @@
 """
 To run:
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_policy_local_engines_e2e.py
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
 """
 
 import pytest

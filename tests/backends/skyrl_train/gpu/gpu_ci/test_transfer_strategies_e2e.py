@@ -14,7 +14,7 @@ GPU Requirements:
     - Broadcast test: 4 GPUs (each sender and receiver uses 1 GPU).
 
 Run with:
-    uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_transfer_strategy.py -v
+    uv run --isolated --extra dev pytest tests/backends/skyrl_train/gpu/gpu_ci/test_transfer_strategies_e2e.py -v
 """
 
 import asyncio

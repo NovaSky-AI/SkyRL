@@ -1,9 +1,9 @@
 """
 For FSDP and FSDP2, run:
-uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
+uv run --isolated --extra dev -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
 
 For Megatron, run:
-uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
+uv run --isolated --extra dev --extra mcore -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
 """
 
 import ray
