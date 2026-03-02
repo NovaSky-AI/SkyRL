@@ -225,7 +225,11 @@ class JaxBackendImpl(AbstractBackend):
             axis_types=(jax.sharding.AxisType.Auto,) * 3,
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
-            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
+            self.model = model_class(
+                self.model_config,
+                dtype=get_dtype(self.model_config.get_config().dtype),
+                rngs=nnx.Rngs(0),
+            )
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
             # Split model into LoRA and non-LoRA parameters
