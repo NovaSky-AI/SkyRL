@@ -354,31 +354,17 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
         # [kernel, 1, channels] -> [channels, 1, kernel]
         return self.conv1d_weight[...].transpose((2, 1, 0))
 
-    def _causal_conv_prefill(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-        # x: [B, C, T]
+    def _causal_conv(self, x: jax.Array, conv_state: jax.Array | None = None) -> tuple[jax.Array, jax.Array]:
+        # x: [B, C, T], optional conv_state: [B, C, K]
         kernel = self._get_conv_kernel()
         seq_len = x.shape[-1]
-        left_pad = self.conv_kernel_size - 1
-        x_padded = jnp.pad(x, ((0, 0), (0, 0), (left_pad, 0)))
-        out = jax.lax.conv_general_dilated(
-            x_padded,
-            kernel,
-            window_strides=(1,),
-            padding="VALID",
-            feature_group_count=self.conv_dim,
-            dimension_numbers=("NCH", "OIH", "NCH"),
-        )
-        out = nnx.silu(out[..., :seq_len])
 
-        state_pad = max(self.conv_kernel_size - seq_len, 0)
-        conv_state = jnp.pad(x, ((0, 0), (0, 0), (state_pad, 0)))[..., -self.conv_kernel_size :]
-        return out, conv_state
+        if conv_state is None:
+            left_pad = self.conv_kernel_size - 1
+            x_full = jnp.pad(x, ((0, 0), (0, 0), (left_pad, 0)))
+        else:
+            x_full = jnp.concatenate([conv_state, x], axis=-1)
 
-    def _causal_conv_decode(self, x: jax.Array, conv_state: jax.Array) -> tuple[jax.Array, jax.Array]:
-        # x: [B, C, T], conv_state: [B, C, K]
-        kernel = self._get_conv_kernel()
-        seq_len = x.shape[-1]
-        x_full = jnp.concatenate([conv_state, x], axis=-1)
         new_state = x_full[..., -self.conv_kernel_size :]
         out_full = jax.lax.conv_general_dilated(
             x_full,
@@ -402,6 +388,9 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
         batch_size, seq_len, _ = hidden_states.shape
+        if conv_state is not None:
+            assert recurrent_state is not None, "conv_state requires recurrent_state."
+            assert seq_len == 1, f"conv_state only supports seq_len == 1, got {seq_len}."
 
         mixed_qkv = self.in_proj_qkv(hidden_states, adapter_indices=adapter_indices).transpose((0, 2, 1))
         z = self.in_proj_z(hidden_states, adapter_indices=adapter_indices).reshape(
@@ -410,11 +399,7 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
         b = self.in_proj_b(hidden_states, adapter_indices=adapter_indices)
         a = self.in_proj_a(hidden_states, adapter_indices=adapter_indices)
 
-        use_precomputed = conv_state is not None and recurrent_state is not None and seq_len == 1
-        if use_precomputed:
-            mixed_qkv, new_conv_state = self._causal_conv_decode(mixed_qkv, conv_state)
-        else:
-            mixed_qkv, new_conv_state = self._causal_conv_prefill(mixed_qkv)
+        mixed_qkv, new_conv_state = self._causal_conv(mixed_qkv, conv_state)
 
         mixed_qkv = mixed_qkv.transpose((0, 2, 1))
         q_end = self.key_dim
