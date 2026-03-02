@@ -53,7 +53,7 @@ envs:
   MODALITY: "tool_use"
   MAX_TURNS: 50
   # Context: Qwen3-32B has 128K context, use YaRN to extend
-  MAX_INPUT_LENGTH: 48000
+  MAX_INPUT_LENGTH: 64000
   MAX_GENERATE_LENGTH: 8192
   NUM_EPOCHS: 20
   RUN_ID: ""
