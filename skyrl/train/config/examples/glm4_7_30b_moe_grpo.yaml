@@ -6,8 +6,9 @@
 #
 # HF model: zai-org/GLM-4.7-Flash
 #
-# Designed for 1 node x 8 H100 GPUs (8 GPUs, TP=2 EP=4).
-# For 16 GPUs, change to EP=8 and policy_num_nodes=2.
+# Designed for 1 node x 8 GPUs (TP=1 EP=8 for training, 2x TP=4 vLLM engines).
+# GLM-4.7-Flash has 20 attention heads, so vLLM TP must divide 20 (use TP=4).
+# For 16 GPUs, change to policy_num_nodes=2 and adjust inference engines.
 #
 # Usage:
 #   bash examples/megatron/run_megatron_grpo_glm4_7_30b.sh
@@ -44,10 +45,10 @@ trainer:
       num_warmup_steps: 10
       scheduler: "constant_with_warmup"
     megatron_config:
-      tensor_model_parallel_size: 2
+      tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       context_parallel_size: 1
-      expert_model_parallel_size: 4
+      expert_model_parallel_size: 8
       expert_tensor_parallel_size: 1
       # GLM4.7-30B uses sigmoid routing with expert bias (DeepSeek-V3 style)
       moe_token_dispatcher_type: "alltoall"
@@ -55,11 +56,18 @@ trainer:
       moe_grouped_gemm: true
       moe_router_score_function: "sigmoid"
       moe_router_enable_expert_bias: true
+      # CPU optimizer offload to fit in 80GB GPUs
+      optimizer_config_kwargs:
+        optimizer_cpu_offload: true
+        optimizer_offload_fraction: 1.0
+        overlap_cpu_optimizer_d2h_h2d: false
+        use_precision_aware_optimizer: true
       transformer_config_kwargs:
         recompute_granularity: full
         recompute_modules: ["core_attn"]
         recompute_method: uniform
         recompute_num_layers: 1
+      empty_cuda_cache: true
 
   ref:
     model:
@@ -111,10 +119,14 @@ generator:
   weight_sync_backend: "nccl"
   async_engine: true
   batched: true
-  num_inference_engines: 1
-  inference_engine_tensor_parallel_size: 8
+  # 2 engines x TP=4 = 8 GPUs (20 heads / 4 = 5 heads per GPU)
+  num_inference_engines: 2
+  inference_engine_tensor_parallel_size: 4
   n_samples_per_prompt: 5
-  gpu_memory_utilization: 0.6
+  gpu_memory_utilization: 0.5
+  enforce_eager: true
+  engine_init_kwargs:
+    max_model_len: 2048
   sampling_params:
     max_generate_length: 1024
 

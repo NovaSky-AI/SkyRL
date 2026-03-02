@@ -4,8 +4,9 @@ set -x
 # GLM-4.7-Flash (zai-org/GLM-4.7-Flash) is a DeepSeek-V3 architecture clone
 # with MLA + MoE (64 routed experts, 4 active per token, ~3B active parameters).
 #
-# Runs on 1 node of 8xH100s (8 GPUs, TP=2 EP=4).
-# For 16 GPUs, change NUM_NODES=2 and MEGATRON_EP=8.
+# Runs on 1 node of 8 GPUs (TP=1 EP=8 for Megatron, 2x TP=4 vLLM engines).
+# GLM-4.7-Flash has 20 attention heads, so vLLM TP must divide 20 (use TP=4).
+# For 16 GPUs, change NUM_NODES=2 and adjust inference engines.
 #
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
@@ -20,15 +21,17 @@ INFERENCE_BACKEND="vllm"
 NUM_NODES=1
 NUM_GPUS=8
 
-# Megatron parallelism: TP=2, EP=4 fits 64 MoE experts across 8 GPUs (16 experts/GPU)
-MEGATRON_TP=2
+# Megatron parallelism: TP=1, EP=8 fits 64 MoE experts across 8 GPUs (8 experts/GPU)
+MEGATRON_TP=1
 MEGATRON_PP=1
 MEGATRON_CP=1
-MEGATRON_EP=4
+MEGATRON_EP=8
 MEGATRON_ETP=1
 
-NUM_INFERENCE_ENGINES=1
-INFERENCE_ENGINE_TP=8
+# vLLM inference: 2 engines x TP=4 = 8 GPUs (20 heads / 4 = 5 heads per GPU)
+NUM_INFERENCE_ENGINES=2
+INFERENCE_ENGINE_TP=4
+INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 
 # MLA does not support flash attention in TransformerEngine
 FLASH_ATTN=false
@@ -39,6 +42,10 @@ MOE_ROUTER_LB="none"
 MOE_GROUPED_GEMM=true
 MOE_ROUTER_SCORE_FN="sigmoid"
 MOE_ROUTER_EXPERT_BIAS=true
+
+# CPU optimizer offload to fit in 80GB GPUs
+OPTIMIZER_CPU_OFFLOAD=true
+OPTIMIZER_OFFLOAD_FRACTION=1.0
 
 uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -53,6 +60,8 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TP \
+  generator.enforce_eager=true \
+  +generator.engine_init_kwargs.max_model_len=$INFERENCE_ENGINE_MAX_MODEL_LEN \
   trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
   trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
@@ -73,6 +82,10 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.ref.megatron_config.moe_grouped_gemm=$MOE_GROUPED_GEMM \
   trainer.ref.megatron_config.moe_router_score_function=$MOE_ROUTER_SCORE_FN \
   trainer.ref.megatron_config.moe_router_enable_expert_bias=$MOE_ROUTER_EXPERT_BIAS \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_CPU_OFFLOAD \
+  trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
+  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=$OPTIMIZER_CPU_OFFLOAD \
+  trainer.policy.megatron_config.empty_cuda_cache=true \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
   trainer.epochs=20 \
@@ -98,7 +111,7 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.6 \
+  generator.gpu_memory_utilization=0.5 \
   trainer.logger="$LOGGER" \
   trainer.project_name="glm4_7_30b_grpo" \
   trainer.run_name="glm4_7_30b_a3b_grpo_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
