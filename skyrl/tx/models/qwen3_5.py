@@ -598,8 +598,11 @@ class Qwen3_5TextModel(nnx.Module):
             if self.layer_types[layer_idx] == "full_attention":
                 layer_kv = (kv_cache.keys[layer_idx], kv_cache.values[layer_idx]) if has_cache else None
                 hidden_states, updated_kv, _, _ = layer(
-                    hidden_states, attention_mask=attention_mask, positions=positions,
-                    adapter_indices=adapter_indices, kv_cache=layer_kv,
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    positions=positions,
+                    adapter_indices=adapter_indices,
+                    kv_cache=layer_kv,
                 )
                 assert updated_kv is not None
                 updated_keys.append(updated_kv[0])
@@ -608,14 +611,20 @@ class Qwen3_5TextModel(nnx.Module):
                     kv_cache.conv_states[layer_idx] if has_conv_cache else jnp.zeros((batch_size, 0, 0), dtype=dtype)
                 )
                 updated_recurrent_states.append(
-                    kv_cache.recurrent_states[layer_idx] if has_conv_cache else jnp.zeros((batch_size, 0, 0, 0), dtype=dtype)
+                    kv_cache.recurrent_states[layer_idx]
+                    if has_conv_cache
+                    else jnp.zeros((batch_size, 0, 0, 0), dtype=dtype)
                 )
             else:
                 conv_state = kv_cache.conv_states[layer_idx] if has_conv_cache else None
                 recurrent_state = kv_cache.recurrent_states[layer_idx] if has_conv_cache else None
                 hidden_states, _, new_conv_state, new_recurrent_state = layer(
-                    hidden_states, attention_mask=None if has_cache else attention_mask, positions=positions,
-                    adapter_indices=adapter_indices, conv_state=conv_state, recurrent_state=recurrent_state,
+                    hidden_states,
+                    attention_mask=None if has_cache else attention_mask,
+                    positions=positions,
+                    adapter_indices=adapter_indices,
+                    conv_state=conv_state,
+                    recurrent_state=recurrent_state,
                 )
                 assert new_conv_state is not None and new_recurrent_state is not None
                 updated_conv_states.append(new_conv_state)
