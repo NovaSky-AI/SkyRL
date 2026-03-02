@@ -100,6 +100,7 @@ fsdp = [
     "skyrl[skyrl-train]",
     "vllm; sys_platform == 'linux'",
     "torch==2.10.0; sys_platform == 'linux'",
+    "flash-attn; sys_platform == 'linux'",
     "flashinfer-python; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
@@ -215,7 +216,7 @@ transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tool
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 
 [tool.uv.extra-build-variables]
-flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
+# flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 vllm = { VLLM_USE_PRECOMPILED = "1" }
 
 [[tool.uv.index]]

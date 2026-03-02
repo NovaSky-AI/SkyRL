@@ -111,10 +111,10 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   trainer.run_name="$RUN_NAME" \
   trainer.export_path="$HOME/exports/$RUN_NAME" \
   trainer.hf_save_interval=$EVAL_CKPT_INTERVAL \
-  trainer.resume_mode=latest \
+  trainer.resume_mode=none \
   trainer.max_ckpts_to_keep=3 \
   trainer.ckpt_path="$HOME/ckpts/$RUN_NAME" \
-  trainer.flash_attn=false \
-  trainer.use_sample_packing=false \
-  +generator.engine_init_kwargs.attention_backend=FLEX_ATTENTION \
+  trainer.flash_attn=true \
+  trainer.use_sample_packing=true \
+  # +generator.engine_init_kwargs.attention_backend=FLEX_ATTENTION \
   $@

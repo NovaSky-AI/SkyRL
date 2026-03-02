@@ -610,7 +610,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     async def pause_generation(self) -> None:
         """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
         engine = self._get_engine()
-        await engine.pause_generation(mode="keep")
+        await engine.pause_generation(mode="keep", clear_cache=False)
         logger.info("pause_generation(mode='keep') finished")
 
     async def resume_generation(self) -> None:
