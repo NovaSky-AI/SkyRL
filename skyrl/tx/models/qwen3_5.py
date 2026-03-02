@@ -78,7 +78,7 @@ def recurrent_gated_delta_rule(
         inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
     ) -> tuple[jax.Array, jax.Array]:
         q_t, k_t, v_t, g_t, beta_t = inputs
-        decay = jnp.exp(g_t)[..., None, None]
+        decay = jnp.exp(g_t).astype(dtype)[..., None, None]
         state = state * decay
         kv_mem = jnp.sum(state * k_t[..., :, None], axis=-2)
         delta = (v_t - kv_mem) * beta_t[..., None]
