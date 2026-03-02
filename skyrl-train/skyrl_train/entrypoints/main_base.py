@@ -154,11 +154,15 @@ class BasePPOExp:
         Returns:
             PromptDataset: The training dataset.
         """
+        # Get sample_ratio from config (default 1.0 = use all data)
+        sample_ratio = getattr(self.cfg.data, "train_sample_ratio", 1.0)
+
         prompts_dataset = PromptDataset(
             datasets=self.cfg.data.train_data,
             tokenizer=self.tokenizer,
             max_prompt_length=self.cfg.trainer.max_prompt_length,
             num_workers=8,
+            sample_ratio=sample_ratio,
         )
         # make sure the dataset is large enough to train on
         assert (
@@ -173,11 +177,15 @@ class BasePPOExp:
             PromptDataset: The evaluation dataset.
         """
         if self.cfg.trainer.eval_interval > 0 and self.cfg.data.val_data:
+            # Get sample_ratio from config (default 1.0 = use all data)
+            sample_ratio = getattr(self.cfg.data, "val_sample_ratio", 1.0)
+
             prompts_dataset = PromptDataset(
                 datasets=self.cfg.data.val_data,
                 tokenizer=self.tokenizer,
                 max_prompt_length=self.cfg.trainer.max_prompt_length,
                 num_workers=8,
+                sample_ratio=sample_ratio,
             )
             return prompts_dataset
         return None
@@ -207,8 +215,21 @@ class BasePPOExp:
         else:
             return None
 
-    def get_generator(self, cfg, tokenizer, inference_engine_client):
+    def get_generator(
+        self,
+        cfg,
+        tokenizer,
+        inference_engine_client,
+        reward_inference_client=None,
+    ):
         """Initializes the generator.
+
+        Args:
+            cfg: Configuration object
+            tokenizer: Tokenizer for encoding/decoding
+            inference_engine_client: Client for policy model inference
+            reward_inference_client: Optional client for reward model inference
+                                    (uses frozen_model=True for no weight sync)
 
         Returns:
             GeneratorInterface: The generator.
@@ -221,6 +242,7 @@ class BasePPOExp:
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
             model_name=cfg.trainer.policy.model.path,
+            reward_inference_client=reward_inference_client,
         )
 
     def get_trainer(
@@ -277,6 +299,46 @@ class BasePPOExp:
             return self._get_new_inference_client()
         else:
             return self._get_legacy_inference_client()
+
+    def get_reward_inference_client(self) -> InferenceEngineClient | None:
+        """Setup and return the reward model inference client.
+
+        This creates inference engines for reward model scoring (LLM-as-Judge,
+        verifiers, frozen reward models). Uses frozen_model=True to skip weight
+        sync and enable always-active engines.
+
+        Returns:
+            InferenceEngineClient: The reward inference client, or None if disabled.
+        """
+        from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
+
+        # Check if reward inference is enabled in config
+        reward_cfg = getattr(self.cfg, "reward_inference", None)
+        if reward_cfg is None or not getattr(reward_cfg, "enabled", False):
+            return None
+
+        logger.info(
+            f"Creating reward inference client: {reward_cfg.num_engines} engines × "
+            f"TP{reward_cfg.tensor_parallel_size} for {reward_cfg.model_path}"
+        )
+
+        # Create engines with frozen_model=True (no weight sync)
+        engines = create_ray_wrapped_inference_engines(
+            num_inference_engines=reward_cfg.num_engines,
+            tensor_parallel_size=reward_cfg.tensor_parallel_size,
+            model_dtype=reward_cfg.model_dtype,
+            pretrain=reward_cfg.model_path,
+            seed=self.cfg.trainer.seed + 1000,  # Different seed from policy
+            vllm_v1_disable_multiproc=True,
+            enable_prefix_caching=reward_cfg.enable_prefix_caching,
+            enforce_eager=reward_cfg.enforce_eager,
+            gpu_memory_utilization=reward_cfg.gpu_memory_utilization,
+            max_num_batched_tokens=reward_cfg.max_num_batched_tokens,
+            max_num_seqs=reward_cfg.max_num_seqs,
+            frozen_model=True,  # KEY: No weight sync for reward model
+        )
+
+        return InferenceEngineClient(engines, self.tokenizer, self.cfg)
 
     def _get_legacy_inference_client(self) -> InferenceEngineInterface:
         """Legacy inference client using Ray actors."""
@@ -390,7 +452,15 @@ class BasePPOExp:
 
         inference_engine_client = self.get_inference_client()
 
-        generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
+        # Create reward inference client if enabled (uses frozen_model=True)
+        reward_inference_client = self.get_reward_inference_client()
+
+        generator: GeneratorInterface = self.get_generator(
+            self.cfg,
+            self.tokenizer,
+            inference_engine_client,
+            reward_inference_client=reward_inference_client,
+        )
 
         trainer = self.get_trainer(
             cfg=self.cfg,
