@@ -91,7 +91,7 @@ class ExternalInferenceClient:
 
         For base model sampling (no LoRA), the request is sent directly using the base model name.
         """
-        prompt_tokens = [token for chunk in request.prompt.chunks for token in chunk.tokens]
+        prompt_tokens = request.prompt.to_types().to_token_list()
 
         if base_model:
             # Base model sampling: use the model name directly, no LoRA checkpoint needed
