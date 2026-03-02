@@ -111,7 +111,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=None,
         description="Total number of processes in the multi-node cluster",
     )
-    process_id: int | None = Field(
+    process_id: int = Field(
         default=0,
         description="Process ID within the multi-node cluster",
     )
