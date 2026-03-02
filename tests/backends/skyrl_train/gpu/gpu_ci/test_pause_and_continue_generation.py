@@ -1,7 +1,7 @@
 """
 Test pause and continue generation with inference engine client HTTP endpoint.
 
-uv run --isolated --extra dev --extra vllm pytest tests/backends/skyrl_train/gpu/gpu_ci/test_pause_and_continue_generation.py
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_pause_and_continue_generation.py
 """
 
 import asyncio
