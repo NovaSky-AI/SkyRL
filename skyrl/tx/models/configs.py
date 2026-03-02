@@ -51,7 +51,7 @@ class ModelConfig(PretrainedConfig):
 
     def get_config(self) -> PretrainedConfig:
         """Return `text_config` when present, otherwise return this config."""
-        return self.get_text_context() if hasattr(self, "text_config") else self
+        return self.get_text_config() if hasattr(self, "text_config") else self
 
     def get_text_config(self) -> "ModelConfig":
         """Return a wrapped config built from `self.text_config`."""
