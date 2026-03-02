@@ -19,7 +19,7 @@ def _find_local_repo_root() -> Path:
     candidates = [Path(__file__).resolve(), Path.cwd()]
     for start in candidates:
         for base in [start] + list(start.parents):
-            if (base / "skyrl-train").exists() and (base / "skyrl-gym").exists():
+            if base.exists() and (base / "skyrl-gym").exists():
                 return base
     raise Exception("SkyRL root repo path not found")
 
@@ -86,7 +86,7 @@ volume = create_modal_volume()
 )
 def run_script(command: str):
     """
-    Runs COMMAND inside SkyRL/skyrl-train
+    Runs COMMAND inside SkyRL/
     """
     import subprocess
     import os
@@ -98,8 +98,8 @@ def run_script(command: str):
     print(f"Container repo root: {repo_root}")
     print(f"Initial working directory: {os.getcwd()}")
 
-    # Change to the skyrl-train directory
-    run_command_dir = os.path.join(repo_root, "skyrl-train")
+    # Change to the root directory
+    run_command_dir = os.path.join(repo_root)
     os.chdir(run_command_dir)
     print(f"Changed to directory: {os.getcwd()}")
 
@@ -156,7 +156,7 @@ def run_script(command: str):
 @app.local_entrypoint()
 def main(command: str = "nvidia-smi"):
     """Main entry-point for running a command in Modal-integrated SkyRL environmenmt.
-    The given command will be run inside SkyRL/skyrl-train/
+    The given command will be run inside SkyRL/
 
     Args:
         command (str, optional): Command to run. Defaults to "nvidia-smi".

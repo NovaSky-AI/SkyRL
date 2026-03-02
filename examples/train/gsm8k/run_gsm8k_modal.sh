@@ -2,8 +2,8 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
 
-# Intended to be used with Modal (SkyRL/skyrl-train/integration/modal)
-# modal run main.py --command "WANDB_API_KEY=... bash examples/gsm8k/run_gsm8k_modal.sh"
+# Intended to be used with Modal (SkyRL/examples/train_integrations/modal)
+# modal run main.py --command "WANDB_API_KEY=... bash examples/train/gsm8k/run_gsm8k_modal.sh"
 
 # NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
 
