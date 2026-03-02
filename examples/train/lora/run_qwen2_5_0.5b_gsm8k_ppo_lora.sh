@@ -2,7 +2,7 @@ set -x
 
 # Colocated PPO LoRA training + generation for Qwen2.5-0.5B-Instruct on GSM8K.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/train/lora/run_qwen2_5_0.5b_gsm8k_ppo_lora.sh
 
