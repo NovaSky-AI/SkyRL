@@ -259,10 +259,9 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
         self.conv_dim = self.key_dim * 2 + self.value_dim
 
         # Keep linear-attention projections replicated across TP for simplicity/stability.
-        projection_size_qkv = self.key_dim * 2 + self.value_dim
         self.in_proj_qkv = LoRALinear(
             self.hidden_size,
-            projection_size_qkv,
+            self.conv_dim,
             sharding=("fsdp", None),
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
