@@ -1155,6 +1155,7 @@ def compute_grpo_outcome_advantage(
     """
     # this assumes response-level rewards
     scores = token_level_rewards.sum(dim=-1)
+    returns = scores.clone()
 
     id2score = defaultdict(list)
     id2mean = {}
@@ -1179,8 +1180,9 @@ def compute_grpo_outcome_advantage(
             else:
                 scores[i] = scores[i] - id2mean[index[i]]
         scores = scores.unsqueeze(-1) * response_mask
+        returns = returns.unsqueeze(-1) * response_mask
 
-    return scores, scores
+    return scores, returns
 
 
 def repopulate_all_registries():
