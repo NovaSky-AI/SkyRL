@@ -847,7 +847,7 @@ class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsPro
         self.config = model_config
         self.model = Qwen3_5Model(model_config, dtype=dtype, rngs=rngs)
 
-        if model_config.tie_word_embeddings:
+        if config.tie_word_embeddings:
             self.lm_head = None
         else:
             self.lm_head = LoRALinear(
