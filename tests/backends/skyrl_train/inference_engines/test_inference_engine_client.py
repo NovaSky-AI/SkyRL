@@ -1,9 +1,9 @@
 """
-Test for `skyrl-train/skyrl_train/inference_engines/inference_engine_client.py` functinoalities
-that can be mocked. Also tests for `skyrl-train/skyrl_train/inference_engines/utils.py`.
+Test for `skyrl/backends/skyrl_train/inference_engines/inference_engine_client.py` functionalities
+that can be mocked. Also tests for `skyrl/backends/skyrl_train/inference_engines/utils.py`.
 
 Run with:
-uv run --isolated --extra dev pytest tests/backends/skyrl_train/inf_engines/test_inference_engine_client.py
+uv run --isolated --extra dev pytest tests/backends/skyrl_train/inference_engines/test_inference_engine_client.py
 """
 
 from http import HTTPStatus

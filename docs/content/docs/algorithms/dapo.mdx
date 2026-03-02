@@ -93,7 +93,7 @@ class DAPOExp(BasePPOExp):
       return DAPOTrainer(*args, **kwargs)
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp = DAPOExp(cfg)
     exp.run()
 
@@ -102,8 +102,8 @@ def skyrl_entrypoint(cfg: DictConfig):
 To add the overlong buffer length and penalty factor parameters to the config, you can add the following lines to the `run_dapo_gsm8k.sh` script:
 
 ```bash title="examples/algorithms/dapo/run_dapo_gsm8k.sh"
-+trainer.algorithm.overlong_buffer.len=512 \
-+trainer.algorithm.overlong_buffer.penalty_factor=1.0 \
+trainer.algorithm.overlong_buffer.len=512 \
+trainer.algorithm.overlong_buffer.penalty_factor=1.0 \
 ```
 
 ### Launching a DAPO Training Run

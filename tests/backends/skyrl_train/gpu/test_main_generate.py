@@ -1,5 +1,5 @@
 """
-uv run --extra dev --extra vllm --isolated pytest tests/gpu/test_main_generate.py
+uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu/test_main_generate.py
 """
 
 import json

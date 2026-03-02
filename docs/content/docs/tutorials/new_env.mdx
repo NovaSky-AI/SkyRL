@@ -186,7 +186,7 @@ We will create a new entrypoint for training with the `multiply` environment by 
 
 ```python
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
    # Register the multiply environment
    # this needs to be done inside the entrypoint task
    register(
@@ -198,9 +198,8 @@ def skyrl_entrypoint(cfg: DictConfig):
    exp = BasePPOExp(cfg)
    exp.run()
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
-   # validate the arguments
+def main() -> None:
+   cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
    validate_cfg(cfg)
 
    initialize_ray(cfg)

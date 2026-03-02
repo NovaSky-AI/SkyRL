@@ -81,7 +81,7 @@ ray.init()
 sync_registries()
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
      # Function is now available on all Ray processes
      available_functions = AdvantageEstimatorRegistry.list_available() # will include "my_function"
 

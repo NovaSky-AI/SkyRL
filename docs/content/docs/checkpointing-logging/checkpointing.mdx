@@ -95,7 +95,7 @@ Checkpointing behavior is controlled by several parameters in the YAML configura
   - **Purpose**: Save checkpoints every N training steps
 
 `ckpt_path`
-  - **Default**: `"${oc.env:HOME}/ckpts/"`
+  - **Default**: `"~/ckpts/"`
   - **Purpose**: Base directory where all checkpoints are stored
   - **Options**:
     - Local file system path (e.g., `/path/to/ckpts/`)
@@ -138,6 +138,6 @@ In addition to checkpointing, users can optionally save the policy model in Hugg
   - **Purpose**: Save HuggingFace format policy models every N training steps
 
 `export_path`
-  - **Default**: `"${oc.env:HOME}/exports/"`
+  - **Default**: `"~/exports/"`
   - **Purpose**: Base directory where HuggingFace models and other artifacts are saved
   - **Structure**: Models are saved to `{export_path}/global_step_{N}/policy/`

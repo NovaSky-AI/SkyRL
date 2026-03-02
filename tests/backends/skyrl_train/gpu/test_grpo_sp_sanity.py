@@ -1,5 +1,5 @@
 """
-uv run --isolated --extra vllm --extra dev -- pytest -s -vvv tests/gpu/test_grpo_sp_sanity.py
+uv run --isolated --extra fsdp --extra dev -- pytest -s -vvv tests/backends/skyrl_train/gpu/test_grpo_sp_sanity.py
 """
 
 from loguru import logger

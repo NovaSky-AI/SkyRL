@@ -1,6 +1,6 @@
 """
 Run with:
-uv run --isolated --extra dev -- pytest tests/gpu/test_multi_node_pg.py
+uv run --isolated --extra dev -- pytest tests/backends/skyrl_train/gpu/test_multi_node_pg.py
 NOTE: Placement group bundle ordering across nodes only typically has race conditions when using >16 GPUs
 so this test is best run with >16 GPUs to actually see that ordering is correct
 """
