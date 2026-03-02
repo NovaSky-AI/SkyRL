@@ -155,7 +155,7 @@ class MegatronConfig(BaseConfig):
     # MoE runtime configuration flags
     moe_token_dispatcher_type: str = "alltoall"
     moe_router_load_balancing_type: str = "none"
-    moe_grouped_gemm: bool = False
+    moe_grouped_gemm: bool = True
     moe_router_score_function: Optional[str] = None
     moe_router_enable_expert_bias: Optional[bool] = None
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
