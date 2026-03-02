@@ -151,14 +151,8 @@ class Qwen3_5Attention(nnx.Module):
         tp_shard = "tp" if shard_attention_heads else None
 
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
-        rope_parameters = getattr(config, "rope_parameters", None)
-        assert isinstance(rope_parameters, dict), "Qwen3_5Attention requires config.rope_parameters to be a dict."
-        assert (
-            "partial_rotary_factor" in rope_parameters
-        ), "Qwen3_5Attention requires rope_parameters['partial_rotary_factor']."
-        assert "rope_theta" in rope_parameters, "Qwen3_5Attention requires rope_parameters['rope_theta']."
-        partial_rotary_factor = rope_parameters["partial_rotary_factor"]
-        rope_theta = rope_parameters["rope_theta"]
+        partial_rotary_factor = config.rope_parameters["partial_rotary_factor"]
+        rope_theta = config.rope_parameters["rope_theta"]
 
         rotary_dim = int(self.head_dim * partial_rotary_factor)
         rotary_dim = min(self.head_dim, rotary_dim)
