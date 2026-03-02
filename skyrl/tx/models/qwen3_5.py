@@ -702,7 +702,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
         return hidden_states, updated_kv, new_conv_state, new_recurrent_state
 
 
-class Qwen3_5Model(nnx.Module):
+class Qwen3_5TextModel(nnx.Module):
 
     def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         self.config = config
@@ -833,11 +833,11 @@ class Qwen3_5Model(nnx.Module):
         )
 
 
-class Qwen3_5Backbone(nnx.Module):
+class Qwen3_5Model(nnx.Module):
 
     def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         # Keep the nested `model.language_model.*` parameter structure used by HF checkpoints.
-        self.language_model = Qwen3_5Model(config, dtype=dtype, rngs=rngs)
+        self.language_model = Qwen3_5TextModel(config, dtype=dtype, rngs=rngs)
 
 
 class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProcessorMixin):
@@ -845,7 +845,7 @@ class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsPro
     def __init__(self, config: Qwen3_5Config, *, dtype: jnp.dtype, rngs: nnx.Rngs) -> None:
         model_config = config.get_text_config()
         self.config = model_config
-        self.model = Qwen3_5Backbone(model_config, dtype=dtype, rngs=rngs)
+        self.model = Qwen3_5Model(model_config, dtype=dtype, rngs=rngs)
 
         if model_config.tie_word_embeddings:
             self.lm_head = None
