@@ -4,7 +4,7 @@ set -x
 
 # uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/lora/run_qwen2_5_0.5b_gsm8k_ppo_lora.sh
+# bash examples/train/lora/run_qwen2_5_0.5b_gsm8k_ppo_lora.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
