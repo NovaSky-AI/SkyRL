@@ -32,8 +32,10 @@ NUM_INFERENCE_ENGINES=2
 INFERENCE_ENGINE_TP=4
 INFERENCE_ENGINE_MAX_MODEL_LEN=2048
 
-# MLA does not support flash attention in TransformerEngine
-FLASH_ATTN=false
+# GLM-4.7-Flash supports flash attention (v_head_dim == qk_head_dim + qk_rope_head_dim == 256).
+# Most other MLA models (DeepSeek-V3, Moonlight) do NOT support flash attention due to
+# mismatched Q/V head dimensions. Use flash_attn=false for those models.
+FLASH_ATTN=true
 
 # MoE routing flags (DeepSeek-V3 style: sigmoid scoring with expert bias)
 MOE_TOKEN_DISPATCHER="alltoall"
