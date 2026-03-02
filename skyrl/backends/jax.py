@@ -1073,14 +1073,13 @@ class JaxBackend(JaxBackendImpl):
             tpu_worker_id = int(os.environ.get("TPU_WORKER_ID"))
 
             jax.distributed.initialize(
-                cluster_detection_method="deactivate",
                 coordinator_address=config.coordinator_address,
                 num_processes=config.num_processes,
-                process_id=0,
-                local_device_ids=range(config.tensor_parallel_size),
+                # process_id=0,
+                # local_device_ids=range(config.tensor_parallel_size),
             )
             logger.info(
-                f"JAX distributed initialized: input_process_id=0, "
+                f"JAX distributed initialized: tpu_worker_id={tpu_worker_id}, input_process_id=0, "
                 f"rocess_id={jax.process_index()} ({jax.process_count()} total), "
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
@@ -1144,15 +1143,14 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int, te
         raise ValueError("Worker process_id must be > 0 (process 0 is the coordinator)")
     tpu_worker_id = int(os.environ.get("TPU_WORKER_ID"))
     jax.distributed.initialize(
-        cluster_detection_method="deactivate",
         coordinator_address=coordinator_address,
         num_processes=num_processes,
-        process_id=process_id,
-        local_device_ids=range(tensor_parallel_size),
+        # process_id=process_id,
+        # local_device_ids=range(tensor_parallel_size),
     )
 
     logger.info(
-        f"Worker input_process_id={process_id} process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
+        f"Worker tpu_worker_id={tpu_worker_id} input_process_id={process_id} process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
     )
 
     # Receive INIT payload with base_model and config from coordinator
