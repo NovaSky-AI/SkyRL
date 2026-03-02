@@ -39,7 +39,7 @@ The `skyrl-train` package supports:
 
 ## Documentation
 
-Find `skyrl-train` documentation at: [docs.skyrl.ai/docs/](https://docs.skyrl.ai/docs/)
+Find documentation at: [docs.skyrl.ai/docs/](https://docs.skyrl.ai/docs/)
 
 ## Quick Start
 
