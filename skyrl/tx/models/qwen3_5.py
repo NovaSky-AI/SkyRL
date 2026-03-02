@@ -53,12 +53,8 @@ def recurrent_gated_delta_rule(
     initial_state: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     dtype = query.dtype
-    compute_dtype = dtype
-    query = l2norm(query.astype(compute_dtype), axis=-1)
-    key = l2norm(key.astype(compute_dtype), axis=-1)
-    value = value.astype(compute_dtype)
-    g = g.astype(compute_dtype)
-    beta = beta.astype(compute_dtype)
+    query = l2norm(query, axis=-1)
+    key = l2norm(key, axis=-1)
 
     query = query * (1.0 / math.sqrt(query.shape[-1]))
 
@@ -75,9 +71,9 @@ def recurrent_gated_delta_rule(
     v_head_dim = value.shape[3]
 
     if initial_state is None:
-        initial_state = jnp.zeros((batch_size, num_heads, k_head_dim, v_head_dim), dtype=compute_dtype)
+        initial_state = jnp.zeros((batch_size, num_heads, k_head_dim, v_head_dim), dtype=dtype)
     else:
-        initial_state = initial_state.astype(compute_dtype)
+        initial_state = initial_state.astype(dtype)
 
     def step_fn(
         state: jax.Array,
@@ -109,11 +105,8 @@ class Qwen3_5RMSNorm(nnx.Module):
         )
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        compute_dtype = x.dtype
-        out = x.astype(compute_dtype)
-        out = out * jax.lax.rsqrt(jnp.mean(out * out, axis=-1, keepdims=True) + self.eps)
-        out = out * (1.0 + self.weight[...].astype(compute_dtype))
-        return out.astype(x.dtype)
+        out = x * jax.lax.rsqrt(jnp.mean(x * x, axis=-1, keepdims=True) + self.eps)
+        return out * (1.0 + self.weight[...].astype(x.dtype))
 
 
 class Qwen3_5RMSNormGated(nnx.Module):
@@ -128,13 +121,9 @@ class Qwen3_5RMSNormGated(nnx.Module):
         )
 
     def __call__(self, hidden_states: jax.Array, gate: jax.Array) -> jax.Array:
-        input_dtype = hidden_states.dtype
-        compute_dtype = hidden_states.dtype
-        out = hidden_states.astype(compute_dtype)
-        out = out * jax.lax.rsqrt(jnp.mean(out * out, axis=-1, keepdims=True) + self.eps)
-        out = out * self.weight[...].astype(compute_dtype)
-        out = out * nnx.silu(gate.astype(compute_dtype))
-        return out.astype(input_dtype)
+        dtype = hidden_states.dtype
+        out = hidden_states * jax.lax.rsqrt(jnp.mean(hidden_states * hidden_states, axis=-1, keepdims=True) + self.eps)
+        return out * self.weight[...].astype(dtype) * nnx.silu(gate)
 
 
 class Qwen3_5Attention(nnx.Module):
