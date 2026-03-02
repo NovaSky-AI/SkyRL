@@ -1,10 +1,8 @@
 __pycache__/
 /wandb/
-/skyrl-train/wandb/
 **/*.egg-info/
 # hydra logs
 /outputs/
-/skyrl-train/outputs/
 /data/lcb
 
 # MkDocs build output (generated during build)
@@ -21,10 +19,8 @@ docs/public/api-ref/
 # .env
 
 # .env files inside directories can be ignored
-/skyrl-train/.env
 /skyrl-gym/.env 
 
-/skyrl_train/.venv
 /skyrl-gym/.venv
 
 # build
