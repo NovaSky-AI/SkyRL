@@ -12,7 +12,7 @@ set -x
 # export WANDB_API_KEY=<your_key_here>
 # bash examples/openenv/run_dummy_openenv.sh
 
-# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/openenv/run_dummy_openenv.sh`.
+# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/train_integrations/openenv/run_dummy_openenv.sh`.
 
 : "${ENV_NAME:="echo_env"}"
 : "${DATA_DIR:="$HOME/data/openenv/$ENV_NAME"}"
