@@ -61,7 +61,6 @@ trainer:
         optimizer_cpu_offload: true
         optimizer_offload_fraction: 1.0
         overlap_cpu_optimizer_d2h_h2d: false
-        use_precision_aware_optimizer: true
       transformer_config_kwargs:
         recompute_granularity: full
         recompute_modules: ["core_attn"]

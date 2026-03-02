@@ -84,7 +84,6 @@ uv run --isolated --extra mcore -m skyrl_train.entrypoints.main_base \
   trainer.ref.megatron_config.moe_router_enable_expert_bias=$MOE_ROUTER_EXPERT_BIAS \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_CPU_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
-  trainer.policy.megatron_config.optimizer_config_kwargs.use_precision_aware_optimizer=$OPTIMIZER_CPU_OFFLOAD \
   trainer.policy.megatron_config.empty_cuda_cache=true \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
