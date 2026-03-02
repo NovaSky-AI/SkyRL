@@ -558,9 +558,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             # NOTE(Charlie): This is hacky. With the refactored inference stack, we
             # should be able to directly reuse the error handling from the served vllm.
             error_message = str(e).lower()
-            is_context_length_error = (
-                "maximum context length" in error_message or "maximum model length" in error_message
-            )
+            is_context_length_error = "context length" in error_message or "maximum model length" in error_message
 
             if is_context_length_error:
                 http_status = HTTPStatus.BAD_REQUEST

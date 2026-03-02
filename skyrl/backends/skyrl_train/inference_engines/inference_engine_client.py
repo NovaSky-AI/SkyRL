@@ -615,7 +615,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         if self.generation_paused_event.is_set():
             raise RuntimeError("Generation is already paused, cannot pause again.")
         self.generation_paused_event.set()
-        await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
+        # await asyncio.sleep(ABORT_GENERATION_GRACE_PERIOD_SECONDS)
         await self._run_on_all_engines("abort_generation")
 
     async def resume_generation(self) -> None:

@@ -98,7 +98,7 @@ def _check_chat_completions_outputs(
         if test_type == "litellm":
             response_data = response_data.model_dump()
         if test_type != "litellm" and backend == "vllm":
-            from vllm.entrypoints.openai.protocol import ChatCompletionResponse
+            from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 
             ChatCompletionResponse.model_validate(response_data)
         for key in ["id", "object", "created", "model", "choices"]:
@@ -125,7 +125,7 @@ def _check_completions_outputs(
         if test_type == "litellm":
             response_data = response_data.model_dump()
         if test_type != "litellm" and backend == "vllm":
-            from vllm.entrypoints.openai.protocol import CompletionResponse
+            from vllm.entrypoints.openai.completion.protocol import CompletionResponse
 
             CompletionResponse.model_validate(response_data)
         for key in ["id", "object", "created", "model", "choices"]:
@@ -339,7 +339,7 @@ def test_context_length_error_returns_400(vllm_server):
     assert response.status_code == HTTPStatus.BAD_REQUEST
     error_data = response.json()
     error_message = error_data.get("error", {}).get("message", str(error_data)).lower()
-    assert "maximum context length" in error_message or "context" in error_message
+    assert "context length" in error_message
 
     # Test 2: Prompt fits, but prompt + max_tokens exceeds max_model_len -> HTTP 400
     # vllm serve returns: "'max_tokens' or 'max_completion_tokens' is too large: {max_tokens}.
@@ -356,9 +356,7 @@ def test_context_length_error_returns_400(vllm_server):
     error_data = response.json()
     assert "error" in error_data
     error_message = error_data["error"]["message"]
-    assert (
-        "maximum context length" in error_message.lower()
-    ), f"Error message should mention 'maximum context length': {error_message}"
+    assert "context length" in error_message.lower(), f"Error message should mention 'context length': {error_message}"
 
 
 # NOTE : We use LiteLLM because it supports sampling params such as min_tokens, skip_special_tokens, etc.,
@@ -450,8 +448,8 @@ def test_client_context_length_error_returns_400_via_litellm(vllm_server: Infere
     assert exception_raised is not None
     error_str = str(exception_raised).lower()
     assert (
-        "maximum context length" in error_str
-    ), f"Error message should mention 'maximum context length': {str(exception_raised)[:200]}"
+        "context length" in error_str
+    ), f"Error message should mention 'context length': {str(exception_raised)[:200]}"
 
 
 # --- Group B: RemoteInferenceClient ---
@@ -540,7 +538,7 @@ def test_client_context_length_error_returns_400(vllm_server):
     err = exc_info.value
     assert err.status == HTTPStatus.BAD_REQUEST
     error_str = str(err).lower()
-    assert "maximum context length" in error_str or "context" in error_str
+    assert "context length" in error_str
 
 
 @pytest.mark.vllm

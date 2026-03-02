@@ -137,7 +137,7 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend: st
         if test_type != "litellm":
             # Cannot check for litellm because it returns it has its own pydantic object
             if backend == "vllm":
-                from vllm.entrypoints.openai.protocol import ChatCompletionResponse
+                from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 
                 ChatCompletionResponse.model_validate(response_data)  # will raise error if invalid
             else:
@@ -189,7 +189,7 @@ def _check_completions_outputs(prompts, outputs, test_type, backend: str = "vllm
 
         if test_type != "litellm":
             if backend == "vllm":
-                from vllm.entrypoints.openai.protocol import CompletionResponse
+                from vllm.entrypoints.openai.completion.protocol import CompletionResponse
 
                 CompletionResponse.model_validate(response_data)
             else:
@@ -1002,8 +1002,8 @@ def test_context_length_error_returns_400(ray_init_fixture):
         assert "error" in error_data
         error_message = error_data["error"]["message"]
         assert (
-            "maximum context length" in error_message.lower()
-        ), f"Error message should mention 'maximum context length': {error_message}"
+            "context length" in error_message.lower()
+        ), f"Error message should mention 'context length': {error_message}"
 
         # Test 2: Prompt fits, but prompt + max_tokens exceeds max_model_len -> HTTP 400
         # vllm serve returns: "'max_tokens' or 'max_completion_tokens' is too large: {max_tokens}.
@@ -1021,8 +1021,8 @@ def test_context_length_error_returns_400(ray_init_fixture):
         assert "error" in error_data
         error_message = error_data["error"]["message"]
         assert (
-            "maximum context length" in error_message.lower()
-        ), f"Error message should mention 'maximum context length': {error_message}"
+            "context length" in error_message.lower()
+        ), f"Error message should mention 'context length': {error_message}"
 
         # Test 3: Valid request still works (regression test)
         response = requests.post(
@@ -1053,8 +1053,8 @@ def test_context_length_error_returns_400(ray_init_fixture):
         assert exception_raised is not None
         error_str = str(exception_raised).lower()
         assert (
-            "maximum context length" in error_str
-        ), f"Error message should mention 'maximum context length': {str(exception_raised)[:200]}"
+            "context length" in error_str
+        ), f"Error message should mention 'context length': {str(exception_raised)[:200]}"
 
     finally:
         if server_port is not None:
