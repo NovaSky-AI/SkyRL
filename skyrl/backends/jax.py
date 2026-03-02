@@ -1067,6 +1067,7 @@ class JaxBackend(JaxBackendImpl):
     def __init__(self, base_model: str, config: JaxBackendConfig):
         if config.coordinator_address is not None:
             jax.distributed.initialize(
+                cluster_detection_method="deactivate",
                 coordinator_address=config.coordinator_address,
                 num_processes=config.num_processes,
                 process_id=0,
@@ -1136,6 +1137,7 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int, te
         raise ValueError("Worker process_id must be > 0 (process 0 is the coordinator)")
 
     jax.distributed.initialize(
+        cluster_detection_method="deactivate",
         coordinator_address=coordinator_address,
         num_processes=num_processes,
         process_id=process_id,
