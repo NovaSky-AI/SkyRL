@@ -1045,22 +1045,18 @@ def _broadcast_command(cmd: RpcPayload | None, process_id: int) -> RpcPayload:
         assert cmd is not None, "Coordinator must provide a command to broadcast."
         data = RpcPayloadAdapter.dump_json(cmd)
         size = np.array([len(data)], dtype=np.int64)
+
+        size = multihost_utils.broadcast_one_to_all(size, is_source=True)
+
+        data_arr = np.frombuffer(data, dtype=np.uint8)
+        data_arr = multihost_utils.broadcast_one_to_all(data_arr, is_source=True)
     else:
         size = np.array([0], dtype=np.int64)
 
-    # Broadcast size first
-    if process_id == 0:
-        size = multihost_utils.broadcast_one_to_all(size, source=True)
-    else:
-        size = multihost_utils.broadcast_one_to_all(size, source=False)
+        size = multihost_utils.broadcast_one_to_all(size, is_source=False)
 
-    # Broadcast data
-    if process_id == 0:
-        data_arr = np.frombuffer(data, dtype=np.uint8)
-    else:
         data_arr = np.zeros(size[0], dtype=np.uint8)
-
-    data_arr = multihost_utils.broadcast_one_to_all(data_arr)
+        data_arr = multihost_utils.broadcast_one_to_all(data_arr, is_source=False)
 
     return RpcPayloadAdapter.validate_json(data_arr.tobytes())
 
