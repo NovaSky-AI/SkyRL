@@ -19,7 +19,7 @@
 from collections import defaultdict
 from enum import StrEnum
 from functools import wraps
-from typing import Callable, List, Literal, Optional, Tuple, Union
+from typing import Any, Callable, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import ray
@@ -427,6 +427,7 @@ class AdvantageEstimator(StrEnum):
     GRPO = "grpo"
     RLOO = "rloo"
     REINFORCE_PP = "reinforce++"
+    GDPO = "gdpo"
 
 
 class AdvantageEstimatorRegistry(BaseFunctionRegistry):
@@ -453,6 +454,7 @@ class AdvantageEstimatorRegistry(BaseFunctionRegistry):
             "gae": [AdvantageEstimator.GAE, compute_gae_advantage_return],
             "rloo": [AdvantageEstimator.RLOO, compute_rloo_outcome_advantage],
             "reinforce++": [AdvantageEstimator.REINFORCE_PP, compute_reinforce_plus_plus_outcome_advantage],
+            "gdpo": [AdvantageEstimator.GDPO, compute_gdpo_outcome_advantage],
         }
 
         for ae_name, (ae_type, ae_func) in ae_types.items():
@@ -1181,6 +1183,76 @@ def compute_grpo_outcome_advantage(
         scores = scores.unsqueeze(-1) * response_mask
 
     return scores, scores
+
+
+@register_advantage_estimator(AdvantageEstimator.GDPO)
+def compute_gdpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    grpo_norm_by_std: bool = True,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantage for GDPO, (see https://arxiv.org/pdf/2601.05242 for details)
+
+    Expects:
+        - token_level_rewards: Float[torch.Tensor, "batch_size seqlen num_objectives"]
+        - response_mask: Float[torch.Tensor, "batch_size seqlen"]
+        - index: np.ndarray (batch_size)
+        - epsilon: float
+        - grpo_norm_by_std: bool (used for GDPO as well)
+
+    Returns:
+        - advantages: Float[torch.Tensor, "batch_size seqlen"]
+        - returns: Float[torch.Tensor, "batch_size seqlen"]
+    """
+
+    gdpo_norm_by_std = grpo_norm_by_std
+
+    # this assumes reward-level rewards assigned as well as single scalar outcome reward for each response
+    scores = token_level_rewards.sum(dim=-2)
+    id2score = defaultdict[Any, list](list)
+    id2pos = defaultdict(list)
+
+    with torch.no_grad():
+        bsz = scores.shape[0]
+        advantage_propogated = torch.empty((bsz,), device=scores.device, dtype=scores.dtype)
+        for i in range(bsz):
+            id2score[index[i]].append(scores[i])  # prompt index -> rollouts x objectives
+            id2pos[index[i]].append(i)  # prompt index -> rollout indices for batch norm
+
+        for idx in id2score:  # per batch
+            reward_fn_scores = torch.stack(id2score[idx])  # all objective scores for batch -> rollouts x objectives
+            if reward_fn_scores.shape[0] == 1:
+                rwd_fn_means = torch.zeros(reward_fn_scores.shape[1])
+                rwd_fn_stds = torch.ones(reward_fn_scores.shape[1])
+            elif reward_fn_scores.shape[0] > 1:
+                rwd_fn_means = torch.mean(reward_fn_scores, dim=0)
+                rwd_fn_stds = torch.std(reward_fn_scores, dim=0, unbiased=False)
+                if gdpo_norm_by_std:
+                    reward_fn_scores = (reward_fn_scores - rwd_fn_means) / (rwd_fn_stds + epsilon)
+                else:
+                    reward_fn_scores = reward_fn_scores - rwd_fn_means
+
+            id2score[idx] = reward_fn_scores.sum(
+                dim=-1
+            )  # sum over objectives to get unnormalized advantage per rollout
+
+            positions = torch.tensor(id2pos[idx], device=scores.device, dtype=torch.long)
+            advantage_propogated.index_copy_(0, positions, id2score[idx])
+
+        # batch norm the advantages
+        batch_mean = advantage_propogated.mean()
+        if gdpo_norm_by_std:
+            batch_std = advantage_propogated.std(unbiased=False)
+            a_hat = (advantage_propogated - batch_mean) / (batch_std + epsilon)
+        else:
+            a_hat = advantage_propogated - batch_mean
+        advantages = a_hat.unsqueeze(-1) * response_mask
+
+    return advantages, advantages
 
 
 def repopulate_all_registries():
