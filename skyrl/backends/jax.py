@@ -57,10 +57,13 @@ from skyrl.tx.utils.models import (
     resolve_model_path,
     get_adapter_idx,
 )
+import logging
 from skyrl.utils.log import logger
 
 _DEFAULT_PPO_CLIP_LOW_THRESHOLD = 0.8
 _DEFAULT_PPO_CLIP_HIGH_THRESHOLD = 1.2
+
+logging.getLogger().setLevel(logging.DEBUG)
 
 
 class JaxBackendConfig(BaseModel, extra="forbid"):
