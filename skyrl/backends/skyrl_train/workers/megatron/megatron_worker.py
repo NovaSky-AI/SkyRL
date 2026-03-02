@@ -49,7 +49,6 @@ from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk
 # DeepSeek-V3 (MLA + MoE) so we reuse that bridge with a trivial subclass.
 # ---------------------------------------------------------------------------
 try:
-    import torch
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
     from megatron.bridge.models.deepseek.common import get_common_configs
     from megatron.bridge.models.deepseek.deepseek_provider import DeepSeekV3ModelProvider
