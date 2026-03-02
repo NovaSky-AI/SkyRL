@@ -9,8 +9,6 @@ from skyrl.train.utils import initialize_ray
 from skyrl.train.entrypoints.main_base import validate_cfg
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
-    register_policy_loss,
-    reduce_loss,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
@@ -43,18 +41,6 @@ class OnPolicyDistillationTrainer(RayPPOTrainer):
 def compute_no_op_advantage(token_level_rewards: torch.Tensor, **kwargs):
     # just pass through the rewards
     return token_level_rewards, token_level_rewards
-
-
-@register_policy_loss("importance_sampling")
-def compute_importance_sampling_policy_loss(
-    log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None, **kwargs
-):
-    # as defined here: https://tinker-docs.thinkingmachines.ai/losses#policy-gradient-importance_sampling
-    loss = -torch.exp(log_probs - old_log_probs) * advantages
-
-    loss = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", config.max_seq_len)
-    # return loss and a dummy clip ratio value as we aren't clipping here
-    return loss, {"clip_ratio": 0.0}
 
 
 class OnPolicyDistillationExp(BasePPOExp):

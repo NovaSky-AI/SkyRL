@@ -1,7 +1,7 @@
 """
 Tests for expert parallel (EP).
 
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/test_expert_parallel_inference.py
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/test_expert_parallel_inference.py
 
 """
 

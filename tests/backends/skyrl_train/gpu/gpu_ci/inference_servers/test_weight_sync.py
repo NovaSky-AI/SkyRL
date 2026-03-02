@@ -9,7 +9,7 @@ Colocated test (CUDA IPC strategy) is deferred until vLLM weight sync endpoints 
 See: https://github.com/vllm-project/vllm/issues/31848
 
 Run:
-    uv run pytest tests/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
+    uv run pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
 """
 
 import time

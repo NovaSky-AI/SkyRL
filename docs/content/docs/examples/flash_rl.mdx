@@ -2,6 +2,9 @@
 title: "FlashRL + SkyRL: Training with Quantized Rollouts"
 ---
 
+<Callout type="info">
+FlashRL is supported with the `fsdp` backend.
+</Callout>
 
 In this example, we walk through how to train a model with quantized rollouts using [FlashRL](https://fengyao.notion.site/flash-rl) and SkyRL.
 
@@ -40,7 +43,7 @@ For Int8, we need to provide calibration data. We leverage the provided calibrat
 First, prepare and save the dataset in a chosen `DATA_DIR` by running:
 
 ```bash
-# execute from skyrl-train directory
+# execute from SkyRL root directory
 
 DATA_DIR="$HOME/data/dapo" bash examples/algorithms/dapo/prepare_dapo_data.sh
 

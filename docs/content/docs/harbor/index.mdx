@@ -114,7 +114,7 @@ When `HarborGenerator` is created, it:
 1. Builds a `base_url` from the vLLM HTTP endpoint host and port.
 2. Converts the Harbor YAML config into a Python dict (the **config template**).
 3. Injects the model name (`hosted_vllm/{served_model_name}`) and API base URL (`{base_url}/v1`) into the template. These stay constant across all trials.
-4. Creates a rate limiter from the `generator.rate_limit` config (passed via Hydra `+generator.rate_limit.*` overrides, separate from the Harbor TrialConfig).
+4. Creates a rate limiter from the `generator.rate_limit` config (passed via `generator.rate_limit.*` overrides, separate from the Harbor TrialConfig).
 
 ### Per-Batch Generation
 
@@ -190,15 +190,15 @@ The generator includes built-in rate limiting to avoid overloading sandbox provi
 - **`trajectories_per_second`**: Throttles trial submission rate (e.g., 5/sec).
 - **`max_concurrency`**: Caps parallel `trial.run()` calls (e.g., 512).
 
-These are configured via Hydra overrides on the `generator` config (not in the Harbor TrialConfig YAML). For example:
+These are configured via overrides on the `generator` config (not in the Harbor TrialConfig YAML). For example:
 
 ```bash
-+generator.rate_limit.enabled=true \
-+generator.rate_limit.trajectories_per_second=5 \
-+generator.rate_limit.max_concurrency=512
+generator.rate_limit.enabled=true \
+generator.rate_limit.trajectories_per_second=5 \
+generator.rate_limit.max_concurrency=512
 ```
 
-If `+generator.rate_limit` is omitted entirely, no rate limiting is applied.
+If `generator.rate_limit` is omitted entirely, no rate limiting is applied.
 
 ## TrialConfig and Key Knobs
 
@@ -216,7 +216,7 @@ agent:
     temperature: 1.0                  # Sampling temperature (higher = more exploration)
     enable_summarize: false           # Context summarization when nearing token limits
     model_info:
-      max_input_tokens: 32768        # Should match generator.engine_init_kwargs.max_model_len
+      max_input_tokens: 32768        # Should match generator.inference_engine.engine_init_kwargs.max_model_len
       max_output_tokens: 32768
 ```
 
@@ -237,8 +237,8 @@ agent:
 | `trainer.algorithm.advantage_estimator` | SkyRL config | Advantage method: `grpo`, `rloo`, `reinforce_pp`, etc. |
 | `trainer.train_batch_size` | SkyRL config | Number of unique prompts per training batch |
 | `environment.type` | Harbor config | Sandbox provider: `daytona`, `docker`, `modal`, `e2b`, `gke` |
-| `+generator.rate_limit.max_concurrency` | Launch script | Parallel trial cap; tune based on sandbox provider capacity |
-| `+generator.rate_limit.trajectories_per_second` | Launch script | Submission rate; prevents overloading the sandbox provider |
+| `generator.rate_limit.max_concurrency` | Launch script | Parallel trial cap; tune based on sandbox provider capacity |
+| `generator.rate_limit.trajectories_per_second` | Launch script | Submission rate; prevents overloading the sandbox provider |
 | `timeout_multiplier` | Harbor config | Scales all default timeouts; increase for harder tasks |
 
 ### Environment and Verifier
@@ -338,7 +338,7 @@ You must run `prepare_harbor_dataset.py` before launching training. The launch s
 - **Sandbox access**: Daytona API key (`DAYTONA_API_KEY`) or Modal credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`), or other sandbox providers that Harbor supports.
 - **Dataset**: Harbor task directories, each with `instruction.md` and `tests/test.sh`
 - **GPUs**: Typically 4-8 for combined training and inference
-- **vLLM HTTP endpoint**: Enabled via `generator.enable_http_endpoint=true`
+- **vLLM HTTP endpoint**: Enabled via `generator.inference_engine.enable_http_endpoint=true`
 
 ### Launch
 
@@ -352,27 +352,25 @@ bash examples/train_integrations/harbor/run_codecontest.sh
 bash examples/train_integrations/harbor/run_harbor_gen.sh
 ```
 
-The scripts use Hydra to configure the run. A typical invocation looks like:
+A typical invocation looks like:
 
 ```bash
 uv run --isolated --extra fsdp --extra harbor \
   -m examples.train_integrations.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \
-  generator.served_model_name=Qwen3-8B \
-  hydra.searchpath=['file://examples/train_integrations/harbor'] \
-  +harbor_trial_config=default \
-  ++harbor_trial_config.trials_dir=$TRIALS_DIR \
-  ++harbor_trial_config.environment.type=daytona \
+  generator.inference_engine.served_model_name=Qwen3-8B \
+  harbor_trial_config.trials_dir=$TRIALS_DIR \
+  harbor_trial_config.environment.type=daytona \
   trainer.algorithm.max_seq_len=32768 \
   generator.apply_overlong_filtering=true \
   generator.n_samples_per_prompt=8 \
   trainer.algorithm.advantage_estimator=grpo \
   trainer.train_batch_size=64 \
-  generator.enable_http_endpoint=true \
-  +generator.rate_limit.enabled=true \
-  +generator.rate_limit.trajectories_per_second=5 \
-  +generator.rate_limit.max_concurrency=512
+  generator.inference_engine.enable_http_endpoint=true \
+  generator.rate_limit.enabled=true \
+  generator.rate_limit.trajectories_per_second=5 \
+  generator.rate_limit.max_concurrency=512
 ```
 
 ### Metrics

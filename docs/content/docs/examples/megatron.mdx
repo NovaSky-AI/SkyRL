@@ -2,10 +2,13 @@
 title: "Megatron Backend for 5D Parallelism"
 ---
 
+<Callout type="info">
+This page covers the `megatron` backend.
+</Callout>
 
 SkyRL supports NVIDIA's [Megatron-Core](https://developer.nvidia.com/megatron-core) library as an RL training backend, inheriting support for 5D parallelism (tensor+sequence, pipeline, context, expert, and data parallelism), and optimized performance for large scale models.
 
-We provide example scripts for running efficient large scale MoE training with models like `Qwen3-30B-A3B` using Megatron in the [examples/megatron](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/megatron) directory.
+We provide example scripts for running efficient large scale MoE training with models like `Qwen3-30B-A3B` using Megatron in the [examples/megatron](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/megatron) directory.
 For details on configuring the Megatron backend, and enabling checkpointing, see the [Megatron configuration guide](../configuration/config#megatron-configuration) and the [Megatron checkpointing guide](../checkpointing-logging/checkpointing#megatron-checkpointing).
 
 ## When to use the Megatron backend
@@ -31,8 +34,8 @@ All statistics shown were averaged over the first 10 steps of training. Micro ba
 
 ![Parallelism Diagram](/images/examples/parallelism.svg)
 
-A script for running the Qwen3-30B-A3B experiment can be found [here](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/megatron/run_search_megatron.sh). 
-Additionally, we provide a script for running basic GSM8K training on Qwen3-235B-A22B with Megatron [here](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/megatron/run_megatron_qwen3-235b-a22b.sh). 
+A script for running the Qwen3-30B-A3B experiment can be found [here](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_search_megatron.sh).
+Additionally, we provide a script for running basic GSM8K training on Qwen3-235B-A22B with Megatron [here](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_qwen3-235b-a22b.sh). 
 Note that although training at 100B+ scale using Megatron is currently possible, we are in the process of further optimizing peformance.
 
 For more details on configuring the Megatron backend, and enabling checkpointing, see [Megatron configuration guide](../configuration/config#megatron-configuration), and [Megatron checkpointing guide](../checkpointing-logging/checkpointing#megatron-checkpointing).

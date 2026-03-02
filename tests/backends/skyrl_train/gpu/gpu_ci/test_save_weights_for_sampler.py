@@ -4,7 +4,7 @@ Test save_weights_for_sampler() method
 GPU Requirements: 2 GPUs
 
 Run with:
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_save_weights_for_sampler.py -v
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_weights_for_sampler.py -v
 """
 
 import asyncio
