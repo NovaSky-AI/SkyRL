@@ -2,7 +2,7 @@ set -x
 
 # Colocated GRPO training+generation for Qwen2.5-0.5B-Instruct on OpenEnv.
 
-# uv run examples/openenv/dummy_openenv_dataset.py --output_dir $HOME/data/openenv --env_name echo_env
+# uv run examples/train_integrations/openenv/dummy_openenv_dataset.py --output_dir $HOME/data/openenv --env_name echo_env
 # Env name: echo_env, coding_env, openspiel-env, atari-env, sumo-rl-env, finrl-env
 
 # Prestart the docker environment with 
