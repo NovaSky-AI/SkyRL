@@ -159,7 +159,7 @@ class MessageEncoder:
             kwargs["chat_template"] = self.chat_template.read_text()
         kwargs["enable_thinking"] = self.qwen3_enable_thinking
         if is_first_message:
-            input_ids = self.tokenizer.apply_chat_template(formatted_messages, **kwargs)
+            input_ids = self.tokenizer.apply_chat_template(formatted_messages, return_dict=False, **kwargs)
         else:
             # do incremental encoding,
             # for assistant messages, we assume the generation prompt is already added in the previous message
@@ -169,7 +169,9 @@ class MessageEncoder:
             ]
             is_assistant_message = formatted_messages[0]["role"] == "assistant"
             kwargs["add_generation_prompt"] = True if is_assistant_message else False
-            base_conversation_token_ids = self.tokenizer.apply_chat_template(base_conversation, **kwargs)
+            base_conversation_token_ids = self.tokenizer.apply_chat_template(
+                base_conversation, return_dict=False, **kwargs
+            )
 
             if not is_assistant_message:
                 # remove tokens after the last EOS
@@ -181,7 +183,9 @@ class MessageEncoder:
                 base_conversation_token_ids = base_conversation_token_ids[: last_eos_token_index + 1]
             kwargs["add_generation_prompt"] = add_generation
             full_conversation = base_conversation + formatted_messages
-            full_conversation_token_ids = self.tokenizer.apply_chat_template(full_conversation, **kwargs)
+            full_conversation_token_ids = self.tokenizer.apply_chat_template(
+                full_conversation, return_dict=False, **kwargs
+            )
             input_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
 
         return input_ids

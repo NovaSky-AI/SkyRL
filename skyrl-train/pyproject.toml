@@ -81,6 +81,7 @@ override-dependencies = [
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.15.0; sys_platform == 'linux'",
+    "transformers>=5.0.0; sys_platform == 'linux'",
 ]
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
