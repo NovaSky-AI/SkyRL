@@ -1049,7 +1049,10 @@ def _broadcast_command(cmd: RpcPayload | None, process_id: int) -> RpcPayload:
         size = np.array([0], dtype=np.int64)
 
     # Broadcast size first
-    size = multihost_utils.broadcast_one_to_all(size)
+    if process_id == 0:
+        size = multihost_utils.broadcast_one_to_all(size, source=True)
+    else:
+        size = multihost_utils.broadcast_one_to_all(size, source=False)
 
     # Broadcast data
     if process_id == 0:
