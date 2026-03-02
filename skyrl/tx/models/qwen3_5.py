@@ -848,7 +848,7 @@ class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsPro
         self.model = Qwen3_5Backbone(model_config, dtype=dtype, rngs=rngs)
 
         if model_config.tie_word_embeddings:
-            self.lm_head = self.model.language_model.embed_tokens.T
+            self.lm_head = None
         else:
             self.lm_head = LoRALinear(
                 model_config.hidden_size,
@@ -864,7 +864,8 @@ class Qwen3_5ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsPro
             )
 
     def get_lm_head(self) -> LMHead:
-        return self.lm_head
+        """Return the lm_head callable for logits computation."""
+        return self.lm_head or self.model.language_model.embed_tokens.T
 
     def __call__(
         self,
