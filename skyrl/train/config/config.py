@@ -152,6 +152,12 @@ class MegatronConfig(BaseConfig):
     context_parallel_size: int = 1
     expert_model_parallel_size: int = 1
     expert_tensor_parallel_size: Optional[int] = None
+    # MoE runtime configuration flags
+    moe_token_dispatcher_type: str = "alltoall"
+    moe_router_load_balancing_type: str = "none"
+    moe_grouped_gemm: bool = False
+    moe_router_score_function: Optional[str] = None
+    moe_router_enable_expert_bias: Optional[bool] = None
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
     torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
