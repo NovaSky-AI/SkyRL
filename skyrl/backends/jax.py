@@ -111,6 +111,10 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=None,
         description="Total number of processes in the multi-node cluster",
     )
+    process_id: int | None = Field(
+        default=0,
+        description="Process ID within the multi-node cluster",
+    )
 
 
 @jax.tree_util.register_dataclass
@@ -1031,13 +1035,13 @@ class RpcPayload(BaseModel):
 RpcPayloadAdapter: TypeAdapter[RpcPayload] = TypeAdapter(RpcPayload)
 
 
-def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
+def _broadcast_command(cmd: RpcPayload | None, process_id: int) -> RpcPayload:
     """Broadcast an RpcPayload from coordinator to all workers using JSON.
 
     On coordinator (process 0): serializes and broadcasts the payload.
     On workers: receives and deserializes the payload (pass None).
     """
-    if jax.process_index() == 0:
+    if process_id == 0:
         assert cmd is not None, "Coordinator must provide a command to broadcast."
         data = RpcPayloadAdapter.dump_json(cmd)
         size = np.array([len(data)], dtype=np.int64)
@@ -1048,7 +1052,7 @@ def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
     size = multihost_utils.broadcast_one_to_all(size)
 
     # Broadcast data
-    if jax.process_index() == 0:
+    if process_id == 0:
         data_arr = np.frombuffer(data, dtype=np.uint8)
     else:
         data_arr = np.zeros(size[0], dtype=np.uint8)
@@ -1065,14 +1069,15 @@ class JaxBackend(JaxBackendImpl):
     """
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
+        self.process_id = config.process_id
         if config.coordinator_address is not None:
             jax.distributed.initialize(
                 coordinator_address=config.coordinator_address,
                 num_processes=config.num_processes,
-                process_id=0,
+                process_id=self.process_id,
             )
             logger.info(
-                f"JAX distributed initialized: process_id={jax.process_index()} ({jax.process_count()} total), "
+                f"JAX distributed initialized: process_id={self.process_id} ({jax.process_count()} total), "
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
 
@@ -1089,7 +1094,10 @@ class JaxBackend(JaxBackendImpl):
                     return str(v)
                 return TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
 
-            _broadcast_command(RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}))
+            _broadcast_command(
+                RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}),
+                process_id=self.process_id,
+            )
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
@@ -1141,21 +1149,21 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         process_id=process_id,
     )
     logger.info(
-        f"Worker process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
+        f"Worker process_id={process_id} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
     )
 
     # Receive INIT payload with base_model and config from coordinator
-    init_payload = _broadcast_command(None)
+    init_payload = _broadcast_command(None, process_id=process_id)
     assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
     config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
     logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}")
 
     backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
 
-    logger.info(f"Worker process_id={jax.process_index()} entering command loop")
+    logger.info(f"Worker process_id={process_id} entering command loop")
 
     while True:
-        payload: RpcPayload = _broadcast_command(None)
+        payload: RpcPayload = _broadcast_command(None, process_id=process_id)
 
         if not hasattr(backend, payload.method):
             logger.error(f"Unknown method: {payload.method}")
