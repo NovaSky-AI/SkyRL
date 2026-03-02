@@ -40,23 +40,54 @@ from skyrl.utils.log import logger, get_uvicorn_log_config
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 ID_MAX_LENGTH = 255
 
+API_SERVER_STARTUP_ARGS = ["-m", "skyrl.tinker.api"]
+
 # Timeout for graceful shutdown when engine crashes
 SHUTDOWN_TIMEOUT_SECONDS = 10
 
 
-def _get_parent_uv_accelerator_extras() -> list[str]:
-    """Extract parent `uv --extra` accelerator flags for the engine launch.
+def _get_parent_uv_run_args() -> list[str]:
+    """Extract parent `uv run <uv run args>` flags for the engine launch.
 
     `uv run` starts this Python API process as a child. To recover the original
-    `uv run --extra ...` flags, we inspect the parent process command line and
-    pass through only accelerator extras (`gpu`/`tpu`) to the engine subprocess.
+    `uv run <uv run args> ...` flags, we inspect the parent process command line
+    and extract all the uv run args before the script argument
     """
     tokens = psutil.Process(os.getppid()).cmdline()
+    # the API server startup command can be
+    # uv run <uv run args> -m skyrl.tinker.api
+    # or uv run <uv run args> python -m skyrl.tinker.api
+    # or uv run <uv run args> -- python -m skyrl.tinker.api
+    stop_strings = ["--", "python"]
+    detected = False
+    for i in range(len(tokens) - 1):
+        if tokens[i] in stop_strings or (
+            tokens[i] == API_SERVER_STARTUP_ARGS[0] and tokens[i + 1] == API_SERVER_STARTUP_ARGS[1]
+        ):
+            detected = True
+            break
+    if not detected or i < 2:
+        raise ValueError(
+            "Unable to parse tinker API server startup command: ",
+            tokens,
+            "Ensure that the tinker API server was started with `uv run <uv run args> -m skyrl.tinker.api",
+        )
+    tokens = tokens[2:i]  # ignore uv run
+    return tokens
 
-    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--extra", action="append", default=[])
-    parsed, _ = parser.parse_known_args(tokens)
-    return list({extra for extra in parsed.extra if extra in {"gpu", "tpu"}})
+
+def _build_uv_run_cmd_engine(engine_config: BaseModel) -> list[str]:
+    cmd = ["uv", "run"]
+    parent_flags = _get_parent_uv_run_args()
+    logger.debug(f"Detected API server uv run flags: {parent_flags}")
+    cmd.extend(parent_flags)
+    if "--isolated" not in cmd:
+        cmd.extend(["--isolated"])
+    # NOTE: uv deduplicates extras so we can unconditionally add the tinker extra
+    cmd.extend(["--extra", "tinker", "--extra", engine_config.backend])
+    cmd.extend(["-m", "skyrl.tinker.engine"])
+    cmd.extend(config_to_argv(engine_config))
+    return cmd
 
 
 @asynccontextmanager
@@ -79,12 +110,7 @@ async def lifespan(app: FastAPI):
         logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters.
-    cmd = ["uv", "run", "--isolated", "--extra", "tinker", "--extra", app.state.engine_config.backend]
-    if app.state.engine_config.backend == "jax":
-        for extra in _get_parent_uv_accelerator_extras():
-            cmd.extend(["--extra", extra])
-    cmd.extend(["-m", "skyrl.tinker.engine"])
-    cmd.extend(config_to_argv(app.state.engine_config))
+    cmd = _build_uv_run_cmd_engine(app.state.engine_config)
 
     background_engine = await asyncio.create_subprocess_exec(*cmd)
     app.state.background_engine = background_engine
