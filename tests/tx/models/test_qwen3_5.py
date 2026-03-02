@@ -26,7 +26,6 @@ def make_small_hf_config() -> HFQwen3_5Config:
         num_key_value_heads=2,
         head_dim=8,
         max_position_embeddings=128,
-        tie_word_embeddings=False,
         linear_conv_kernel_dim=3,
         linear_key_head_dim=4,
         linear_value_head_dim=4,
@@ -48,6 +47,7 @@ def make_small_tx_config(base_config: HFQwen3_5Config, *, shard_attention_heads:
     wrapped_base_config = PretrainedConfig(
         architectures=["Qwen3_5ForCausalLM"],
         model_type=getattr(base_config, "model_type", "qwen3_5_moe"),
+        tie_word_embeddings=False,
         text_config=base_config,
     )
     return Qwen3_5Config(
@@ -188,7 +188,6 @@ def test_qwen3_5_nested_rope_parameters_without_top_level_rope_theta():
         head_dim=8,
         rms_norm_eps=1e-6,
         max_position_embeddings=128,
-        tie_word_embeddings=False,
         linear_conv_kernel_dim=3,
         linear_key_head_dim=4,
         linear_value_head_dim=4,
@@ -207,6 +206,7 @@ def test_qwen3_5_nested_rope_parameters_without_top_level_rope_theta():
     base_config = PretrainedConfig(
         architectures=["Qwen3_5ForCausalLM"],
         model_type="qwen3_5_moe",
+        tie_word_embeddings=False,
         text_config=text_config,
     )
     config = Qwen3_5Config(
