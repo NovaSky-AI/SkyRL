@@ -1,4 +1,3 @@
-import argparse
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
@@ -51,7 +50,7 @@ def _get_parent_uv_run_args() -> list[str]:
 
     `uv run` starts this Python API process as a child. To recover the original
     `uv run <uv run args> ...` flags, we inspect the parent process command line
-    and extract all the uv run args before the script argument
+    and extract all the uv run args before the script argument.
     """
     tokens = psutil.Process(os.getppid()).cmdline()
     # the API server startup command can be
@@ -68,8 +67,8 @@ def _get_parent_uv_run_args() -> list[str]:
             break
     if not detected or i < 2:
         raise ValueError(
-            f"Unable to parse tinker API server startup command: {tokens},"
-            "Ensure that the tinker API server was started with `uv run <uv run args> -m skyrl.tinker.api",
+            f"Unable to parse tinker API server startup command: {tokens}. "
+            "Ensure that the tinker API server was started with `uv run <uv run args> -m skyrl.tinker.api`"
         )
     tokens = tokens[2:i]  # ignore uv run
     return tokens
