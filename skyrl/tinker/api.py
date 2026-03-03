@@ -68,8 +68,7 @@ def _get_parent_uv_run_args() -> list[str]:
             break
     if not detected or i < 2:
         raise ValueError(
-            "Unable to parse tinker API server startup command: ",
-            tokens,
+            f"Unable to parse tinker API server startup command: {tokens},"
             "Ensure that the tinker API server was started with `uv run <uv run args> -m skyrl.tinker.api",
         )
     tokens = tokens[2:i]  # ignore uv run
