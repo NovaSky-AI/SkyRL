@@ -162,7 +162,7 @@ class FleetTaskEnv(BaseTextEnv):
             configure_fleet_telemetry(token=logfire_token)
 
         # TTL for Fleet environment instances
-        self.ttl_seconds = env_config.get("ttl_seconds", 600)
+        self.ttl_seconds = env_config.get("ttl_seconds", None)  # None = auto (CUA: 1800s, tool_use: 600s)
 
         # Environment state (initialized on init())
         self.openenv_task_env: Optional[OpenEnvFleetTaskEnv] = None

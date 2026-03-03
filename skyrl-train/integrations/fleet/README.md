@@ -94,7 +94,7 @@ environment:
     fleet_task:
       tasks_file: /path/to/tasks.json  # Exported from Fleet
       api_key: ${FLEET_API_KEY}        # Or set via environment
-      ttl_seconds: 600                  # Environment TTL
+      ttl_seconds: null                  # Auto: CUA=1800s, tool_use=600s (or override)
 ```
 
 ### Task JSON Format
