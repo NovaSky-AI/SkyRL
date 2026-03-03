@@ -1159,6 +1159,7 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
     init_payload = _broadcast_command(None, process_id=process_id)
     assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
     config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
+    config.process_id = process_id
     logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}")
 
     backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
