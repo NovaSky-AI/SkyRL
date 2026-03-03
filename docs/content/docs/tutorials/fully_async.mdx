@@ -76,7 +76,7 @@ Following [examples/train/fully_async/main_fully_async.py](https://github.com/No
 Following [examples/train/fully_async/fully_async_run_gsm8k.sh](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/fully_async/fully_async_run_gsm8k.sh), update the training configuration to use your new entrypoint `main_async.py`:
 
 ```bash
-uv run --isolated --extra fsdp -m examples.train.fully_async.main_async \
+uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
 ...
 
 ```
