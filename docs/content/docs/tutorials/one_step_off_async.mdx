@@ -107,7 +107,7 @@ uv run --isolated --extra fsdp -m examples.train.async.main_async \
 
 Key configuration changes:
 
-* **examples.async.main_async**: Point the bash script to the new entrypoint
+* **examples.train.async.main_async**: Point the bash script to the new entrypoint
 * **colocate_all=false, colocate_policy_ref=true**: Disables colocation of generation and training models (but keeps the policy and reference models colocated).
 
 Now we can train!
