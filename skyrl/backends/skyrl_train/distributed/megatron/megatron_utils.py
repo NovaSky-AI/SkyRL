@@ -111,6 +111,8 @@ def freeze_moe_router(model):
 def offload_megatron_grads_to_cpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
+            # use megatron DDP built in function to offload grads to cpu
+            # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.16.0/megatron/core/distributed/distributed_data_parallel.py#L575
             model_chunk.offload_grad_buffers(synchronize=False, empty_cache=False)
         else:
             for _, param in model_chunk.named_parameters():
@@ -145,6 +147,8 @@ def offload_megatron_model_to_cpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
             for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                # use megatron buffer built in function to offload to cpu
+                # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.16.0/megatron/core/distributed/param_and_grad_buffer.py#L964
                 buffer.offload_to_cpu(move_params=True, move_grads=False)
 
             # LoRA-aware offloading: offload non-lora base weights that live
