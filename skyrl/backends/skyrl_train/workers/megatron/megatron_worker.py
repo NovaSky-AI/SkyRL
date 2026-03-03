@@ -555,6 +555,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
+        # Skip optimizer state in checkpoints when using CPU offload to avoid
+        # system OOM during serialization.
+        if optim_config.optimizer_cpu_offload:
+            self._skip_optimizer_checkpoint = True
+
         # create scheduler
         self.scheduler = get_megatron_optimizer_param_scheduler(
             optimizer=self.optimizer,
