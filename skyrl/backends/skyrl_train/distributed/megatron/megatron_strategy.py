@@ -162,7 +162,7 @@ class MegatronStrategy(DistributedStrategy):
             init_fn = getattr(opt, "init_state_fn", None)
             inner_opt = getattr(opt, "optimizer", None)
             cfg = getattr(opt, "config", None)
-            if init_fn is not None and inner_opt is not None and len(inner_opt.state) == 0:
+            if init_fn is not None and inner_opt is not None and cfg is not None and len(inner_opt.state) == 0:
                 init_fn(inner_opt, cfg)
 
     def save_checkpoint(
