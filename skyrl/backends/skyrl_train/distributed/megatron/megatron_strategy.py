@@ -142,6 +142,23 @@ class MegatronStrategy(DistributedStrategy):
     ) -> Union[List[ModelOrModelOptimPair], ModelOrModelOptimPair]:
         raise NotImplementedError()
 
+    @staticmethod
+    def _ensure_optimizer_state_initialized(optimizer):
+        """Ensure Adam optimizer state (exp_avg, exp_avg_sq) exists before checkpointing.
+
+        Megatron's DistributedOptimizer lazily initializes optimizer state on the first
+        training step. If we checkpoint before any step, the save template will lack
+        exp_avg/exp_avg_sq entries, while the load template (which pre-allocates state)
+        will include them, causing a key mismatch.
+        """
+        optimizers = getattr(optimizer, "chained_optimizers", [optimizer])
+        for opt in optimizers:
+            init_fn = getattr(opt, "init_state_fn", None)
+            inner_opt = getattr(opt, "optimizer", None)
+            cfg = getattr(opt, "config", None)
+            if init_fn is not None and inner_opt is not None and len(inner_opt.state) == 0:
+                init_fn(inner_opt, cfg)
+
     def save_checkpoint(
         self,
         model: MegatronModelWrapper,
@@ -171,7 +188,12 @@ class MegatronStrategy(DistributedStrategy):
         if not self.is_lora:
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer:
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
+            self._ensure_optimizer_state_initialized(optimizer)
+            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                model_sharded_state_dict,
+                is_loading=False,
+                metadata={"distrib_optim_sharding_type": "dp_reshardable"},
+            )
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
@@ -263,7 +285,11 @@ class MegatronStrategy(DistributedStrategy):
         if not self.is_lora:
             sharded_state_dict["model"] = model_sharded_state_dict
         if optimizer and load_optimizer_states:
-            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(model_sharded_state_dict)
+            sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
+                model_sharded_state_dict,
+                is_loading=True,
+                metadata={"distrib_optim_sharding_type": "dp_reshardable"},
+            )
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
