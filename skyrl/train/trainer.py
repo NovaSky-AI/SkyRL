@@ -64,7 +64,6 @@ from skyrl.train.utils.trainer_utils import (
     build_dataloader,
     cleanup_old_checkpoints,
     extract_step_from_path,
-    filter_generator_output,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
@@ -243,7 +242,7 @@ class RayPPOTrainer:
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
+                        generator_output = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -707,16 +706,11 @@ class RayPPOTrainer:
         return generator_output
 
     @torch.no_grad()
-    def postprocess_generator_output(
-        self, generator_output: GeneratorOutput, uids: List[str]
-    ) -> Tuple[GeneratorOutput, List[str]]:
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
         """
         Converts to per token rewards and computes pass@N.
 
         In the future algorithm specific reward or loss mask post processing should be done here.
-
-        Returns:
-            Tuple of (processed_generator_output, uids) -- uids may be filtered.
         """
         generator_output_for_metrics = generator_output
         uids_for_metrics = uids
@@ -751,19 +745,11 @@ class RayPPOTrainer:
             per_token_rewards = rewards
         else:
             if self.cfg.trainer.algorithm.zero_variance_filter:
-                filter_mode = getattr(self.cfg.trainer.algorithm, "zero_variance_filter_mode", "mask")
-                kept_indices = zero_variance_filter(rewards, uids)
-                if filter_mode == "filter":
-                    generator_output = filter_generator_output(generator_output, kept_indices)
-                    uids = [uids[i] for i in kept_indices]
-                    rewards = generator_output["rewards"]
-                    responses = generator_output["response_ids"]
-                else:
-                    kept_indices_set = set(kept_indices)
-                    generator_output["loss_masks"] = [
-                        [0] * len(mask) if i not in kept_indices_set else mask
-                        for i, mask in enumerate(generator_output["loss_masks"])
-                    ]
+                kept_indices_set = set(zero_variance_filter(rewards, uids))
+                generator_output["loss_masks"] = [
+                    [0] * len(mask) if i not in kept_indices_set else mask
+                    for i, mask in enumerate(generator_output["loss_masks"])
+                ]
             # Response-level rewards: rewards is List[float], convert to per-token rewards
             for reward, response in zip(rewards, responses):
                 per_token_reward = [0.0] * len(response)
@@ -783,7 +769,7 @@ class RayPPOTrainer:
         )
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
-        return generator_output, uids
+        return generator_output
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:

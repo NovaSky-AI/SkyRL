@@ -1,5 +1,5 @@
 """
-Tests for new algorithm features added as part of the algorithm-enhancements branch.
+Tests for DRO loss, KL-in-advantages, importance-weighted corrections, and related utilities.
 
 Covers:
 - DRO policy loss (5 tests)
@@ -11,7 +11,7 @@ Covers:
 - Config fields (2 tests)
 
 Run with:
-    uv run --isolated --extra dev pytest tests/train/algorithms/test_new_algorithm_features.py -v
+    uv run --isolated --extra dev pytest tests/train/algorithms/test_dro_kl_advantages_iw_corrections.py -v
 """
 
 import math
