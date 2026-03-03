@@ -35,7 +35,7 @@ The original `train()` method performs generation and training sequentially, so 
 
 The generation loop passes the training loop completed trajectories via an `asyncio.Queue` and coordinates weight synchronization using asyncio events.
 
-We include a minimal version here, please see [examples/async/async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/async/async_trainer.py) for full details:
+We include a minimal version here, please see [examples/train/async/async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/async/async_trainer.py) for full details:
 
 ```python
 class AsyncRayPPOTrainer(RayPPOTrainer):
@@ -114,10 +114,10 @@ Now we can train!
 
 ```bash
 # Prepare the dataset
-uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
  # Run the training script
 export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
-bash examples/async/async_run_gsm8k.sh
+bash examples/train/async/async_run_gsm8k.sh
 
 ```

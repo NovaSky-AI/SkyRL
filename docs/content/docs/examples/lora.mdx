@@ -59,7 +59,7 @@ Here's a complete example of running LoRA training on GSM8K:
 First, prepare your dataset:
 
 ```bash
-uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
 ```
 
@@ -115,7 +115,7 @@ Set up your WandB API key and run the training:
 
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
-bash examples/lora/run_qwen2_5_0.5b_gsm8k_grpo_lora.sh
+bash examples/train/lora/run_qwen2_5_0.5b_gsm8k_grpo_lora.sh
 
 ```
 

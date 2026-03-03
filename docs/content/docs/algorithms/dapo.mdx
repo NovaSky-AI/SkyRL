@@ -14,7 +14,7 @@ The [DAPO](https://arxiv.org/abs/2503.14476) (Decoupled Clip and Dynamic Samplin
 - **Token-Level Policy Gradient Loss**: Critical in long-CoT RL scenarios;
 - **Overlong Reward Shaping**: Reduces reward noise and stabilizes training.
 
-In this guide, we walk through how to enable each of these components in SkyRL. We provide a simple example script for training DAPO on GSM8K in `examples/algorithms/dapo/`.
+In this guide, we walk through how to enable each of these components in SkyRL. We provide a simple example script for training DAPO on GSM8K in `examples/train/algorithms/dapo/`.
 
 ### Clip-Higher
 
@@ -75,9 +75,9 @@ generator:
 ## Soft Overlong Punishment
 
 To enable soft overlong punishment, you can create a custom trainer class and override the `RayPPOTrainer` `postprocess_generator_output` method to additionally apply soft overlong punishment to rewards.
-We provide an example of this in `examples/algorithms/dapo/main_dapo.py`, and show an overview of the implementation below:
+We provide an example of this in `examples/train/algorithms/dapo/main_dapo.py`, and show an overview of the implementation below:
 
-```python title="examples/algorithms/dapo/main_dapo.py"
+```python title="examples/train/algorithms/dapo/main_dapo.py"
 class DAPOTrainer(RayPPOTrainer):
   @torch.no_grad()
   def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
@@ -101,17 +101,17 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 
 To add the overlong buffer length and penalty factor parameters to the config, you can add the following lines to the `run_dapo_gsm8k.sh` script:
 
-```bash title="examples/algorithms/dapo/run_dapo_gsm8k.sh"
+```bash title="examples/train/algorithms/dapo/run_dapo_gsm8k.sh"
 trainer.algorithm.overlong_buffer.len=512 \
 trainer.algorithm.overlong_buffer.penalty_factor=1.0 \
 ```
 
 ### Launching a DAPO Training Run
 
-An example script with all of the above components enabled for basic GSM8K training can be found at `examples/algorithms/dapo/run_dapo_gsm8k.sh`.
+An example script with all of the above components enabled for basic GSM8K training can be found at `examples/train/algorithms/dapo/run_dapo_gsm8k.sh`.
 
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
-bash examples/algorithms/dapo/run_dapo_gsm8k.sh
+bash examples/train/algorithms/dapo/run_dapo_gsm8k.sh
 
 ```
