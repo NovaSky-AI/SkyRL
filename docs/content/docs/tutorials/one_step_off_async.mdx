@@ -95,7 +95,7 @@ That's it! The rest of the entrypoint logic for launching the training run remai
 Finally, we modify the training configuration to use our new entrypoint and disable model colocation:
 
 ```bash
-uv run --isolated --extra fsdp -m examples.async.main_async \
+uv run --isolated --extra fsdp -m examples.train.async.main_async \
   trainer.placement.colocate_all=false \
   trainer.placement.colocate_policy_ref=true \
   trainer.placement.policy_num_gpus_per_node=4 \
