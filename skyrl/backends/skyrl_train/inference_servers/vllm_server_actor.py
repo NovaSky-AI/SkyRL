@@ -49,7 +49,7 @@ class VLLMServerActor(ServerActorProtocol):
 
     - (vLLM RFC: https://github.com/vllm-project/vllm/issues/31848)
     - /init_weight_transfer: Initialize weight sync process group
-    - /update_weights: Update model weights via NCCL broadcast
+    - /update_weights_skyrl: Update model weights via NCCL broadcast
     - /finalize_weight_update: Post-processing after weight sync
     """
 
@@ -340,7 +340,10 @@ class VLLMServerActor(ServerActorProtocol):
             )
             return {"status": "ok"}
 
-        @app.post("/update_weights")
+        # NOTE (sumanthrh): We use the _skyrl suffix to differentiate this from the native /update_weights endpoint
+        # introduced in vLLM 0.16.0: https://github.com/vllm-project/vllm/pull/31943
+        # TODO: Migrate to the native weight sync APIs
+        @app.post("/update_weights_skyrl")
         async def _update_weights(request: Request):
             """Update model weights via NCCL broadcast."""
             from skyrl.backends.skyrl_train.weight_sync import BroadcastWeightUpdateRequest, CudaIpcWeightUpdateRequest

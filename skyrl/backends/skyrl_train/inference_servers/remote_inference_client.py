@@ -571,7 +571,7 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/update_weights", request.to_json_dict())
+        return await self._call_all_servers("/update_weights_skyrl", request.to_json_dict())
 
     async def finalize_weight_update(self) -> Dict[str, Any]:
         """

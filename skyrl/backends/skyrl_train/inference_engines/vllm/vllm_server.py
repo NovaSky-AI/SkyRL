@@ -91,7 +91,9 @@ class VllmServer:
             await engine.reset_prefix_cache()
             return {"status": "ok"}
 
-        @app.post("/update_weights")
+        # NOTE (sumanthrh): We use the _skyrl suffix to differentiate this from the native /update_weights endpoint
+        # introduced in vLLM 0.16.0: https://github.com/vllm-project/vllm/pull/31943
+        @app.post("/update_weights_skyrl")
         async def _update_weights(request: Request):
             import pickle
             from skyrl.backends.skyrl_train.weight_sync import BroadcastWeightUpdateRequest
