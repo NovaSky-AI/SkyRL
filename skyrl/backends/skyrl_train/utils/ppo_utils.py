@@ -495,6 +495,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
             "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
+            "cispo": [PolicyLossType.CISPO, compute_policy_loss_cispo],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
@@ -542,6 +543,37 @@ def sync_registries():
     PolicyLossRegistry.sync_with_actor()
     AdvantageEstimatorRegistry.sync_with_actor()
     logger.info("Synced registries to ray actor")
+
+
+def compute_iw_metrics(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> dict:
+    """Compute importance-weighting diagnostics for logging.
+
+    Returns a dict with mean, std, max, and min of the per-token importance
+    ratio ``exp(log_probs - old_log_probs)`` over valid (masked) positions.
+    """
+    ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    if loss_mask is not None:
+        valid = loss_mask > 0
+        valid_ratios = ratio[valid]
+    else:
+        valid_ratios = ratio.reshape(-1)
+    if valid_ratios.numel() == 0:
+        return {
+            "iw_ratio_mean": 0.0,
+            "iw_ratio_std": 0.0,
+            "iw_ratio_max": 0.0,
+            "iw_ratio_min": 0.0,
+        }
+    return {
+        "iw_ratio_mean": valid_ratios.mean().detach().item(),
+        "iw_ratio_std": valid_ratios.std().detach().item(),
+        "iw_ratio_max": valid_ratios.max().detach().item(),
+        "iw_ratio_min": valid_ratios.min().detach().item(),
+    }
 
 
 @register_policy_loss(PolicyLossType.REGULAR)
@@ -751,6 +783,8 @@ def compute_policy_loss_cispo(
 
     # apply off policy correction
     loss_metrics = {"clip_ratio": clip_ratio}
+    iw_metrics = compute_iw_metrics(log_probs, old_log_probs, loss_mask)
+    loss_metrics.update(iw_metrics)
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )
@@ -904,7 +938,7 @@ def cross_entropy_loss(
     ignoring the old_log_probs and advantages which are only used for RL.
 
     The loss is computed as: -log_probs * loss_mask, summed over all tokens.
-    This matches Tinker's cross_entropy semantics where the loss is a simple sum.
+    The loss is a simple sum over all masked tokens.
 
     Args:
         log_probs: Log probabilities from the model for each token
@@ -920,7 +954,7 @@ def cross_entropy_loss(
     # Simple negative log-likelihood: -log p(token)
     elementwise_loss = -log_probs
 
-    # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
+    # Apply loss mask and sum
     if loss_mask is not None:
         loss = (elementwise_loss * loss_mask).sum()
     else:
@@ -946,10 +980,7 @@ def importance_sampling_loss(
     off-policy samples. Uses the ratio p_theta(x)/q(x) where p_theta is the
     current (learner) policy and q is the sampling policy.
 
-    The loss is: -(exp(log_probs - old_log_probs) * advantages).sum()
-
-    This matches Tinker's importance_sampling semantics.
-    See: https://tinker-docs.thinkingmachines.ai/losses#policy-gradient-importance_sampling
+    The loss is: -(exp(log_probs - old_log_probs) * advantages).
 
     Args:
         log_probs: Log probabilities from current policy (learner)
@@ -963,21 +994,23 @@ def importance_sampling_loss(
         Tuple of (loss, metrics_dict)
     """
     # Compute importance ratio: p_theta(x) / q(x)
-    prob_ratio = torch.exp(log_probs - old_log_probs)
+    prob_ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
 
     # Importance-weighted policy gradient
-    elementwise_loss = -(prob_ratio * advantages)
+    loss = -(prob_ratio * advantages)
 
-    # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
-    if loss_mask is not None:
-        loss = (elementwise_loss * loss_mask).sum()
-        # Track mean importance ratio for monitoring
-        mean_ratio = (prob_ratio * loss_mask).sum() / loss_mask.sum()
-    else:
-        loss = elementwise_loss.sum()
-        mean_ratio = prob_ratio.mean()
+    loss_metrics = {}
+    iw_metrics = compute_iw_metrics(log_probs, old_log_probs, loss_mask)
+    loss_metrics.update(iw_metrics)
 
-    return loss, {"importance_ratio": mean_ratio.item()}
+    # apply off policy correction
+    loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
+    return loss, loss_metrics
 
 
 def reduce_loss(
