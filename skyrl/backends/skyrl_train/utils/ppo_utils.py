@@ -469,6 +469,7 @@ class PolicyLossType(StrEnum):
     SAPO = "sapo"
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
+    DRO = "dro"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -500,6 +501,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
             "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
+            "dro": [PolicyLossType.DRO, dro_policy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -978,6 +980,67 @@ def importance_sampling_loss(
         mean_ratio = prob_ratio.mean()
 
     return loss, {"importance_ratio": mean_ratio.item()}
+
+
+
+@register_policy_loss(PolicyLossType.DRO)
+def dro_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """Distributionally Robust Optimization (DRO) policy loss.
+
+    Applies an exponential tilt to the per-token PPO surrogate loss so that
+    the optimisation focuses on the worst-case region of the advantage
+    distribution.  The ``beta`` parameter in ``config.dro`` controls the
+    degree of robustness: larger values concentrate more weight on the
+    highest-loss tokens/sequences.
+
+    The loss is:
+
+        L_dro = (1/beta) * log( E[ exp(beta * L_ppo) ] )
+
+    where L_ppo is the standard clipped surrogate loss (per token).
+
+    Note: ``config.loss_reduction`` is ignored — DRO uses its own log-mean-exp reduction.
+    """
+    beta = config.dro.beta
+
+    ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    surr1 = ratio * advantages
+    surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+    elementwise_loss = -torch.min(surr1, surr2)
+
+    clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+
+    loss_metrics = {"clip_ratio": clip_ratio}
+
+    # apply off policy correction
+    elementwise_loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        elementwise_loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    # DRO exponential tilt
+    if loss_mask is not None:
+        masked_loss = elementwise_loss * loss_mask
+        # Stabilise log-sum-exp with the max trick
+        max_val = masked_loss.max().detach()
+        exp_term = torch.exp(beta * (masked_loss - max_val))
+        exp_term = exp_term * loss_mask
+        log_mean_exp = max_val + torch.log(exp_term.sum() / loss_mask.sum().clamp(min=1))
+    else:
+        max_val = elementwise_loss.max().detach()
+        exp_term = torch.exp(beta * (elementwise_loss - max_val))
+        log_mean_exp = max_val + torch.log(exp_term.mean())
+
+    loss = log_mean_exp / beta
+
+    return loss, loss_metrics
 
 
 def reduce_loss(
