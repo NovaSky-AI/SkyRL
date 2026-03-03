@@ -1,11 +1,9 @@
 import os
 import signal
 
-import aiohttp
 import uvloop
 import vllm.envs as envs
 from fastapi import Request
-from fastapi.responses import JSONResponse
 from vllm import AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launcher import serve_http
@@ -21,10 +19,6 @@ from vllm.entrypoints.openai.cli_args import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.system_utils import set_ulimit
-
-from skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers import (
-    _assemble_tokens_from_chunks,
-)
 
 
 # TODO(tgriggs): Handle errors and use best practices for vLLM server
@@ -134,31 +128,6 @@ class VllmServer:
                 args=(),
             )
             return {"status": "ok"}
-
-        @app.post("/sample")
-        async def _sample(request: Request):
-            data = await request.json()
-            chunks = data["chunks"]
-            sampling_params = data["sampling_params"]
-            model = data.get("model", self.server_args.model)
-
-            base_url = f"{request.url.scheme}://{request.url.netloc}"
-            assembled_tokens, features = await _assemble_tokens_from_chunks(chunks, base_url, model)
-
-            payload: dict = {
-                "token_ids": assembled_tokens,
-                "sampling_params": sampling_params,
-                "model": model,
-            }
-            if features is not None:
-                payload["features"] = features
-
-            async with aiohttp.ClientSession() as s:
-                async with s.post(f"{base_url}/inference/v1/generate", json=payload) as resp:
-                    resp.raise_for_status()
-                    result = await resp.json()
-
-            return JSONResponse(content=result)
 
         await init_app_state(engine, app.state, args)
 

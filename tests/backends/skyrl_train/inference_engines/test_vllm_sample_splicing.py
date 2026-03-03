@@ -12,7 +12,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 # Import helpers from the vLLM-free helper module so tests run without a GPU env.
-from skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers import (
+from skyrl.backends.skyrl_train.inference_servers._sample_helpers import (
     _extract_render_info,
     _assemble_tokens_from_chunks,
 )
@@ -127,7 +127,7 @@ class TestAssembleTokensFromChunks:
         ]
 
         with patch(
-            "skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers._render_image",
+            "skyrl.backends.skyrl_train.inference_servers._sample_helpers._render_image",
             new=AsyncMock(return_value=_RENDER_RESP_A),
         ):
             token_ids, features = await _assemble_tokens_from_chunks(chunks, "http://fake", "model")
@@ -151,7 +151,7 @@ class TestAssembleTokensFromChunks:
         ]
 
         with patch(
-            "skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers._render_image",
+            "skyrl.backends.skyrl_train.inference_servers._sample_helpers._render_image",
             new=AsyncMock(return_value=_RENDER_RESP_A),
         ):
             token_ids, features = await _assemble_tokens_from_chunks(chunks, "http://fake", "model")
@@ -168,7 +168,7 @@ class TestAssembleTokensFromChunks:
         ]
 
         with patch(
-            "skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers._render_image",
+            "skyrl.backends.skyrl_train.inference_servers._sample_helpers._render_image",
             new=AsyncMock(return_value=_RENDER_RESP_A),
         ):
             token_ids, features = await _assemble_tokens_from_chunks(chunks, "http://fake", "model")
@@ -189,7 +189,7 @@ class TestAssembleTokensFromChunks:
         render_side_effect = [_RENDER_RESP_A, _RENDER_RESP_B]
 
         with patch(
-            "skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers._render_image",
+            "skyrl.backends.skyrl_train.inference_servers._sample_helpers._render_image",
             new=AsyncMock(side_effect=render_side_effect),
         ):
             token_ids, features = await _assemble_tokens_from_chunks(chunks, "http://fake", "model")
@@ -215,7 +215,7 @@ class TestAssembleTokensFromChunks:
         ]
 
         with patch(
-            "skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers._render_image",
+            "skyrl.backends.skyrl_train.inference_servers._sample_helpers._render_image",
             new=AsyncMock(return_value=_RENDER_RESP_A),  # renders 3 placeholder tokens
         ):
             token_ids, features = await _assemble_tokens_from_chunks(chunks, "http://fake", "model")
@@ -230,7 +230,7 @@ class TestAssembleTokensFromChunks:
         ]
 
         with patch(
-            "skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers._render_image",
+            "skyrl.backends.skyrl_train.inference_servers._sample_helpers._render_image",
             new=AsyncMock(return_value=_RENDER_RESP_A),  # renders 3 placeholder tokens, not 99
         ):
             with pytest.raises(ValueError, match="expected_tokens=99"):
@@ -248,7 +248,7 @@ class TestAssembleTokensFromChunks:
         ]
 
         with patch(
-            "skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers._render_image_url",
+            "skyrl.backends.skyrl_train.inference_servers._sample_helpers._render_image_url",
             new=AsyncMock(return_value=_RENDER_RESP_B),
         ):
             token_ids, features = await _assemble_tokens_from_chunks(chunks, "http://fake", "model")
@@ -270,7 +270,7 @@ class TestAssembleTokensFromChunks:
         ]
 
         with patch(
-            "skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers._render_image_url",
+            "skyrl.backends.skyrl_train.inference_servers._sample_helpers._render_image_url",
             new=AsyncMock(return_value=_RENDER_RESP_B),  # renders 2 placeholder tokens, not 50
         ):
             with pytest.raises(ValueError, match="expected_tokens=50"):

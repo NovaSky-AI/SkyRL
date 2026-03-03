@@ -388,7 +388,7 @@ class VLLMServerActor(ServerActorProtocol):
             """Token-in-token-out sampling with multimodal support."""
             import aiohttp
             from fastapi.responses import JSONResponse
-            from skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers import (
+            from skyrl.backends.skyrl_train.inference_servers._sample_helpers import (
                 _assemble_tokens_from_chunks,
             )
 
