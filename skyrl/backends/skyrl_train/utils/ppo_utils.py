@@ -999,7 +999,7 @@ def importance_sampling_loss(
         Tuple of (loss, metrics_dict)
     """
     # Compute importance ratio: p_theta(x) / q(x)
-    prob_ratio = torch.exp(log_probs - old_log_probs)
+    prob_ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
 
     # Importance-weighted policy gradient
     loss = -(prob_ratio * advantages)
@@ -1040,6 +1040,8 @@ def dro_policy_loss(
         L_dro = (1/beta) * log( E[ exp(beta * L_ppo) ] )
 
     where L_ppo is the standard clipped surrogate loss (per token).
+
+    Note: ``config.loss_reduction`` is ignored — DRO uses its own log-mean-exp reduction.
     """
     beta = config.dro.beta
 
