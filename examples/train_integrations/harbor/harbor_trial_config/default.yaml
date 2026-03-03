@@ -47,6 +47,9 @@ agent:
     # Store all messages in the trial output (required for SkyRL training)
     store_all_messages: true
 
+    # Collect per-turn token IDs and logprobs from the LLM provider (required for step-wise training / TIS)
+    collect_rollout_details: true
+
     # The only sampling param that directly gets passed to Terminus
     temperature: 1.0
 
