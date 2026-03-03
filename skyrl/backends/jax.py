@@ -961,6 +961,7 @@ class JaxBackendImpl(AbstractBackend):
             lora_model.lora_config,
             lora_model.adapter_index,
             output_path,
+            self.config.process_id,
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
