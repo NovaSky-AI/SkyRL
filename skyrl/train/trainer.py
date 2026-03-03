@@ -384,7 +384,10 @@ class RayPPOTrainer:
         cfg = self.cfg
         pg = None
 
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        use_ref_model = (
+            (cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward)
+            and getattr(cfg.trainer.algorithm, "kl_reference_source", "ref_model") == "ref_model"
+        )
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -949,6 +952,17 @@ class RayPPOTrainer:
             ref_output = self.dispatch.forward("ref", data_fwd_pass)
             base_log_probs = ref_output["output"]
             self.dispatch.empty_cache("ref")
+        elif getattr(self.cfg.trainer.algorithm, "kl_reference_source", "ref_model") in ("rollout", "old_policy"):
+            # Use rollout (sampling) logprobs as reference instead of a frozen ref model.
+            # This eliminates the reference model memory and forward pass compute.
+            base_log_probs = training_input.get("rollout_logprobs", None)
+            if base_log_probs is None:
+                raise ValueError(
+                    "kl_reference_source is set to "
+                    f"'{self.cfg.trainer.algorithm.kl_reference_source}' but "
+                    "rollout_logprobs is not available in the training input. "
+                    "Ensure generator.sampling_params.logprobs is set to 1."
+                )
 
         # Policy forward
         policy_output = self.dispatch.forward("policy", data_fwd_pass)

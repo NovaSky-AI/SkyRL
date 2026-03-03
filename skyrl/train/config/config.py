@@ -328,6 +328,10 @@ class AlgorithmConfig(BaseConfig):
     use_kl_loss: bool = True
     """Apply KL loss in the policy model. Mutually exclusive with ``use_kl_in_reward``."""
     kl_loss_coef: float = 0.001
+    kl_reference_source: str = "ref_model"
+    """Source of base logprobs for KL computation: ``"ref_model"`` uses a frozen
+    reference model; ``"rollout"`` (or ``"old_policy"``) uses the rollout
+    (sampling) logprobs, eliminating the reference-model memory and compute."""
     use_entropy_loss: bool = False
     entropy_loss_coef: float = 0.01
     temperature: Optional[float] = None
