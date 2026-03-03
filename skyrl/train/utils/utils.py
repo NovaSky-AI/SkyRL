@@ -272,9 +272,10 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         "token_mean",
         "sequence_mean",
         "seq_mean_token_sum_norm",
+        "sum",
     ), (
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
-        f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+        f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm', 'sum']`"
     )
 
     # TODO (erictang000): remove this after deprecation period
