@@ -206,7 +206,16 @@ class DistributedTorchRayActor:
         def numa_bind(nid: int):
             bitmask = LIBNUMA.numa_parse_nodestring(bytes(str(nid), "ascii"))
             LIBNUMA.numa_run_on_node_mask(bitmask)
-            LIBNUMA.numa_set_membind(bitmask)
+            # Use interleave instead of membind to spread memory across all
+            # NUMA nodes. With optimizer CPU offload, binding to one node
+            # causes OOM during checkpoint serialization.
+            try:
+                LIBNUMA.numa_set_interleave_mask.argtypes = [POINTER(bitmask_t)]
+                LIBNUMA.numa_set_interleave_mask.restype = c_void_p
+                all_nodes = LIBNUMA.numa_parse_nodestring(b"all")
+                LIBNUMA.numa_set_interleave_mask(all_nodes)
+            except Exception:
+                LIBNUMA.numa_set_membind(bitmask)
 
         numa_nodes = LIBNUMA.numa_num_configured_nodes()
         if numa_nodes <= 0:
@@ -983,10 +992,18 @@ class PolicyWorkerBase(Worker):
         torch.distributed.barrier()
 
     def save_checkpoint(self, ckpt_dir: Path, tokenizer=None):
+        # When optimizer CPU offload is enabled, skip saving optimizer state
+        # to avoid OOM during serialization and flattened_range errors in
+        # mcore 0.16.0. Training can resume from model-only checkpoints.
+        save_optimizer = self.optimizer
+        save_scheduler = self.scheduler
+        if getattr(self, "_skip_optimizer_checkpoint", False):
+            save_optimizer = None
+            save_scheduler = None
         self.strategy.save_checkpoint(
             model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
+            optimizer=save_optimizer,
+            scheduler=save_scheduler,
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
@@ -995,6 +1012,11 @@ class PolicyWorkerBase(Worker):
     def load_checkpoint(
         self, ckpt_dir: Path, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True
     ):
+        # Skip optimizer loading when checkpoint was saved without optimizer
+        # states (e.g., when _skip_optimizer_checkpoint was set during save).
+        if getattr(self, "_skip_optimizer_checkpoint", False):
+            load_optimizer_states = False
+            load_lr_scheduler_states = False
         _, states = self.strategy.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer if load_optimizer_states else None,
@@ -1230,10 +1252,19 @@ class CriticWorkerBase(Worker):
         )
 
     def save_checkpoint(self, ckpt_dir: str, tokenizer=None):
+        # When optimizer CPU offload is enabled, skip saving optimizer state
+        # to avoid OOM during serialization (optimizer + model weights can
+        # exceed available system memory). Training can resume from model-only
+        # checkpoints by re-initializing the optimizer.
+        save_optimizer = self.optimizer
+        save_scheduler = self.scheduler
+        if getattr(self, "_skip_optimizer_checkpoint", False):
+            save_optimizer = None
+            save_scheduler = None
         self.strategy.save_checkpoint(
             model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
+            optimizer=save_optimizer,
+            scheduler=save_scheduler,
             ckpt_dir=ckpt_dir,
             node_local_rank=self.get_node_local_rank(),
             tokenizer=tokenizer,
