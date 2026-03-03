@@ -355,7 +355,6 @@ class AlgorithmConfig(BaseConfig):
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
-    zero_variance_filter_mode: str = "mask"
     lambd: float = 1.0
     gamma: float = 1.0
     eps_clip_low: float = 0.2

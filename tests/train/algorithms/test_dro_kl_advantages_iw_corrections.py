@@ -385,9 +385,6 @@ class TestConfigFields:
         assert hasattr(cfg, "use_kl_in_advantages")
         assert hasattr(cfg, "kl_advantages_coef")
         assert hasattr(cfg, "kl_reference_source")
-        assert hasattr(cfg, "zero_variance_filter_mode")
-        assert cfg.zero_variance_filter_mode == "mask"
-
         # OffPolicyCorrectionConfig new fields
         opc = OffPolicyCorrectionConfig()
         assert hasattr(opc, "token_mask_eps_low")
