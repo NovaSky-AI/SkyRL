@@ -58,15 +58,23 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
 
 
 @pytest.mark.parametrize(
-    ("strategy", "lora"),
+    ("strategy", "lora", "fully_reshardable"),
     [
-        ("fsdp", False),
-        ("fsdp2", False),
-        pytest.param("megatron", False, marks=pytest.mark.megatron),
-        pytest.param("megatron", True, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        ("fsdp", False, False),
+        ("fsdp2", False, False),
+        pytest.param("megatron", False, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", True, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        pytest.param("megatron", False, True, marks=pytest.mark.megatron),
+    ],
+    ids=[
+        "fsdp",
+        "fsdp2",
+        "megatron",
+        "megatron_lora",
+        "megatron_fully_reshardable",
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
+def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -80,6 +88,8 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         from skyrl.train.config import SkyRLLoraConfig
 
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32)
+    if fully_reshardable:
+        cfg.trainer.policy.megatron_config.dist_ckpt_optim_fully_reshardable = True
 
     try:
         actor_group = init_worker_with_type(

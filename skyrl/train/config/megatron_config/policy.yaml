@@ -61,3 +61,9 @@ transformer_config_kwargs:
 # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
 # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer
 empty_cuda_cache: true
+
+# When True, uses the "fully-reshardable" format for the distributed-optimizer checkpoint.
+# When False (default), uses the "dp-reshardable" format which is more
+# efficient but only supports resharding along the data-parallel dimension.
+# see https://github.com/NVIDIA/Megatron-LM/blob/core_v0.16.0/megatron/core/optimizer/distrib_optimizer.py#L1187 for more details.
+dist_ckpt_optim_fully_reshardable: false

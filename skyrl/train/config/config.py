@@ -169,6 +169,7 @@ class MegatronConfig(BaseConfig):
     )
     empty_cuda_cache: Optional[bool] = None
     model_config_kwargs: dict = field(default_factory=dict)
+    dist_ckpt_optim_fully_reshardable: bool = False
 
 
 # ---------------------------------------------------------------------------

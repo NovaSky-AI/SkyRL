@@ -142,6 +142,12 @@ class MegatronStrategy(DistributedStrategy):
     ) -> Union[List[ModelOrModelOptimPair], ModelOrModelOptimPair]:
         raise NotImplementedError()
 
+    @property
+    def _dist_ckpt_optim_metadata(self) -> dict:
+        if self.megatron_config.dist_ckpt_optim_fully_reshardable:
+            return {"distrib_optim_sharding_type": "fully_reshardable"}
+        return {"distrib_optim_sharding_type": "dp_reshardable"}
+
     @staticmethod
     def _ensure_optimizer_state_initialized(optimizer):
         """Ensure Adam optimizer state (exp_avg, exp_avg_sq) exists before checkpointing.
@@ -192,7 +198,7 @@ class MegatronStrategy(DistributedStrategy):
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                 model_sharded_state_dict,
                 is_loading=False,
-                metadata={"distrib_optim_sharding_type": "dp_reshardable"},
+                metadata=self._dist_ckpt_optim_metadata,
             )
         if scheduler:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
@@ -288,7 +294,7 @@ class MegatronStrategy(DistributedStrategy):
             sharded_state_dict["optimizer"] = optimizer.sharded_state_dict(
                 model_sharded_state_dict,
                 is_loading=True,
-                metadata={"distrib_optim_sharding_type": "dp_reshardable"},
+                metadata=self._dist_ckpt_optim_metadata,
             )
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
