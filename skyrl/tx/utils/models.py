@@ -284,7 +284,7 @@ def save_lora_checkpoint(
     adapter_config: LoraConfig,
     adapter_index: int,
     output_path: Path | CloudPath,
-    rank: int = 0,
+    rank: int,
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 
