@@ -328,6 +328,12 @@ class AlgorithmConfig(BaseConfig):
     use_kl_loss: bool = True
     """Apply KL loss in the policy model. Mutually exclusive with ``use_kl_in_reward``."""
     kl_loss_coef: float = 0.001
+    use_kl_in_advantages: bool = False
+    """Modify advantages with a batch-centered relative KL signal after group normalization.
+    ``advantage += coef * (avg_batch_KL - token_KL)``. Tokens drifting more than
+    the batch average from the reference get penalized; tokens drifting less get a bonus."""
+    kl_advantages_coef: float = 0.01
+    """Coefficient for the KL-in-advantages penalty. Only used when ``use_kl_in_advantages=True``."""
     use_entropy_loss: bool = False
     entropy_loss_coef: float = 0.01
     temperature: Optional[float] = None
