@@ -439,6 +439,13 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
 @pytest.mark.parametrize(
     "engine_config, parent_process_cmd, expected_cmd_start",
     [
+        # jax backend, no args
+        (
+            EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
+            ["uv", "run", "-m", "skyrl.tinker.api"],
+            ["uv", "run", "--isolated", "--extra", "tinker", "--extra", "jax", "-m", "skyrl.tinker.engine"],
+        ),
+        # skyrl-train backend, with args
         (
             EngineConfig(backend="skyrl_train", base_model="Qwen/Qwen3-0.6B"),
             ["uv", "run", "--env-file", ".env", "--extra", "tinker", "-m", "skyrl.tinker.api"],
@@ -565,11 +572,6 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
                 "-m",
                 "skyrl.tinker.engine",
             ],
-        ),
-        (
-            EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
-            ["uv", "run", "-m", "skyrl.tinker.api"],
-            ["uv", "run", "--isolated", "--extra", "tinker", "--extra", "jax", "-m", "skyrl.tinker.engine"],
         ),
     ],
 )
