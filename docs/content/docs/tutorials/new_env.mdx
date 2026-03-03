@@ -191,7 +191,7 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
    # this needs to be done inside the entrypoint task
    register(
       id="multiply",  # <-- The name of the environment.
-      entry_point="examples.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
+      entry_point="examples.train.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
    )
 
    # make sure that the training loop is not run on the head node.
