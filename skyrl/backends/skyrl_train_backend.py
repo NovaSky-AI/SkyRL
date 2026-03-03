@@ -25,7 +25,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl.train.config import get_config_as_yaml_str
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
@@ -189,14 +189,32 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_engines_initialized:
             return
 
-        logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} inference engines")
-        self._inference_engine_client = InferenceEngineClient(
-            create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
-            self._tokenizer,
-            self._cfg.trainer.policy.model.path,
-            self._cfg.trainer.policy.model.lora,
-            self._cfg.generator.inference_engine,
-        )
+        if _SKYRL_USE_NEW_INFERENCE:
+            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+
+            ie_cfg = self._cfg.generator.inference_engine
+            proxy_url = ie_cfg.external_proxy_url
+            server_urls = list(ie_cfg.external_server_urls or [])
+            if not proxy_url:
+                raise ValueError(
+                    "_SKYRL_USE_NEW_INFERENCE=1 requires " "generator.inference_engine.external_proxy_url to be set."
+                )
+            logger.info(f"Using RemoteInferenceClient: proxy_url={proxy_url}, server_urls={server_urls}")
+            self._inference_engine_client = RemoteInferenceClient(
+                proxy_url=proxy_url,
+                server_urls=server_urls,
+                model_name=self._cfg.trainer.policy.model.path,
+            )
+        else:
+            logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} inference engines")
+            self._inference_engine_client = InferenceEngineClient(
+                create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
+                self._tokenizer,
+                self._cfg.trainer.policy.model.path,
+                self._cfg.trainer.policy.model.lora,
+                self._cfg.generator.inference_engine,
+            )
+
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()
         self._inference_engines_initialized = True
@@ -530,7 +548,6 @@ class SkyRLTrainBackend(AbstractBackend):
         async def sample_all():
             tasks = []
             for i in range(len(prepared_batch.all_prompts)):
-                prompt = prepared_batch.all_prompts[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
                 # Pass through common fields; only stop needs name translation
@@ -550,8 +567,9 @@ class SkyRLTrainBackend(AbstractBackend):
 
                 tasks.append(
                     self._inference_engine_client.sample(
-                        prompt_token_ids=prompt,
-                        num_samples=1,  # Tinker batches multiple samples separately
+                        prompt_token_ids=prepared_batch.all_prompts[i],
+                        chunks=prepared_batch.all_prompt_inputs[i].model_dump()["chunks"],
+                        num_samples=1,
                         sampling_params=params_dict,
                     )
                 )

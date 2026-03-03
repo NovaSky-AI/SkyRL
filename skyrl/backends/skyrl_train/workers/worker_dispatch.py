@@ -412,7 +412,7 @@ class WorkerDispatch:
             finally:
                 await self._inference_engine_client.resume_generation()
 
-    def set_inference_engine_client(self, inference_engine_client: InferenceEngineClient) -> None:
+    def set_inference_engine_client(self, inference_engine_client) -> None:
         """Set the inference engine client for weight sync.
 
         This can be called after construction if the client isn't available at init time.

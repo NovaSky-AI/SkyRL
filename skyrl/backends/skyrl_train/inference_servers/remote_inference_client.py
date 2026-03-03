@@ -298,6 +298,8 @@ class RemoteInferenceClient:
         chunks: List[Dict[str, Any]],
         sampling_params: Dict[str, Any],
         session_id: Optional[Any] = None,
+        prompt_token_ids: Optional[List[int]] = None,  # ignored; used by InferenceEngineClient
+        num_samples: Optional[int] = None,  # ignored; used by InferenceEngineClient
     ) -> Dict[str, Any]:
         """Token-in-token-out sampling supporting multimodal ModelInput chunks.
 

@@ -383,6 +383,38 @@ class VLLMServerActor(ServerActorProtocol):
             await engine.reset_prefix_cache()
             return {"status": "ok"}
 
+        @app.post("/sample")
+        async def _sample(request: Request):
+            """Token-in-token-out sampling with multimodal support."""
+            import aiohttp
+            from fastapi.responses import JSONResponse
+            from skyrl.backends.skyrl_train.inference_engines.vllm._sample_helpers import (
+                _assemble_tokens_from_chunks,
+            )
+
+            data = await request.json()
+            chunks = data["chunks"]
+            sampling_params = data["sampling_params"]
+            model = data.get("model", self._cli_args.model)
+
+            base_url = f"{request.url.scheme}://{request.url.netloc}"
+            assembled_tokens, features = await _assemble_tokens_from_chunks(chunks, base_url, model)
+
+            payload: dict = {
+                "token_ids": assembled_tokens,
+                "sampling_params": sampling_params,
+                "model": model,
+            }
+            if features is not None:
+                payload["features"] = features
+
+            async with aiohttp.ClientSession() as s:
+                async with s.post(f"{base_url}/inference/v1/generate", json=payload) as resp:
+                    resp.raise_for_status()
+                    result = await resp.json()
+
+            return JSONResponse(content=result)
+
     async def shutdown(self) -> None:
         """Gracefully shutdown the server."""
         if self._server_task:

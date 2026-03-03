@@ -193,6 +193,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         num_samples: int,
         sampling_params: Dict[str, Any],
         session_id: Optional[Union[str, int]] = None,
+        chunks: Optional[List[Dict]] = None,  # ignored; used by RemoteInferenceClient
     ) -> InferenceEngineOutput:
         """Generate multiple independent samples from a single prompt.
 
