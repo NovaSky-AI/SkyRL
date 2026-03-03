@@ -163,8 +163,7 @@ def chunk_gated_delta_rule(
 
     # Compute the correction matrix M = (I + L)^{-1} where L is the strictly lower triangular
     # matrix L = (k_beta @ key^T) * decay_mask. This solves the linear system (I + L) @ M = I
-    # to account for the delta rule's recursive dependency within each chunk.
-    # We compute this via forward substitution (equivalent to the Neumann series I - L + L^2 - L^3 + ...).
+    # via forward substitution to account for the delta rule's recursive dependency within each chunk.
     L = jnp.tril((k_beta @ jnp.swapaxes(key, -1, -2)) * decay_mask, k=-1)
     correction = -L
     for i in range(1, chunk_size):
