@@ -52,7 +52,7 @@ on:
           - harbor-grpo-qwen3-8b
         default: "openenv-fleet-grpo-qwen3-8b"
       data_version:
-        description: "Dataset version in S3 (v3=20,557 tasks, v4=15,169 tasks, v5=6,594 tasks recommended)"
+        description: "Dataset version in S3 (v3=20,557 tasks, v4=15,169 tasks, v5=5,654 tasks recommended)"
         type: string
         default: "v5"
       resume_run_name:
