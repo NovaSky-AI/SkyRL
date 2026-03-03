@@ -111,10 +111,6 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=None,
         description="Total number of processes in the multi-node cluster",
     )
-    process_id: int = Field(
-        default=0,
-        description="Process ID within the multi-node cluster",
-    )
 
 
 @jax.tree_util.register_dataclass
@@ -196,10 +192,11 @@ class JaxBackendImpl(AbstractBackend):
     - Supports both FORWARD and FORWARD_BACKWARD request types
     """
 
-    def __init__(self, base_model: str, config: JaxBackendConfig):
+    def __init__(self, base_model: str, config: JaxBackendConfig, process_id: int):
         """Initialize JAX LoRA backend."""
         self.base_model = base_model
         self.config = config
+        self.process_id = process_id
         self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model with LoRA config
@@ -961,7 +958,7 @@ class JaxBackendImpl(AbstractBackend):
             lora_model.lora_config,
             lora_model.adapter_index,
             output_path,
-            self.config.process_id,
+            self.process_id,
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
@@ -1072,7 +1069,7 @@ class JaxBackend(JaxBackendImpl):
     """
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
-        self.process_id = config.process_id
+        self.process_id = 0  # Coordinator is always process 0
         if config.coordinator_address is not None:
             jax.distributed.initialize(
                 coordinator_address=config.coordinator_address,
@@ -1084,7 +1081,7 @@ class JaxBackend(JaxBackendImpl):
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
 
-        self._broadcast_and_call("__init__", base_model=base_model, config=config)
+        self._broadcast_and_call("__init__", base_model=base_model, config=config, process_id=self.process_id)
 
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
@@ -1159,10 +1156,9 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
     init_payload = _broadcast_command(None, process_id=process_id)
     assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
     config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
-    config.process_id = process_id
     logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}")
 
-    backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
+    backend = JaxBackendImpl(init_payload.kwargs["base_model"], config, process_id)
 
     logger.info(f"Worker process_id={process_id} entering command loop")
 
