@@ -1042,7 +1042,7 @@ def _broadcast_command(cmd: RpcPayload | None, process_id: int) -> RpcPayload:
     On coordinator (process 0): serializes and broadcasts the payload.
     On workers: receives and deserializes the payload (pass None).
     """
-    is_source = (process_id == 0)
+    is_source = process_id == 0
 
     if is_source:
         assert cmd is not None, "Coordinator must provide a command to broadcast."
