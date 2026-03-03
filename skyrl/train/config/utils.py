@@ -1,7 +1,7 @@
 from pathlib import Path
 from hydra import compose, initialize_config_dir
 
-CONFIG_DIR = Path(__file__).parent  # skyrl-train/config
+CONFIG_DIR = Path(__file__).parent  # train/config
 DEFAULT_CONFIG_NAME = "ppo_base_config.yaml"
 
 

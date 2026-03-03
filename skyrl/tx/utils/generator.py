@@ -19,6 +19,12 @@ class KVCache:
     keys: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
     values: list[jax.Array]  # list of (batch, seq, num_kv_heads, head_dim) per layer
     cache_position: jax.Array  # Per-sequence positions of shape (batch,)
+    # list of (batch, conv_dim, conv_kernel_size) for linear-attention layers
+    # full-attention layers use placeholder tensors with shape (batch, 0, 0)
+    conv_states: list[jax.Array] | None = None
+    # list of (batch, num_heads, k_head_dim, v_head_dim) for linear-attention layers
+    # full-attention layers use placeholder tensors with shape (batch, 0, 0, 0)
+    recurrent_states: list[jax.Array] | None = None
 
     @staticmethod
     def update(
@@ -27,6 +33,9 @@ class KVCache:
         values: list[jax.Array],
         positions: jax.Array,
         attention_mask: jax.Array,
+        *,
+        conv_states: list[jax.Array] | None = None,
+        recurrent_states: list[jax.Array] | None = None,
     ) -> KVCache:
         """Create an updated KVCache with computed cache positions for left-aligned decoding.
 
@@ -36,6 +45,10 @@ class KVCache:
             values: List of value arrays per layer.
             positions: Position indices with shape [B, seq_len].
             attention_mask: Attention mask with shape [B, seq_len].
+            conv_states: Optional list of linear-attention conv states per layer.
+                Expected shape per linear-attention layer: [B, conv_dim, conv_kernel_size].
+            recurrent_states: Optional list of linear-attention recurrent states per layer.
+                Expected shape per linear-attention layer: [B, num_heads, k_head_dim, v_head_dim].
 
         Returns:
             New KVCache with computed cache_position.
@@ -43,10 +56,20 @@ class KVCache:
         if kv_cache is not None:
             # Decode: next position is current position + 1
             cache_position = positions[:, 0] + 1
+            if conv_states is None:
+                conv_states = kv_cache.conv_states
+            if recurrent_states is None:
+                recurrent_states = kv_cache.recurrent_states
         else:
             # Prefill: next position is the sequence length (number of real tokens)
             cache_position = attention_mask.sum(axis=1)
-        return KVCache(keys=keys, values=values, cache_position=cache_position)
+        return KVCache(
+            keys=keys,
+            values=values,
+            cache_position=cache_position,
+            conv_states=conv_states,
+            recurrent_states=recurrent_states,
+        )
 
     @staticmethod
     def update_layer(kv_cache, k, v, positions):
@@ -76,13 +99,21 @@ class KVCache:
         Returns:
             New KVCache with padded keys and values.
         """
-        # k and v have shape [B, T, num_heads, head_dim]
-        cache_pad_length = max_length - self.keys[0].shape[1]
-        pad_spec = ((0, 0), (0, cache_pad_length), (0, 0), (0, 0))
+
+        def pad_kv(x):
+            # x has shape [B, T, num_heads, head_dim]
+            # Linear attention layers use placeholder tensors with T=0; pad each layer independently
+            if x.shape[1] >= max_length:
+                return x
+            pad_spec = ((0, 0), (0, max_length - x.shape[1]), (0, 0), (0, 0))
+            return jnp.pad(x, pad_spec)
+
         return KVCache(
-            keys=[jnp.pad(k, pad_spec) for k in self.keys],
-            values=[jnp.pad(v, pad_spec) for v in self.values],
+            keys=[pad_kv(k) for k in self.keys],
+            values=[pad_kv(v) for v in self.values],
             cache_position=self.cache_position,
+            conv_states=self.conv_states,
+            recurrent_states=self.recurrent_states,
         )
 
 

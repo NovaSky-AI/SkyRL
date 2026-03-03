@@ -5,8 +5,8 @@ import optax
 from huggingface_hub import snapshot_download
 from transformers import PretrainedConfig
 
-from skyrl.tx.models.configs import Qwen3Config
-from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
+from skyrl.tx.models.configs import Qwen3_5Config
+from skyrl.tx.models.qwen3_5 import Qwen3_5ForCausalLM
 from skyrl.tx.utils.models import get_dtype, load_safetensors
 from skyrl.tx.layers.lora import init_lora_adapter
 from skyrl.tinker.types import LoraConfig
@@ -14,14 +14,14 @@ from tests.tx.models.lora_test_utils import get_adapter_params, get_out_of_rank_
 
 
 def test_lora_training():
-    base_model = "Qwen/Qwen3-0.6B"
+    base_model = "Qwen/Qwen3.5-0.8B"
     base_config = PretrainedConfig.from_pretrained(base_model)
-    config = Qwen3Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
+    config = Qwen3_5Config(base_config, max_lora_adapters=5, max_lora_rank=32, shard_attention_heads=True)
 
     checkpoint_path = snapshot_download(base_model, allow_patterns=["*.safetensors"])
-    mesh = jax.make_mesh((1, 1), ("fsdp", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 2)
+    mesh = jax.make_mesh((1, 1, 1), ("fsdp", "ep", "tp"), axis_types=(jax.sharding.AxisType.Auto,) * 3)
     with jax.set_mesh(mesh):
-        model = Qwen3ForCausalLM(config, dtype=get_dtype(config.get_config().dtype), rngs=nnx.Rngs(0))
+        model = Qwen3_5ForCausalLM(config, dtype=get_dtype(config.get_config().dtype), rngs=nnx.Rngs(0))
         load_safetensors(checkpoint_path, config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
