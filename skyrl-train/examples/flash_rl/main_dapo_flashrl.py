@@ -5,7 +5,7 @@ Main entrypoint for DAPO training with FlashRL.
 import ray
 import hydra
 import torch
-from typing import List, Union
+from typing import List, Tuple, Union
 from omegaconf import DictConfig
 from skyrl_train.config import SkyRLConfig
 from skyrl_train.trainer import RayPPOTrainer
@@ -54,7 +54,7 @@ class DAPOTrainer(RayPPOTrainer):
     """
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> Tuple[GeneratorOutput, List[str]]:
         """
         Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
 

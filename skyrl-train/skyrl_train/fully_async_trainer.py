@@ -640,7 +640,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
         # Convert rewards to per-token form and compute reward metrics before training conversion
-        generator_output = self.postprocess_generator_output(generator_output, uids)
+        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
         # print example just for debugging
         vis = self.tokenizer.decode(generator_output["response_ids"][0])

@@ -64,6 +64,7 @@ from skyrl_train.utils.trainer_utils import (
     build_dataloader,
     cleanup_old_checkpoints,
     extract_step_from_path,
+    filter_generator_output,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
@@ -240,7 +241,7 @@ class RayPPOTrainer:
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output = self.postprocess_generator_output(generator_output, uids)
+                        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -381,7 +382,10 @@ class RayPPOTrainer:
         cfg = self.cfg
         pg = None
 
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        use_ref_model = (
+            (cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward or cfg.trainer.algorithm.use_kl_in_advantages)
+            and cfg.trainer.algorithm.kl_reference_source == "ref_model"
+        )
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -691,7 +695,7 @@ class RayPPOTrainer:
         return generator_output
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> Tuple[GeneratorOutput, List[str]]:
         """
         Converts to per token rewards and computes pass@N.
 
@@ -730,11 +734,30 @@ class RayPPOTrainer:
             per_token_rewards = rewards
         else:
             if self.cfg.trainer.algorithm.zero_variance_filter:
-                kept_indices_set = set(zero_variance_filter(rewards, uids))
-                generator_output["loss_masks"] = [
-                    [0] * len(mask) if i not in kept_indices_set else mask
-                    for i, mask in enumerate(generator_output["loss_masks"])
-                ]
+                kept_indices = zero_variance_filter(rewards, uids)
+                kept_indices_set = set(kept_indices)
+
+                if (
+                    self.cfg.trainer.algorithm.zero_variance_filter_mode == "remove"
+                    and len(kept_indices) < len(rewards)
+                ):
+                    if len(kept_indices) == 0:
+                        # All samples filtered — fall back to mask mode to avoid empty batch
+                        generator_output["loss_masks"] = [
+                            [0] * len(mask) for mask in generator_output["loss_masks"]
+                        ]
+                    else:
+                        # Remove filtered samples from batch to save forward/backward compute
+                        generator_output = filter_generator_output(generator_output, kept_indices)
+                        rewards = generator_output["rewards"]
+                        responses = generator_output["response_ids"]
+                        uids = [uids[i] for i in kept_indices]
+                else:
+                    # Default: zero the loss_mask for filtered samples (existing behavior)
+                    generator_output["loss_masks"] = [
+                        [0] * len(mask) if i not in kept_indices_set else mask
+                        for i, mask in enumerate(generator_output["loss_masks"])
+                    ]
             # Response-level rewards: rewards is List[float], convert to per-token rewards
             for reward, response in zip(rewards, responses):
                 per_token_reward = [0.0] * len(response)
@@ -754,7 +777,40 @@ class RayPPOTrainer:
         )
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
-        return generator_output
+        return generator_output, uids
+
+    def apply_kl_advantage_penalty(self, data: TrainingInputBatch) -> TrainingInputBatch:
+        """Modify advantages with batch-centered relative KL penalty.
+
+        Adds a per-token KL adjustment to advantages: tokens drifting more
+        than the batch average from the reference get penalized, tokens
+        drifting less get a bonus. The total KL advantage sums to approximately
+        zero across the batch (variance-reducing centering).
+
+        Formula: advantage += kl_coef * (avg_batch_KL - token_KL)
+        where token_KL = log(p_current / p_reference)
+        """
+        action_log_probs = data["action_log_probs"]
+        base_log_probs = data["base_action_log_probs"]
+        loss_mask = data["loss_mask"].float()
+        advantages = data["advantages"]
+
+        # Per-token KL: log(p_current / p_reference)
+        token_kl = (action_log_probs - base_log_probs) * loss_mask
+
+        # Batch-average KL across all valid tokens
+        avg_kl = token_kl.sum() / loss_mask.sum().clamp(min=1.0)
+
+        # Relative KL advantage: positive for low-drift tokens, negative for high-drift
+        kl_advantage = self.cfg.trainer.algorithm.kl_advantages_coef * (avg_kl - token_kl) * loss_mask
+
+        data["advantages"] = advantages + kl_advantage
+
+        self.all_metrics.update({
+            "kl_in_advantages/avg_token_kl": avg_kl.item(),
+        })
+
+        return data
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:
@@ -820,6 +876,10 @@ class RayPPOTrainer:
             )
         data["returns"] = returns
         data["advantages"] = advantages
+
+        # Apply KL-in-advantages penalty if configured
+        if self.cfg.trainer.algorithm.use_kl_in_advantages and data.get("base_action_log_probs") is not None:
+            data = self.apply_kl_advantage_penalty(data)
 
         # remove padding while calculating metrics
         pad_size = data.metadata.get("pad_size", 0)
@@ -938,10 +998,23 @@ class RayPPOTrainer:
             values = critic_output["output"]
 
         # Ref forward
-        if self.ref_model is not None:
-            ref_output = self.dispatch.forward("ref", data_fwd_pass)
-            base_log_probs = ref_output["output"]
-            self.dispatch.empty_cache("ref")
+        kl_ref_source = self.cfg.trainer.algorithm.kl_reference_source
+        if kl_ref_source == "ref_model":
+            if self.ref_model is not None:
+                ref_output = self.dispatch.forward("ref", data_fwd_pass)
+                base_log_probs = ref_output["output"]
+                self.dispatch.empty_cache("ref")
+        elif kl_ref_source in ("rollout", "old_policy"):
+            # Use rollout sampling logprobs as KL reference — no ref model needed.
+            # Constrains per-step policy drift rather than cumulative drift from init.
+            base_log_probs = training_input.get("rollout_logprobs")
+            if base_log_probs is None:
+                raise ValueError(
+                    f"kl_reference_source='{kl_ref_source}' requires rollout logprobs, "
+                    "but they are None. Ensure sampling_params.logprobs is set in the generator config."
+                )
+        else:
+            raise ValueError(f"Unknown kl_reference_source: {kl_ref_source}")
 
         # Policy forward
         policy_output = self.dispatch.forward("policy", data_fwd_pass)

@@ -5,7 +5,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo
 import ray
 import hydra
 import torch
-from typing import List
+from typing import List, Tuple
 from omegaconf import DictConfig
 from skyrl_train.trainer import RayPPOTrainer
 from skyrl_train.utils import initialize_ray
@@ -22,7 +22,7 @@ class DAPOTrainer(RayPPOTrainer):
     """
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> Tuple[GeneratorOutput, List[str]]:
         """
         Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
 

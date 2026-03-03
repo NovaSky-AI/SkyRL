@@ -106,8 +106,8 @@ trainer:
     # this adds training batch level normalization to advantages
     advantage_batch_normalize: false
     value_head_prefix: "value_head"
-    policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "clip_cov", "kl_cov", or customizable with PolicyLossRegistry
-    loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm"
+    policy_loss_type: "regular" # "regular", "dual_clip", "gspo", "cispo", "sapo", "clip_cov", "kl_cov", "importance_sampling", "dro", "cross_entropy", or customizable with PolicyLossRegistry
+    loss_reduction: "token_mean" # "token_mean", "sequence_mean", "seq_mean_token_sum_norm", "sum"
     grpo_norm_by_std: true # set to false to disable normalization by std in GRPO
     zero_variance_filter: false # set to true to loss mask out prompts with zero variance rewards. only applicable when rewards are response-level.
     # GAE parameters
@@ -188,10 +188,14 @@ trainer:
       ppo_kl_coef: 1.0
     
     # cispo parameters (only used when policy_loss_type: "cispo")
-    cispo: 
+    cispo:
       cispo_eps_clip_low: 0  # offset for lower bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
       cispo_eps_clip_high: 5 # offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)
-  
+
+    # dro parameters (only used when policy_loss_type: "dro")
+    dro:
+      beta: 0.1  # strength of the quadratic divergence penalty
+
   # Fully async specific knobs. For more see https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:
     # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,

@@ -470,6 +470,7 @@ class PolicyLossType(StrEnum):
     SAPO = "sapo"
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
+    DRO = "dro"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -496,11 +497,13 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
             "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
+            "cispo": [PolicyLossType.CISPO, compute_policy_loss_cispo],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
             "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
+            "dro": [PolicyLossType.DRO, dro_policy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -543,6 +546,34 @@ def sync_registries():
     PolicyLossRegistry.sync_with_actor()
     AdvantageEstimatorRegistry.sync_with_actor()
     logger.info("Synced registries to ray actor")
+
+
+def compute_iw_metrics(ratio: torch.Tensor, loss_mask: Optional[torch.Tensor]) -> dict[str, float]:
+    """Compute importance weight health diagnostics.
+
+    Returns:
+        iw_snr: Signal-to-noise ratio of importance weights (higher = healthier).
+            Equals sqrt(num_tokens) when all weights are 1.0 (on-policy).
+            Drops toward 1.0 when weights are highly variable (off-policy degradation).
+        iw_mean: Mean importance weight.
+        iw_p1/p50/p99: Percentiles of importance weight distribution.
+    """
+    with torch.no_grad():
+        if loss_mask is not None:
+            flat = ratio[loss_mask.bool()]
+        else:
+            flat = ratio.flatten()
+        if flat.numel() == 0:
+            return {}
+        metrics = {}
+        iw_sum = flat.sum()
+        iw_sq_sum = (flat ** 2).sum()
+        metrics["iw_snr"] = (iw_sum / iw_sq_sum.sqrt().clamp(min=1e-8)).item()
+        metrics["iw_mean"] = flat.mean().item()
+        quantiles = torch.quantile(flat.float(), torch.tensor([0.01, 0.50, 0.99], device=flat.device))
+        for p, q in zip([1, 50, 99], quantiles):
+            metrics[f"iw_p{p}"] = q.item()
+        return metrics
 
 
 @register_policy_loss(PolicyLossType.REGULAR)
@@ -752,6 +783,7 @@ def compute_policy_loss_cispo(
 
     # apply off policy correction
     loss_metrics = {"clip_ratio": clip_ratio}
+    loss_metrics.update(compute_iw_metrics(ratio, loss_mask))
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )
@@ -905,7 +937,7 @@ def cross_entropy_loss(
     ignoring the old_log_probs and advantages which are only used for RL.
 
     The loss is computed as: -log_probs * loss_mask, summed over all tokens.
-    This matches Tinker's cross_entropy semantics where the loss is a simple sum.
+    The loss is a simple sum over masked tokens.
 
     Args:
         log_probs: Log probabilities from the model for each token
@@ -921,7 +953,7 @@ def cross_entropy_loss(
     # Simple negative log-likelihood: -log p(token)
     elementwise_loss = -log_probs
 
-    # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
+    # Apply loss mask and sum
     if loss_mask is not None:
         loss = (elementwise_loss * loss_mask).sum()
     else:
@@ -949,9 +981,6 @@ def importance_sampling_loss(
 
     The loss is: -(exp(log_probs - old_log_probs) * advantages).sum()
 
-    This matches Tinker's importance_sampling semantics.
-    See: https://tinker-docs.thinkingmachines.ai/losses#policy-gradient-importance_sampling
-
     Args:
         log_probs: Log probabilities from current policy (learner)
         old_log_probs: Log probabilities from sampling policy (for importance weighting)
@@ -969,22 +998,66 @@ def importance_sampling_loss(
     # Importance-weighted policy gradient
     elementwise_loss = -(prob_ratio * advantages)
 
-    # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
+    # Track mean importance ratio for monitoring (before off-policy correction)
     if loss_mask is not None:
-        loss = (elementwise_loss * loss_mask).sum()
-        # Track mean importance ratio for monitoring
         mean_ratio = (prob_ratio * loss_mask).sum() / loss_mask.sum()
     else:
-        loss = elementwise_loss.sum()
         mean_ratio = prob_ratio.mean()
 
-    return loss, {"importance_ratio": mean_ratio.item()}
+    loss_metrics = {"importance_ratio": mean_ratio.item()}
+    loss_metrics.update(compute_iw_metrics(prob_ratio, loss_mask))
+
+    # apply off policy correction
+    elementwise_loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        elementwise_loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(elementwise_loss, loss_mask, config.loss_reduction, config.max_seq_len)
+    return loss, loss_metrics
+
+
+@register_policy_loss(PolicyLossType.DRO)
+def dro_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: Union[AlgorithmConfig, DictConfig],
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """Direct Reward Optimization loss with smooth quadratic trust region.
+
+    Uses a quadratic penalty on policy divergence instead of hard clipping:
+        L = -(log_p * A - 0.5 * beta * (log_p - log_q)^2)
+
+    The quadratic term penalizes divergence smoothly in both directions,
+    providing a trust region without gradient discontinuities or token dropping.
+
+    References:
+        - arXiv:2405.19107
+        - arXiv:2501.12599
+    """
+    quadratic_term = (log_probs - old_log_probs) ** 2
+    per_token_loss = -(log_probs * advantages - 0.5 * config.dro.beta * quadratic_term)
+
+    mean_quad = masked_mean(quadratic_term, loss_mask).detach().item()
+    loss_metrics = {"dro_quadratic_term": mean_quad}
+
+    # apply off policy correction
+    per_token_loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        per_token_loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(per_token_loss, loss_mask, config.loss_reduction, config.max_seq_len)
+    return loss, loss_metrics
 
 
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm"],
+    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "sum"],
     max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
@@ -1005,6 +1078,10 @@ def reduce_loss(
             # If no mask, assume all tokens are valid
             seq_losses = torch.sum(loss, dim=-1) / max_seq_len
         loss = torch.mean(seq_losses)
+    elif loss_reduction == "sum":
+        # Raw sum over all valid tokens. Gradient magnitude scales with batch size
+        # and sequence length. Requires LR scaling when changing batch size.
+        loss = (loss * loss_mask).sum() if loss_mask is not None else loss.sum()
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
     return loss

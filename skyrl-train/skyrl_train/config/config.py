@@ -268,6 +268,13 @@ class OffPolicyCorrectionConfig(BaseConfig):
     product_mask_low: float = 0.5
     outlier_token_is_threshold_low: Optional[float] = None
     outlier_token_is_threshold_high: Optional[float] = None
+    token_mask_eps_low: Optional[float] = None
+    token_mask_eps_high: Optional[float] = None
+
+
+@dataclass
+class DROConfig(BaseConfig):
+    beta: float = 0.1
 
 
 @dataclass
@@ -278,6 +285,9 @@ class AlgorithmConfig(BaseConfig):
     use_kl_in_reward: bool = False
     use_kl_loss: bool = True
     kl_loss_coef: float = 0.001
+    use_kl_in_advantages: bool = False
+    kl_advantages_coef: float = 0.01
+    kl_reference_source: str = "ref_model"
     use_entropy_loss: bool = False
     entropy_loss_coef: float = 0.01
     advantage_batch_normalize: bool = False
@@ -286,6 +296,7 @@ class AlgorithmConfig(BaseConfig):
     loss_reduction: str = "token_mean"
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
+    zero_variance_filter_mode: str = "mask"
     lambd: float = 1.0
     gamma: float = 1.0
     eps_clip_low: float = 0.2
@@ -300,6 +311,7 @@ class AlgorithmConfig(BaseConfig):
     clip_cov: ClipCovConfig = field(default_factory=ClipCovConfig)
     kl_cov: KLCovConfig = field(default_factory=KLCovConfig)
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
+    dro: DROConfig = field(default_factory=DROConfig)
     max_seq_len: Optional[int] = None
 
 
