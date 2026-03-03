@@ -469,6 +469,7 @@ class PolicyLossType(StrEnum):
     SAPO = "sapo"
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
+    DRO = "dro"
 
 
 class PolicyLossRegistry(BaseFunctionRegistry):
@@ -495,11 +496,13 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "regular": [PolicyLossType.REGULAR, ppo_policy_loss],
             "dual_clip": [PolicyLossType.DUAL_CLIP, ppo_policy_loss],
             "gspo": [PolicyLossType.GSPO, gspo_policy_loss],
+            "cispo": [PolicyLossType.CISPO, compute_policy_loss_cispo],
             "clip_cov": [PolicyLossType.CLIP_COV, compute_policy_loss_clip_cov],
             "kl_cov": [PolicyLossType.KL_COV, compute_policy_loss_kl_cov],
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
             "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
+            "dro": [PolicyLossType.DRO, dro_policy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -542,6 +545,37 @@ def sync_registries():
     PolicyLossRegistry.sync_with_actor()
     AdvantageEstimatorRegistry.sync_with_actor()
     logger.info("Synced registries to ray actor")
+
+
+def compute_iw_metrics(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> dict:
+    """Compute importance-weighting diagnostics for logging.
+
+    Returns a dict with mean, std, max, and min of the per-token importance
+    ratio ``exp(log_probs - old_log_probs)`` over valid (masked) positions.
+    """
+    ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    if loss_mask is not None:
+        valid = loss_mask > 0
+        valid_ratios = ratio[valid]
+    else:
+        valid_ratios = ratio.reshape(-1)
+    if valid_ratios.numel() == 0:
+        return {
+            "iw_ratio_mean": 0.0,
+            "iw_ratio_std": 0.0,
+            "iw_ratio_max": 0.0,
+            "iw_ratio_min": 0.0,
+        }
+    return {
+        "iw_ratio_mean": valid_ratios.mean().detach().item(),
+        "iw_ratio_std": valid_ratios.std().detach().item(),
+        "iw_ratio_max": valid_ratios.max().detach().item(),
+        "iw_ratio_min": valid_ratios.min().detach().item(),
+    }
 
 
 @register_policy_loss(PolicyLossType.REGULAR)
@@ -751,6 +785,8 @@ def compute_policy_loss_cispo(
 
     # apply off policy correction
     loss_metrics = {"clip_ratio": clip_ratio}
+    iw_metrics = compute_iw_metrics(log_probs, old_log_probs, loss_mask)
+    loss_metrics.update(iw_metrics)
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )
@@ -966,24 +1002,84 @@ def importance_sampling_loss(
     prob_ratio = torch.exp(log_probs - old_log_probs)
 
     # Importance-weighted policy gradient
-    elementwise_loss = -(prob_ratio * advantages)
+    loss = -(prob_ratio * advantages)
 
-    # Apply loss mask and sum (matching Tinker's SUM reduction semantics)
+    loss_metrics = {}
+    iw_metrics = compute_iw_metrics(log_probs, old_log_probs, loss_mask)
+    loss_metrics.update(iw_metrics)
+
+    # apply off policy correction
+    loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
+    return loss, loss_metrics
+
+
+@register_policy_loss(PolicyLossType.DRO)
+def dro_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """Distributionally Robust Optimization (DRO) policy loss.
+
+    Applies an exponential tilt to the per-token PPO surrogate loss so that
+    the optimisation focuses on the worst-case region of the advantage
+    distribution.  The ``beta`` parameter in ``config.dro`` controls the
+    degree of robustness: larger values concentrate more weight on the
+    highest-loss tokens/sequences.
+
+    The loss is:
+
+        L_dro = (1/beta) * log( E[ exp(beta * L_ppo) ] )
+
+    where L_ppo is the standard clipped surrogate loss (per token).
+    """
+    beta = config.dro.beta
+
+    ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    surr1 = ratio * advantages
+    surr2 = ratio.clamp(1 - config.eps_clip_low, 1 + config.eps_clip_high) * advantages
+    elementwise_loss = -torch.min(surr1, surr2)
+
+    clip_ratio = masked_mean((-surr2 > -surr1).float(), loss_mask).mean().detach().item()
+
+    loss_metrics = {"clip_ratio": clip_ratio}
+
+    # apply off policy correction
+    elementwise_loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        elementwise_loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    # DRO exponential tilt
     if loss_mask is not None:
-        loss = (elementwise_loss * loss_mask).sum()
-        # Track mean importance ratio for monitoring
-        mean_ratio = (prob_ratio * loss_mask).sum() / loss_mask.sum()
+        masked_loss = elementwise_loss * loss_mask
+        # Stabilise log-sum-exp with the max trick
+        max_val = masked_loss.max().detach()
+        exp_term = torch.exp(beta * (masked_loss - max_val))
+        exp_term = exp_term * loss_mask
+        log_mean_exp = max_val + torch.log(exp_term.sum() / loss_mask.sum().clamp(min=1))
     else:
-        loss = elementwise_loss.sum()
-        mean_ratio = prob_ratio.mean()
+        max_val = elementwise_loss.max().detach()
+        exp_term = torch.exp(beta * (elementwise_loss - max_val))
+        log_mean_exp = max_val + torch.log(exp_term.mean())
 
-    return loss, {"importance_ratio": mean_ratio.item()}
+    loss = log_mean_exp / beta
+
+    return loss, loss_metrics
 
 
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm"],
+    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "sum"],
     max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
@@ -1004,6 +1100,11 @@ def reduce_loss(
             # If no mask, assume all tokens are valid
             seq_losses = torch.sum(loss, dim=-1) / max_seq_len
         loss = torch.mean(seq_losses)
+    elif loss_reduction == "sum":
+        if loss_mask is not None:
+            loss = (loss * loss_mask).sum()
+        else:
+            loss = loss.sum()
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
     return loss

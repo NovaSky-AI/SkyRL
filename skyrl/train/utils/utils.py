@@ -162,7 +162,11 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     # Validate training batch size is larger than the least common multiple of the DP sizes of policy (and ref if used).
     lcm_dp_size = policy_dp_size
 
-    use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+    use_ref_model = (
+        cfg.trainer.algorithm.use_kl_loss
+        or cfg.trainer.algorithm.use_kl_in_reward
+        or (cfg.trainer.algorithm.use_kl_in_advantages and cfg.trainer.algorithm.kl_reference_source == "ref_model")
+    )
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
         if cfg.trainer.strategy == "megatron":
@@ -272,9 +276,10 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         "token_mean",
         "sequence_mean",
         "seq_mean_token_sum_norm",
+        "sum",
     ), (
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
-        f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
+        f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm', 'sum']`"
     )
 
     # TODO (erictang000): remove this after deprecation period
@@ -343,7 +348,11 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             "must be the same when colocating all models"
         )
     else:
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        use_ref_model = (
+            cfg.trainer.algorithm.use_kl_loss
+            or cfg.trainer.algorithm.use_kl_in_reward
+            or (cfg.trainer.algorithm.use_kl_in_advantages and cfg.trainer.algorithm.kl_reference_source == "ref_model")
+        )
         if cfg.trainer.placement.colocate_policy_ref and use_ref_model:
             assert cfg.trainer.placement.policy_num_nodes == cfg.trainer.placement.ref_num_nodes, (
                 f"policy_num_nodes ({cfg.trainer.placement.policy_num_nodes}) and ref_num_nodes "

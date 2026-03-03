@@ -58,7 +58,7 @@ def test_response_level_rewards():
         "rollout_metrics": None,
     }
 
-    result = trainer.postprocess_generator_output(generator_output, ["uid1"])
+    result, _ = trainer.postprocess_generator_output(generator_output, ["uid1"])
 
     # Verify conversion to per-token rewards
     assert result["rewards"] == [[0.0, 0.0, 1.0]]
@@ -84,7 +84,7 @@ def test_response_level_rewards():
         "rollout_metrics": None,
     }
 
-    result = trainer.postprocess_generator_output(generator_output, ["uid1", "uid2"])
+    result, _ = trainer.postprocess_generator_output(generator_output, ["uid1", "uid2"])
 
     # Verify conversion to per-token rewards
     assert result["rewards"] == [[0.0, 1.0], [0.0, 0.0, 0.5]]
@@ -115,7 +115,7 @@ def test_token_level_rewards():
         "rollout_metrics": None,
     }
 
-    result = trainer.postprocess_generator_output(generator_output, ["uid1"])
+    result, _ = trainer.postprocess_generator_output(generator_output, ["uid1"])
 
     # Verify token-level rewards are unchanged
     assert result["rewards"] == per_token_rewards
@@ -142,7 +142,7 @@ def test_token_level_rewards():
         "rollout_metrics": None,
     }
 
-    result = trainer.postprocess_generator_output(generator_output, ["uid1", "uid2"])
+    result, _ = trainer.postprocess_generator_output(generator_output, ["uid1", "uid2"])
 
     # Verify token-level rewards are unchanged
     assert result["rewards"] == per_token_rewards

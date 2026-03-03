@@ -288,6 +288,11 @@ class CISPOConfig(BaseConfig):
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
 
 
+@dataclass
+class DROConfig(BaseConfig):
+    beta: float = 0.1
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -312,6 +317,8 @@ class OffPolicyCorrectionConfig(BaseConfig):
     """Mask sequences with any token IS ratio below this threshold. Suggested: 1e-4. ``None`` to disable."""
     outlier_token_is_threshold_high: Optional[float] = None
     """Mask sequences with any token IS ratio above this threshold. Suggested: 100. ``None`` to disable."""
+    token_mask_eps_low: Optional[float] = None
+    token_mask_eps_high: Optional[float] = None
 
 
 @dataclass
@@ -328,6 +335,9 @@ class AlgorithmConfig(BaseConfig):
     use_kl_loss: bool = True
     """Apply KL loss in the policy model. Mutually exclusive with ``use_kl_in_reward``."""
     kl_loss_coef: float = 0.001
+    use_kl_in_advantages: bool = False
+    kl_advantages_coef: float = 0.01
+    kl_reference_source: str = "ref_model"
     use_entropy_loss: bool = False
     entropy_loss_coef: float = 0.01
     temperature: Optional[float] = None
@@ -345,6 +355,7 @@ class AlgorithmConfig(BaseConfig):
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
+    zero_variance_filter_mode: str = "mask"
     lambd: float = 1.0
     gamma: float = 1.0
     eps_clip_low: float = 0.2
@@ -365,6 +376,7 @@ class AlgorithmConfig(BaseConfig):
     """Only used when ``policy_loss_type="kl_cov"``."""
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
     """Only used when ``policy_loss_type="cispo"``."""
+    dro: DROConfig = field(default_factory=DROConfig)
     max_seq_len: Optional[int] = None
     """Used for ``seq_mean_token_sum_norm`` loss reduction; set explicitly for multi-turn.
     If ``None``, calculated as ``generator.max_input_length + generator.sampling_params.max_generate_length``."""

@@ -183,6 +183,53 @@ def compute_sequence_mask(
         raise ValueError(f"Unknown sequence_mask_metric: {sequence_mask_metric}")
 
 
+def compute_token_mask(
+    old_log_probs: torch.Tensor,
+    rollout_logprobs: torch.Tensor,
+    loss_mask: torch.Tensor,
+    token_mask_eps_low: Optional[float],
+    token_mask_eps_high: Optional[float],
+) -> Tuple[torch.Tensor, dict]:
+    """Compute a per-token mask based on importance-sampling ratio bounds.
+
+    Tokens whose IS ratio ``exp(old_log_probs - rollout_logprobs)`` falls
+    outside ``[token_mask_eps_low, token_mask_eps_high]`` are zeroed in the
+    returned mask.
+
+    Args:
+        old_log_probs: Log probabilities from the old policy.
+        rollout_logprobs: Log probabilities from the rollout policy.
+        loss_mask: Current token-level loss mask.
+        token_mask_eps_low: Lower IS-ratio bound (``None`` to skip).
+        token_mask_eps_high: Upper IS-ratio bound (``None`` to skip).
+
+    Returns:
+        Tuple of (updated_loss_mask, metrics).
+    """
+    metrics = {}
+    if token_mask_eps_low is None and token_mask_eps_high is None:
+        return loss_mask, metrics
+
+    token_is_ratio = safe_exp_delta(old_log_probs - rollout_logprobs, clip=20.0, out_dtype=old_log_probs.dtype)
+    valid = loss_mask > 0
+    total_tokens = valid.sum().clamp(min=1)
+
+    keep = torch.ones_like(loss_mask, dtype=torch.bool)
+    if token_mask_eps_low is not None:
+        under = (token_is_ratio < token_mask_eps_low) & valid
+        keep = keep & ~under
+        metrics["token_mask_under_low_ratio"] = (under.sum() / total_tokens).detach().item()
+    if token_mask_eps_high is not None:
+        over = (token_is_ratio > token_mask_eps_high) & valid
+        keep = keep & ~over
+        metrics["token_mask_over_high_ratio"] = (over.sum() / total_tokens).detach().item()
+
+    updated_mask = loss_mask * keep.float()
+    masked_count = (valid & ~keep).sum()
+    metrics["token_mask_masked_ratio"] = (masked_count / total_tokens).detach().item()
+    return updated_mask, metrics
+
+
 def compute_off_policy_correction(
     old_log_probs: torch.Tensor,
     rollout_logprobs: torch.Tensor,
@@ -237,6 +284,15 @@ def compute_off_policy_correction(
     )
     loss_mask = loss_mask * outlier_mask
     metrics.update(outlier_metrics)
+
+    # Apply per-token masking if configured
+    token_mask_eps_low = getattr(off_policy_correction, "token_mask_eps_low", None)
+    token_mask_eps_high = getattr(off_policy_correction, "token_mask_eps_high", None)
+    if token_mask_eps_low is not None or token_mask_eps_high is not None:
+        loss_mask, token_mask_metrics = compute_token_mask(
+            old_log_probs, rollout_logprobs, loss_mask, token_mask_eps_low, token_mask_eps_high
+        )
+        metrics.update(token_mask_metrics)
 
     # Initialize tis_ratio to None (only set if TIS is enabled)
     tis_ratio = None

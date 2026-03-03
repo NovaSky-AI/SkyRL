@@ -64,6 +64,7 @@ from skyrl.train.utils.trainer_utils import (
     build_dataloader,
     cleanup_old_checkpoints,
     extract_step_from_path,
+    filter_generator_output,
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
@@ -242,7 +243,7 @@ class RayPPOTrainer:
 
                     # 1.2 postprocess rewards
                     with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output = self.postprocess_generator_output(generator_output, uids)
+                        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -269,6 +270,10 @@ class RayPPOTrainer:
                     # 3. calculate advantages and returns
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
+
+                        if self.cfg.trainer.algorithm.use_kl_in_advantages:
+                            training_input = self.apply_kl_advantage_penalty(training_input)
+
                         # remove some unwanted keys
                         for key in ["rewards"]:
                             training_input.pop(key)
@@ -384,7 +389,11 @@ class RayPPOTrainer:
         cfg = self.cfg
         pg = None
 
-        use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
+        use_ref_model = (
+            cfg.trainer.algorithm.use_kl_loss
+            or cfg.trainer.algorithm.use_kl_in_reward
+            or (cfg.trainer.algorithm.use_kl_in_advantages and cfg.trainer.algorithm.kl_reference_source == "ref_model")
+        )
 
         if cfg.trainer.placement.colocate_all:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
@@ -698,11 +707,16 @@ class RayPPOTrainer:
         return generator_output
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(
+        self, generator_output: GeneratorOutput, uids: List[str]
+    ) -> Tuple[GeneratorOutput, List[str]]:
         """
         Converts to per token rewards and computes pass@N.
 
         In the future algorithm specific reward or loss mask post processing should be done here.
+
+        Returns:
+            Tuple of (processed_generator_output, uids) -- uids may be filtered.
         """
         generator_output_for_metrics = generator_output
         uids_for_metrics = uids
@@ -737,11 +751,19 @@ class RayPPOTrainer:
             per_token_rewards = rewards
         else:
             if self.cfg.trainer.algorithm.zero_variance_filter:
-                kept_indices_set = set(zero_variance_filter(rewards, uids))
-                generator_output["loss_masks"] = [
-                    [0] * len(mask) if i not in kept_indices_set else mask
-                    for i, mask in enumerate(generator_output["loss_masks"])
-                ]
+                filter_mode = getattr(self.cfg.trainer.algorithm, "zero_variance_filter_mode", "mask")
+                kept_indices = zero_variance_filter(rewards, uids)
+                if filter_mode == "filter":
+                    generator_output = filter_generator_output(generator_output, kept_indices)
+                    uids = [uids[i] for i in kept_indices]
+                    rewards = generator_output["rewards"]
+                    responses = generator_output["response_ids"]
+                else:
+                    kept_indices_set = set(kept_indices)
+                    generator_output["loss_masks"] = [
+                        [0] * len(mask) if i not in kept_indices_set else mask
+                        for i, mask in enumerate(generator_output["loss_masks"])
+                    ]
             # Response-level rewards: rewards is List[float], convert to per-token rewards
             for reward, response in zip(rewards, responses):
                 per_token_reward = [0.0] * len(response)
@@ -761,7 +783,7 @@ class RayPPOTrainer:
         )
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
-        return generator_output
+        return generator_output, uids
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:
@@ -949,6 +971,12 @@ class RayPPOTrainer:
             ref_output = self.dispatch.forward("ref", data_fwd_pass)
             base_log_probs = ref_output["output"]
             self.dispatch.empty_cache("ref")
+        elif (
+            self.cfg.trainer.algorithm.use_kl_in_advantages
+            and self.cfg.trainer.algorithm.kl_reference_source == "sampler"
+        ):
+            # Use rollout (sampler) logprobs as reference when no ref model
+            base_log_probs = training_input.get("rollout_logprobs", None)
 
         # Policy forward
         policy_output = self.dispatch.forward("policy", data_fwd_pass)
@@ -1039,6 +1067,35 @@ class RayPPOTrainer:
             }
         )
 
+        return data
+
+    @torch.no_grad()
+    def apply_kl_advantage_penalty(
+        self,
+        data: TrainingInputBatch,
+    ) -> TrainingInputBatch:
+        """Subtract a KL-divergence penalty from the per-token advantages.
+
+        The penalty is ``kl_advantages_coef * KL(policy || ref)`` computed
+        token-wise.  This encourages the policy to stay close to the
+        reference while still optimising rewards via the advantage signal.
+        """
+        base_action_log_probs = data["base_action_log_probs"]
+        action_log_probs = data["action_log_probs"]
+        loss_mask = data["loss_mask"]
+        advantages = data["advantages"]
+
+        kl = compute_approx_kl(
+            action_log_probs,
+            base_action_log_probs,
+            loss_mask=loss_mask,
+            kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+        )
+        coef = self.cfg.trainer.algorithm.kl_advantages_coef
+        data["advantages"] = advantages - coef * kl
+
+        kl_mean = masked_mean(kl, loss_mask, dim=-1).mean().item()
+        self.all_metrics.update({"loss/kl_advantage_penalty_mean": kl_mean})
         return data
 
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
