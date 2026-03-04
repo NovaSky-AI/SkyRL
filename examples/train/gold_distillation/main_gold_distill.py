@@ -12,38 +12,36 @@ Reference:
 
 from typing import List
 import os
+import sys
 
-import hydra
 import ray
 from loguru import logger
-from omegaconf import DictConfig
+from skyrl.train.config import SkyRLTrainConfig
 from transformers import AutoTokenizer
 import torch
 import torch.nn.functional as F
 
-from skyrl_train.entrypoints.main_base import (
+from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
     config_dir,
     validate_cfg,
     create_ray_wrapped_inference_engines_from_config,
     create_remote_inference_engines_from_config,
 )
-from skyrl_train.generators.base import GeneratorInterface
+from skyrl.train.generators.base import GeneratorInterface
 
-from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl_train.trainer import RayPPOTrainer
-from skyrl_train.utils import initialize_ray
-from skyrl_train.utils.ppo_utils import (
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils import initialize_ray
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
-    register_policy_loss,
-    reduce_loss,
 )
-from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl_train.workers.fsdp.fsdp_worker import CriticWorker
-from skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import CriticWorker
+from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 
-from examples.gold_distillation.gold_workers import GOLDPolicyWorker, GOLDRefWorker
-from examples.gold_distillation.gold_utils import (
+from .gold_workers import GOLDPolicyWorker, GOLDRefWorker
+from .gold_utils import (
     build_teacher_inputs_from_texts,
     build_alignment_groups_from_ids,
     merge_probabilities_with_alignment_groups,
@@ -68,7 +66,7 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         super().__init__(cfg, **kwargs)
 
         self.ref_tokenizer = ref_tokenizer
-        self.gold_temperature = self.cfg.trainer.algorithm.get("gold_temperature", 1.0)
+        self.gold_temperature = getattr(self.cfg.trainer.algorithm, "gold_temperature", 1.0)
 
     def update_ref_with_policy(self):
         """
@@ -719,19 +717,8 @@ def compute_no_op_advantage(token_level_rewards: torch.Tensor, **kwargs):
     return token_level_rewards, token_level_rewards
 
 
-# TODO: Is this accurate for GOLD? Taken from on-policy distillation example.
-@register_policy_loss("importance_sampling")
-def compute_importance_sampling_policy_loss(
-    log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None, **kwargs
-):
-    # as defined here: https://tinker-docs.thinkingmachines.ai/losses#policy-gradient-importance_sampling
-    loss = -torch.exp(log_probs - old_log_probs) * advantages
-    loss = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", config.max_seq_len)
-    return loss, 0.0
-
-
 class GOLDDistillationExp(BasePPOExp):
-    def __init__(self, cfg: DictConfig):
+    def __init__(self, cfg: SkyRLTrainConfig):
         super().__init__(cfg)
         self.ref_tokenizer = self.get_tokenizer(model_path=cfg.trainer.ref.model.path)
 
@@ -773,12 +760,18 @@ class GOLDDistillationExp(BasePPOExp):
 
         tokenizer = self.tokenizer
         ref_tokenizer = self.ref_tokenizer
-        if self.cfg.generator.run_engines_locally:
+        if self.cfg.generator.inference_engine.run_engines_locally:
             inference_engines = create_ray_wrapped_inference_engines_from_config(self.cfg, self.colocate_pg, tokenizer)
         else:
             inference_engines = create_remote_inference_engines_from_config(self.cfg, tokenizer)
 
-        inference_engine_client = InferenceEngineClient(inference_engines, tokenizer, self.cfg)
+        inference_engine_client = InferenceEngineClient(
+            inference_engines,
+            tokenizer,
+            self.cfg.trainer.policy.model.path,
+            self.cfg.trainer.policy.model.lora,
+            self.cfg.generator.inference_engine,
+        )
 
         generator: GeneratorInterface = self.get_generator(self.cfg, tokenizer, inference_engine_client)
 
@@ -800,13 +793,13 @@ class GOLDDistillationExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp = GOLDDistillationExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))

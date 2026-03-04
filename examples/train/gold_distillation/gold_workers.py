@@ -13,8 +13,8 @@ while overriding _forward_micro_batch to return logits instead of log_probs.
 import ray
 import torch
 
-from skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase, FSDPRefWorkerBase
-from skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import FSDPPolicyWorkerBase, FSDPRefWorkerBase
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 
 
 def _forward_micro_batch_logits(model, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
@@ -67,7 +67,7 @@ class GOLDFSDPPolicyWorkerBase(FSDPPolicyWorkerBase):
         This method is used by GOLD distillation to get logits for reward computation,
         while the standard `forward` method returns log probs for RL training.
         """
-        micro_batches = data.chunk(self.cfg.trainer.micro_forward_batch_size_per_gpu)
+        micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
         outputs = []
         for micro_batch in micro_batches:
             outputs.append(_forward_micro_batch_logits(self.model, micro_batch))
