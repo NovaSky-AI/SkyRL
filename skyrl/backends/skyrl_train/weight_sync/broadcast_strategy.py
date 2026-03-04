@@ -366,7 +366,7 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
                 from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
 
                 vllm_group = NCCLWeightTransferEngine.trainer_init(
-                    dict[str, str | int](
+                    dict(
                         master_address=init_info.master_addr,
                         master_port=init_info.master_port,
                         world_size=init_info.world_size,
