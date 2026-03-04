@@ -78,9 +78,9 @@ def test_chunk_gated_delta_rule_matches_recurrent(batch_size: int, seq_len: int,
     recurrent_out, recurrent_state = recurrent_gated_delta_rule(query, keys, value, g, beta)
     chunk_out, chunk_state = chunk_gated_delta_rule(query, keys, value, g, beta, chunk_size=chunk_size)
 
-    # Use relaxed tolerances for bfloat16
-    rtol = 1e-2 if dtype == jnp.bfloat16 else 1e-4
-    atol = 1e-2 if dtype == jnp.bfloat16 else 1e-4
+    # Use relaxed tolerances for bfloat16 (no float32 upcast in chunked impl)
+    rtol = 2e-2 if dtype == jnp.bfloat16 else 1e-4
+    atol = 2e-2 if dtype == jnp.bfloat16 else 1e-4
 
     assert (
         recurrent_out.shape == chunk_out.shape

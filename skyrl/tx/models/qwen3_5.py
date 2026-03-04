@@ -141,11 +141,11 @@ def chunk_gated_delta_rule(
     key = l2norm(key, axis=-1)
 
     # [B, T, H, D] -> [B, H, T, D] for easier chunk processing
-    query = jnp.transpose(query, (0, 2, 1, 3)).astype(jnp.float32)
-    key = jnp.transpose(key, (0, 2, 1, 3)).astype(jnp.float32)
-    value = jnp.transpose(value, (0, 2, 1, 3)).astype(jnp.float32)
-    beta = jnp.transpose(beta, (0, 2, 1)).astype(jnp.float32)
-    g = jnp.transpose(g, (0, 2, 1)).astype(jnp.float32)
+    query = jnp.transpose(query, (0, 2, 1, 3))
+    key = jnp.transpose(key, (0, 2, 1, 3))
+    value = jnp.transpose(value, (0, 2, 1, 3))
+    beta = jnp.transpose(beta, (0, 2, 1))
+    g = jnp.transpose(g, (0, 2, 1))
 
     batch_size, num_heads, seq_len, k_head_dim = key.shape
     v_head_dim = value.shape[-1]
@@ -200,9 +200,9 @@ def chunk_gated_delta_rule(
 
     # Initialize recurrent state S
     if initial_state is None:
-        state = jnp.zeros((batch_size, num_heads, k_head_dim, v_head_dim), dtype=jnp.float32)
+        state = jnp.zeros((batch_size, num_heads, k_head_dim, v_head_dim), dtype=dtype)
     else:
-        state = initial_state.astype(jnp.float32)
+        state = initial_state.astype(dtype)
 
     def chunk_step(
         S: jax.Array,
