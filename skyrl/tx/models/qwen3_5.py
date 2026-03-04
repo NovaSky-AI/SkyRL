@@ -111,15 +111,15 @@ def chunk_gated_delta_rule(
         - Q, K, V: query, key, value
         - β: update gate
         - γ[r] = cumulative decay at position r within chunk
-        - γ^C = γ[C-1]: cumulative decay at chunk end
+        - γ^C = γ[L-1]: cumulative decay at chunk end
         - Γ[i,j] = γ[i]/γ[j]: decay-aware causal mask
         - S: recurrent state [D_k, D_v]
         - Arrows denote decay scaling: ←x = γx, →x = (γ^C/γ)x
 
-    Correction matrix (UT transform, extends Eq 8-9 with decay):
+    Correction matrix (Eq 6 and 7 with decay):
         Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
 
-    Chunk-wise parallel form (extends Eq 10-11 with decay):
+    Chunk-wise parallel form (Eq 8 and 9 with decay):
         S[t+1] = →S[t] + (Ũ - ←W S[t]^T)^T →K
         O[t] = ←Q S[t]^T + (Q K^T ⊙ M)(Ũ - ←W S[t]^T)
 
@@ -180,7 +180,7 @@ def chunk_gated_delta_rule(
     decay_mask = jnp.tril(jnp.exp(g_cumsum[..., :, None] - g_cumsum[..., None, :]))
 
     # Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
-    # Computed via forward substitution (extends Eq 8-9 with decay).
+    # Computed via forward substitution (Eq 6 and 7 with decay).
     L = jnp.tril((k_beta @ jnp.swapaxes(key, -1, -2)) * decay_mask, k=-1)
     correction = -L
     for i in range(1, chunk_size):
@@ -194,7 +194,7 @@ def chunk_gated_delta_rule(
     # ←W = γW: decay-scaled corrected keys for state contribution
     gamma_W = correction @ (k_beta * jnp.exp(g_cumsum)[..., None])
 
-    # γ^C = γ[C-1]: cumulative decay at chunk end
+    # γ^C = γ[L-1]: cumulative decay at chunk end
     # →K = (γ^C/γ) K: decay scaling from each position to chunk end
     key_decay = jnp.exp(g_cumsum[..., -1, None] - g_cumsum)[..., None]
 
@@ -228,7 +228,7 @@ def chunk_gated_delta_rule(
         # S[t+1] = →S[t] + (Ũ - ←W S[t]^T)^T →K
         # where →S = γ^C S, →K = (γ^C/γ) K
         # Note: transposed from paper to match our state convention [D_k, D_v]
-        gamma_C = gamma_t[..., -1, None, None]  # γ^C = γ[C-1]
+        gamma_C = gamma_t[..., -1, None, None]  # γ^C = γ[L-1]
         S = gamma_C * S + jnp.swapaxes(K_t * key_decay_t, -1, -2) @ U_minus_gamma_W_S
 
         return S, O_t
