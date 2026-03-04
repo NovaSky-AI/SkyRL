@@ -235,12 +235,12 @@ def chunk_gated_delta_rule(
 
     # Transpose chunk dimension to first for scan: [B, H, C, ...] -> [C, B, H, ...]
     scan_inputs = (
-        jnp.transpose(query, (2, 0, 1, 3, 4)),      # Q
-        jnp.transpose(key, (2, 0, 1, 3, 4)),        # K
-        jnp.transpose(U, (2, 0, 1, 3, 4)),          # Ũ
-        jnp.transpose(gamma_W, (2, 0, 1, 3, 4)),    # ←W = γW
-        jnp.transpose(g_cumsum, (2, 0, 1, 3)),      # log(γ)
-        jnp.transpose(decay_mask, (2, 0, 1, 3, 4)), # Γ
+        jnp.transpose(query, (2, 0, 1, 3, 4)),  # Q
+        jnp.transpose(key, (2, 0, 1, 3, 4)),  # K
+        jnp.transpose(U, (2, 0, 1, 3, 4)),  # Ũ
+        jnp.transpose(gamma_W, (2, 0, 1, 3, 4)),  # ←W = γW
+        jnp.transpose(g_cumsum, (2, 0, 1, 3)),  # log(γ)
+        jnp.transpose(decay_mask, (2, 0, 1, 3, 4)),  # Γ
         jnp.transpose(key_decay, (2, 0, 1, 3, 4)),  # γ^C/γ (for →K)
     )
 
@@ -577,9 +577,7 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
                 query, key, value, g, beta, chunk_size=64, initial_state=None
             )
         else:
-            core_out, new_recurrent_state = recurrent_gated_delta_rule(
-                query, key, value, g, beta, recurrent_state
-            )
+            core_out, new_recurrent_state = recurrent_gated_delta_rule(query, key, value, g, beta, recurrent_state)
         core_out = self.norm(core_out, z).reshape(batch_size, seq_len, -1)
         out = self.out_proj(core_out, adapter_indices=adapter_indices)
         return out, new_conv_state, new_recurrent_state

@@ -56,9 +56,7 @@ def test_qwen3_5(tp: int):
 @pytest.mark.parametrize("seq_len", [32, 64, 100])
 @pytest.mark.parametrize("chunk_size", [16, 32])
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16])
-def test_chunk_gated_delta_rule_matches_recurrent(
-    batch_size: int, seq_len: int, chunk_size: int, dtype: jnp.dtype
-):
+def test_chunk_gated_delta_rule_matches_recurrent(batch_size: int, seq_len: int, chunk_size: int, dtype: jnp.dtype):
     """Test that chunk_gated_delta_rule produces the same results as recurrent_gated_delta_rule."""
     num_heads = 4
     k_head_dim = 16
@@ -84,8 +82,12 @@ def test_chunk_gated_delta_rule_matches_recurrent(
     rtol = 1e-2 if dtype == jnp.bfloat16 else 1e-4
     atol = 1e-2 if dtype == jnp.bfloat16 else 1e-4
 
-    assert recurrent_out.shape == chunk_out.shape, f"Output shapes don't match: {recurrent_out.shape} vs {chunk_out.shape}"
-    assert recurrent_state.shape == chunk_state.shape, f"State shapes don't match: {recurrent_state.shape} vs {chunk_state.shape}"
+    assert (
+        recurrent_out.shape == chunk_out.shape
+    ), f"Output shapes don't match: {recurrent_out.shape} vs {chunk_out.shape}"
+    assert (
+        recurrent_state.shape == chunk_state.shape
+    ), f"State shapes don't match: {recurrent_state.shape} vs {chunk_state.shape}"
 
     np.testing.assert_allclose(
         np.array(recurrent_out),
