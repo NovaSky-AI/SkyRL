@@ -18,5 +18,5 @@ search:
 fleet_task:
   tasks_file: null  # Path to exported Fleet tasks JSON file
   api_key: null  # Fleet API key (defaults to FLEET_API_KEY env var)
-  ttl_seconds: 600  # TTL for Fleet environment instances
+  ttl_seconds: 900  # TTL for Fleet environment instances (15 min headroom for retries)
   enable_context_tools: false  # Enable context management tools (check_context, manage_context, etc.)
