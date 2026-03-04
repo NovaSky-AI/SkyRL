@@ -28,7 +28,7 @@ Key features:
 - Two URL types:
   - proxy_url: Single URL for data plane operations (routed requests)
   - server_urls: List of backend URLs for control plane operations (fan-out)
-- Lazy world_size fetching from /get_server_info
+- Lazy world_size fetching from /get_world_size
 - Built-in retry on abort for in-flight weight updates (temporary)
 
 Usage:
@@ -69,16 +69,13 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
-from dataclasses import asdict
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 import aiohttp
 
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 
-if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, WeightUpdateRequest
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +132,7 @@ class RemoteInferenceClient:
 
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
-    _world_size: Optional[int] = field(default=None, repr=False)
+    _world_size: Optional[Tuple[int, List[int]]] = field(default=None, repr=False)
 
     # ---------------------------
     # Session Management
@@ -545,77 +542,109 @@ class RemoteInferenceClient:
 
     async def init_weight_update_communicator(
         self,
-        init_info: "BroadcastInitInfo",
+        init_info_list: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """
-        Initialize weight sync process group on all backends.
+        Initialize weight sync via vLLM native /init_weight_transfer_engine.
+
+        Accepts one init_info dict per server (same order as
+        server_urls). The caller builds the list via init_info.update_rank_offset(...)
+        and [x.to_api_payload() for x in server_infos].
 
         Args:
-            init_info: BroadcastInitInfo containing all args for weight sync setup.
+            init_info_list: One dict per server. Each dict is backend-specific
+                (e.g. NCCL: master_address, master_port, rank_offset, world_size).
 
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/init_weight_transfer", asdict(init_info))
+        if len(init_info_list) != len(self.server_urls):
+            raise ValueError(
+                f"init_info_list length ({len(init_info_list)}) must match " f"server_urls ({len(self.server_urls)})"
+            )
+        session = await self._get_session()
+        timeout = aiohttp.ClientTimeout(total=60)
+
+        async def post_init(url: str, init_dict: Dict[str, Any]) -> tuple:
+            async with session.post(
+                f"{url}/init_weight_transfer_engine",
+                json={"init_info": init_dict},
+                timeout=timeout,
+            ) as resp:
+                body = await resp.json() if resp.content_length else None
+                raise_for_status(resp, body)
+                return url, {"status": resp.status, "body": body}
+
+        results = await asyncio.gather(*[post_init(url, d) for url, d in zip(self.server_urls, init_info_list)])
+        return {url: resp for url, resp in results}
 
     async def update_named_weights(
         self,
-        request: "WeightUpdateRequest",
+        update_info: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Update weights on all backends.
+        Update weights via vLLM native /update_weights.
 
         Args:
-            request: BroadcastWeightUpdateRequest containing weight metadata.
+            update_info: Dict with keys expected by vLLM (e.g. names, dtype_names,
+                shapes, packed for NCCL).
 
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/update_weights", request.to_json_dict())
+        return await self._call_all_servers(
+            "/update_weights",
+            {"update_info": update_info},
+        )
 
     async def finalize_weight_update(self) -> Dict[str, Any]:
         """
         Finalize weight update on all backends.
 
-        Called after all update_weights() calls are complete.
-        Reserved for any post-processing steps that may be needed:
-        - Cache invalidation
-        - State synchronization
-        - Future vLLM requirements
+        No-op when using vLLM native weight sync (vLLM RLHF router has no
+        finalize route). Reserved for future post-processing if vLLM adds one.
 
         Returns:
-            Dict mapping server_url to response.
+            Dict mapping server_url to response (empty when no-op).
         """
-        return await self._call_all_servers("/finalize_weight_update", {})
+        return {url: {"status": 200, "body": {}} for url in self.server_urls}
 
     # ---------------------------
     # Info
     # ---------------------------
 
-    async def get_world_size(self) -> int:
+    async def get_world_size(self) -> Tuple[int, List[int]]:
         """
-        Get total world size across all inference workers.
+        Get total world size and per-server world sizes across all inference workers.
 
-        Fetches from /get_server_info on each server and sums the world_size values.
+        Fetches from vLLM's /get_world_size endpoint on each server.
         Result is cached after first call.
+
+        Returns:
+            Tuple of (total_world_size, world_size_per_server).
         """
         if self._world_size is not None:
             return self._world_size
 
-        results = await self._call_all_servers("/get_server_info", {}, method="GET")
+        results = await self._call_all_servers("/get_world_size", {}, method="GET")
 
         total_world_size = 0
-        for server_url, resp in results.items():
+        world_size_per_server: List[int] = []
+        for server_url in self.server_urls:
+            resp = results.get(server_url)
+            if resp is None:
+                raise RuntimeError(f"No response for server {server_url}")
             if resp.get("status") != 200:
                 error = resp.get("error", resp.get("body"))
-                raise RuntimeError(f"Failed to fetch server info from {server_url}: {error}")
+                raise RuntimeError(f"Failed to get world size from {server_url}: {error}")
             body = resp.get("body", {})
             world_size = body.get("world_size")
             if world_size is None:
-                raise RuntimeError(f"Failed to fetch server info from {server_url}: world_size is missing")
+                raise RuntimeError(f"Missing world_size in response from {server_url}")
             total_world_size += world_size
+            world_size_per_server.append(world_size)
 
-        self._world_size = total_world_size
+        self._world_size = (total_world_size, world_size_per_server)
         return self._world_size
 
     # ---------------------------

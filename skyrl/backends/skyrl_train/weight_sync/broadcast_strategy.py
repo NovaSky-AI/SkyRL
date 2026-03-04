@@ -7,7 +7,7 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass, replace
-from typing import Iterable, Iterator, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
@@ -59,6 +59,48 @@ class BroadcastInitInfo(WeightSyncInitInfo):
         cumulative_offset = engine_index * tp_size * pp_size
         return replace(self, rank_offset=self.rank_offset + cumulative_offset)
 
+    # TODO (Aaron): native weight sync only needs the following params:
+    #     master_address, master_port, rank_offset, world_size
+    # so we need a new method (to_api_payload) to return the payload for the native weight sync.
+    # Also we need a new method (update_rank_offset) to update the rank_offset for the native weight
+    # sync, since this is done automatically in the legacy weight sync.
+
+    def update_rank_offset(self, world_size_per_server: List[int]) -> List["BroadcastInitInfo"]:
+        """Return one BroadcastInitInfo per server with rank_offset for each.
+
+        Used when calling init_weight_update_communicator on the new inference path:
+        expand the single init_info into a list (one per server), then pass
+        [x.to_api_payload() for x in server_infos] to the client.
+
+        Args:
+            world_size_per_server: Per-server worker counts in server order.
+
+        Returns:
+            List of BroadcastInitInfo, one per server, with rank_offset 1, 1+ws[0], etc.
+        """
+        result: List[BroadcastInitInfo] = []
+        rank_offset = self.rank_offset
+        for ws in world_size_per_server:
+            result.append(replace(self, rank_offset=rank_offset))
+            rank_offset += ws
+        return result
+
+    def to_api_payload(self) -> Union["BroadcastInitInfo", Dict[str, Any]]:
+        """Return payload for init_weight_update_communicator.
+
+        When using new inference (vLLM native APIs), returns a dict with
+        master_address, master_port, rank_offset, world_size. Otherwise returns
+        self for legacy clients that expect WeightSyncInitInfo.
+        """
+        if _SKYRL_USE_NEW_INFERENCE:
+            return {
+                "master_address": self.master_addr,
+                "master_port": self.master_port,
+                "rank_offset": self.rank_offset,
+                "world_size": self.world_size,
+            }
+        return self
+
 
 @dataclass
 class BroadcastWeightUpdateRequest(WeightUpdateRequest):
@@ -71,10 +113,10 @@ class BroadcastWeightUpdateRequest(WeightUpdateRequest):
 
 
 class BroadcastWeightTransferSender(WeightTransferSender):
-    """Sends weights via torch.distributed.broadcast.
+    """Sends weights via torch.distributed.broadcast or vLLM NCCL (new inference path).
 
-    The sender broadcasts tensors from rank 0 to all other ranks in the
-    model update group, while coordinating with inference engines via RPC.
+    When _vllm_group is set, uses vLLM's trainer_send_weights with batched
+    update_weights. Otherwise uses per-chunk HTTP + torch.distributed.broadcast.
     """
 
     def __init__(
@@ -82,36 +124,93 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         init_info: BroadcastInitInfo,
         model_update_group: Optional[torch.distributed.ProcessGroup],
         inference_client: InferenceEngineClient,
+        vllm_group: Optional[Any] = None,
     ) -> None:
         """Initialize the broadcast sender.
 
         Args:
             init_info: BroadcastInitInfo containing all config-derived args.
-            model_update_group: Process group for broadcast operations (None on non-rank-0 training workers).
+            model_update_group: Process group for broadcast (legacy path); None when vllm_group set.
             inference_client: Client for coordinating with inference engines.
+            vllm_group: vLLM NCCL communicator from NCCLWeightTransferEngine.trainer_init (new path).
         """
         self._init_info = init_info
         self._model_update_group = model_update_group
         self._inference_client = inference_client
+        self._vllm_group = vllm_group
 
-    async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
-        """Send chunks via broadcast.
-
-        Each chunk should contain exactly one parameter for broadcast strategy.
-        All training ranks iterate through chunks (weight extraction may involve
-        collective ops), but only rank 0 broadcasts to inference engines via the
-        model_update_group.
+    async def send_chunks(
+        self,
+        chunks: Iterable[WeightChunk],
+        weight_metadata: Optional[Dict[str, list]] = None,
+    ) -> None:
+        """Send chunks via broadcast or vLLM native NCCL.
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
+            weight_metadata: Pre-computed metadata dict with "names", "dtype_names",
+                "shapes". When provided on the vLLM native path, avoids materializing
+                all chunks to collect metadata. Ignored on legacy path.
         """
+        if _SKYRL_USE_NEW_INFERENCE:
+            await self._send_chunks_vllm_native(chunks, weight_metadata)
+        else:
+            await self._send_chunks_legacy(chunks)
+
+    async def _send_chunks_vllm_native(
+        self,
+        chunks: Iterable[WeightChunk],
+        weight_metadata: Optional[Dict[str, list]] = None,
+    ) -> None:
+        """Batched path: one update_weights call + trainer_send_weights (vLLM native).
+
+        All ranks must evaluate the chunks iterator (extract_weights uses
+        collective all-gather internally). Only rank 0 sends the gathered
+        tensors to vLLM via the NCCL weight transfer engine.
+        """
+        from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+
         rank = torch.distributed.get_rank()
 
-        # Rank 0 must have a process group to broadcast to inference engines
+        if weight_metadata is None:
+            raise ValueError(
+                "weight_metadata is required for vLLM native path. "
+                "Call weight_extractor.get_weight_metadata() and pass it to send_chunks."
+            )
+        update_info = {**weight_metadata, "packed": True}
+
+        if rank == 0:
+            update_task = asyncio.create_task(self._inference_client.update_named_weights(update_info))
+
+        def weight_iterator() -> Iterator[Tuple[str, torch.Tensor]]:
+            for chunk in chunks:
+                yield from zip(chunk.names, chunk.tensors)
+
+        def do_gather_and_send() -> None:
+            if rank == 0 and self._vllm_group is not None:
+                NCCLWeightTransferEngine.trainer_send_weights(
+                    iterator=weight_iterator(),
+                    group=self._vllm_group,
+                    packed=True,
+                )
+            else:
+                for _ in weight_iterator():
+                    pass
+
+        await asyncio.to_thread(do_gather_and_send)
+
+        if rank == 0:
+            await update_task
+
+        torch.distributed.barrier()
+
+    async def _send_chunks_legacy(self, chunks: Iterable[WeightChunk]) -> None:
+        """Per-chunk HTTP + torch.distributed.broadcast (legacy path)."""
+        rank = torch.distributed.get_rank()
+
         if rank == 0:
             assert self._model_update_group is not None, "Rank 0 must have model_update_group"
 
-        # All ranks iterate through chunks (weight extraction may involve collective ops)
         for chunk in chunks:
             assert len(chunk) == 1, f"Broadcast strategy expects single-parameter chunks, got {len(chunk)}"
 
@@ -119,7 +218,6 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             tensor = chunk.tensors[0]
             shape = chunk.shapes[0]
 
-            # Only rank 0 sends request to inference engines
             if rank == 0:
                 request = BroadcastWeightUpdateRequest(
                     names=[name],
@@ -128,7 +226,6 @@ class BroadcastWeightTransferSender(WeightTransferSender):
                 )
                 update_weight_task = asyncio.create_task(self._inference_client.update_named_weights(request))
 
-            # Broadcast tensor from rank 0 to inference engines (no-op on other training ranks)
             def broadcast_tensor(t: torch.Tensor) -> None:
                 if rank == 0 and self._model_update_group is not None:
                     torch.distributed.broadcast(t.data, 0, group=self._model_update_group)
@@ -141,12 +238,10 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             torch.distributed.barrier()
 
     def teardown(self) -> None:
-        """Destroy the process group used for weight transfer.
-
-        TODO: Integrate with training workers to call this during shutdown.
-        """
+        """Destroy the process group used for weight transfer (legacy only)."""
         if self._model_update_group is not None:
             torch.distributed.destroy_process_group(self._model_update_group)
+        self._vllm_group = None
 
 
 class BroadcastWeightTransferReceiver(WeightTransferReceiver):
@@ -255,31 +350,43 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
     ) -> BroadcastWeightTransferSender:
         """Create a broadcast sender.
 
-        Sets up the process group on rank 0 only (other training ranks don't join).
+        When _SKYRL_USE_NEW_INFERENCE, uses vLLM's NCCLWeightTransferEngine.trainer_init
+        on rank 0. Otherwise uses init_custom_process_group for legacy path.
 
         Args:
-            init_info: BroadcastInitInfo containing config-derived args.
+            init_info: BroadcastInitInfo from create_init_info.
             inference_client: Client for coordinating with inference engines.
-
-        Returns:
-            A configured BroadcastWeightTransferSender instance.
         """
-        # Only rank 0 joins the model_update_group (with inference engines)
-        # Other training ranks don't participate in the process group
+        rank = torch.distributed.get_rank()
         model_update_group = None
-        if torch.distributed.get_rank() == 0:
-            model_update_group = init_custom_process_group(
-                backend=init_info.backend,
-                init_method=get_tcp_url(init_info.master_addr, init_info.master_port),
-                world_size=init_info.world_size,
-                rank=0,
-                group_name=init_info.group_name,
-            )
+        vllm_group = None
+
+        if _SKYRL_USE_NEW_INFERENCE:
+            if rank == 0:
+                from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+
+                vllm_group = NCCLWeightTransferEngine.trainer_init(
+                    dict[str, str | int](
+                        master_address=init_info.master_addr,
+                        master_port=init_info.master_port,
+                        world_size=init_info.world_size,
+                    )
+                )
+        else:
+            if rank == 0:
+                model_update_group = init_custom_process_group(
+                    backend=init_info.backend,
+                    init_method=get_tcp_url(init_info.master_addr, init_info.master_port),
+                    world_size=init_info.world_size,
+                    rank=0,
+                    group_name=init_info.group_name,
+                )
 
         return BroadcastWeightTransferSender(
             init_info=init_info,
             model_update_group=model_update_group,
             inference_client=inference_client,
+            vllm_group=vllm_group,
         )
 
     @staticmethod

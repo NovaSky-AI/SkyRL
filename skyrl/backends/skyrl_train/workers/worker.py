@@ -323,8 +323,9 @@ class Worker(DistributedTorchRayActor):
         # For new inference path, fetch world_size from servers
         # For legacy path, calculate from config
         inference_world_size = None
+        world_size_per_server = None
         if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
-            inference_world_size = await inference_engine_client.get_world_size()
+            inference_world_size, world_size_per_server = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(
@@ -345,7 +346,14 @@ class Worker(DistributedTorchRayActor):
         # NOTE: For broadcast strategy, sender and receiver init must run concurrently
         # because both need to join the same process group to avoid deadlock
         if torch.distributed.get_rank() == 0:
-            tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
+            if _SKYRL_USE_NEW_INFERENCE:
+                # TODO (Aaron): for native weight syncing apis, each server must
+                # receive a different payload (NCCL rank offset is different for each server)
+                server_infos = init_info.update_rank_offset(world_size_per_server)
+                payload_list = [x.to_api_payload() for x in server_infos]
+                tasks.append(inference_engine_client.init_weight_update_communicator(payload_list))
+            else:
+                tasks.append(inference_engine_client.init_weight_update_communicator(init_info))
 
         results = await asyncio.gather(*tasks)
         self._weight_transfer_sender = results[0]  # sender is always first task

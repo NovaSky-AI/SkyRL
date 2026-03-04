@@ -29,7 +29,7 @@ from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip, get
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
-from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, BroadcastWeightUpdateRequest
+from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -257,7 +257,7 @@ class TestWeightUpdateFlow:
             master_port = get_open_port()
 
             # Query all servers for world_size via client (fans out to all backends)
-            inference_world_size = await client.get_world_size()
+            inference_world_size, world_size_per_server = await client.get_world_size()
             world_size = 1 + inference_world_size  # 1 trainer + all inference workers
             group_name = f"weight_sync_test_{master_port}"
 
@@ -279,7 +279,9 @@ class TestWeightUpdateFlow:
             trainer_init_ref = trainer.init_weight_sync.remote(master_address, master_port, world_size, group_name)
 
             # Await server init via client (fans out to all backends)
-            result = await client.init_weight_update_communicator(init_info)
+            server_infos = init_info.update_rank_offset(world_size_per_server)
+            payload_list = [x.to_api_payload() for x in server_infos]
+            result = await client.init_weight_update_communicator(payload_list)
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} init failed: {resp}"
 
@@ -298,12 +300,14 @@ class TestWeightUpdateFlow:
             trainer_broadcast_ref = trainer.broadcast_weights.remote()
 
             # Await server receive via client (fans out to all backends)
-            update_request = BroadcastWeightUpdateRequest(
-                names=weight_info["names"],
-                dtypes=weight_info["dtypes"],
-                shapes=weight_info["shapes"],
-            )
-            result = await client.update_named_weights(update_request)
+            dtype_names = [(d.split(".")[-1] if "." in d else d) for d in weight_info["dtypes"]]
+            update_info = {
+                "names": weight_info["names"],
+                "dtype_names": dtype_names,
+                "shapes": weight_info["shapes"],
+                "packed": True,
+            }
+            result = await client.update_named_weights(update_info)
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} update weights failed: {resp}"
 

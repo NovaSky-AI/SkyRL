@@ -19,7 +19,12 @@ def ray_init_fixture():
         ray.shutdown()
 
     # TODO (team): maybe we should use the default config and use prepare_runtime_environment in some way
-    env_vars = {"VLLM_USE_V1": "1", "VLLM_ENABLE_V1_MULTIPROCESSING": "0", "VLLM_ALLOW_INSECURE_SERIALIZATION": "1"}
+    env_vars = {
+        "VLLM_USE_V1": "1",
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+        "_SKYRL_USE_NEW_INFERENCE": os.environ.get("_SKYRL_USE_NEW_INFERENCE", "0"),
+    }
 
     if not peer_access_supported(max_num_gpus_per_node=2):
         log_once("Disabling NCCL P2P for CI environment")

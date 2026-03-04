@@ -24,15 +24,9 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def health():
         return {"status": "ok"}
 
-    @app.get("/get_server_info")
-    async def get_server_info():
-        return {
-            "ip": "127.0.0.1",
-            "port": 8000 + server_id,
-            "url": f"http://127.0.0.1:{8000 + server_id}",
-            "server_idx": server_id,
-            "world_size": 2,  # Simulate TP=2
-        }
+    @app.get("/get_world_size")
+    async def get_world_size():
+        return {"world_size": 2}  # Simulate TP=2
 
     @app.post("/v1/completions")
     async def completions(request: Request):
@@ -96,8 +90,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def reset_prefix_cache(request: Request):
         return {"status": "cache_reset", "server_id": server_id}
 
-    @app.post("/init_weight_transfer")
-    async def init_weight_transfer(request: Request):
+    @app.post("/init_weight_transfer_engine")
+    async def init_weight_transfer_engine(request: Request):
         return {"status": "ok", "server_id": server_id}
 
     @app.post("/update_weights")
@@ -314,33 +308,24 @@ class TestWeightSync:
 
     @pytest.mark.asyncio
     async def test_init_weight_update_communicator(self, client):
-        """Test init_weight_update_communicator fans out to all servers."""
-        from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo
-
-        init_info = BroadcastInitInfo(
-            master_addr="127.0.0.1",
-            master_port=29500,
-            rank_offset=1,
-            world_size=5,
-            group_name="test",
-            backend="nccl",
-            model_dtype_str="torch.bfloat16",
-            override_existing_receiver=True,
-        )
-        result = await client.init_weight_update_communicator(init_info)
+        """Test init_weight_update_communicator fans out to all servers with per-server dicts."""
+        init_info_list = [
+            {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5},
+            {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 3, "world_size": 5},
+        ]
+        result = await client.init_weight_update_communicator(init_info_list)
         assert len(result) == 2
 
     @pytest.mark.asyncio
     async def test_update_named_weights(self, client):
         """Test update_weights fans out to all servers."""
-        from skyrl.backends.skyrl_train.weight_sync import BroadcastWeightUpdateRequest
-
-        request = BroadcastWeightUpdateRequest(
-            names=["layer.weight"],
-            dtypes=["torch.bfloat16"],
-            shapes=[[1024, 1024]],
-        )
-        result = await client.update_named_weights(request)
+        update_info = {
+            "names": ["layer.weight"],
+            "dtype_names": ["bfloat16"],
+            "shapes": [[1024, 1024]],
+            "packed": True,
+        }
+        result = await client.update_named_weights(update_info)
         assert len(result) == 2
 
     @pytest.mark.asyncio
@@ -357,13 +342,14 @@ class TestServerInfo:
     async def test_get_world_size(self, client):
         """Test world_size fetching and caching."""
         # First call fetches from all servers and sums
-        world_size = await client.get_world_size()
+        total_world_size, world_size_per_server = await client.get_world_size()
         # Each mock server reports world_size=2, we have 2 servers = 4
-        assert world_size == 4
+        assert total_world_size == 4
+        assert world_size_per_server == [2, 2]
 
         # Second call returns cached value
-        world_size2 = await client.get_world_size()
-        assert world_size2 == 4
+        total_world_size2, _ = await client.get_world_size()
+        assert total_world_size2 == 4
 
 
 class TestContextManager:
@@ -433,8 +419,8 @@ class TestRetryOnAbort:
             tokens = [str(i) for i in token_ids]
             return {"prompt": " ".join(tokens)}
 
-        @app.get("/get_server_info")
-        async def get_server_info():
+        @app.get("/get_world_size")
+        async def get_world_size():
             return {"world_size": 1}
 
         @app.get("/is_paused")

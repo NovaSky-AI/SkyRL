@@ -5,15 +5,14 @@ vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 import asyncio
 import logging
 import os
-import pickle
 import time
 from argparse import Namespace
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import httpx
 import uvicorn
 import vllm.envs as envs
-from fastapi import Request, HTTPException
+from fastapi import Request
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.api_server import (
@@ -30,7 +29,6 @@ from skyrl.backends.skyrl_train.env_vars import (
 )
 from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_open_port
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
-from skyrl.backends.skyrl_train.inference_servers.vllm_worker import VLLM_WORKER_EXTENSION_CLS
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +43,10 @@ class VLLMServerActor(ServerActorProtocol):
     called from anywhere (other actors, driver, external processes).
 
     Custom endpoints added for SkyRL:
-    - /get_server_info: Return parallelism info
+    - /reset_prefix_cache: Reset prefix cache
 
-    - (vLLM RFC: https://github.com/vllm-project/vllm/issues/31848)
-    - /init_weight_transfer: Initialize weight sync process group
-    - /update_weights: Update model weights via NCCL broadcast
-    - /finalize_weight_update: Post-processing after weight sync
+    Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
+    /update_weights, /get_world_size) from the RLHF router when VLLM_SERVER_DEV_MODE=1.
     """
 
     @staticmethod
@@ -100,9 +96,6 @@ class VLLMServerActor(ServerActorProtocol):
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
 
-        # Ensure SkyRL's custom worker extension is used for weight sync
-        self._ensure_worker_extension()
-
         # Ensure vLLM sleep endpoints are enabled by using dev mode
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
@@ -147,19 +140,6 @@ class VLLMServerActor(ServerActorProtocol):
         # Initialized lazily to not block the actor initialization.
         self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
-
-    def _ensure_worker_extension(self) -> None:
-        """
-        Ensure the SkyRL worker extension is configured.
-
-        The worker extension (WorkerWrap) provides the RPC methods needed for
-        weight synchronization (init_weight_update_communicator, load_weights).
-        """
-        if not hasattr(self._cli_args, "worker_extension_cls") or not self._cli_args.worker_extension_cls:
-            self._cli_args.worker_extension_cls = VLLM_WORKER_EXTENSION_CLS
-            logger.info(f"Using default worker extension: {VLLM_WORKER_EXTENSION_CLS}")
-        else:
-            logger.info(f"Using provided worker extension: {self._cli_args.worker_extension_cls}")
 
     def _ensure_ray_executor(self) -> None:
         """
@@ -208,16 +188,6 @@ class VLLMServerActor(ServerActorProtocol):
     def get_server_info(self) -> ServerInfo:
         """Get the server's IP and port info."""
         return ServerInfo(ip=self._ip, port=self._port)
-
-    def _get_extended_server_info(self) -> Dict[str, Any]:
-        """Return extended server info including parallelism settings."""
-        return {
-            "ip": self._ip,
-            "port": self._port,
-            "url": f"http://{self._ip}:{self._port}",
-            "server_idx": self._server_idx,
-            "world_size": self._num_gpus_per_server,
-        }
 
     def get_dp_info(self) -> Tuple[str, int]:
         """Get the DP master address and RPC port (for server 0 to share with others)."""
@@ -304,75 +274,9 @@ class VLLMServerActor(ServerActorProtocol):
         """Add custom SkyRL endpoints to the FastAPI app."""
         engine = self._engine
 
-        @app.get("/get_server_info")
-        async def _get_server_info():
-            """Return server parallelism info."""
-            return self._get_extended_server_info()
-
-        # TODO (Kourosh): After https://github.com/vllm-project/vllm/pull/
-        # 31943/ is merged, use the native API.
-        @app.post("/init_weight_transfer")
-        async def _init_weight_transfer(request: Request):
-            """Initialize weight sync process group."""
-            from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcInitInfo
-
-            data = await request.json()
-            # simple way to figure out the strategy type: try to load with BroadcastInitInfo else fallback to CudaIpcInitInfo
-            # Can be derived from vllm cli args once https://github.com/vllm-project/vllm/pull/31943/ is merged.
-            try:
-                init_info = BroadcastInitInfo(**data)
-            except Exception:
-                try:
-                    init_info = CudaIpcInitInfo(**data)
-                except Exception:
-                    raise HTTPException(status_code=400, detail="Received invalid init info")
-
-            init_info = init_info.for_engine(
-                engine_index=self._server_idx,
-                tp_size=self._cli_args.tensor_parallel_size,
-                pp_size=self._cli_args.pipeline_parallel_size,
-            )
-            pickled_init_info = pickle.dumps(init_info)
-
-            await engine.collective_rpc(
-                "init_weight_update_communicator",
-                args=(pickled_init_info,),
-            )
-            return {"status": "ok"}
-
-        @app.post("/update_weights")
-        async def _update_weights(request: Request):
-            """Update model weights via NCCL broadcast."""
-            from skyrl.backends.skyrl_train.weight_sync import BroadcastWeightUpdateRequest, CudaIpcWeightUpdateRequest
-
-            data = await request.json()
-            try:
-                weight_request = BroadcastWeightUpdateRequest.from_json_dict(data)
-            except Exception:
-                try:
-                    weight_request = CudaIpcWeightUpdateRequest.from_json_dict(data)
-                except Exception:
-                    raise HTTPException(status_code=400, detail="Received invalid weight update request")
-
-            pickled_request = pickle.dumps(weight_request)
-
-            await engine.collective_rpc(
-                "load_weights",
-                args=(pickled_request,),
-            )
-            return {"status": "ok"}
-
-        @app.post("/finalize_weight_update")
-        async def _finalize_weight_update(request: Request):
-            """
-            Finalize weight update - post-processing hook.
-
-            Currently a no-op, reserved for future use e.g. Quantization
-            See https://github.com/vllm-project/vllm/issues/31848 for more
-            details.
-            """
-            # No-op for now - placeholder for future post-processing
-            return {"status": "ok"}
+        # Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
+        # /update_weights, /get_world_size) registered by the RLHF router when
+        # VLLM_SERVER_DEV_MODE=1.
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):

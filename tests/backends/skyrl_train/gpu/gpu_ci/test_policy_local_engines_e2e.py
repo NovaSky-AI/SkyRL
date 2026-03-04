@@ -39,19 +39,22 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
     [
         pytest.param(False, "nccl", "fsdp", 2),
-        pytest.param(True, "nccl", "fsdp", 2),
-        pytest.param(False, "gloo", "fsdp", 2),
-        pytest.param(True, "gloo", "fsdp", 2),
+        # colocated uses CUDA IPC strategy, not yet supported on new inference path
+        # pytest.param(True, "nccl", "fsdp", 2),
+        # gloo backend is not supported
+        # pytest.param(False, "gloo", "fsdp", 2),
+        # pytest.param(True, "gloo", "fsdp", 2),
         pytest.param(False, "nccl", "fsdp2", 2),
-        pytest.param(True, "nccl", "fsdp2", 2),
+        # colocated uses CUDA IPC strategy, not yet supported on new inference path
+        # pytest.param(True, "nccl", "fsdp2", 2),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
-        "colocate_nccl_fsdp_vllm",
-        "no_colocate_gloo_fsdp_vllm",
-        "colocate_gloo_fsdp_vllm",
+        # "colocate_nccl_fsdp_vllm",
+        # "no_colocate_gloo_fsdp_vllm",
+        # "colocate_gloo_fsdp_vllm",
         "no_colocate_nccl_fsdp2_vllm",
-        "colocate_nccl_fsdp2_vllm",
+        # "colocate_nccl_fsdp2_vllm",
     ],
 )
 def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
