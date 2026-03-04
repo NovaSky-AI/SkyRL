@@ -13,7 +13,8 @@ def _split_replay_indices(rollout_inference_indices: torch.Tensor) -> List[torch
     if rollout_inference_indices.dim() != 4:
         raise ValueError(f"Expected 4D replay indices, got shape {rollout_inference_indices.shape}")
     per_layer = rollout_inference_indices.permute(2, 0, 1, 3).contiguous()
-    return [per_layer[i] for i in range(per_layer.shape[0])]
+    # flatten [batch, seq, topk] to [batch * seq, topk] for each layer
+    return [per_layer[i].reshape(-1, per_layer.shape[-1]) for i in range(per_layer.shape[0])]
 
 
 def setup_router_replay_forward(data: TrainingInputBatch, enable_router_replay: bool) -> bool:

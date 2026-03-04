@@ -254,26 +254,31 @@ class MegatronWeightExtractor(WeightExtractor):
 
 class MegatronWorker:
     def _read_router_replay_state(self):
+        """Read the current RouterReplay state from all instances."""
         from megatron.core.transformer.moe.router_replay import RouterReplay
 
         # See https://docs.nvidia.com/megatron-core/developer-guide/0.15.0/api-guide/router_replay.html docs for more info 
-        global_indices = getattr(RouterReplay, "global_indices", None) or []
-        instances = getattr(RouterReplay, "global_router_replay_instances", None) or []
+        instances = RouterReplay.global_router_replay_instances or []
+        action = instances[0].router_replay_action if instances else None
 
-        # Track size to check if shapes are valid after replay / we consume only layers we need
-        replay_backward_total_entries = 0
-        for instance in instances:
-            replay_backward_total_entries += len(getattr(instance, "replay_backward_list", None) or [])
+        target_indices = [
+            inst.target_topk_idx.detach().cpu()
+            for inst in instances if inst.target_topk_idx is not None
+        ]
 
         return {
-            "action": str(getattr(RouterReplay, "global_router_replay_action", None)),
-            "global_indices": [x.detach().cpu() for x in global_indices],
+            "action": str(action),
+            "target_indices": target_indices,
             "num_instances": len(instances),
-            "replay_backward_total_entries": replay_backward_total_entries,
         }
 
-    def get_last_router_replay_state(self):
-        return getattr(self, "_last_router_replay_state", None)
+    def debug_setup_router_replay_state(self, data: TrainingInputBatch):
+        from skyrl.backends.skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
+
+        setup_router_replay_forward(data, enable_router_replay=True)
+        state = self._read_router_replay_state()
+        clear_router_replay()
+        return state
 
     def init_configs(
         self,
@@ -424,7 +429,7 @@ class MegatronWorker:
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
-        from skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
+        from skyrl.backends.skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
 
         setup_router_replay_forward(data, self.enable_router_replay)
 
@@ -622,7 +627,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        from skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
+        from skyrl.backends.skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
 
         setup_router_replay_forward(data, self.enable_router_replay)
         self.model.train()
