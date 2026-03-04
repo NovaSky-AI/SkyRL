@@ -215,10 +215,10 @@ async def weight_update_env(ray_init_fixture):
     router.shutdown()
 
 
+@pytest.mark.asyncio(loop_scope="class")
 class TestWeightUpdateFlow:
     """Tests for weight synchronization from trainer to inference server (non-colocated)."""
 
-    @pytest.mark.asyncio
     async def test_update_weights_flow(self, weight_update_env):
         """
         Full E2E weight sync test (non-colocated, NCCL broadcast):
