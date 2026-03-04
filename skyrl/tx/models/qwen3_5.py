@@ -177,14 +177,14 @@ def chunk_gated_delta_rule(
     g_cumsum = jnp.cumsum(g, axis=-1)
 
     # Γ[i,j] = γ[i]/γ[j] = exp(g_cumsum[i] - g_cumsum[j]) for i >= j (decay-aware causal mask)
-    decay_mask = jnp.tril(jnp.exp(jnp.tril(g_cumsum[..., :, None] - g_cumsum[..., None, :])))
+    decay_mask = jnp.tril(jnp.exp(jnp.tril(g_cumsum[..., :, None] - g_cumsum[..., None, :]))).astype(dtype)
 
     # Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
     # Solved via triangular_solve with unit_diagonal=True (assumes I on diagonal).
     L = jnp.tril((k_beta @ jnp.swapaxes(key, -1, -2)) * decay_mask, k=-1)
 
     # Solve (I + L) @ [U, gamma_W] = [v_beta, k_beta * exp(g_cumsum)] in one call
-    k_beta_scaled = k_beta * jnp.exp(g_cumsum)[..., None]
+    k_beta_scaled = (k_beta * jnp.exp(g_cumsum)[..., None]).astype(dtype)
     rhs = jnp.concatenate([v_beta, k_beta_scaled], axis=-1)
     solution = jax.lax.linalg.triangular_solve(L, rhs, left_side=True, lower=True, unit_diagonal=True)
 
@@ -196,7 +196,7 @@ def chunk_gated_delta_rule(
 
     # γ^C = γ[L-1]: cumulative decay at chunk end
     # →K = (γ^C/γ) K: decay scaling from each position to chunk end
-    key_decay = jnp.exp(g_cumsum[..., -1, None] - g_cumsum)[..., None]
+    key_decay = jnp.exp(g_cumsum[..., -1, None] - g_cumsum)[..., None].astype(dtype)
 
     # Initialize recurrent state S
     if initial_state is None:
