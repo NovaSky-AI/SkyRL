@@ -460,7 +460,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 ]
             if agent_loop_state.rollout_inference_indices is not None:
                 rollout_inference_indices_out = agent_loop_state.rollout_inference_indices[
-                    : agent_loop_state.response_end_idx - initial_prompt_length + 1
+                    : agent_loop_state.response_end_idx + 1
                 ]
             # fix index for per_step_rewards
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
@@ -676,8 +676,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 sample_logprobs = logprobs[i][: len(response)]
                 truncated_logprobs.append(sample_logprobs)
             if raw_rollout_inference_indices is not None:
-                sample_indices = raw_rollout_inference_indices[i][: len(response)]
-                truncated_indices.append(sample_indices)
+                truncated_indices.append(raw_rollout_inference_indices[i])
 
             # Get environment-specific metrics
             env_metrics.append(env.get_metrics())

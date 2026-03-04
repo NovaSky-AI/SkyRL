@@ -157,18 +157,19 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     del token_logprobs
             response_logprobs.append(_logprobs)
 
+            _routed_experts = None
             if resp.routed_experts is not None:
                 if hasattr(resp.routed_experts, "tolist"):
-                    routed_experts_list = resp.routed_experts.tolist()
+                    _routed_experts = resp.routed_experts.tolist()
                 else:
-                    routed_experts_list = resp.routed_experts
-                rollout_inference_indices.append(routed_experts_list)
+                    _routed_experts = resp.routed_experts
+            rollout_inference_indices.append(_routed_experts)
 
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
 
-        if len(rollout_inference_indices) == 0:
-            rollout_inference_indices = None
+        if len(rollout_inference_indices) == 0 and _routed_experts is None:
+            rollout_inference_indices = None  # hack: assume uniform sampling params
 
         return InferenceEngineOutput(
             responses=responses,

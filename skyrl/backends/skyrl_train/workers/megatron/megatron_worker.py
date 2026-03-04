@@ -426,9 +426,7 @@ class MegatronWorker:
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
-        from skyrl.backends.skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
-
-        setup_router_replay_forward(data, self.enable_router_replay)
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
         # Run in micro batches grouped into a single mini-batch
         micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
@@ -444,14 +442,16 @@ class MegatronWorker:
             num_actions = micro.metadata["response_length"]
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
-            micro_dicts.append(
-                {
-                    "sequences": sequences,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": num_actions,
-                }
-            )
+            micro_dict = {
+                "sequences": sequences,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "num_actions": num_actions,
+            }
+            rii = micro.get("rollout_inference_indices")
+            if rii is not None and self.enable_router_replay:
+                micro_dict["rollout_inference_indices"] = rii
+            micro_dicts.append(micro_dict)
 
         self.model.eval()
         seq_len = micro_dicts[0]["sequences"].shape[1]
