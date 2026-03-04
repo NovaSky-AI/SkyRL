@@ -194,9 +194,6 @@ def chunk_gated_delta_rule(
     # ←W = γW: decay-scaled corrected keys for state contribution
     gamma_W = solution[..., v_head_dim:]
 
-    # γ^C/γ = decay_mask[last_row]
-    key_decay = decay_mask[..., -1, :][..., None]
-
     # Initialize recurrent state S
     if initial_state is None:
         state = jnp.zeros((batch_size, num_heads, k_head_dim, v_head_dim), dtype=dtype)
@@ -205,12 +202,12 @@ def chunk_gated_delta_rule(
 
     def chunk_step(
         S: jax.Array,
-        inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+        inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
     ) -> tuple[jax.Array, jax.Array]:
-        Q_t, K_t, U_t, gamma_W_t, gamma_t, Gamma_t, key_decay_t = inputs
+        Q_t, K_t, U_t, gamma_W_t, gamma_t, Gamma_t = inputs
 
-        # (Q K^T ⊙ Γ): intra-chunk attention with decay mask
-        intra_attn = jnp.tril(Q_t @ jnp.swapaxes(K_t, -1, -2) * Gamma_t)
+        # (Q K^T ⊙ Γ): intra-chunk attention with decay mask (Γ is already lower triangular)
+        intra_attn = Q_t @ jnp.swapaxes(K_t, -1, -2) * Gamma_t
 
         # Ũ - ←W S^T: corrected values minus state contribution (←W = γW)
         U_minus_gamma_W_S = U_t - gamma_W_t @ S
@@ -225,6 +222,7 @@ def chunk_gated_delta_rule(
         # where →S = γ^C S, →K = (γ^C/γ) K
         # Note: transposed from paper to match our state convention [D_k, D_v]
         gamma_C = gamma_t[..., -1, None, None]  # γ^C = γ[L-1]
+        key_decay_t = Gamma_t[..., -1, :][..., None]  # γ^C/γ
         S = gamma_C * S + jnp.swapaxes(K_t * key_decay_t, -1, -2) @ U_minus_gamma_W_S
 
         return S, O_t
@@ -237,7 +235,6 @@ def chunk_gated_delta_rule(
         jnp.transpose(gamma_W, (2, 0, 1, 3, 4)),  # ←W = γW
         jnp.transpose(gamma, (2, 0, 1, 3)),  # γ
         jnp.transpose(decay_mask, (2, 0, 1, 3, 4)),  # Γ
-        jnp.transpose(key_decay, (2, 0, 1, 3, 4)),  # γ^C/γ (for →K)
     )
 
     final_state, outputs = jax.lax.scan(chunk_step, state, scan_inputs)
