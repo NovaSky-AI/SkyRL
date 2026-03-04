@@ -18,7 +18,7 @@ from ray.util.placement_group import (
 )
 
 from skyrl.train.config.config import SkyRLTrainConfig
-from skyrl.train.env_vars import (
+from skyrl.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
     SKYRL_PYTHONPATH_EXPORT,

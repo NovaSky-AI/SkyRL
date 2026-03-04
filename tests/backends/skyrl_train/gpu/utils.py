@@ -31,7 +31,7 @@ from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine i
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl.backends.skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT, _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import SKYRL_PYTHONPATH_EXPORT, _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter

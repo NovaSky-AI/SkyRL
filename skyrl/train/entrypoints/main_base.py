@@ -14,7 +14,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
 from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
-from skyrl.train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.generators.base import GeneratorInterface
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from pathlib import Path

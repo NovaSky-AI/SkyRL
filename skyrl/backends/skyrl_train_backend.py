@@ -25,7 +25,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl.train.config import get_config_as_yaml_str
-from skyrl.backends.skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )

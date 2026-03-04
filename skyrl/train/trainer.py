@@ -26,7 +26,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
 )
-from skyrl.train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
 from skyrl.train.generators.base import (
     GeneratorInput,

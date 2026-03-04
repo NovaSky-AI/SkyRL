@@ -24,7 +24,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import set_ulimit
 
-from skyrl.backends.skyrl_train.env_vars import (
+from skyrl.env_vars import (
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )

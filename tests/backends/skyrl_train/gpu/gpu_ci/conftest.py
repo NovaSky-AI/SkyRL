@@ -4,7 +4,7 @@ import ray
 from loguru import logger
 from functools import lru_cache
 from skyrl.train.utils.utils import peer_access_supported
-from skyrl.backends.skyrl_train.env_vars import SKYRL_PYTHONPATH_EXPORT
+from skyrl.env_vars import SKYRL_PYTHONPATH_EXPORT
 
 
 @lru_cache(5)
