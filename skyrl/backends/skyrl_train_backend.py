@@ -116,6 +116,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._vision_processor = None
+        self._image_token_id = None
 
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
@@ -226,6 +228,17 @@ class SkyRLTrainBackend(AbstractBackend):
         # Build config
         self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
 
+        # Try to load a vision processor for VLM models
+        try:
+            from skyrl.backends.skyrl_train.utils.vision_utils import VisionProcessor
+
+            self._vision_processor = VisionProcessor.from_pretrained(self.base_model)
+            self._image_token_id = self._tokenizer.convert_tokens_to_ids(self._vision_processor.image_token)
+            logger.info("VisionProcessor loaded for %s (image_token_id=%s)", self.base_model, self._image_token_id)
+        except Exception:
+            self._vision_processor = None
+            self._image_token_id = None
+
         if not ray.is_initialized():
             logger.info("Initializing Ray with runtime environment")
             initialize_ray(self._cfg)
@@ -274,17 +287,51 @@ class SkyRLTrainBackend(AbstractBackend):
         # TODO: For now, prefer shutting down the backend and re-launching. Will be improved shortly.
         raise NotImplementedError("Deleting models not yet implemented")
 
+    def _build_vlm_sequence(self, model_input: types.ModelInput) -> tuple[list[int], list]:
+        """Walk ModelInput chunks, building a token sequence with image placeholders.
+
+        Returns:
+            (token_ids, processed_images) where processed_images is a list of ProcessedImage.
+        """
+        from skyrl.backends.skyrl_train.utils.vision_utils import ProcessedImage
+
+        token_ids: list[int] = []
+        processed_images: list[ProcessedImage] = []
+        for chunk in model_input.chunks:
+            if isinstance(chunk, types.EncodedTextChunk):
+                token_ids.extend(chunk.tokens)
+            elif isinstance(chunk, types.ImageChunk):
+                pi = self._vision_processor.process_image(chunk.data, chunk.format)
+                token_ids.extend([self._image_token_id] * pi.num_tokens)
+                processed_images.append(pi)
+        return token_ids, processed_images
+
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""
         if not prepared_batch.all_input_ids:
             return TrainingInputBatch({})
 
-        # SkyRL-Train shifts internally, so provide the full sequence length by
-        # appending the last target token to each already-shifted input.
-        full_sequences = [
-            list(input_ids) + ([targets[-1]] if targets else [])
-            for input_ids, targets in zip(prepared_batch.all_input_ids, prepared_batch.all_targets)
-        ]
+        has_vlm = self._vision_processor is not None and any(
+            any(isinstance(c, types.ImageChunk) for c in mi.chunks) for mi in prepared_batch.all_model_inputs
+        )
+
+        # Build full sequences. For VLM inputs we rebuild from chunks to insert
+        # image placeholder tokens; for text-only we use the pre-tokenised IDs.
+        all_processed_images: list[list] = []
+        full_sequences = []
+        for i, (input_ids, targets) in enumerate(zip(prepared_batch.all_input_ids, prepared_batch.all_targets)):
+            if has_vlm and any(isinstance(c, types.ImageChunk) for c in prepared_batch.all_model_inputs[i].chunks):
+                prompt_tokens, proc_imgs = self._build_vlm_sequence(prepared_batch.all_model_inputs[i])
+                # Append target tokens (the response part)
+                response_tokens = list(targets)
+                full_seq = prompt_tokens + response_tokens
+                full_sequences.append(full_seq)
+                all_processed_images.append(proc_imgs)
+            else:
+                # SkyRL-Train shifts internally, so provide the full sequence length by
+                # appending the last target token to each already-shifted input.
+                full_sequences.append(list(input_ids) + ([targets[-1]] if targets else []))
+                all_processed_images.append([])
 
         max_seq_len = max(len(seq) for seq in full_sequences)
         max_response_len = max(len(weights) for weights in prepared_batch.all_token_weights)
@@ -327,6 +374,21 @@ class SkyRLTrainBackend(AbstractBackend):
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
 
+        # Add VLM pixel data as list[Tensor] fields (one per sample)
+        if has_vlm:
+            pixel_values_list = []
+            grid_thw_list = []
+            for proc_imgs in all_processed_images:
+                if proc_imgs:
+                    pixel_values_list.append(torch.cat([pi.pixel_values for pi in proc_imgs], dim=0))
+                    grid_thw_list.append(torch.cat([pi.image_grid_thw for pi in proc_imgs], dim=0))
+                else:
+                    # Text-only sample in a mixed batch — empty tensors
+                    pixel_values_list.append(torch.empty(0))
+                    grid_thw_list.append(torch.empty(0, 3, dtype=torch.long))
+            batch_dict["pixel_values"] = pixel_values_list
+            batch_dict["image_grid_thw"] = grid_thw_list
+
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
         return batch
@@ -353,16 +415,20 @@ class SkyRLTrainBackend(AbstractBackend):
             return batch, 0
 
         new_tensors = {}
-        for key, tensor in batch.items():
-            if tensor is not None:
-                if key == "loss_mask":
+        for key, value in batch.items():
+            if value is not None:
+                if isinstance(value, list):
+                    # list[Tensor] – repeat elements cyclically
+                    new_tensors[key] = value + [value[i % len(value)] for i in range(pad_size)]
+                elif key == "loss_mask":
                     # Padding entries must not contribute to the loss
-                    additional_dims = tensor.shape[1:]
-                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
+                    additional_dims = value.shape[1:]
+                    padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=value.dtype, device=value.device)
+                    new_tensors[key] = torch.cat([value, padding_tensor], dim=0)
                 else:
                     # Clone real data so shapes/dtypes are valid for the model
-                    padding_tensor = tensor[torch.arange(pad_size) % tensor.shape[0]].clone()
-                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+                    padding_tensor = value[torch.arange(pad_size) % value.shape[0]].clone()
+                    new_tensors[key] = torch.cat([value, padding_tensor], dim=0)
 
         padded = TrainingInputBatch(new_tensors)
         padded.metadata = batch.metadata

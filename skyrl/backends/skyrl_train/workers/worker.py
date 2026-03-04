@@ -781,6 +781,15 @@ class PolicyWorkerBase(Worker):
         action_mask = experience.action_mask
         rollout_action_logprobs = experience.rollout_logprobs
 
+        # Extract VLM image kwargs if present
+        image_kwargs = {}
+        if experience.info:
+            pv_list = experience.info.get("pixel_values")
+            gt_list = experience.info.get("image_grid_thw")
+            if pv_list:
+                image_kwargs["pixel_values"] = torch.cat([t for t in pv_list if t.numel() > 0], dim=0)
+                image_kwargs["image_grid_thw"] = torch.cat([t for t in gt_list if t.numel() > 0], dim=0)
+
         # Determine which loss function to use
         resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
         if loss_fn is not None:
@@ -812,6 +821,7 @@ class PolicyWorkerBase(Worker):
                 return_output=True,
                 compute_entropy=True,
                 entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
+                **image_kwargs,
             )
             # loss function
             # TODO: recompute advantages
@@ -1021,6 +1031,14 @@ class PolicyWorkerBase(Worker):
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
 
+        # Extract VLM image kwargs if present
+        image_kwargs = {}
+        pv_list = micro_batch.get("pixel_values")
+        gt_list = micro_batch.get("image_grid_thw")
+        if pv_list:
+            image_kwargs["pixel_values"] = torch.cat([t for t in pv_list if t.numel() > 0], dim=0)
+            image_kwargs["image_grid_thw"] = torch.cat([t for t in gt_list if t.numel() > 0], dim=0)
+
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
                 sequences,
@@ -1028,6 +1046,7 @@ class PolicyWorkerBase(Worker):
                 attention_mask,
                 return_output=False,
                 temperature=self.cfg.algorithm.temperature,
+                **image_kwargs,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
