@@ -7,7 +7,6 @@ import tempfile
 import urllib.request
 from contextlib import contextmanager
 from urllib.parse import urlparse
-from unittest.mock import patch
 
 import pytest
 from skyrl.tinker.config import EngineConfig
@@ -435,7 +434,6 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
     assert wait_for_condition(cleanup_logs_found, timeout_sec=10, poll_interval_sec=1), "Cleanup logs not found"
 
 
-@patch("skyrl.tinker.api.psutil.Process")
 @pytest.mark.parametrize(
     "engine_config, parent_process_cmd, expected_cmd_start",
     [
@@ -443,7 +441,7 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
         (
             EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
             ["uv", "run", "-m", "skyrl.tinker.api"],
-            ["uv", "run", "--isolated", "--extra", "tinker", "--extra", "jax", "-m", "skyrl.tinker.engine"],
+            ["uv", "run", "--extra", "tinker", "--extra", "jax", "-m", "skyrl.tinker.engine"],
         ),
         # skyrl-train backend, with args
         (
@@ -457,7 +455,6 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
                 ".env",
                 "--extra",
                 "tinker",
-                "--isolated",
                 "--extra",
                 "tinker",
                 "--extra",
@@ -527,7 +524,6 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
                 ".env",
                 "--extra",
                 "tinker",
-                "--isolated",
                 "--extra",
                 "tinker",
                 "--extra",
@@ -564,7 +560,6 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
                 "tinker",
                 "--extra",
                 "gpu",
-                "--isolated",
                 "--extra",
                 "tinker",
                 "--extra",
@@ -575,14 +570,12 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
         ),
     ],
 )
-def test_build_cmd_engine(mock_process, engine_config, parent_process_cmd, expected_cmd_start):
-    mock_process.return_value.cmdline.return_value = parent_process_cmd
+def test_build_cmd_engine(engine_config, parent_process_cmd, expected_cmd_start):
 
-    cmd = " ".join(_build_uv_run_cmd_engine(engine_config))
+    cmd = " ".join(_build_uv_run_cmd_engine(parent_process_cmd, engine_config))
     assert cmd.startswith(" ".join(expected_cmd_start))
 
 
-@patch("skyrl.tinker.api.psutil.Process")
 @pytest.mark.parametrize(
     "engine_config, parent_process_cmd",
     [
@@ -593,8 +586,7 @@ def test_build_cmd_engine(mock_process, engine_config, parent_process_cmd, expec
         ),
     ],
 )
-def test_build_cmd_engine_invalid_arg(mock_process, engine_config, parent_process_cmd):
-    mock_process.return_value.cmdline.return_value = parent_process_cmd
+def test_build_cmd_engine_invalid_arg(engine_config, parent_process_cmd):
 
     with pytest.raises(ValueError, match="Unable to parse tinker API server startup command"):
-        _build_uv_run_cmd_engine(engine_config)
+        _build_uv_run_cmd_engine(parent_process_cmd, engine_config)
