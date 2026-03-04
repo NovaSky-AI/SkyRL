@@ -153,8 +153,10 @@ class InferenceEngineClient(InferenceEngineInterface):
         stop_reasons: list[str] = [""] * n
         response_logprobs: List[Optional[List[float]]] = [None for _ in range(n)]
         response_ids: List[List[int]] = [[] for _ in range(n)]
+        rollout_inference_indices: List[Optional[List[List[List[int]]]]] = [None for _ in range(n)]
         # a bit hacky for now
         add_resp_logprobs = False
+        add_rollout_inference_indices = False
 
         for indices, result in zip(indices_list, results):
             for local_idx, original_idx in enumerate(indices):
@@ -164,12 +166,16 @@ class InferenceEngineClient(InferenceEngineInterface):
                 if result.get("response_logprobs", None):
                     add_resp_logprobs = True
                     response_logprobs[original_idx] = result["response_logprobs"][local_idx]
+                if result.get("rollout_inference_indices", None):
+                    add_rollout_inference_indices = True
+                    rollout_inference_indices[original_idx] = result["rollout_inference_indices"][local_idx]
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs if add_resp_logprobs else None,
+            rollout_inference_indices=rollout_inference_indices if add_rollout_inference_indices else None,
         )
 
     def _select_engine_idx(self, session_id: Optional[Union[str, int]] = None) -> int:
@@ -265,6 +271,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 2. Initialize fields we want to accumulate or update in each loop iteration
         accum_response_ids: List[int] = []
         accum_response_logprobs: List[float] = []
+        accum_rollout_inference_indices: List[List[List[int]]] = []
         stop_reason: str = "abort"
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -300,6 +307,10 @@ class InferenceEngineClient(InferenceEngineInterface):
             new_response_logprobs_list: Optional[List[List[float]]] = partial_response.get("response_logprobs", None)
             if new_response_logprobs_list is not None and len(new_response_logprobs_list) > 0:
                 new_response_logprobs = new_response_logprobs_list[0]
+            new_rollout_inference_indices: Optional[List[List[List[int]]]] = None
+            new_rollout_inference_indices_list = partial_response.get("rollout_inference_indices", None)
+            if new_rollout_inference_indices_list is not None and len(new_rollout_inference_indices_list) > 0:
+                new_rollout_inference_indices = new_rollout_inference_indices_list[0]
 
             # 3.4 Aborted without generating tokens, so partial_response is useless.
             if stop_reason == "abort" and len(new_response_ids) == 0:
@@ -309,6 +320,8 @@ class InferenceEngineClient(InferenceEngineInterface):
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
+            if new_rollout_inference_indices is not None:
+                accum_rollout_inference_indices.extend(new_rollout_inference_indices)
             num_turns += 1
 
         # 4. Build the final response and return.
@@ -321,6 +334,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             stop_reasons=[stop_reason],
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
+            rollout_inference_indices=[accum_rollout_inference_indices]
+            if len(accum_rollout_inference_indices) > 0
+            else None,
         )
 
     async def _chat_completion_with_retry(

@@ -107,6 +107,7 @@ def create_ray_wrapped_inference_engines(
     rope_scaling: Dict[str, Any] = {},
     rope_theta: float | None = None,
     enable_ray_prometheus_stats: bool = False,
+    enable_return_routed_experts: bool = False,
     served_model_name: str | None = None,
 ) -> List[InferenceEngineInterface]:
     """
@@ -249,6 +250,7 @@ def create_ray_wrapped_inference_engines(
                     max_num_seqs=max_num_seqs,
                     max_logprobs=1,  # only need chosen-token logprobs
                     enable_ray_prometheus_stats=enable_ray_prometheus_stats,
+                    enable_return_routed_experts=enable_return_routed_experts,
                     **dp_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,

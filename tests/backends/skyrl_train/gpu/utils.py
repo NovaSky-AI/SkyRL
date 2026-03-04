@@ -516,6 +516,7 @@ class InferenceEngineState:
                 sleep_level=sleep_level,
                 enable_lora=enable_lora,
                 engine_init_kwargs=ie_cfg.engine_init_kwargs,
+                enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
                 served_model_name=served_model_name,
             )
             client = InferenceEngineClient(

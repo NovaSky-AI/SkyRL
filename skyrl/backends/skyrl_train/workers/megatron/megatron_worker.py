@@ -253,6 +253,28 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
+    def _read_router_replay_state(self):
+        from megatron.core.transformer.moe.router_replay import RouterReplay
+
+        # See https://docs.nvidia.com/megatron-core/developer-guide/0.15.0/api-guide/router_replay.html docs for more info 
+        global_indices = getattr(RouterReplay, "global_indices", None) or []
+        instances = getattr(RouterReplay, "global_router_replay_instances", None) or []
+
+        # Track size to check if shapes are valid after replay / we consume only layers we need
+        replay_backward_total_entries = 0
+        for instance in instances:
+            replay_backward_total_entries += len(getattr(instance, "replay_backward_list", None) or [])
+
+        return {
+            "action": str(getattr(RouterReplay, "global_router_replay_action", None)),
+            "global_indices": [x.detach().cpu() for x in global_indices],
+            "num_instances": len(instances),
+            "replay_backward_total_entries": replay_backward_total_entries,
+        }
+
+    def get_last_router_replay_state(self):
+        return getattr(self, "_last_router_replay_state", None)
+
     def init_configs(
         self,
         model_path,
@@ -443,6 +465,7 @@ class MegatronWorker:
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
+        self._last_router_replay_state = self._read_router_replay_state()
         clear_router_replay()
         return output
 
@@ -675,6 +698,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if all_loss_fn_outputs:
             status["loss_fn_outputs"] = all_loss_fn_outputs
 
+        self._last_router_replay_state = self._read_router_replay_state()
         clear_router_replay()
 
         return status
