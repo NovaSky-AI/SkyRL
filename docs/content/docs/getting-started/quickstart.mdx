@@ -15,13 +15,13 @@ You'll prepare the dataset, configure your training parameters, and launch your 
 To download and prepare the GSM8K dataset, run the following script. We provide convenience scripts for GSM8K and several other popular datasets, but you can also use your own custom dataset by following the instructions in the [dataset-preparation](#dataset-preparation) section.
 
 ```bash
-uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
 ```
 
 ## Training Configuration
 
-Next, let's set up the training configuration. You can find a complete example in `examples/gsm8k/run_gsm8k.sh`, and we highlight some key parameters here:
+Next, let's set up the training configuration. You can find a complete example in `examples/train/gsm8k/run_gsm8k.sh`, and we highlight some key parameters here:
 
 ```bash
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
@@ -59,7 +59,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
    trainer.project_name="gsm8k" \
    trainer.run_name="gsm8k_test" \
 
-   ... # Other parameters (see `examples/gsm8k/run_gsm8k.sh` for more)
+   ... # Other parameters (see `examples/train/gsm8k/run_gsm8k.sh` for more)
 
 ```
 
@@ -87,7 +87,7 @@ export WANDB_API_KEY=your_wandb_api_key
 Then launch your training run:
 
 ```bash
-bash examples/gsm8k/run_gsm8k.sh
+bash examples/train/gsm8k/run_gsm8k.sh
 
 ```
 

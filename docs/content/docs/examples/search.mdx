@@ -39,7 +39,7 @@ A reward of 0 is given for incorrect responses, and a reward of 1 is given for c
 
 Let's walk through configuration for running GRPO to train a 4-turn search agent on the SearchR1 dataset
 
-```bash title="examples/search/run_search.sh"
+```bash title="examples/train/search/run_search.sh"
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
 
@@ -116,7 +116,7 @@ uv run --isolated --frozen --extra fsdp -m skyrl.train.entrypoints.main_base \
     generator.eval_sampling_params.temperature=0 \
     generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
     trainer.eval_interval=50 \
-    ... # logging + checkpointing configuration (see `examples/search/run_search.sh` for the full script)
+    ... # logging + checkpointing configuration (see `examples/train/search/run_search.sh` for the full script)
 
 ```
 
@@ -130,7 +130,7 @@ If you are using `generator.use_conversation_multi_turn=true`,
 you might want to append an EOS token ID to the end of the response after these stop strings to adhere
 to the model's behavior (i.e. ending generation with an EOS token ID rather than say `</answer>`).
 This can be done by setting `generator.append_eos_token_after_stop_str_in_multi_turn=true` in the generator config.
-The full script is available in `examples/search/run_search_conversation_format.sh`.
+The full script is available in `examples/train/search/run_search_conversation_format.sh`.
 
 ## Launching Your Training Run
 
@@ -138,7 +138,7 @@ Let's get our training run started! Make sure your WandB API key is set, your da
 
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
-bash examples/search/run_search.sh
+bash examples/train/search/run_search.sh
 
 ```
 

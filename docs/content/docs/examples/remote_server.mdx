@@ -25,7 +25,7 @@ In addition to the standard OpenAI-compatible generation endpoints (`/v1/chat/co
 
 That's it! We use a custom `WorkerWrap` class at `skyrl/backends/skyrl_train/inference_engines/vllm/vllm_engine.py` with VLLM's worker extension API to enable efficient NCCL weight updates.
 
-To launch the server, run the following command (the full script is at `examples/remote_inference_engine/run_vllm_server.sh`):
+To launch the server, run the following command (the full script is at `examples/train/remote_inference_engine/run_vllm_server.sh`):
 
 ```bash
 uv run --isolated --extra fsdp -m skyrl.backends.skyrl_train.inference_engines.vllm.vllm_server \
@@ -65,7 +65,7 @@ uv run --isolated --extra fsdp -m skyrl.backends.skyrl_train.inference_engines.v
 
 Now that we've started our remote inference engine (located behind `127.0.0.1:8001`), we can start a training run!
 
-To start training, we need to set up our training script. You can find a complete example in `examples/remote_inference_engine/run_remote.sh`:
+To start training, we need to set up our training script. You can find a complete example in `examples/train/remote_inference_engine/run_remote.sh`:
 
 ```bash
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
@@ -106,7 +106,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     trainer.eval_before_train=true \
     trainer.eval_interval=5 \
 
-    ... # Other parameters (see `examples/remote_inference_engine/run_remote.sh` for more)
+    ... # Other parameters (see `examples/train/remote_inference_engine/run_remote.sh` for more)
 
 ```
 
@@ -120,7 +120,7 @@ You're done setting up! Now let's get our training run started!
 
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
-bash examples/remote_inference_engine/run_remote.sh
+bash examples/train/remote_inference_engine/run_remote.sh
 
 ```
 

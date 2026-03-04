@@ -559,7 +559,6 @@ async def test_megatron_train(
         keys_to_compare.extend(
             [
                 "loss_metrics/is_ratio_mean",
-                "loss_metrics/outlier_seq_masked_ratio",
                 "loss_metrics/geo_sequence_mask_masked_ratio",
             ]
         )

@@ -16,7 +16,7 @@ This client is responsible for BOTH data plane and control plane operations:
 
 2. Control Plane (fan-out to all server_urls):
    - pause, resume, sleep, wake_up, reset_prefix_cache
-   - init_weight_transfer, update_weights, finalize_weight_update
+   - init_weight_transfer, update_weights_skyrl, finalize_weight_update
    - Fans out directly to all backend servers (bypassing router)
    - This allows using external routers that only handle data plane
 

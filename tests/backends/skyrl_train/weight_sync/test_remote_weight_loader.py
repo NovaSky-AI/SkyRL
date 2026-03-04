@@ -123,7 +123,7 @@ class TestRemoteWeightLoader:
 
             # Verify correct endpoint called
             call_args = mock_session.post.call_args
-            assert call_args[0][0] == f"{url}/update_weights"
+            assert call_args[0][0] == f"{url}/update_weights_skyrl"
 
             # vLLM uses asdict(request) - plural field names
             from dataclasses import asdict

@@ -37,19 +37,19 @@ With default settings this is e.g. `/tmp/skyrl-logs/infra-260212_143052.log`. Ea
 **Normal run** — clean stdout, infrastructure logs to `/tmp/skyrl-logs/infra-YYMMDD_HHMMSS.log`:
 
 ```bash
-bash examples/gsm8k/run_gsm8k.sh
+bash examples/train/gsm8k/run_gsm8k.sh
 ```
 
 **Custom log directory:**
 
 ```bash
-bash examples/gsm8k/run_gsm8k.sh trainer.log_path=/home/user/logs
+bash examples/train/gsm8k/run_gsm8k.sh trainer.log_path=/home/user/logs
 ```
 
 **Dump infrastructure logs to stdout** (no file redirection):
 
 ```bash
-SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 bash examples/gsm8k/run_gsm8k.sh
+SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1 bash examples/train/gsm8k/run_gsm8k.sh
 ```
 
 ## How It Works
@@ -77,7 +77,7 @@ By default, `trainer.log_path` is `/tmp/skyrl-logs`, which is a **node-local** p
 To consolidate all nodes' infrastructure logs into a **single file**, point `trainer.log_path` at a shared filesystem that is mounted on all nodes, e.g.:
 
 ```bash
-bash examples/gsm8k/run_gsm8k.sh trainer.log_path=/mnt/shared_storage/skyrl-logs
+bash examples/train/gsm8k/run_gsm8k.sh trainer.log_path=/mnt/shared_storage/skyrl-logs
 ```
 
 With a shared filesystem, all actors across all nodes append to the same timestamped log file. Individual log lines remain intact (POSIX atomic append), but lines from different actors will be interleaved.

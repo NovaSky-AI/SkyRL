@@ -78,7 +78,7 @@ class RemoteWeightLoader(WeightLoader):
                 from dataclasses import asdict
 
                 resp = await session.post(
-                    f"{self._url}/update_weights",
+                    f"{self._url}/update_weights_skyrl",
                     json=asdict(request),
                 )
                 return await resp.json()

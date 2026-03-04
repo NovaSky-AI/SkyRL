@@ -7,7 +7,7 @@ To demonstrate how to create custom environments in SkyRL-Gym and train with Sky
 
 We'll walk through the complete process: implementing the environment, registering it, preparing training data, and running your first training session.
 
-**What we're building:** An environment that asks the model to multiply numbers and checks if the answer is correct. The completed code is available at [examples/multiply](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply).
+**What we're building:** An environment that asks the model to multiply numbers and checks if the answer is correct. The completed code is available at [examples/train/multiply](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply).
 
 ## Environment Interface
 
@@ -94,7 +94,7 @@ We will make a few simple extensions to our `step()` method:
   - Incorrect answer, and not in format of `\\boxed{...}`: 0.0.
 - If the model is incorrect and has more turns remaining, we also provide feedback as a new `observation`.
 
-**Multi-turn multiplication environment in [examples/multiply/env.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/env.py)**:
+**Multi-turn multiplication environment in [examples/train/multiply/env.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/env.py)**:
 
 ```python
 def step(self, action: str) -> BaseTextEnvStepOutput:
@@ -142,7 +142,7 @@ def step(self, action: str) -> BaseTextEnvStepOutput:
 
 The multi-turn version gives partial credit for formatting the answer correctly, even if it's wrong. This helps the model learn the expected output format.
 
-The final implementation is available in [examples/multiply/env.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/env.py).
+The final implementation is available in [examples/train/multiply/env.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/env.py).
 
 ## (Turn-level) Rewards And Metrics
 
@@ -180,9 +180,9 @@ If there is only an outcome reward of `1.0` (i.e. intermediate turns' rewards ar
 
 Finally, we need to `register` the new environment so the training stack can find it by name (which we refer to as `env_class`). We will name this environment `multiply`.
 
-We will create a new entrypoint for training with the `multiply` environment by creating a file at `examples/multiply/main_multiply.py` that looks like this:
+We will create a new entrypoint for training with the `multiply` environment by creating a file at `examples/train/multiply/main_multiply.py` that looks like this:
 
-**Environment registration at [examples/multiply/main_multiply.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/main_multiply.py)**:
+**Environment registration at [examples/train/multiply/main_multiply.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/main_multiply.py)**:
 
 ```python
 @ray.remote(num_cpus=1)
@@ -191,7 +191,7 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
    # this needs to be done inside the entrypoint task
    register(
       id="multiply",  # <-- The name of the environment.
-      entry_point="examples.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
+      entry_point="examples.train.multiply.env:MultiplyEnv",  # <-- The path to the environment class.
    )
 
    # make sure that the training loop is not run on the head node.
@@ -220,7 +220,7 @@ All example code written in this document is *outside* of the `skyrl` and `skyrl
 
 Before we can train, we need a dataset of problems to train on.
 
-We can generate a dataset of multiplication problems using [examples/multiply/multiply_dataset.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/multiply_dataset.py). See the file for more details, but the core idea is to generate random multiplication problems of n-digit numbers, and ensure the dataset example is in the correct format:
+We can generate a dataset of multiplication problems using [examples/train/multiply/multiply_dataset.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/multiply_dataset.py). See the file for more details, but the core idea is to generate random multiplication problems of n-digit numbers, and ensure the dataset example is in the correct format:
 
 **Generating a dataset of random multiplication problems.**:
 
@@ -258,7 +258,7 @@ See the doc on [Dataset Preparation](../datasets/dataset-preparation) for more d
 Now we can generate the datsaet:
 
 ```bash title="Generate training data"
-uv run --isolated examples/multiply/multiply_dataset.py \
+uv run --isolated examples/train/multiply/multiply_dataset.py \
   --output_dir $HOME/data/multiply \
   --num_digits 4 \
   --train_size 10000 \
@@ -271,7 +271,7 @@ This creates `train.parquet` and `validation.parquet` files in the `$HOME/data/m
 
 Time to train! 🚀
 
-We will use the `run_multiply.sh` script to train the model. This script is located in [examples/multiply/run_multiply.sh](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/run_multiply.sh), which sets up the training configuration and calls `main_multiply.py`.
+We will use the `run_multiply.sh` script to train the model. This script is located in [examples/train/multiply/run_multiply.sh](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/multiply/run_multiply.sh), which sets up the training configuration and calls `main_multiply.py`.
 
 **Common Configuration Parameters**
 
@@ -286,7 +286,7 @@ Then, configure how the environment should be executed. For multi-turn environme
 
 ```bash title="Run training"
 export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
-bash examples/multiply/run_multiply.sh
+bash examples/train/multiply/run_multiply.sh
 ```
 
 **Next Steps:** Want to make multiplication easier? Try integrating a calculator tool into your environment! Check out the [tools_guide](tools_guide) documentation for details.
