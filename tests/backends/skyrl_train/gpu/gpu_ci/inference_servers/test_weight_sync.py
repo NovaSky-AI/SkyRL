@@ -18,9 +18,9 @@ import httpx
 import pytest
 import ray
 import torch
-import asyncio
 import argparse
 
+import pytest_asyncio
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
@@ -141,8 +141,8 @@ class Trainer:
         torch.cuda.synchronize()
 
 
-@pytest.fixture(scope="class")
-def weight_update_env(ray_init_fixture):
+@pytest_asyncio.fixture(scope="class")
+async def weight_update_env(ray_init_fixture):
     """
     Create environment for weight update testing.
 
@@ -211,7 +211,7 @@ def weight_update_env(ray_init_fixture):
         "client": client,
     }
 
-    asyncio.get_event_loop().run_until_complete(client.teardown())
+    await client.teardown()
     router.shutdown()
 
 
