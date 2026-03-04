@@ -180,19 +180,20 @@ def chunk_gated_delta_rule(
     decay_mask = jnp.tril(jnp.exp(jnp.tril(g_cumsum[..., :, None] - g_cumsum[..., None, :])))
 
     # Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
-    # Computed via forward substitution (Eq 6 and 7 with decay).
+    # Solved via triangular_solve since (I + L) is lower triangular.
     L = jnp.tril((k_beta @ jnp.swapaxes(key, -1, -2)) * decay_mask, k=-1)
-    correction = -L
-    for i in range(1, chunk_size):
-        row = correction[..., i, :]
-        correction = correction.at[..., i, :].add(jnp.sum(row[..., :, None] * correction, axis=-2))
-    correction = correction + jnp.eye(chunk_size, dtype=correction.dtype)
+    A = jnp.eye(chunk_size, dtype=L.dtype) + L
+
+    # Solve A @ [U, gamma_W] = [v_beta, k_beta * exp(g_cumsum)] in one call
+    k_beta_scaled = k_beta * jnp.exp(g_cumsum)[..., None]
+    rhs = jnp.concatenate([v_beta, k_beta_scaled], axis=-1)
+    solution = jax.lax.linalg.triangular_solve(A, rhs, left_side=True, lower=True)
 
     # Ũ = corrected values
-    U = correction @ v_beta
+    U = solution[..., :v_head_dim]
 
     # ←W = γW: decay-scaled corrected keys for state contribution
-    gamma_W = correction @ (k_beta * jnp.exp(g_cumsum)[..., None])
+    gamma_W = solution[..., v_head_dim:]
 
     # γ^C = γ[L-1]: cumulative decay at chunk end
     # →K = (γ^C/γ) K: decay scaling from each position to chunk end
