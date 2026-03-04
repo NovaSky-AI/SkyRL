@@ -228,10 +228,10 @@ def chunk_gated_delta_rule(
         # S[t+1] = →S[t] + (Ũ - ←W S[t]^T)^T →K
         # where →S = γ^C S, →K = (γ^C/γ) K
         # Note: transposed from paper to match our state convention [D_k, D_v]
-        gamma_C = gamma_t[..., -1, None, None]  # γ^C = γ[L-1]
-        S_new = gamma_C * S + jnp.swapaxes(K_t * key_decay_t, -1, -2) @ U_minus_gamma_W_S
+        gamma_C = gamma_t[..., -1, None, None].astype(S.dtype)  # γ^C = γ[L-1]
+        S = gamma_C * S + jnp.swapaxes(K_t * key_decay_t, -1, -2) @ U_minus_gamma_W_S
 
-        return S_new.astype(S.dtype), O_t
+        return S, O_t
 
     # Transpose chunk dimension to first for scan: [B, H, C, ...] -> [C, B, H, ...]
     scan_inputs = (
