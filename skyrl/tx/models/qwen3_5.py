@@ -177,7 +177,7 @@ def chunk_gated_delta_rule(
     g_cumsum = jnp.cumsum(g, axis=-1)
 
     # Γ[i,j] = γ[i]/γ[j] = exp(g_cumsum[i] - g_cumsum[j]) for i >= j (decay-aware causal mask)
-    decay_mask = jnp.tril(jnp.exp(g_cumsum[..., :, None] - g_cumsum[..., None, :]))
+    decay_mask = jnp.tril(jnp.exp(jnp.tril(g_cumsum[..., :, None] - g_cumsum[..., None, :])))
 
     # Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
     # Computed via forward substitution (Eq 6 and 7 with decay).
