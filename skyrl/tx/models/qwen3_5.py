@@ -100,23 +100,41 @@ def chunk_gated_delta_rule(
     chunk_size: int = 64,
     initial_state: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Chunked implementation of gated delta rule for improved efficiency.
+    """Chunked implementation of gated delta rule.
+
+    Reference: https://arxiv.org/pdf/2412.06464
 
     This computes the same result as recurrent_gated_delta_rule but processes
-    tokens in chunks, enabling better parallelization.
+    tokens in chunks, enabling better parallelization via the WY representation.
+
+    Paper notation (Section 3.3 "Hardware-efficient Chunkwise training"):
+        - Q, K, V: query, key, value
+        - β: update gate
+        - γ[r] = cumulative decay at position r within chunk
+        - γ^C = γ[C-1]: cumulative decay at chunk end
+        - Γ[i,j] = γ[i]/γ[j]: decay-aware causal mask
+        - S: recurrent state [D_k, D_v]
+        - Arrows denote decay scaling: ←x = γx, →x = (γ^C/γ)x
+
+    Correction matrix (UT transform, extends Eq 8-9 with decay):
+        Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
+
+    Chunk-wise parallel form (extends Eq 10-11 with decay):
+        S[t+1] = →S[t] + (Ũ - ←W S[t]^T)^T →K
+        O[t] = ←Q S[t]^T + (Q K^T ⊙ M)(Ũ - ←W S[t]^T)
 
     Args:
-        query: [B, T, H, D_k] query tensor
-        key: [B, T, H, D_k] key tensor
-        value: [B, T, H, D_v] value tensor
-        g: [B, T, H] decay gate (negative log-space)
-        beta: [B, T, H] update gate
-        chunk_size: Number of tokens per chunk
-        initial_state: Optional [B, H, D_k, D_v] initial recurrent state
+        query: [B, T, H, D_k] query tensor (Q)
+        key: [B, T, H, D_k] key tensor (K)
+        value: [B, T, H, D_v] value tensor (V)
+        g: [B, T, H] log decay gate (log α, typically negative)
+        beta: [B, T, H] update gate (β)
+        chunk_size: Number of tokens per chunk (L)
+        initial_state: Optional [B, H, D_k, D_v] initial recurrent state (S)
 
     Returns:
-        output: [B, T, H, D_v] attention output
-        final_state: [B, H, D_k, D_v] final recurrent state
+        output: [B, T, H, D_v] attention output (O)
+        final_state: [B, H, D_k, D_v] final recurrent state (S)
     """
     dtype = query.dtype
     query = l2norm(query, axis=-1)
@@ -151,19 +169,18 @@ def chunk_gated_delta_rule(
     beta = beta.reshape(batch_size, num_heads, num_chunks, chunk_size)
     g = g.reshape(batch_size, num_heads, num_chunks, chunk_size)
 
-    # Compute beta-scaled key and value
+    # Diag(β) K and Diag(β) V
     k_beta = key * beta[..., None]
     v_beta = value * beta[..., None]
 
-    # Compute cumulative decay within each chunk
+    # γ[j] = exp(cumsum(g)[j]) - cumulative decay
     g_cumsum = jnp.cumsum(g, axis=-1)
 
-    # Decay mask for causal attention: exp(g_cumsum[i] - g_cumsum[j]) for i >= j
+    # Γ[i,j] = γ[i]/γ[j] = exp(g_cumsum[i] - g_cumsum[j]) for i >= j (decay-aware causal mask)
     decay_mask = jnp.tril(jnp.exp(g_cumsum[..., :, None] - g_cumsum[..., None, :]))
 
-    # Compute the correction matrix M = (I + L)^{-1} where L is the strictly lower triangular
-    # matrix L = (k_beta @ key^T) * decay_mask. This solves the linear system (I + L) @ M = I
-    # via forward substitution to account for the delta rule's recursive dependency within each chunk.
+    # Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
+    # Computed via forward substitution (extends Eq 8-9 with decay).
     L = jnp.tril((k_beta @ jnp.swapaxes(key, -1, -2)) * decay_mask, k=-1)
     correction = -L
     for i in range(1, chunk_size):
@@ -171,52 +188,60 @@ def chunk_gated_delta_rule(
         correction = correction.at[..., i, :].add(jnp.sum(row[..., :, None] * correction, axis=-2))
     correction = correction + jnp.eye(chunk_size, dtype=correction.dtype)
 
-    # Apply correction to values and compute decayed keys for state updates
-    value_corrected = correction @ v_beta
-    k_cumdecay = correction @ (k_beta * jnp.exp(g_cumsum)[..., None])
+    # Ũ = corrected values
+    U = correction @ v_beta
 
-    # Precompute decay factors for state updates
-    chunk_decay = jnp.exp(g_cumsum[..., -1, None, None])
+    # ←W = γW: decay-scaled corrected keys for state contribution
+    gamma_W = correction @ (k_beta * jnp.exp(g_cumsum)[..., None])
+
+    # γ^C = γ[C-1]: cumulative decay at chunk end
+    # →K = (γ^C/γ) K: decay scaling from each position to chunk end
     key_decay = jnp.exp(g_cumsum[..., -1, None] - g_cumsum)[..., None]
 
-    # Initialize recurrent state
+    # Initialize recurrent state S
     if initial_state is None:
         state = jnp.zeros((batch_size, num_heads, k_head_dim, v_head_dim), dtype=jnp.float32)
     else:
         state = initial_state.astype(jnp.float32)
 
     def chunk_step(
-        state: jax.Array,
+        S: jax.Array,
         inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
     ) -> tuple[jax.Array, jax.Array]:
-        q_i, k_i, v_corrected_i, k_cumdecay_i, g_cumsum_i, decay_mask_i, key_decay_i = inputs
+        Q_t, K_t, U_t, gamma_W_t, g_cumsum_t, Gamma_t, key_decay_t = inputs
 
-        # Intra-chunk causal attention (lower triangular including diagonal)
-        intra_attn = jnp.tril(q_i @ jnp.swapaxes(k_i, -1, -2) * decay_mask_i)
+        # γ = exp(g_cumsum): per-position cumulative decay
+        gamma_t = jnp.exp(g_cumsum_t)
 
-        # Subtract state contribution from corrected values
-        v_new = v_corrected_i - k_cumdecay_i @ state
+        # (Q K^T ⊙ Γ): intra-chunk attention with decay mask
+        intra_attn = jnp.tril(Q_t @ jnp.swapaxes(K_t, -1, -2) * Gamma_t)
 
-        # Inter-chunk attention: query attends to previous state with decay
-        inter_out = (q_i * jnp.exp(g_cumsum_i)[..., None]) @ state
+        # Ũ - ←W S^T: corrected values minus state contribution (←W = γW)
+        U_minus_gamma_W_S = U_t - gamma_W_t @ S
 
-        # Combine intra and inter chunk contributions
-        out_i = inter_out + intra_attn @ v_new
+        # ←Q S^T: inter-chunk attention (←Q = γQ)
+        inter_out = (Q_t * gamma_t[..., None]) @ S
 
-        # Update state: decay old state and add new key-value associations
-        state = state * jnp.exp(g_cumsum_i[..., -1, None, None]) + jnp.swapaxes(k_i * key_decay_i, -1, -2) @ v_new
+        # O[t] = ←Q S[t]^T + (Q K^T ⊙ M)(Ũ - ←W S[t]^T)
+        O_t = inter_out + intra_attn @ U_minus_gamma_W_S
 
-        return state, out_i
+        # S[t+1] = →S[t] + (Ũ - ←W S[t]^T)^T →K
+        # where →S = γ^C S, →K = (γ^C/γ) K
+        # Note: transposed from paper to match our state convention [D_k, D_v]
+        gamma_C = gamma_t[..., -1, None, None]  # γ^C = γ[C-1]
+        S = gamma_C * S + jnp.swapaxes(K_t * key_decay_t, -1, -2) @ U_minus_gamma_W_S
+
+        return S, O_t
 
     # Transpose chunk dimension to first for scan: [B, H, C, ...] -> [C, B, H, ...]
     scan_inputs = (
-        jnp.transpose(query, (2, 0, 1, 3, 4)),
-        jnp.transpose(key, (2, 0, 1, 3, 4)),
-        jnp.transpose(value_corrected, (2, 0, 1, 3, 4)),
-        jnp.transpose(k_cumdecay, (2, 0, 1, 3, 4)),
-        jnp.transpose(g_cumsum, (2, 0, 1, 3)),
-        jnp.transpose(decay_mask, (2, 0, 1, 3, 4)),
-        jnp.transpose(key_decay, (2, 0, 1, 3, 4)),
+        jnp.transpose(query, (2, 0, 1, 3, 4)),      # Q
+        jnp.transpose(key, (2, 0, 1, 3, 4)),        # K
+        jnp.transpose(U, (2, 0, 1, 3, 4)),          # Ũ
+        jnp.transpose(gamma_W, (2, 0, 1, 3, 4)),    # ←W = γW
+        jnp.transpose(g_cumsum, (2, 0, 1, 3)),      # log(γ)
+        jnp.transpose(decay_mask, (2, 0, 1, 3, 4)), # Γ
+        jnp.transpose(key_decay, (2, 0, 1, 3, 4)),  # γ^C/γ (for →K)
     )
 
     final_state, outputs = jax.lax.scan(chunk_step, state, scan_inputs)
