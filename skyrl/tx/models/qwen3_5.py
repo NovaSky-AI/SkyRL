@@ -180,19 +180,14 @@ def chunk_gated_delta_rule(
     # Γ[i,j] = γ[i]/γ[j] = exp(g_cumsum[i] - g_cumsum[j]) for i >= j (decay-aware causal mask)
     decay_mask = jnp.tril(jnp.exp(jnp.tril(g_cumsum[..., :, None] - g_cumsum[..., None, :]))).astype(dtype)
 
-    # Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
-    # Solved via triangular_solve with unit_diagonal=True (assumes I on diagonal).
+    # L = strictLower(diag(β)(Γ ⊙ K K^T))
     L = jnp.tril((k_beta @ jnp.swapaxes(key, -1, -2)) * decay_mask, k=-1)
 
-    # Solve (I + L) @ [U, gamma_W] = [v_beta, k_beta * γ] in one call
+    # Solve (I + L) x = rhs for Ũ (corrected values) and ←W (corrected keys decayed to chunk start)
     rhs = jnp.concatenate([v_beta, k_beta * gamma[..., None]], axis=-1)
     solution = jax.lax.linalg.triangular_solve(L, rhs, left_side=True, lower=True, unit_diagonal=True)
-
-    # Ũ = corrected values
     U = solution[..., :v_head_dim]
-
-    # ←W = γW: decay-scaled corrected keys for state contribution
-    gamma_W = solution[..., v_head_dim:]
+    W_decay = solution[..., v_head_dim:]
 
     # Initialize recurrent state S
     if initial_state is None:
@@ -204,26 +199,26 @@ def chunk_gated_delta_rule(
         S: jax.Array,
         inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
     ) -> tuple[jax.Array, jax.Array]:
-        Q_t, K_t, U_t, gamma_W_t, gamma_t, Gamma_t = inputs
+        Q_t, K_t, U_t, W_decay_t, gamma_t, Gamma_t = inputs
 
         # (Q K^T ⊙ Γ): intra-chunk attention with decay mask (Γ is already lower triangular)
         intra_attn = Q_t @ jnp.swapaxes(K_t, -1, -2) * Gamma_t
 
-        # Ũ - ←W S^T: corrected values minus state contribution (←W = γW)
-        U_minus_gamma_W_S = U_t - gamma_W_t @ S
+        # Ũ - ←W S^T: corrected values minus state contribution
+        U_minus_W_decay_S = U_t - W_decay_t @ S
 
         # ←Q S^T: inter-chunk attention (←Q = γQ)
         inter_out = (Q_t * gamma_t[..., None]) @ S
 
         # O[t] = ←Q S[t]^T + (Q K^T ⊙ M)(Ũ - ←W S[t]^T)
-        O_t = inter_out + intra_attn @ U_minus_gamma_W_S
+        O_t = inter_out + intra_attn @ U_minus_W_decay_S
 
         # S[t+1] = →S[t] + (Ũ - ←W S[t]^T)^T →K
         # where →S = γ^C S, →K = (γ^C/γ) K
         # Note: transposed from paper to match our state convention [D_k, D_v]
         gamma_C = gamma_t[..., -1, None, None]  # γ^C = γ[L-1]
         key_decay_t = Gamma_t[..., -1, :][..., None]  # γ^C/γ
-        S = gamma_C * S + jnp.swapaxes(K_t * key_decay_t, -1, -2) @ U_minus_gamma_W_S
+        S = gamma_C * S + jnp.swapaxes(K_t * key_decay_t, -1, -2) @ U_minus_W_decay_S
 
         return S, O_t
 
@@ -232,7 +227,7 @@ def chunk_gated_delta_rule(
         jnp.transpose(query, (2, 0, 1, 3, 4)),  # Q
         jnp.transpose(key, (2, 0, 1, 3, 4)),  # K
         jnp.transpose(U, (2, 0, 1, 3, 4)),  # Ũ
-        jnp.transpose(gamma_W, (2, 0, 1, 3, 4)),  # ←W = γW
+        jnp.transpose(W_decay, (2, 0, 1, 3, 4)),  # ←W
         jnp.transpose(gamma, (2, 0, 1, 3)),  # γ
         jnp.transpose(decay_mask, (2, 0, 1, 3, 4)),  # Γ
     )
