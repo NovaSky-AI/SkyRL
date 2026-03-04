@@ -361,6 +361,10 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
+            rollout_inference_indices = batch.pop("rollout_inference_indices", None)
+            if rollout_inference_indices is not None:
+                _setup_per_microbatch_replay(rollout_inference_indices, batch["attention_mask"])
+
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]

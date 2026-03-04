@@ -33,7 +33,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
 from skyrl.train.utils.utils import update_model_config, str_to_torch_dtype
 from skyrl.backends.skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
+from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics, all_reduce_metrics
 from skyrl.backends.skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -624,9 +624,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Returns:
             Aggregated metrics dict across all micro batches
         """
-        from skyrl.backends.skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
 
-        setup_router_replay_forward(data, self.enable_router_replay)
         self.model.train()
         for chunk in self.actor_module:
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
@@ -638,28 +637,31 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
-        # Build micro-batch dicts expected by forward_backward_mini_batch
+        # Chunk manually so we can propagate rollout_inference_indices for
+        # per-micro-batch router replay (BatchIterator/Experience don't carry them).
         micro_buffer = []
-        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
-            sequences = experience.sequences
-            attention_mask = experience.attention_mask
+        for micro in data.chunk(micro_batch_size):
+            sequences = micro["sequences"]
+            attention_mask = micro["attention_mask"]
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
 
-            micro_buffer.append(
-                {
-                    "sequences": sequences,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": experience.num_actions,
-                    "old_action_log_probs": experience.action_log_probs,
-                    "base_action_log_probs": experience.base_action_log_probs,
-                    "advantages": experience.advantages,
-                    "loss_mask": experience.loss_mask,
-                    "rollout_action_logprobs": experience.rollout_logprobs,
-                    "action_mask": experience.action_mask,
-                }
-            )
+            micro_dict = {
+                "sequences": sequences,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "num_actions": micro.metadata["response_length"],
+                "old_action_log_probs": micro.get("action_log_probs"),
+                "base_action_log_probs": micro.get("base_action_log_probs"),
+                "advantages": micro.get("advantages"),
+                "loss_mask": micro.get("loss_mask"),
+                "rollout_action_logprobs": micro.get("rollout_logprobs"),
+                "action_mask": micro.get("action_mask"),
+            }
+            rii = micro.get("rollout_inference_indices")
+            if rii is not None and self.enable_router_replay:
+                micro_dict["rollout_inference_indices"] = rii
+            micro_buffer.append(micro_dict)
 
         if not micro_buffer:
             return {}
