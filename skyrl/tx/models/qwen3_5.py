@@ -112,7 +112,7 @@ def chunk_gated_delta_rule(
         - β: update gate
         - γ[r] = cumulative decay at position r within chunk
         - γ^C = γ[L-1]: cumulative decay at chunk end
-        - Γ[i,j] = γ[i]/γ[j]: decay-aware causal mask
+        - Γ[i,j] = γ[i]/γ[j] if i >= j: decay-aware causal mask
         - S: recurrent state [D_k, D_v]
         - Arrows denote decay scaling: ←x = γx, →x = (γ^C/γ)x
 
@@ -173,21 +173,20 @@ def chunk_gated_delta_rule(
     k_beta = key * beta[..., None]
     v_beta = value * beta[..., None]
 
-    # γ[j] = exp(cumsum(g)[j]) - cumulative decay
+    # γ[j] = exp(cumsum(g)[j]): cumulative decay
     g_cumsum = jnp.cumsum(g, axis=-1)
 
     # Γ[i,j] = γ[i]/γ[j] = exp(g_cumsum[i] - g_cumsum[j]) for i >= j (decay-aware causal mask)
     decay_mask = jnp.tril(jnp.exp(jnp.tril(g_cumsum[..., :, None] - g_cumsum[..., None, :])))
 
     # Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
-    # Solved via triangular_solve since (I + L) is lower triangular.
+    # Solved via triangular_solve with unit_diagonal=True (assumes I on diagonal).
     L = jnp.tril((k_beta @ jnp.swapaxes(key, -1, -2)) * decay_mask, k=-1)
-    A = jnp.eye(chunk_size, dtype=L.dtype) + L
 
-    # Solve A @ [U, gamma_W] = [v_beta, k_beta * exp(g_cumsum)] in one call
+    # Solve (I + L) @ [U, gamma_W] = [v_beta, k_beta * exp(g_cumsum)] in one call
     k_beta_scaled = k_beta * jnp.exp(g_cumsum)[..., None]
     rhs = jnp.concatenate([v_beta, k_beta_scaled], axis=-1)
-    solution = jax.lax.linalg.triangular_solve(A, rhs, left_side=True, lower=True)
+    solution = jax.lax.linalg.triangular_solve(L, rhs, left_side=True, lower=True, unit_diagonal=True)
 
     # Ũ = corrected values
     U = solution[..., :v_head_dim]
