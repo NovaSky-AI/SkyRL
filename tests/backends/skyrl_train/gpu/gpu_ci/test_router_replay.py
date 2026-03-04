@@ -123,14 +123,16 @@ def test_megatron_router_replay(ray_init_fixture):
         rewards = generator_output["rewards"]
         if rewards and not isinstance(rewards[0], list):
             rewards = [[r] * len(resp) for r, resp in zip(rewards, responses)]
-        (sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor) = convert_prompts_responses_to_batch_tensors(
-            tokenizer=tokenizer,
-            prompts=generator_output["prompt_token_ids"],
-            responses=responses,
-            rewards=rewards,
-            loss_masks=generator_output["loss_masks"],
-            logprobs=generator_output.get("rollout_logprobs"),
-            rollout_inference_indices=indices,
+        (sequences, attention_mask, response_mask, rewards_t, loss_mask_t, logprobs_t, rii_tensor) = (
+            convert_prompts_responses_to_batch_tensors(
+                tokenizer=tokenizer,
+                prompts=generator_output["prompt_token_ids"],
+                responses=responses,
+                rewards=rewards,
+                loss_masks=generator_output["loss_masks"],
+                logprobs=generator_output.get("rollout_logprobs"),
+                rollout_inference_indices=indices,
+            )
         )
 
         assert rii_tensor is not None
@@ -138,20 +140,25 @@ def test_megatron_router_replay(ray_init_fixture):
 
         num_actions = response_mask.shape[1]
         batch_size = sequences.shape[0]
-        training_input = TrainingInputBatch({
-            "sequences": sequences,
-            "attention_mask": attention_mask,
-            "response_mask": response_mask,
-            "rewards": rewards_t,
-            "loss_mask": loss_mask_t,
-            "rollout_logprobs": logprobs_t if logprobs_t is not None
-                else torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "rollout_inference_indices": rii_tensor,
-            "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
-            "action_mask": response_mask.to(dtype=torch.int64),
-        })
+        training_input = TrainingInputBatch(
+            {
+                "sequences": sequences,
+                "attention_mask": attention_mask,
+                "response_mask": response_mask,
+                "rewards": rewards_t,
+                "loss_mask": loss_mask_t,
+                "rollout_logprobs": (
+                    logprobs_t
+                    if logprobs_t is not None
+                    else torch.zeros((batch_size, num_actions), dtype=torch.float32)
+                ),
+                "rollout_inference_indices": rii_tensor,
+                "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+                "action_mask": response_mask.to(dtype=torch.int64),
+            }
+        )
         training_input.metadata = {"response_length": num_actions}
 
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = {
@@ -168,35 +175,38 @@ def test_megatron_router_replay(ray_init_fixture):
         cfg.trainer.micro_train_batch_size_per_gpu = 1
 
         actor_group = init_worker_with_type(
-            "policy", shared_pg=None, colocate_all=False,
-            num_gpus_per_node=2, cfg=cfg,
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=2,
+            cfg=cfg,
         )
 
         expected_per_layer = _split_replay_indices(rii_tensor.to(torch.long))
 
         state = ray.get(
             actor_group.async_run_ray_method(
-                "pass_through", "debug_setup_router_replay_state",
+                "pass_through",
+                "debug_setup_router_replay_state",
                 data=training_input,
             )
         )[0]
 
         assert state is not None, "Worker returned None state"
-        assert "REPLAY_FORWARD" in state["action"], (
-            f"RouterReplay action should be REPLAY_FORWARD, got: {state['action']}"
-        )
+        assert (
+            "REPLAY_FORWARD" in state["action"]
+        ), f"RouterReplay action should be REPLAY_FORWARD, got: {state['action']}"
         assert state["num_instances"] == len(expected_per_layer), (
-            f"Expected {len(expected_per_layer)} replay instances (one per layer), "
-            f"got {state['num_instances']}"
+            f"Expected {len(expected_per_layer)} replay instances (one per layer), " f"got {state['num_instances']}"
         )
-        for layer_idx, (got, expected) in enumerate(
-            zip(state["target_indices"], expected_per_layer)
-        ):
-            assert torch.equal(got.to(torch.long), expected.to(torch.long)), (
-                f"Layer {layer_idx}: Megatron target indices differ from vLLM indices"
-            )
-        print(f"PASSED: vLLM routing indices ({rii_tensor.shape}) correctly "
-              f"loaded into {state['num_instances']} Megatron RouterReplay instances")
+        for layer_idx, (got, expected) in enumerate(zip(state["target_indices"], expected_per_layer)):
+            assert torch.equal(
+                got.to(torch.long), expected.to(torch.long)
+            ), f"Layer {layer_idx}: Megatron target indices differ from vLLM indices"
+        print(
+            f"PASSED: vLLM routing indices ({rii_tensor.shape}) correctly "
+            f"loaded into {state['num_instances']} Megatron RouterReplay instances"
+        )
 
     finally:
         ray.shutdown()

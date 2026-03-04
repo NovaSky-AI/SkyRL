@@ -334,9 +334,9 @@ class InferenceEngineClient(InferenceEngineInterface):
             stop_reasons=[stop_reason],
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
-            rollout_inference_indices=[accum_rollout_inference_indices]
-            if len(accum_rollout_inference_indices) > 0
-            else None,
+            rollout_inference_indices=(
+                [accum_rollout_inference_indices] if len(accum_rollout_inference_indices) > 0 else None
+            ),
         )
 
     async def _chat_completion_with_retry(

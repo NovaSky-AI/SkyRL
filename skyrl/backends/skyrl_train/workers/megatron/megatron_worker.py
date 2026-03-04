@@ -257,14 +257,11 @@ class MegatronWorker:
         """Read the current RouterReplay state from all instances."""
         from megatron.core.transformer.moe.router_replay import RouterReplay
 
-        # See https://docs.nvidia.com/megatron-core/developer-guide/0.15.0/api-guide/router_replay.html docs for more info 
+        # See https://docs.nvidia.com/megatron-core/developer-guide/0.15.0/api-guide/router_replay.html docs for more info
         instances = RouterReplay.global_router_replay_instances or []
         action = instances[0].router_replay_action if instances else None
 
-        target_indices = [
-            inst.target_topk_idx.detach().cpu()
-            for inst in instances if inst.target_topk_idx is not None
-        ]
+        target_indices = [inst.target_topk_idx.detach().cpu() for inst in instances if inst.target_topk_idx is not None]
 
         return {
             "action": str(action),
