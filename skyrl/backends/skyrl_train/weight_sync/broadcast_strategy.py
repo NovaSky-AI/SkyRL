@@ -7,7 +7,7 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
@@ -86,21 +86,14 @@ class BroadcastInitInfo(WeightSyncInitInfo):
             rank_offset += world_size_per_server
         return result
 
-    def to_api_payload(self) -> Union["BroadcastInitInfo", Dict[str, Any]]:
-        """Return payload for init_weight_update_communicator.
-
-        When using new inference (vLLM native APIs), returns a dict with
-        master_address, master_port, rank_offset, world_size. Otherwise returns
-        self for legacy clients that expect WeightSyncInitInfo.
-        """
-        if _SKYRL_USE_NEW_INFERENCE:
-            return {
-                "master_address": self.master_addr,
-                "master_port": self.master_port,
-                "rank_offset": self.rank_offset,
-                "world_size": self.world_size,
-            }
-        return self
+    def to_api_payload(self) -> Dict[str, Any]:
+        """Return JSON-serializable payload for the /init_weight_transfer_engine endpoint."""
+        return {
+            "master_address": self.master_addr,
+            "master_port": self.master_port,
+            "rank_offset": self.rank_offset,
+            "world_size": self.world_size,
+        }
 
 
 @dataclass

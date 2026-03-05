@@ -137,7 +137,7 @@ class TestServerGroupAndRouter:
         total_world_size, world_size_per_server = await client.get_world_size()
         print(f"Total world_size: {total_world_size}, per_server: {world_size_per_server}")
         assert total_world_size == 4
-        assert world_size_per_server == [2, 2]
+        assert world_size_per_server == 2
 
     def test_completion_request(self, server_group_and_router):
         """Completion requests work through router."""

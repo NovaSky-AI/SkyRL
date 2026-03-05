@@ -304,12 +304,18 @@ class TestWeightSync:
 
     @pytest.mark.asyncio
     async def test_init_weight_update_communicator(self, client):
-        """Test init_weight_update_communicator fans out to all servers with per-server dicts."""
-        init_info_list = [
-            {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5},
-            {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 3, "world_size": 5},
-        ]
-        result = await client.init_weight_update_communicator(init_info_list)
+        """Test init_weight_update_communicator expands init_info and fans out to all servers."""
+
+        class MockInitInfo:
+            """Lightweight mock satisfying the update_rank_offset / to_api_payload protocol."""
+
+            def update_rank_offset(self, world_size_per_server, num_servers):
+                return [self] * num_servers
+
+            def to_api_payload(self):
+                return {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5}
+
+        result = await client.init_weight_update_communicator(MockInitInfo())
         assert len(result) == 2
 
     @pytest.mark.asyncio
@@ -335,7 +341,7 @@ class TestServerInfo:
         total_world_size, world_size_per_server = await client.get_world_size()
         # Each mock server reports world_size=2, we have 2 servers = 4
         assert total_world_size == 4
-        assert world_size_per_server == [2, 2]
+        assert world_size_per_server == 2
 
         # Second call returns cached value
         total_world_size2, _ = await client.get_world_size()
