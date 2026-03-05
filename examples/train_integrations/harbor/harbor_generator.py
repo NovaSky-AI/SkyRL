@@ -10,9 +10,10 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.utils.rate_limiter import create_rate_limiter
 from tqdm import tqdm
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
+from harbor.models.trial.result import TrialResult
 
 # Suppress LiteLLM verbose logging
 
@@ -93,22 +94,23 @@ class HarborGenerator(GeneratorInterface):
         ] = f"hosted_vllm/{ie_cfg.served_model_name}"
         self._harbor_trial_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
-        if self.step_wise:
-            # Step-wise training requires collect_rollout_details to get per-turn token IDs and logprobs
-            agent_kwargs = self._harbor_trial_config_template["agent"].get("kwargs", {})
-            if not agent_kwargs.get("collect_rollout_details", False):
-                logger.warning(
-                    "step_wise_trajectories=True but collect_rollout_details is not enabled in Harbor config. "
-                    "Enabling it automatically."
-                )
-                self._harbor_trial_config_template["agent"]["kwargs"]["collect_rollout_details"] = True
+        # Config post-processings
+        agent_kwargs = self._harbor_trial_config_template["agent"].get("kwargs", {})
 
-            # Step-wise training does not support summarization (rollout_details become incomplete)
-            if agent_kwargs.get("enable_summarize", False):
-                raise ValueError(
-                    "step_wise_trajectories=True is incompatible with enable_summarize=True. "
-                    "Summarization invalidates rollout_details. Set enable_summarize=false."
-                )
+        # Summarization is not supproted yet
+        if agent_kwargs.get("enable_summarize", False):
+            raise ValueError(
+                "step_wise_trajectories=True is incompatible with enable_summarize=True. "
+                "Summarization invalidates rollout_details. Set enable_summarize=false."
+            )
+
+        # Step-wise training requires collect_rollout_details to get per-turn token IDs and logprobs
+        if self.step_wise and not agent_kwargs.get("collect_rollout_details", False):
+            logger.warning(
+                "step_wise_trajectories=True but collect_rollout_details is not enabled in Harbor config. "
+                "Enabling it automatically."
+            )
+            self._harbor_trial_config_template["agent"]["kwargs"]["collect_rollout_details"] = True
 
         logger.info(
             f"HarborGenerator initialized with Harbor config. "
@@ -449,7 +451,7 @@ class HarborGenerator(GeneratorInterface):
         successful = False
         is_context_length_error = False
         is_agent_timeout_error = False
-        results = None
+        results: Optional[TrialResult] = None
         for i in range(MAX_NUM_RETRIES_PER_TRIAL):
             prefix = f"Trajectory {trajectory_id} attempt {i+1}/{MAX_NUM_RETRIES_PER_TRIAL}"
             results = None
@@ -491,13 +493,25 @@ class HarborGenerator(GeneratorInterface):
                 chat_history = results.agent_result.metadata["all_messages"]
                 summarization_count = results.agent_result.metadata["summarization_count"]
                 num_turns = results.agent_result.metadata["n_episodes"]
-                if len(chat_history) > 1 and chat_history[0]["role"] == "user":
-                    successful = True
-                    logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
-                    break
+                if self.step_wise:
+                    # For step-wise, success is defined as having rollout_details
+                    if results.agent_result.rollout_details is not None and len(results.agent_result.rollout_details[0].get("prompt_token_ids", [])) > 0:
+                        successful = True
+                        logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
+                        break
+                    else:
+                        logger.warning(
+                            f"{prefix} failed: No rollout_details (or empty one). Results: {results}"
+                        )
                 else:
-                    logger.warning(
-                        f"{prefix} failed: Did not return a chat history with a user message. chat_history: {chat_history}\nResults: {results}"
+                    # For non-step-wise, success is defined as having a chat history starting with a user message
+                    if len(chat_history) > 1 and chat_history[0]["role"] == "user":
+                        successful = True
+                        logger.debug(f"{prefix} successful: reward={reward}. Results: {results}")
+                        break
+                    else:
+                        logger.warning(
+                            f"{prefix} failed: Did not return a chat history with a user message. chat_history: {chat_history}\nResults: {results}"
                     )
             except Exception as e:
                 logger.warning(f"{prefix} failed: Error running trial: {e}. Results: {results}")
@@ -594,7 +608,7 @@ class HarborGenerator(GeneratorInterface):
 
     def _build_step_wise_output(
         self,
-        results,
+        results: TrialResult,
         reward: float,
         trajectory_id: TrajectoryID,
         summarization_count: Optional[int],
@@ -606,122 +620,62 @@ class HarborGenerator(GeneratorInterface):
         Uses the exact per-turn token IDs and logprobs from vLLM (no re-tokenization).
         This avoids retokenization drift and enables correct TIS computation.
         """
+        # 1. Extract needed information
         rollout_details_list = results.agent_result.rollout_details
-
-        # Validate rollout_details are available
-        if not rollout_details_list:
-            logger.warning(
-                f"Trajectory {trajectory_id}: step_wise_trajectories=True but no rollout_details available. "
-                f"Make sure collect_rollout_details=True is set in Harbor agent config."
-            )
-            # Fall back to a single zeroed-out step
-            failed_step = HarborAgentOutput(
-                response_ids=[0],
-                reward=[0.0],
-                stop_reason="error",
-                loss_mask=[0],
-                prompt_ids=[0],
-                trajectory_id=trajectory_id,
-            )
-            return HarborStepWiseOutput(
-                step_outputs=[failed_step],
-                trajectory_id=trajectory_id,
-                summarization_count=summarization_count,
-                num_turns=num_turns,
-            )
+        assert rollout_details_list is not None, "rollout_details_list is required for step-wise training"
 
         # Use the first (main) rollout detail — this is the main agent's conversation.
         # Additional entries (index 1+) are subagent rollout details (e.g., summarization).
         main_rollout = rollout_details_list[0]
+        prompt_token_ids_per_turn = main_rollout.get("prompt_token_ids", [])
+        completion_token_ids_per_turn = main_rollout.get("completion_token_ids", [])
+        logprobs_per_turn = main_rollout.get("logprobs", [])
+        n_turns = len(completion_token_ids_per_turn)
 
-        # Assert no summarization occurred (we don't support it in step-wise mode yet)
+        # 2. Validate the data
+        # Assert no summarization occurred (not supported yet)
         if len(rollout_details_list) > 1:
             assert summarization_count == 0, (
                 f"Trajectory {trajectory_id}: step_wise_trajectories=True but summarization occurred "
                 f"({summarization_count} summarizations, {len(rollout_details_list)} rollout detail segments). "
                 f"This is not supported. Set enable_summarize=false."
             )
-
-        prompt_token_ids_per_turn = main_rollout.get("prompt_token_ids", [])
-        completion_token_ids_per_turn = main_rollout.get("completion_token_ids", [])
-        logprobs_per_turn = main_rollout.get("logprobs", [])
-
-        n_turns = len(completion_token_ids_per_turn)
-        if n_turns == 0:
-            logger.warning(f"Trajectory {trajectory_id}: rollout_details has no completion turns.")
-            failed_step = HarborAgentOutput(
-                response_ids=[0],
-                reward=[0.0],
-                stop_reason="error",
-                loss_mask=[0],
-                prompt_ids=[0],
-                trajectory_id=trajectory_id,
-            )
-            return HarborStepWiseOutput(
-                step_outputs=[failed_step],
-                trajectory_id=trajectory_id,
-                summarization_count=summarization_count,
-                num_turns=num_turns,
-            )
-
-        # Validate alignment of prompt_token_ids, completion_token_ids, and logprobs
-        has_prompt_ids = len(prompt_token_ids_per_turn) == n_turns
-        has_logprobs = len(logprobs_per_turn) == n_turns
-
-        if not has_prompt_ids:
-            logger.warning(
-                f"Trajectory {trajectory_id}: prompt_token_ids has {len(prompt_token_ids_per_turn)} entries "
-                f"but completion_token_ids has {n_turns}. Prompt IDs will be unavailable for some turns."
+        assert n_turns > 0, "rollout_details has no completion turns"
+        assert len(prompt_token_ids_per_turn) == n_turns and len(logprobs_per_turn) == n_turns, (
+            f"Trajectory {trajectory_id}: Expect prompt_token_ids, completion_token_ids, and "
+            f"logprobs to have the same length, but respectively got: {len(prompt_token_ids_per_turn)} turns, ",
+            f"{len(completion_token_ids_per_turn)} turns, and {len(logprobs_per_turn)} turns."
+        )
+        for turn_idx in range(n_turns):
+            assert len(logprobs_per_turn[turn_idx]) == len(completion_token_ids_per_turn[turn_idx]), (
+                f"Trajectory {trajectory_id} turn {turn_idx}: "
+                f"logprobs length ({len(logprobs_per_turn[turn_idx])}) != "
+                f"completion_ids length ({len(completion_token_ids_per_turn[turn_idx])}). "
             )
 
         step_outputs = []
         for turn_idx in range(n_turns):
             completion_ids = completion_token_ids_per_turn[turn_idx]
-            turn_prompt_ids = prompt_token_ids_per_turn[turn_idx] if has_prompt_ids else []
-            turn_logprobs = logprobs_per_turn[turn_idx] if has_logprobs else None
-
-            # Truncate completion to fit within max_seq_len (prompt + response must fit).
-            # This prevents OOM from padding: without this, the padded batch dimension becomes
-            # max(all prompts) + max(all responses) which can far exceed max_seq_len when
-            # different steps have different prompt/response length ratios.
-            max_response_for_step = max(0, self.max_seq_len - len(turn_prompt_ids))
-            if len(completion_ids) > max_response_for_step:
-                completion_ids = completion_ids[:max_response_for_step]
-                if turn_logprobs is not None:
-                    turn_logprobs = turn_logprobs[:max_response_for_step]
-
-            # Validate logprobs alignment with completion tokens
-            if turn_logprobs is not None and len(turn_logprobs) != len(completion_ids):
-                logger.warning(
-                    f"Trajectory {trajectory_id} turn {turn_idx}: "
-                    f"logprobs length ({len(turn_logprobs)}) != completion_ids length ({len(completion_ids)}). "
-                    f"Discarding logprobs for this turn."
-                )
-                turn_logprobs = None
-
-            # Loss mask: all completion tokens are trainable (they are the model's generation)
-            turn_loss_mask = [1] * len(completion_ids)
+            turn_prompt_ids = prompt_token_ids_per_turn[turn_idx]
+            turn_logprobs = logprobs_per_turn[turn_idx]
+            is_last = turn_idx == n_turns - 1
 
             # Per-token reward: zeros for all but the last token of the LAST step
             turn_reward = [0.0] * len(completion_ids)
-
-            is_last = turn_idx == n_turns - 1
+            if is_last and len(turn_reward) > 0:
+                turn_reward[-1] = float(reward)
 
             # Determine stop reason for this step
-            if is_last and is_context_length_error:
+            if is_context_length_error:
                 turn_stop_reason = "context_length"
-            elif is_last:
-                turn_stop_reason = "complete"
             else:
                 turn_stop_reason = "complete"
 
-            # Apply overlong filtering on last step
-            if is_last and self.generator_cfg.apply_overlong_filtering and turn_stop_reason == "context_length":
+            # Loss mask: all completion tokens are trainable (they are the model's generation)
+            turn_loss_mask = [1] * len(completion_ids)
+            # Apply overlong filtering.
+            if self.generator_cfg.apply_overlong_filtering and turn_stop_reason == "context_length":
                 turn_loss_mask = [0] * len(completion_ids)
-
-            # Place reward at the last token of the last step
-            if is_last and len(turn_reward) > 0:
-                turn_reward[-1] = float(reward)
 
             step_output = HarborAgentOutput(
                 response_ids=completion_ids,
