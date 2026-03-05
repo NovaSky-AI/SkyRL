@@ -86,7 +86,7 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn; sys_platform == 'linux'",
+    #"flash-attn; sys_platform == 'linux'",
     "polars",
     "s3fs",
     "fastapi",
@@ -98,7 +98,6 @@ skyrl-train = [
 fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.16.0; sys_platform == 'linux'",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.10.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
