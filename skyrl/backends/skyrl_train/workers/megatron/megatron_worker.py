@@ -31,7 +31,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     broadcast_object_across_pp_ranks,
 )
 from skyrl.train.utils.utils import update_model_config, str_to_torch_dtype
-from skyrl.backends.skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl.backends.skyrl_train.workers.worker import (

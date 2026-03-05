@@ -39,7 +39,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_e
 )
 from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
 from concurrent.futures import ThreadPoolExecutor
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 import skyrl.train.utils
 from transformers import AutoTokenizer
 

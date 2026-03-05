@@ -295,7 +295,7 @@ def test_lora_checkpoint_includes_connectors_when_trainable(tmp_path):
     model_true = _TinyModel(mhc_expansion_rate=4)
     _fill_tiny_model(model_true)
     ckpt_true = tmp_path / "with_connectors.tar.gz"
-    save_lora_checkpoint(model_true, "dummy/base", adapter_cfg, adapter_index=1, output_path=ckpt_true)
+    save_lora_checkpoint(model_true, "dummy/base", adapter_cfg, adapter_index=1, output_path=ckpt_true, rank=0)
 
     with download_and_unpack(ckpt_true) as extracted_dir:
         tensors = safetensors.numpy.load_file(extracted_dir / "adapter_model.safetensors")
@@ -312,7 +312,7 @@ def test_lora_checkpoint_includes_connectors_when_trainable(tmp_path):
     model_false = _TinyModel(mhc_expansion_rate=1)
     _fill_tiny_model(model_false)
     ckpt_false = tmp_path / "without_connectors.tar.gz"
-    save_lora_checkpoint(model_false, "dummy/base", adapter_cfg, adapter_index=1, output_path=ckpt_false)
+    save_lora_checkpoint(model_false, "dummy/base", adapter_cfg, adapter_index=1, output_path=ckpt_false, rank=0)
 
     with download_and_unpack(ckpt_false) as extracted_dir:
         tensors = safetensors.numpy.load_file(extracted_dir / "adapter_model.safetensors")

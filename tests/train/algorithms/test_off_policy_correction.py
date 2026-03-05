@@ -13,6 +13,7 @@ from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
     compute_tis_ratio,
     compute_sequence_mask,
     compute_outlier_token_mask,
+    compute_token_mask,
     compute_off_policy_correction,
 )
 
@@ -621,3 +622,155 @@ def test_compute_sequence_mask_invalid_type():
 
     with pytest.raises(ValueError, match="Unknown sequence_mask_metric"):
         compute_sequence_mask(old_log_probs, rollout_logprobs, loss_mask, "invalid", config)
+
+
+# ---------------------------------------------------------------------------
+# compute_token_mask tests
+# ---------------------------------------------------------------------------
+
+
+def test_compute_token_mask_all_in_bounds():
+    """All valid tokens have IS ratio within thresholds -- nothing masked."""
+    # IS ratios: exp([0.1, -0.1, 0.0]) ≈ [1.105, 0.905, 1.0]
+    old_log_probs = torch.tensor([[-1.0, -1.1, -1.0]])
+    rollout_logprobs = torch.tensor([[-1.1, -1.0, -1.0]])
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]])
+
+    config = OffPolicyCorrectionConfig(
+        token_mask_is_threshold_low=0.5,
+        token_mask_is_threshold_high=2.0,
+    )
+
+    token_mask, metrics = compute_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
+
+    torch.testing.assert_close(token_mask, torch.ones_like(loss_mask))
+    assert metrics["token_mask_ratio"] == 0.0
+
+
+def test_compute_token_mask_masks_high_ratio_tokens():
+    """Tokens with IS ratio above the high threshold are masked."""
+    # IS ratios: exp([0.0, 0.0, 2.0]) ≈ [1.0, 1.0, 7.389]
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]])
+    rollout_logprobs = torch.tensor([[-1.0, -1.0, -3.0]])
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]])
+
+    config = OffPolicyCorrectionConfig(
+        token_mask_is_threshold_low=0.5,
+        token_mask_is_threshold_high=2.0,
+    )
+
+    token_mask, metrics = compute_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
+
+    expected = torch.tensor([[1.0, 1.0, 0.0]])
+    torch.testing.assert_close(token_mask, expected)
+    assert abs(metrics["token_mask_ratio"] - 1 / 3) < 0.01
+
+
+def test_compute_token_mask_masks_low_ratio_tokens():
+    """Tokens with IS ratio below the low threshold are masked."""
+    # IS ratios: exp([0.0, 0.0, -2.0]) ≈ [1.0, 1.0, 0.135]
+    old_log_probs = torch.tensor([[-1.0, -1.0, -3.0]])
+    rollout_logprobs = torch.tensor([[-1.0, -1.0, -1.0]])
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]])
+
+    config = OffPolicyCorrectionConfig(
+        token_mask_is_threshold_low=0.5,
+        token_mask_is_threshold_high=2.0,
+    )
+
+    token_mask, metrics = compute_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
+
+    expected = torch.tensor([[1.0, 1.0, 0.0]])
+    torch.testing.assert_close(token_mask, expected)
+    assert abs(metrics["token_mask_ratio"] - 1 / 3) < 0.01
+
+
+def test_compute_token_mask_ignores_already_masked_tokens():
+    """Out-of-bounds tokens that are already loss_mask==0 stay unchanged."""
+    # IS ratios: exp([0.0, 0.0, 5.0]) ≈ [1.0, 1.0, 148.4]
+    # Third token is out of bounds, but already masked.
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]])
+    rollout_logprobs = torch.tensor([[-1.0, -1.0, -6.0]])
+    loss_mask = torch.tensor([[1.0, 1.0, 0.0]])
+
+    config = OffPolicyCorrectionConfig(
+        token_mask_is_threshold_low=0.5,
+        token_mask_is_threshold_high=2.0,
+    )
+
+    token_mask, metrics = compute_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
+
+    # Third token keeps value 1 in token_mask (loss_mask==0 preserves it).
+    expected = torch.tensor([[1.0, 1.0, 1.0]])
+    torch.testing.assert_close(token_mask, expected)
+    # Metric only counts valid tokens, so 0 of 2 valid tokens masked.
+    assert metrics["token_mask_ratio"] == 0.0
+
+
+def test_compute_token_mask_multi_sequence_batch():
+    """Per-token masking works across a batch of sequences."""
+    # Seq 0 IS ratios: exp([0.0, 2.0]) ≈ [1.0, 7.389]  → second token masked
+    # Seq 1 IS ratios: exp([-2.0, 0.0]) ≈ [0.135, 1.0]  → first token masked
+    old_log_probs = torch.tensor([[-1.0, -1.0], [-3.0, -1.0]])
+    rollout_logprobs = torch.tensor([[-1.0, -3.0], [-1.0, -1.0]])
+    loss_mask = torch.tensor([[1.0, 1.0], [1.0, 1.0]])
+
+    config = OffPolicyCorrectionConfig(
+        token_mask_is_threshold_low=0.5,
+        token_mask_is_threshold_high=2.0,
+    )
+
+    token_mask, metrics = compute_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
+
+    expected = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    torch.testing.assert_close(token_mask, expected)
+    # 2 out of 4 valid tokens masked
+    assert abs(metrics["token_mask_ratio"] - 0.5) < 0.01
+
+
+def test_compute_token_mask_boundary_values():
+    """Tokens exactly at threshold boundaries are kept (>=low, <=high)."""
+    # IS ratios exactly at [0.5, 2.0]
+    old_log_probs = torch.tensor([[0.0, 0.0]])
+    rollout_logprobs = -torch.log(torch.tensor([[0.5, 2.0]]))  # so ratio = exp(old - rollout) = [0.5, 2.0]
+
+    loss_mask = torch.tensor([[1.0, 1.0]])
+
+    config = OffPolicyCorrectionConfig(
+        token_mask_is_threshold_low=0.5,
+        token_mask_is_threshold_high=2.0,
+    )
+
+    token_mask, metrics = compute_token_mask(old_log_probs, rollout_logprobs, loss_mask, config)
+
+    expected = torch.tensor([[1.0, 1.0]])
+    torch.testing.assert_close(token_mask, expected, atol=1e-6, rtol=1e-5)
+    assert metrics["token_mask_ratio"] == 0.0
+
+
+def test_compute_off_policy_correction_with_token_mask():
+    """Token mask integrates correctly through the full correction pipeline."""
+    # IS ratios: exp([0.0, 0.0, 2.0]) ≈ [1.0, 1.0, 7.389]
+    old_log_probs = torch.tensor([[-1.0, -1.0, -1.0]])
+    rollout_logprobs = torch.tensor([[-1.0, -1.0, -3.0]])
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0]])
+
+    config = OffPolicyCorrectionConfig(
+        tis_ratio_type=None,
+        token_tis_ratio_clip_high=None,
+        sequence_mask_metric=None,
+        outlier_token_is_threshold_low=None,
+        outlier_token_is_threshold_high=None,
+        token_mask_is_threshold_low=0.5,
+        token_mask_is_threshold_high=2.0,
+    )
+
+    tis_ratio, metrics, new_loss_mask = compute_off_policy_correction(
+        old_log_probs, rollout_logprobs, loss_mask, config
+    )
+
+    # Third token (IS ≈ 7.389 > 2.0) should be zeroed in loss_mask.
+    expected_mask = torch.tensor([[1.0, 1.0, 0.0]])
+    torch.testing.assert_close(new_loss_mask, expected_mask)
+    assert "token_mask_ratio" in metrics
+    assert abs(metrics["token_mask_ratio"] - 1 / 3) < 0.01

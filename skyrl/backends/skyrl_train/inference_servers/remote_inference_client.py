@@ -16,7 +16,7 @@ This client is responsible for BOTH data plane and control plane operations:
 
 2. Control Plane (fan-out to all server_urls):
    - pause, resume, sleep, wake_up, reset_prefix_cache
-   - init_weight_transfer, update_weights, finalize_weight_update
+   - init_weight_transfer, update_weights_skyrl, finalize_weight_update
    - Fans out directly to all backend servers (bypassing router)
    - This allows using external routers that only handle data plane
 
@@ -571,13 +571,13 @@ class RemoteInferenceClient:
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/update_weights", request.to_json_dict())
+        return await self._call_all_servers("/update_weights_skyrl", request.to_json_dict())
 
     async def finalize_weight_update(self) -> Dict[str, Any]:
         """
         Finalize weight update on all backends.
 
-        Called after all update_weights() calls are complete.
+        Called after all update_weights_skyrl() calls are complete.
         Reserved for any post-processing steps that may be needed:
         - Cache invalidation
         - State synchronization

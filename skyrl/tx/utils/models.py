@@ -289,6 +289,7 @@ def save_lora_checkpoint(
     adapter_config: LoraConfig,
     adapter_index: int,
     output_path: Path | CloudPath,
+    rank: int,
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 
@@ -297,12 +298,13 @@ def save_lora_checkpoint(
         adapter_config: LoRA adapter configuration
         adapter_index: Index of the adapter to save
         output_path: Path to save the checkpoint tar.gz file
+        rank: The process rank for distributed saving
     """
     peft_config = peft.LoraConfig(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
     )
 
-    with pack_and_upload(output_path, rank=jax.process_index()) as temp_dir:
+    with pack_and_upload(output_path, rank=rank) as temp_dir:
 
         save_safetensors(
             model.config,

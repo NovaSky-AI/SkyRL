@@ -100,7 +100,7 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def init_weight_transfer(request: Request):
         return {"status": "ok", "server_id": server_id}
 
-    @app.post("/update_weights")
+    @app.post("/update_weights_skyrl")
     async def update_weights(request: Request):
         return {"status": "ok", "server_id": server_id}
 

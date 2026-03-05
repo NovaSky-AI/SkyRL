@@ -10,7 +10,7 @@ In this example, we walk through a simple example on how to train a SWE-Agent on
 
 ## How does it work?
 
-The Mini-SWE-Agent integration with SkyRL can be found in `examples/mini_swe_agent/`. We implement a custom generator `MiniSweAgentGenerator` to use Mini-SWE-Agent to generate trajectories for the SWE-Bench task. 
+The Mini-SWE-Agent integration with SkyRL can be found in `examples/train/mini_swe_agent/`. We implement a custom generator `MiniSweAgentGenerator` to use Mini-SWE-Agent to generate trajectories for the SWE-Bench task. 
 
 ```python
 class MiniSweAgentGenerator(SkyRLGymGenerator):
@@ -72,7 +72,7 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
 
 ```
 
-Note that the full implementation has some additional logic for configuration and error handling, and can be found in `examples/mini_swe_agent/mini_swe_generator.py`.
+Note that the full implementation has some additional logic for configuration and error handling, and can be found in `examples/train/mini_swe_agent/mini_swe_generator.py`.
 
 ## Dataset preparation
 
@@ -82,21 +82,21 @@ Execute the following command:
 
 ```bash
 # execute from SkyRL root directory
-uv run --isolated examples/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
+uv run --isolated examples/train/mini_swe_agent/preprocess_swegym.py --output_dir ~/data/swe_gym_subset
 
 ```
 
 ## Training
 
-Prerequisites: Ensure that you have the required environment backend installed for generating trajectories with Mini-SWE-Agent. By default, we use [Podman](https://podman.io/docs). This can be modified in `examples/mini_swe_agent/swebench.yaml` 
+Prerequisites: Ensure that you have the required environment backend installed for generating trajectories with Mini-SWE-Agent. By default, we use [Podman](https://podman.io/docs). This can be modified in `examples/train/mini_swe_agent/swebench.yaml` 
 
 We provide two example scripts: One for Qwen3-8B model and another for the [Qwen/Qwen3-Coder-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct) model. While the first script for Qwen3-8B requires a single 8xH100 node, the script for the 30B model requires 2 8xH100 nodes for training.
 
 ```bash
 # execute from SkyRL root directory
-bash examples/mini_swe_agent/run_mini_swe_8B.sh
+bash examples/train/mini_swe_agent/run_mini_swe_8B.sh
 # or for 30B:
-# bash examples/mini_swe_agent/run_mini_swe_30B.sh
+# bash examples/train/mini_swe_agent/run_mini_swe_30B.sh
 
 ```
 

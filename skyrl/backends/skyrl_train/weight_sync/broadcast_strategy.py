@@ -16,7 +16,7 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.distributed.utils import init_custom_process_group
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.train.utils.utils import get_tcp_url
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest

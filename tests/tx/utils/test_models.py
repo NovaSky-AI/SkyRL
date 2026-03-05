@@ -68,7 +68,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     expected_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :].T)
 
     # Save and verify checkpoint exists
-    models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path)
+    models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path, rank=0)
     assert output_path.exists()
 
     # Load with peft and verify

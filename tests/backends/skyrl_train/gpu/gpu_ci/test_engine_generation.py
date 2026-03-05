@@ -5,7 +5,7 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 import pytest
 
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import asyncio
 from tests.backends.skyrl_train.gpu.utils import (

@@ -13,13 +13,13 @@ This example demonstrates how to run PPO training on GSM8K. See [Quick Start Gui
 To download and prepare the GSM8K dataset, run the following script.
 
 ```bash
-uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
 ```
 
 ## Training Configuration
 
-Next, let's set up the training configuration. You can find a complete example in `examples/ppo/run_ppo.sh` - we highlight some key parameters here:
+Next, let's set up the training configuration. You can find a complete example in `examples/train/ppo/run_ppo.sh` - we highlight some key parameters here:
 
 ```bash
 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
@@ -60,7 +60,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
    # Can be specified here to apply to the full dataset, or at the per-prompt level during preprocessing
    environment.env_class=gsm8k \
 
-   ... # Other parameters (see `examples/ppo/run_ppo.sh` for more)
+   ... # Other parameters (see `examples/train/ppo/run_ppo.sh` for more)
 
 ```
 
@@ -86,7 +86,7 @@ export WANDB_API_KEY=your_wandb_api_key
 Then launch your training run:
 
 ```bash
-bash examples/ppo/run_ppo.sh
+bash examples/train/ppo/run_ppo.sh
 
 ```
 

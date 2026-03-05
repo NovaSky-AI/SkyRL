@@ -169,6 +169,7 @@ class MegatronConfig(BaseConfig):
     )
     empty_cuda_cache: Optional[bool] = None
     model_config_kwargs: dict = field(default_factory=dict)
+    dist_ckpt_optim_fully_reshardable: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -309,9 +310,13 @@ class OffPolicyCorrectionConfig(BaseConfig):
     product_mask_low: float = 0.5
     """Used when ``sequence_mask_metric="product"``."""
     outlier_token_is_threshold_low: Optional[float] = None
-    """Mask sequences with any token IS ratio below this threshold. Suggested: 1e-4. ``None`` to disable."""
+    """Set to mask sequences with any token IS ratio below this threshold. Suggested: 1e-4. ``None`` to disable."""
     outlier_token_is_threshold_high: Optional[float] = None
-    """Mask sequences with any token IS ratio above this threshold. Suggested: 100. ``None`` to disable."""
+    """Set to mask sequences with any token IS ratio above this threshold. Suggested: 100. ``None`` to disable."""
+    token_mask_is_threshold_low: Optional[float] = None
+    """Set to mask per-token when IS ratio < `token_mask_is_threshold_low`. ``None`` to disable."""
+    token_mask_is_threshold_high: Optional[float] = None
+    """Set to mask per-token when IS ratio > `token_mask_is_threshold_high`. ``None`` to disable."""
 
 
 @dataclass

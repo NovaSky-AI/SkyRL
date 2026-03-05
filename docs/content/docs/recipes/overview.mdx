@@ -14,7 +14,7 @@ We provide reproduction runs for the following recipes:
 
 ### Simple training on GSM8K
 
-The scripts for training on GSM8K are available at `examples/gsm8k/`.
+The scripts for training on GSM8K are available at `examples/train/gsm8k/`.
 
 <style>{`
   table.skytable {
@@ -70,7 +70,7 @@ The scripts for training on GSM8K are available at `examples/gsm8k/`.
 
 ### DAPO Recipes
 
-The code for the DAPO recipe is available at `examples/algorithms/dapo/`. 
+The code for the DAPO recipe is available at `examples/train/algorithms/dapo/`. 
 
 For evals we report Pass@32 and Mean@32. In the WandB metrics we log "avg_score" - since reward is either -1 or 1 for the AIME task, mean@32 can be computed as mean@32 = (avg_score + 1) / 2. 
 In the table below we report the peak mean@32 and pass@32 over the course of the run. All runs are DAPO but without Dynamic Sampling enabled (just clip-higher, overlong buffer, overlong filtering, and token level loss aggregation).

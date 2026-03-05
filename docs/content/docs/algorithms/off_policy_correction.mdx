@@ -26,6 +26,10 @@ trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
 trainer.algorithm.off_policy_correction.geo_mask_high=1.01
 trainer.algorithm.off_policy_correction.geo_mask_low=0.99
 
+# alternatively, for long context + MoE you can try token masking (icepop) and tune token_mask_is_threshold_low/high
+trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5
+trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0
+
 # for longer context + MoE, you can also try outlier based sequence masking, which stacks on top of geometric sequence masking
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_low=1e-4
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_high=100
@@ -184,6 +188,7 @@ off_policy_correction:
   product_mask_low: 0.5
   outlier_token_is_threshold_low: null
   outlier_token_is_threshold_high: null
+  ...
 ```
 
 To enable sequence masking in SkyRL, set `sequence_mask_metric` to either `product` or `geometric`. For `geometric`, set `geo_mask_high` and `geo_mask_low`; for `product`, set `product_mask_high` and `product_mask_low`.
@@ -198,6 +203,33 @@ $$
 $$
 
 To enable masking sequences with outlier tokens, set `outlier_token_is_threshold_low` and `outlier_token_is_threshold_high`.
+
+## Token Masking
+
+Unlike sequence masking (which rejects *entire sequences* when a sequence-level metric exceeds a threshold), token masking zeros out only the **individual tokens** whose importance-sampling ratio falls outside an acceptable range. This is a finer-grained correction that preserves the rest of the sequence for learning.
+This technique was introduced by [Zhou et. al](https://ringtech.notion.site/icepop) as Icepop, and has since been used in the training of [GLM-5](https://arxiv.org/pdf/2602.15763).
+
+$$
+\textcolor{red}{m_t = \begin{cases}
+1 & \text{if } C_\text{low} \leq \frac{\pi_{\theta_{\text{old}}}(x_t)}{\mu_{\theta_{\text{old}}}(x_t)} \leq C_\text{high} \\
+0 & \text{otherwise}
+\end{cases}}
+$$
+
+The per-token mask $m_t$ is multiplied element-wise into the loss mask, so masked tokens contribute zero gradient while all other tokens in the sequence remain unaffected.
+
+```yaml
+off_policy_correction:
+  ...
+  token_mask_is_threshold_low: 0.5   # suggested starting value
+  token_mask_is_threshold_high: 2.0  # suggested starting value
+```
+
+To enable token masking, set both `token_mask_is_threshold_low` and `token_mask_is_threshold_high`. Both must be set for the mask to activate; setting only one has no effect.
+
+Token masking can be combined with other corrections (TIS, sequence masking, outlier masking). When multiple masks are active, they are applied multiplicatively to the loss mask in order: outlier sequence mask, then token mask, then sequence mask.
+
+When enabled, the metric `token_mask_ratio` is logged, representing the fraction of originally-valid tokens that were zeroed by the token mask.
 
 # Metrics and Monitoring
 If off-policy correction is enabled, you can view relevant metrics, like the mean/std of the importance sampling ratio, the mean/std of logprob diffs, and the fraction of masked sequences in the logger of your choice under `policy/loss_metrics`.
