@@ -31,6 +31,7 @@ on:
           - runpod
           - vast
           - nebius
+          - gcp
         default: any
       task_name:
         description: "SkyPilot task name (YAML file in skyrl-train/tasks/)"
@@ -90,9 +91,16 @@ jobs:
           pip3 install "skypilot-nightly[primeintellect]" 2>/dev/null || true
           mkdir -p ~/.nebius && echo '${{ secrets.NEBIUS_CREDENTIALS_JSON }}' > ~/.nebius/credentials.json
           echo "${{ secrets.NEBIUS_TENANT_ID }}" > ~/.nebius/NEBIUS_TENANT_ID.txt
+          # GCP: write service account key and activate
+          if [ -n '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' ]; then
+            mkdir -p ~/.config/gcloud
+            echo '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' > ~/.config/gcloud/application_default_credentials.json
+            export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json
+            pip3 install google-api-python-client google-cloud-storage 2>/dev/null || true
+          fi
 
       - name: Verify Cloud Credentials
-        run: sky check lambda runpod vast primeintellect nebius || true
+        run: sky check lambda runpod vast primeintellect nebius gcp || true
 
       - name: Validate data version
         run: |

@@ -46,6 +46,11 @@ resources:
     - accelerators: H200-SXM:4
       cloud: primeintellect
       memory: 750+
+    # GCP spot H200 fallback (preemptible, 64 GPU quota per region)
+    - accelerators: H200:4
+      cloud: gcp
+      use_spot: true
+      memory: 750+
 
 num_nodes: 1
 

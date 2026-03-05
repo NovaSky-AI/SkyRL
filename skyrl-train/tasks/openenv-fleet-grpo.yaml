@@ -33,6 +33,10 @@ resources:
       cloud: primeintellect
     - accelerators: H100:1
       cloud: nebius
+    # GCP spot H200 fallback (preemptible, 64 GPU quota per region)
+    - accelerators: H200:1
+      cloud: gcp
+      use_spot: true
 
 num_nodes: 1
 

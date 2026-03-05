@@ -56,5 +56,5 @@ class TestFleetTaskConfig:
         # Default values
         assert fleet_task["tasks_file"] is None, "tasks_file should default to None"
         assert fleet_task["api_key"] is None, "api_key should default to None"
-        assert fleet_task["ttl_seconds"] == 600, "ttl_seconds should default to 600"
+        assert fleet_task["ttl_seconds"] == 900, "ttl_seconds should default to 900"
         assert fleet_task["enable_context_tools"] is False, "enable_context_tools should default to False"
