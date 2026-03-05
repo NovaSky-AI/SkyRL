@@ -228,7 +228,7 @@ class CudaIpcWeightTransferReceiver(WeightTransferReceiver):
         Yields:
             Tuples of (parameter_name, tensor) for each weight.
         """
-        assert len(set(request.dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
+        assert len(set(request.dtypes)) == 1, f"packed weight update should have all tensors with the same dtype, expected {self._model_dtype}. Got {set(request.dtypes)}. Names: {request.names}"
         assert (
             str_to_torch_dtype(request.dtypes[0]) == self._model_dtype
         ), f"mismatch dtype: src {request.dtypes[0]}, dst {self._model_dtype}"
