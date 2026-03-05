@@ -23,17 +23,28 @@ from skyrl.backends.skyrl_train.inference_servers._sample_helpers import (
 # ---------------------------------------------------------------------------
 
 
-def _make_render_resp(token_ids: list[int], *, offset: int, length: int, mm_hash: str) -> dict:
-    """Build a fake /v1/chat/completions/render response."""
-    return {
-        "engine_prompts": [
+def _make_render_resp(token_ids: list[int], *, offset: int, length: int, mm_hash: str) -> list:
+    """Build a fake /v1/chat/completions/render response.
+
+    The render endpoint returns ``[conversation, engine_prompts]`` where each
+    engine prompt uses a ``features`` list instead of separate
+    ``mm_placeholders`` / ``mm_hashes`` dicts.
+    """
+    conversation = [{"role": "user", "content": [{"type": "image_url"}]}]
+    engine_prompt = {
+        "type": "multimodal",
+        "prompt_token_ids": token_ids,
+        "features": [
             {
-                "prompt_token_ids": token_ids,
-                "mm_placeholders": {"image": [{"offset": offset, "length": length}]},
-                "mm_hashes": {"image": [mm_hash]},
+                "modality": "image",
+                "mm_hash": mm_hash,
+                "offset": offset,
+                "length": length,
+                "kwargs_data": None,
             }
-        ]
+        ],
     }
+    return [conversation, [engine_prompt]]
 
 
 def _dummy_image_b64() -> str:

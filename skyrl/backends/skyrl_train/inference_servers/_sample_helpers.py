@@ -7,7 +7,7 @@ without a GPU environment.
 import aiohttp
 
 
-async def _render_image(session: aiohttp.ClientSession, base_url: str, b64_data: str, fmt: str, model: str) -> dict:
+async def _render_image(session: aiohttp.ClientSession, base_url: str, b64_data: str, fmt: str, model: str) -> list:
     """Call /v1/chat/completions/render with a single bare image message."""
     data_uri = f"data:image/{fmt};base64,{b64_data}"
     messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": data_uri}}]}]
@@ -19,7 +19,7 @@ async def _render_image(session: aiohttp.ClientSession, base_url: str, b64_data:
         return await resp.json()
 
 
-async def _render_image_url(session: aiohttp.ClientSession, base_url: str, location: str, model: str) -> dict:
+async def _render_image_url(session: aiohttp.ClientSession, base_url: str, location: str, model: str) -> list:
     """Call /v1/chat/completions/render with an image URL."""
     messages = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": location}}]}]
     async with session.post(
@@ -30,19 +30,23 @@ async def _render_image_url(session: aiohttp.ClientSession, base_url: str, locat
         return await resp.json()
 
 
-def _extract_render_info(render_resp: dict) -> tuple[list[int], str]:
+def _extract_render_info(render_resp: list) -> tuple[list[int], str]:
     """Extract placeholder token IDs and mm_hash from a render response.
+
+    The render endpoint returns ``[conversation, engine_prompts]``.  Each
+    engine prompt carries a ``features`` list of GenerateMultiModalFeature
+    dicts with ``offset``, ``length``, and ``mm_hash``.
 
     Returns:
         (placeholder_tokens, mm_hash) where placeholder_tokens are the token IDs
         for the image placeholder region in the rendered sequence.
     """
-    ep = render_resp["engine_prompts"][0]
+    ep = render_resp[1][0]
     token_ids = ep["prompt_token_ids"]
-    placeholder = ep["mm_placeholders"]["image"][0]
-    offset, length = placeholder["offset"], placeholder["length"]
+    feature = ep["features"][0]
+    offset, length = feature["offset"], feature["length"]
     placeholder_tokens = token_ids[offset : offset + length]
-    mm_hash = ep["mm_hashes"]["image"][0]
+    mm_hash = feature["mm_hash"]
     return placeholder_tokens, mm_hash
 
 
