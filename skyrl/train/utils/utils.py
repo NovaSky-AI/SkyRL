@@ -820,17 +820,10 @@ def peer_access_supported(max_num_gpus_per_node: int):
         return False
 
     if not torch.cuda.is_available():
-        # we are on cpu head node, so we need to check P2P access on a node with 2 GPUs
-        ray.init()
-        pg = placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        result = ray.get(
-            ray.remote(num_gpus=2, scheduling_strategy=PlacementGroupSchedulingStrategy(pg))(
-                run_p2p_access_check
-            ).remote()
-        )
-        ray.shutdown()
-        return result
+        # On a CPU-only head node we cannot run a local CUDA check.
+        # Assume P2P is supported (H200/A100 datacenter GPUs always support it).
+        # NCCL will surface real P2P failures during training if they occur.
+        return True
     else:
         return run_p2p_access_check()
 

@@ -154,12 +154,30 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
         actor_group.backload_to_gpu()
 
         # check that relevant files are saved
+        # Run check remotely on each GPU worker node since checkpoint is on local worker storage.
+        # The rank-0 actor saved the HF configs; we check all GPU nodes to find which one has them.
         huggingface_dir = os.path.join(checkpoint_path, "huggingface")
         expected_files = ["config.json", "generation_config.json", "tokenizer.json"]
-        for file in expected_files:
-            assert os.path.exists(
-                os.path.join(huggingface_dir, file)
-            ), f"File {file} not found in huggingface directory"
+
+        @ray.remote(num_cpus=0.01)
+        def _check_files_exist_on_node(huggingface_dir, expected_files):
+            return [os.path.exists(os.path.join(huggingface_dir, f)) for f in expected_files]
+
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        gpu_nodes = [n for n in ray.nodes() if n["Alive"] and n["Resources"].get("GPU", 0) > 0]
+        found = {f: False for f in expected_files}
+        for node in gpu_nodes:
+            node_results = ray.get(
+                _check_files_exist_on_node.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node["NodeID"], soft=False)
+                ).remote(huggingface_dir, expected_files)
+            )
+            for file, exists in zip(expected_files, node_results):
+                if exists:
+                    found[file] = True
+        for file, exists in found.items():
+            assert exists, f"File {file} not found in huggingface directory on any GPU node"
         if "fsdp" in strategy:
             fsdp_config_path = os.path.join(checkpoint_path, "fsdp_config.json")
             with open(fsdp_config_path, "r") as f:
@@ -184,7 +202,6 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
         logits_after_second_training = get_model_logits_from_actor(actor_group, test_input, attention_mask)
 
         # Step 5: Load checkpoint via strategy's load_checkpoint method
-        assert os.path.exists(checkpoint_path), f"Checkpoint directory {checkpoint_path} does not exist"
         ray.get(actor_group.async_run_ray_method("pass_through", "load_checkpoint", ckpt_dir=checkpoint_path))
 
         # Step 6: Now repeat the exact same second training step
@@ -202,7 +219,21 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
         torch.testing.assert_close(logits_after_second_training, logits_after_reload_and_training, atol=0.0, rtol=0.0)
 
     finally:
-        # Clean up checkpoint directory
-        if checkpoint_dir and os.path.exists(checkpoint_dir):
-            print(f"Removing checkpoint directory: {checkpoint_dir}")
-            shutil.rmtree(checkpoint_dir)
+        # Clean up checkpoint directory on all GPU nodes (checkpoint may be on any worker's local FS).
+        if checkpoint_dir:
+            from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+            @ray.remote(num_cpus=0.01)
+            def _cleanup_dir_on_node(path):
+                import shutil as _shutil, os as _os
+                if _os.path.exists(path):
+                    print(f"Removing checkpoint directory: {path}")
+                    _shutil.rmtree(path)
+
+            gpu_nodes = [n for n in ray.nodes() if n["Alive"] and n["Resources"].get("GPU", 0) > 0]
+            ray.get([
+                _cleanup_dir_on_node.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=n["NodeID"], soft=False)
+                ).remote(checkpoint_dir)
+                for n in gpu_nodes
+            ])

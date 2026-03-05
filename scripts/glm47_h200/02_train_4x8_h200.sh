@@ -5,9 +5,17 @@ set -x
 # GLM-4.7-Flash GRPO Training on 4x8xH200 (32 GPUs)
 #
 # Phase 6: Full-scale training with 32 GPUs
-#   - TP=4, EP=8, DP=4 (4 data-parallel replicas)
-#   - Batch=1024, n_samples=16
-#   - Full 8K context
+#   - Megatron: TP=4, EP=8, DP=4 (4 data-parallel replicas)
+#   - vLLM: num_engines=8, TP=4 (GLM has 20 attention heads; must divide evenly;
+#           TP=8 would fail: 20/8 is not integer)
+#   - Batch=1024, n_samples=16, full 8K context
+#
+# Bug fixes applied (required for multi-node colocate_all):
+#   1. vLLM TP groups must be within-node: use get_reordered_bundle_indices() in
+#      ray_wrapped_inference_engine.py so vLLM bundle assignment matches Megatron.
+#      (Ray PACK assigns {GPU:1} bundles round-robin across nodes, not per-node)
+#   2. disable_custom_all_reduce=true bypasses vLLM's Gloo TCP barrier in
+#      CustomAllreduce.__init__ which would time out on multi-node setups.
 #
 # Prerequisites:
 #   - Run 00_setup_and_sanity_check.sh on ALL 4 nodes
@@ -27,8 +35,11 @@ LOGGER="console"  # change to "wandb" for real runs
 export HF_HUB_ENABLE_HF_TRANSFER=1
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1
+export SKYRL_PYTHONPATH_EXPORT=true
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 export RAY_memory_usage_threshold=1.0
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NVTE_FUSED_ATTN=0
 
 # Start ray head
 .venv/bin/ray stop --force 2>/dev/null; sleep 3
@@ -65,14 +76,15 @@ echo "============================================"
     trainer.strategy=megatron \
     trainer.placement.policy_num_nodes=4 \
     trainer.placement.policy_num_gpus_per_node=8 \
-    generator.inference_engine.num_engines=4 \
-    generator.inference_engine.tensor_parallel_size=8 \
+    generator.inference_engine.num_engines=8 \
+    generator.inference_engine.tensor_parallel_size=4 \
     generator.inference_engine.enforce_eager=true \
     generator.inference_engine.async_engine=true \
     generator.inference_engine.run_engines_locally=true \
     generator.inference_engine.weight_sync_backend=nccl \
     generator.inference_engine.backend=vllm \
     generator.inference_engine.engine_init_kwargs.max_model_len=8704 \
+    generator.inference_engine.engine_init_kwargs.disable_custom_all_reduce=true \
     trainer.policy.megatron_config.tensor_model_parallel_size=4 \
     trainer.policy.megatron_config.pipeline_model_parallel_size=1 \
     trainer.policy.megatron_config.context_parallel_size=1 \
