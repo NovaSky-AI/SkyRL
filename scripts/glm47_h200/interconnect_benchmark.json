@@ -1,0 +1,110 @@
+{
+  "intra_node_p2p": [
+    {
+      "size_mb": 1,
+      "avg_time_ms": 0.02,
+      "bw_gbps": 43.59
+    },
+    {
+      "size_mb": 10,
+      "avg_time_ms": 0.04,
+      "bw_gbps": 234.79
+    },
+    {
+      "size_mb": 100,
+      "avg_time_ms": 0.3,
+      "bw_gbps": 320.87
+    },
+    {
+      "size_mb": 512,
+      "avg_time_ms": 1.46,
+      "bw_gbps": 342.59
+    },
+    {
+      "size_mb": 1024,
+      "avg_time_ms": 2.9,
+      "bw_gbps": 344.8
+    },
+    {
+      "size_mb": 2048,
+      "avg_time_ms": 5.78,
+      "bw_gbps": 346.0
+    }
+  ],
+  "cross_node_2gpu_allreduce": [
+    {
+      "size_mb": 1,
+      "avg_time_ms": 1.22,
+      "algo_bw_gbps": 0.8,
+      "bus_bw_gbps": 0.8
+    },
+    {
+      "size_mb": 10,
+      "avg_time_ms": 2.83,
+      "algo_bw_gbps": 3.45,
+      "bus_bw_gbps": 3.45
+    },
+    {
+      "size_mb": 100,
+      "avg_time_ms": 23.8,
+      "algo_bw_gbps": 4.1,
+      "bus_bw_gbps": 4.1
+    },
+    {
+      "size_mb": 512,
+      "avg_time_ms": 118.74,
+      "algo_bw_gbps": 4.21,
+      "bus_bw_gbps": 4.21
+    },
+    {
+      "size_mb": 1024,
+      "avg_time_ms": 237.66,
+      "algo_bw_gbps": 4.21,
+      "bus_bw_gbps": 4.21
+    },
+    {
+      "size_mb": 2048,
+      "avg_time_ms": 493.97,
+      "algo_bw_gbps": 4.05,
+      "bus_bw_gbps": 4.05
+    }
+  ],
+  "cross_node_8gpu_allreduce": [
+    {
+      "size_mb": 1,
+      "avg_time_ms": 2.55,
+      "algo_bw_gbps": 0.38,
+      "bus_bw_gbps": 0.67
+    },
+    {
+      "size_mb": 10,
+      "avg_time_ms": 3.12,
+      "algo_bw_gbps": 3.13,
+      "bus_bw_gbps": 5.48
+    },
+    {
+      "size_mb": 100,
+      "avg_time_ms": 13.24,
+      "algo_bw_gbps": 7.37,
+      "bus_bw_gbps": 12.9
+    },
+    {
+      "size_mb": 512,
+      "avg_time_ms": 62.95,
+      "algo_bw_gbps": 7.94,
+      "bus_bw_gbps": 13.9
+    },
+    {
+      "size_mb": 1024,
+      "avg_time_ms": 121.5,
+      "algo_bw_gbps": 8.23,
+      "bus_bw_gbps": 14.4
+    },
+    {
+      "size_mb": 2048,
+      "avg_time_ms": 255.19,
+      "algo_bw_gbps": 7.84,
+      "bus_bw_gbps": 13.72
+    }
+  ]
+}
