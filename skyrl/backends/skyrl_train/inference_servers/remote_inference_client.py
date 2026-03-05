@@ -563,14 +563,14 @@ class RemoteInferenceClient:
 
         Args:
             init_info: A WeightSyncInitInfo (e.g. BroadcastInitInfo) that supports
-                update_rank_offset() and to_api_payload().
+                for_servers() and to_api_payload().
 
         Returns:
             Dict mapping server_url to response.
         """
         _, world_size_per_server = await self.get_world_size()
         num_servers = len(self.server_urls)
-        server_infos = init_info.update_rank_offset(world_size_per_server, num_servers)
+        server_infos = init_info.for_servers(world_size_per_server, num_servers)
         payloads = [{"init_info": x.to_api_payload()} for x in server_infos]
         return await self._call_all_servers("/init_weight_transfer_engine", payloads)
 

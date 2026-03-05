@@ -307,9 +307,9 @@ class TestWeightSync:
         """Test init_weight_update_communicator expands init_info and fans out to all servers."""
 
         class MockInitInfo:
-            """Lightweight mock satisfying the update_rank_offset / to_api_payload protocol."""
+            """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
 
-            def update_rank_offset(self, world_size_per_server, num_servers):
+            def for_servers(self, world_size_per_server, num_servers):
                 return [self] * num_servers
 
             def to_api_payload(self):

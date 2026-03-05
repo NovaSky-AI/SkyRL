@@ -62,10 +62,10 @@ class BroadcastInitInfo(WeightSyncInitInfo):
     # TODO (Aaron): native weight sync only needs the following params:
     #     master_address, master_port, rank_offset, world_size
     # so we need a new method (to_api_payload) to return the payload for the native weight sync.
-    # Also we need a new method (update_rank_offset) to update the rank_offset for the native weight
+    # Also we need a new method (for_servers) to update the rank_offset for the native weight
     # sync, since this is done automatically in the legacy weight sync.
 
-    def update_rank_offset(self, world_size_per_server: int, num_servers: int) -> List["BroadcastInitInfo"]:
+    def for_servers(self, world_size_per_server: int, num_servers: int) -> List["BroadcastInitInfo"]:
         """Return one BroadcastInitInfo per server with rank_offset for each.
 
         Used when calling init_weight_update_communicator on the new inference path:
@@ -196,9 +196,12 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         """Per-chunk HTTP + torch.distributed.broadcast (legacy path)."""
         rank = torch.distributed.get_rank()
 
+        # Rank 0 must have a process group to broadcast to inference engines
         if rank == 0:
             assert self._model_update_group is not None, "Rank 0 must have model_update_group"
 
+        # Only rank 0 sends request to inference engines
+        # All ranks iterate through chunks (weight extraction may involve collective ops)
         for chunk in chunks:
             assert len(chunk) == 1, f"Broadcast strategy expects single-parameter chunks, got {len(chunk)}"
 
@@ -206,6 +209,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             tensor = chunk.tensors[0]
             shape = chunk.shapes[0]
 
+            # Only rank 0 sends request to inference engines
             if rank == 0:
                 request = BroadcastWeightUpdateRequest(
                     names=[name],
@@ -214,6 +218,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
                 )
                 update_weight_task = asyncio.create_task(self._inference_client.update_named_weights(request))
 
+            # Broadcast tensor from rank 0 to inference engines (no-op on other training ranks)
             def broadcast_tensor(t: torch.Tensor) -> None:
                 if rank == 0 and self._model_update_group is not None:
                     torch.distributed.broadcast(t.data, 0, group=self._model_update_group)
