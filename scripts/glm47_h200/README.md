@@ -1,5 +1,8 @@
 # GLM-4.7-Flash H200 Validation Plan
 
+> **BLOCKING DEPENDENCY**: PRs **#1241** (transformers 5.x bump) and **#1280** (return_dict=False fixes) are NOT yet merged. You must either merge them first or apply them manually on each node. Without these, GLM-4.7-Flash will fail to load (`Glm4MoeLiteForCausalLM` only exists in transformers >=5.0.0). See "What's NOT Merged but Needed" section below for exact steps.
+
+
 ## Context
 
 We are training GLM-4.7-Flash (30B MoE, DeepSeek-V3 architecture) with GRPO on SkyRL using Megatron backend + vLLM inference. All foundational work is done — 8 PRs merged, full pipeline proven on 8x A100-80GB. We now need to scale up to H200 clusters.
