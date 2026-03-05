@@ -219,7 +219,7 @@ class RayPPOTrainer:
                         self.global_step,
                     )
 
-                    # 1.1 generation phase
+                    # 1.1. generation phase
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = await self.generate(generator_input)
 
@@ -253,20 +253,21 @@ class RayPPOTrainer:
                         reward=generator_output["rewards"][0],
                     )
 
+                    # 3. Convert GenreatorOutput to TrainingInputBatch
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
                         logger.info(f"Number of sequences: {len(training_input['sequences'])}")
 
-                    # 1.4 inference and calculate values, log probs, rewards, kl divergence
+                    # 4. Inference and calculate values, log probs, rewards, kl divergence
                     with Timer("fwd_logprobs_values_reward", self.all_timings):
                         training_input = self.fwd_logprobs_values_reward(training_input)
 
-                    # 1.5 apply kl divergence penalty to rewards
+                    # 5. apply kl divergence penalty to rewards
                     if self.cfg.trainer.algorithm.use_kl_in_reward:
                         with Timer("apply_reward_kl_penalty", self.all_timings):
                             training_input = self.apply_reward_kl_penalty(training_input)
 
-                    # 3. calculate advantages and returns
+                    # 6. calculate advantages and returns
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
                         # remove some unwanted keys
@@ -282,12 +283,12 @@ class RayPPOTrainer:
                         with Timer("dump_data_batch"):
                             self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
-                    # 4. train policy/critic model
+                    # 7. train policy/critic model
                     # Policy model is backloaded to GPU during training
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
 
-                    # 5. conditionally save checkpoints and hf model
+                    # 8. conditionally save checkpoints and hf model
                     if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
                         with Timer("save_checkpoints", self.all_timings):
                             self.save_checkpoints()
@@ -298,7 +299,7 @@ class RayPPOTrainer:
                         with Timer("save_hf_model", self.all_timings):
                             self.save_models()
 
-                    # 6. conditionally sync policy and ref at the end of the epoch
+                    # 9. conditionally sync policy and ref at the end of the epoch
                     if (
                         self.cfg.trainer.update_ref_every_epoch
                         and self.ref_model is not None
@@ -308,11 +309,11 @@ class RayPPOTrainer:
                         with Timer("update_ref_with_policy", self.all_timings):
                             self.update_ref_with_policy()
 
-                    # 7. Prepare weights for sampling
+                    # 10. Prepare weights for sampling
                     with Timer("sync_weights", self.all_timings):
                         await self.dispatch.save_weights_for_sampler()
 
-                # 8. set logs
+                # 11. set logs
                 logger.info(status)
                 # log epoch info
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
@@ -783,27 +784,22 @@ class RayPPOTrainer:
 
         if self.cfg.generator.step_wise_trajectories:
             is_last_step = data["is_last_step"].bool()
-            response_mask = data["response_mask"]
             index = np.array(data.metadata["uids"])
-            adv_estimator = self.cfg.trainer.algorithm.advantage_estimator
-            config = self.cfg.trainer.algorithm
             values = data["values"]
-            gamma = self.cfg.trainer.algorithm.gamma
-            lambd = self.cfg.trainer.algorithm.lambd
-            grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
-            last_step_rewards = token_level_rewards[is_last_step]
-            # compatible with any advantage estimator
+            # Use the last step of each trajectory to compute advantages. Compatible with any advantage estimator
+            # NOTE(Charlie): so we ignore per-step rewards in step-wise training.
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
-                token_level_rewards=last_step_rewards,
-                response_mask=response_mask[is_last_step],
+                token_level_rewards=token_level_rewards[is_last_step],
+                response_mask=data["response_mask"][is_last_step],
                 index=index[is_last_step.cpu().numpy()],
-                adv_estimator=adv_estimator,
+                adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
                 values=values[is_last_step] if values is not None else None,
-                config=config,
-                gamma=gamma,
-                lambd=lambd,
-                grpo_norm_by_std=grpo_norm_by_std,
+                config=self.cfg.trainer.algorithm,
+                gamma=self.cfg.trainer.algorithm.gamma,
+                lambd=self.cfg.trainer.algorithm.lambd,
+                grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
             )
+            # Broadcast each trajectory's advantage and return to all steps of each trajectory.
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
             )
