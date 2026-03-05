@@ -116,6 +116,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._server_group = None
+        self._inference_router = None
         self._vision_processor = None
         self._image_token_id = None
 
@@ -193,15 +195,52 @@ class SkyRLTrainBackend(AbstractBackend):
 
         if _SKYRL_USE_NEW_INFERENCE:
             from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+            from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+            from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+            from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 
             ie_cfg = self._cfg.generator.inference_engine
+            is_colocated = self._cfg.trainer.placement.colocate_all
             proxy_url = ie_cfg.external_proxy_url
             server_urls = list(ie_cfg.external_server_urls or [])
-            if not proxy_url:
-                raise ValueError(
-                    "_SKYRL_USE_NEW_INFERENCE=1 requires " "generator.inference_engine.external_proxy_url to be set."
+
+            if proxy_url and server_urls:
+                # Fully external: proxy for data plane, servers for control plane
+                logger.info(
+                    f"HTTP Inference: Using fully external setup - proxy_url={proxy_url}, server_urls={server_urls}"
                 )
-            logger.info(f"Using RemoteInferenceClient: proxy_url={proxy_url}, server_urls={server_urls}")
+            elif proxy_url and not server_urls:
+                # Proxy only: assume proxy handles control plane too
+                server_urls = [proxy_url]
+                logger.info(
+                    f"HTTP Inference: Using external proxy for both data and control plane - proxy_url={proxy_url}"
+                )
+            elif server_urls and not proxy_url:
+                # Servers only: create internal router over them
+                self._inference_router = InferenceRouter(server_urls=server_urls)
+                proxy_url = self._inference_router.start()
+                logger.info(
+                    f"HTTP Inference: Created internal router over external servers - "
+                    f"server_urls={server_urls}, proxy_url={proxy_url}"
+                )
+            else:
+                # Neither: build servers and router internally (mirrors main_base.py)
+                cli_args = build_vllm_cli_args(self._cfg)
+                self._server_group = ServerGroup(
+                    cli_args=cli_args,
+                    num_servers=ie_cfg.num_engines,
+                    placement_group=self._colocate_pg if is_colocated else None,
+                    enable_dp=ie_cfg.data_parallel_size > 1,
+                )
+                server_infos = self._server_group.start()
+                server_urls = [info.url for info in server_infos]
+                self._inference_router = InferenceRouter(server_urls=server_urls)
+                proxy_url = self._inference_router.start()
+                logger.info(
+                    f"HTTP Inference: Built servers and router internally - "
+                    f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
+                )
+
             self._inference_engine_client = RemoteInferenceClient(
                 proxy_url=proxy_url,
                 server_urls=server_urls,
