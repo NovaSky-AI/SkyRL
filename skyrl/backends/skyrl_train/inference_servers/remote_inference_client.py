@@ -424,41 +424,50 @@ class RemoteInferenceClient:
     # Control Plane (fan-out to all server_urls)
     # ---------------------------
 
+    async def _call_server(
+        self,
+        server_url: str,
+        endpoint: str,
+        json: Dict[str, Any],
+        method: str = "POST",
+    ) -> tuple:
+        """
+        Call endpoint on a single server.
+
+        Args:
+            server_url: Base URL of the server.
+            endpoint: Endpoint path (e.g., "/pause").
+            json: JSON payload to send.
+            method: HTTP method (default: POST).
+
+        Returns:
+            Tuple of (server_url, {"status": <int>, "body": <response>}).
+        """
+        session = await self._get_session()
+        url = f"{server_url}{endpoint}"
+        async with session.request(method, url, json=json) as resp:
+            body = await resp.json() if resp.content_length else None
+            raise_for_status(resp, body)
+            return server_url, {"status": resp.status, "body": body}
+
     async def _call_all_servers(
         self,
         endpoint: str,
-        json: Union[Dict[str, Any], List[Dict[str, Any]]],
+        json: Dict[str, Any],
         method: str = "POST",
     ) -> Dict[str, Any]:
         """
-        Call endpoint on all server_urls concurrently.
+        Call endpoint on all server_urls concurrently with the same payload.
 
         Args:
             endpoint: Endpoint path (e.g., "/pause").
-            json: JSON payload to send. Either a single dict (broadcast to all
-                servers) or a list of dicts (one per server, matched by index).
+            json: JSON payload to broadcast to all servers.
             method: HTTP method (default: POST).
 
         Returns:
             Dict mapping server_url to response.
         """
-        if isinstance(json, list):
-            if len(json) != len(self.server_urls):
-                raise ValueError(f"json list length ({len(json)}) must match " f"server_urls ({len(self.server_urls)})")
-            payloads = json
-        else:
-            payloads = [json] * len(self.server_urls)
-
-        session = await self._get_session()
-
-        async def call_server(server_url: str, payload: Dict[str, Any]) -> tuple:
-            url = f"{server_url}{endpoint}"
-            async with session.request(method, url, json=payload) as resp:
-                body = await resp.json() if resp.content_length else None
-                raise_for_status(resp, body)
-                return server_url, {"status": resp.status, "body": body}
-
-        results = await asyncio.gather(*[call_server(url, p) for url, p in zip(self.server_urls, payloads)])
+        results = await asyncio.gather(*[self._call_server(url, endpoint, json, method) for url in self.server_urls])
         return {url: resp for url, resp in results}
 
     async def pause(self, mode: Union[PauseMode, str] = PauseMode.ABORT) -> Dict[str, Any]:
@@ -572,7 +581,13 @@ class RemoteInferenceClient:
         num_servers = len(self.server_urls)
         server_infos = init_info.for_servers(world_size_per_server, num_servers)
         payloads = [{"init_info": x.to_api_payload()} for x in server_infos]
-        return await self._call_all_servers("/init_weight_transfer_engine", payloads)
+        results = await asyncio.gather(
+            *[
+                self._call_server(url, "/init_weight_transfer_engine", payload)
+                for url, payload in zip(self.server_urls, payloads)
+            ]
+        )
+        return {url: resp for url, resp in results}
 
     async def update_named_weights(
         self,
