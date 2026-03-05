@@ -253,7 +253,7 @@ class RayPPOTrainer:
                         reward=generator_output["rewards"][0],
                     )
 
-                    # 3. Convert GenreatorOutput to TrainingInputBatch
+                    # 3. Convert GeneratorOutput to TrainingInputBatch
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
                         logger.info(f"Number of sequences: {len(training_input['sequences'])}")
