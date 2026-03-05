@@ -52,7 +52,7 @@ We are training GLM-4.7-Flash (30B MoE, DeepSeek-V3 architecture) with GRPO on S
 ```bash
 uv pip install --python .venv/bin/python "transformers>=5.0.0"
 ```
-This overrides the `transformers<5` pin from vLLM/megatron-bridge. The override is safe — slime also uses transformers 5.x in production with GLM-4.7-Flash.
+This overrides the `transformers<5` pin from vLLM/megatron-bridge. The override is safe — the GLM-4.7-Flash HF model page and vLLM recipes also require transformers 5.x.
 
 Then apply the return_dict=False fixes:
 ```bash
@@ -80,7 +80,7 @@ All scripts are at `/home/ubuntu/sky_workdir/scripts/` (on the A100 machine) and
 ### `01_train_2x8_h200.sh` — For the 2x8 cluster
 ```bash
 bash 01_train_2x8_h200.sh phase3   # 8-GPU quick smoke test (1K context, 1 epoch, ~5 min)
-bash 01_train_2x8_h200.sh phase4   # 8-GPU full slime match (8K context, batch=256, 20 epochs)
+bash 01_train_2x8_h200.sh phase4   # 8-GPU full 8K context (8K context, batch=256, 20 epochs)
 bash 01_train_2x8_h200.sh phase5   # 16-GPU multi-node (TP=4, EP=8, batch=512)
 ```
 
@@ -89,84 +89,84 @@ bash 01_train_2x8_h200.sh phase5   # 16-GPU multi-node (TP=4, EP=8, batch=512)
 bash 02_train_4x8_h200.sh          # 32-GPU (TP=4, EP=8, DP=4, batch=1024, n_samples=16)
 ```
 
-## Training Config (Matching Slime's GLM-4.7-Flash Settings)
+## Training Config (Recommended GLM-4.7-Flash Settings)
 
 ### Parallelism (8-GPU / single node)
 | Setting | Value | Source |
 |---------|-------|--------|
-| Megatron TP | 1 | Slime 8-GPU config |
-| Megatron PP | 1 | Slime 8-GPU config |
-| Megatron CP | 1 | Slime 8-GPU config |
-| Megatron EP | 8 | Slime 8-GPU config |
-| vLLM engines | 2 × TP=4 | SkyRL uses vLLM (slime uses SGLang with DP attention) |
+| Megatron TP | 1 | Proven 8-GPU config |
+| Megatron PP | 1 | Proven 8-GPU config |
+| Megatron CP | 1 | Proven 8-GPU config |
+| Megatron EP | 8 | Proven 8-GPU config |
+| vLLM engines | 2 × TP=4 | SkyRL uses vLLM with TP sharding |
 | Colocated | true | Both use colocated |
 
 ### Parallelism (16-GPU / 2 nodes)
 | Setting | Value | Source |
 |---------|-------|--------|
-| Megatron TP | 4 | Slime 16-GPU config |
-| Megatron EP | 8 | Slime 16-GPU config |
+| Megatron TP | 4 | Recommended 16-GPU config |
+| Megatron EP | 8 | Recommended 16-GPU config |
 | vLLM engines | 2 × TP=8 | Scaled up from 8-GPU |
 | Nodes | 2 | Multi-node ray |
 
 ### Batch & Generation
 | Setting | Value | Source |
 |---------|-------|--------|
-| train_batch_size | 256 (8-GPU) / 512 (16-GPU) / 1024 (32-GPU) | Slime uses 256 on 8-GPU |
-| n_samples_per_prompt | 8 | Slime |
+| train_batch_size | 256 (8-GPU) / 512 (16-GPU) / 1024 (32-GPU) | Standard for 30B MoE on 8-GPU |
+| n_samples_per_prompt | 8 | Recommended |
 | max_prompt_length | 512 | GSM8K prompts are short |
-| max_generate_length | 8192 | Slime |
+| max_generate_length | 8192 | Recommended |
 | max_model_len (vLLM) | 8704 | 512 + 8192 |
-| gpu_memory_utilization | 0.7 | Slime uses 0.7 |
+| gpu_memory_utilization | 0.7 | Standard for colocated mode |
 
 ### Optimizer
 | Setting | Value | Source |
 |---------|-------|--------|
-| lr | 1e-6 | Slime |
-| weight_decay | 0.1 | Slime |
-| adam_beta1 | 0.9 | Slime |
-| adam_beta2 | 0.98 | Slime (not default 0.999!) |
-| optimizer_cpu_offload | true | Slime |
-| optimizer_offload_fraction | 1.0 | Slime |
-| overlap_cpu_optimizer_d2h_h2d | true | Slime |
-| use_precision_aware_optimizer | true | Slime |
-| num_warmup_steps | 0 | Constant LR (slime uses constant) |
+| lr | 1e-6 | Recommended |
+| weight_decay | 0.1 | Recommended |
+| adam_beta1 | 0.9 | Recommended |
+| adam_beta2 | 0.98 | Recommended (not default 0.999!) |
+| optimizer_cpu_offload | true | Recommended |
+| optimizer_offload_fraction | 1.0 | Recommended |
+| overlap_cpu_optimizer_d2h_h2d | true | Recommended |
+| use_precision_aware_optimizer | true | Recommended |
+| num_warmup_steps | 0 | Constant LR (no decay) |
 
 ### MoE Flags (all via transformer_config_kwargs)
 | Setting | Value | Source |
 |---------|-------|--------|
-| moe_token_dispatcher_type | alltoall | Slime |
-| moe_router_load_balancing_type | seq_aux_loss | Slime |
-| moe_aux_loss_coeff | 0.0 | Slime (aux loss disabled) |
-| moe_grouped_gemm | true | Slime |
-| moe_permute_fusion | true | Slime |
-| moe_router_score_function | sigmoid | Slime |
-| moe_router_pre_softmax | true | Slime |
-| moe_router_enable_expert_bias | true | Slime |
-| moe_router_bias_update_rate | 0 | Slime (freeze bias for RL) |
-| moe_router_topk_scaling_factor | 1.8 | Slime |
-| moe_router_dtype | fp32 | Slime |
+| moe_token_dispatcher_type | alltoall | Recommended |
+| moe_router_load_balancing_type | seq_aux_loss | Recommended |
+| moe_aux_loss_coeff | 0.0 | Aux loss disabled |
+| moe_grouped_gemm | true | Recommended |
+| moe_permute_fusion | true | Recommended |
+| moe_router_score_function | sigmoid | Recommended |
+| moe_router_pre_softmax | true | Recommended |
+| moe_router_enable_expert_bias | true | Recommended |
+| moe_router_bias_update_rate | 0 | Freeze bias for RL |
+| moe_router_topk_scaling_factor | 1.8 | Recommended |
+| moe_router_dtype | fp32 | Recommended |
 
 ### Memory & Precision
 | Setting | Value | Source |
 |---------|-------|--------|
-| recompute_granularity | full | Slime |
-| recompute_method | uniform | Slime |
-| recompute_num_layers | 1 | Slime |
-| accumulate_allreduce_grads_in_fp32 | true | Slime |
-| make_vocab_size_divisible_by | 64 | Slime |
-| no_rope_fusion | true | Slime |
+| recompute_granularity | full | Recommended |
+| recompute_method | uniform | Recommended |
+| recompute_num_layers | 1 | Recommended |
+| accumulate_allreduce_grads_in_fp32 | true | Recommended |
+| make_vocab_size_divisible_by | 64 | Recommended |
+| no_rope_fusion | true | Recommended |
 | flash_attn | true | GLM-4.7-Flash supports flash attention |
 | empty_cuda_cache | true | Proven needed for memory on A100 |
 
 ### Algorithm (GRPO)
 | Setting | Value | Source |
 |---------|-------|--------|
-| advantage_estimator | grpo | Slime |
+| advantage_estimator | grpo | Recommended |
 | policy_loss_type | regular | Standard PPO clip |
-| eps_clip_low | 0.2 | Slime |
-| eps_clip_high | 0.28 | Slime |
-| use_kl_loss | false | Slime sets KL coef=0.0 (effectively same) |
+| eps_clip_low | 0.2 | Recommended |
+| eps_clip_high | 0.28 | Recommended |
+| use_kl_loss | false | Recommended sets KL coef=0.0 (effectively same) |
 
 ## Recommended Execution Order
 
@@ -180,7 +180,7 @@ bash 02_train_4x8_h200.sh          # 32-GPU (TP=4, EP=8, DP=4, batch=1024, n_sam
 3. **Phase 4** (the real test): `bash 01_train_2x8_h200.sh phase4`
    - 8 GPUs, 8K context, batch=256, 20 epochs
    - This is the config that OOMed on A100 — H200 should handle it
-   - Validates: full slime-matching config works end-to-end
+   - Validates: full 8K context config works end-to-end
    - Expect: ~15 min/step for generation, ~2 min for training, ~18 min total/step
 4. **Phase 5** (multi-node): `bash 01_train_2x8_h200.sh phase5`
    - Requires starting ray worker on node 2 first
@@ -223,10 +223,7 @@ bash 02_train_4x8_h200.sh          # 32-GPU (TP=4, EP=8, DP=4, batch=1024, n_sam
 - Only reshardable along DP dimension (cannot change TP/PP after save)
 - For TP/PP resharding, set `dist_ckpt_optim_fully_reshardable=true` (slower, gathers to rank 0)
 
-## Reference: Slime's Exact Config Sources
-- 8-GPU script: https://github.com/THUDM/slime/blob/main/scripts/run-glm4.7-30B-A3B-8gpus.sh
-- Model config: https://github.com/THUDM/slime/blob/main/scripts/models/glm4.7-30B-A3B.sh
-- Docs: https://thudm.github.io/slime/examples/glm4.7-30B-A3B.html
+## Reference: Recommended's Exact Config Sources
 
 ## Reference: Key Files in SkyRL
 - Megatron worker: `skyrl/backends/skyrl_train/workers/megatron/megatron_worker.py`

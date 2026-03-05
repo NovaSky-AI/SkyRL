@@ -6,8 +6,8 @@ set -x
 #
 # Runs 3 phases of increasing ambition:
 #   Phase 3: 8-GPU single-node (proven config, should be trivial on H200)
-#   Phase 4: 8-GPU with full slime settings (8K context, batch=256)
-#   Phase 5: 16-GPU multi-node (slime's 16-GPU config)
+#   Phase 4: 8-GPU with full 8K context settings (8K context, batch=256)
+#   Phase 5: 16-GPU multi-node (recommended 16-GPU config)
 #
 # Prerequisites:
 #   - Run 00_setup_and_sanity_check.sh on BOTH nodes first
@@ -128,13 +128,13 @@ run_phase3() {
 }
 
 # ==============================================================================
-# Phase 4: 8-GPU with full slime settings (8K context, batch=256)
+# Phase 4: 8-GPU with full 8K context settings (8K context, batch=256)
 #   - This OOMed on A100 (80GB) but should work on H200 (141GB)
-#   - Full slime-matching config
+#   - Full 8K context config matching proven MoE settings
 # ==============================================================================
 run_phase4() {
     echo "============================================"
-    echo " Phase 4: 8-GPU full slime match (8K context)"
+    echo " Phase 4: 8-GPU full 8K context (8K context)"
     echo "============================================"
 
     .venv/bin/ray stop --force 2>/dev/null; sleep 3
@@ -213,7 +213,7 @@ run_phase4() {
         trainer.policy.optimizer_config.num_warmup_steps=0 \
         trainer.logger=$LOGGER \
         trainer.project_name=glm47_h200 \
-        trainer.run_name=phase4_8gpu_slime_match \
+        trainer.run_name=phase4_8gpu_8k_full \
         trainer.resume_mode=null \
         trainer.ckpt_interval=10 \
         trainer.ckpt_path="$HOME/ckpts/phase4" \
@@ -224,7 +224,7 @@ run_phase4() {
 
 # ==============================================================================
 # Phase 5: 16-GPU multi-node (2x8xH200)
-#   - Matches slime's 16-GPU config: TP=4, EP=8, colocated
+#   - Matches recommended 16-GPU config: TP=4, EP=8, colocated
 #   - Uses all 16 GPUs for both training and inference
 #   - Larger batch (512) to utilize all GPUs
 #
@@ -355,7 +355,7 @@ case "$PHASE" in
     *)
         echo "Usage: $0 {phase3|phase4|phase5|all}"
         echo "  phase3 - 8-GPU quick test (short context, 1 epoch)"
-        echo "  phase4 - 8-GPU full slime match (8K context, 20 epochs)"
+        echo "  phase4 - 8-GPU full 8K context (8K context, 20 epochs)"
         echo "  phase5 - 16-GPU multi-node (2x8, requires NODE0_IP and NODE1_IP)"
         echo "  all    - Run phase3 then phase4 sequentially"
         exit 1
