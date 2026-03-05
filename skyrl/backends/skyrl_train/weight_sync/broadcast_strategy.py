@@ -118,6 +118,7 @@ class BroadcastWeightTransferSender(WeightTransferSender):
             name = chunk.names[0]
             tensor = chunk.tensors[0]
             shape = chunk.shapes[0]
+            logger.info(f"Sending weight with name {name} and shape {shape} and dtype {tensor.dtype} to inference engines. Expected dtype: {self._init_info.model_dtype_str}")
 
             # Only rank 0 sends request to inference engines
             if rank == 0:
