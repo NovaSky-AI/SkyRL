@@ -560,9 +560,9 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
             key = jnp.repeat(key, repeats, axis=2)
 
         # Use chunked version for prefill (better parallelization), recurrent for decode
-        if recurrent_state is None and seq_len > 1:
+        if seq_len > 1:
             core_out, new_recurrent_state = chunk_gated_delta_rule(
-                query, key, value, g, beta, chunk_size=64, initial_state=None
+                query, key, value, g, beta, chunk_size=64, initial_state=recurrent_state
             )
         else:
             core_out, new_recurrent_state = recurrent_gated_delta_rule(query, key, value, g, beta, recurrent_state)
