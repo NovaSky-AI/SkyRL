@@ -98,10 +98,6 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def update_weights(request: Request):
         return {"status": "ok", "server_id": server_id}
 
-    @app.post("/finalize_weight_update")
-    async def finalize_weight_update(request: Request):
-        return {"status": "ok", "server_id": server_id}
-
     return app
 
 
@@ -326,12 +322,6 @@ class TestWeightSync:
             "packed": True,
         }
         result = await client.update_named_weights(update_info)
-        assert len(result) == 2
-
-    @pytest.mark.asyncio
-    async def test_finalize_weight_update(self, client):
-        """Test finalize_weight_update fans out to all servers."""
-        result = await client.finalize_weight_update()
         assert len(result) == 2
 
 

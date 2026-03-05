@@ -251,9 +251,10 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             return
 
         # Extract and send weights using the sender created at init time
+        weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
         weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
         await self._weight_transfer_sender.send_chunks(
-            self.weight_extractor.extract_weights(generator_dtype),
+            weight_iterator,
             weight_metadata=weight_metadata,
         )
 

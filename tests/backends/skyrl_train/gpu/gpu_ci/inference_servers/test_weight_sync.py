@@ -315,13 +315,7 @@ class TestWeightUpdateFlow:
             ray.get(trainer_broadcast_ref)
             print("[Step 3] Weight sync complete")
 
-            # ===== Step 4: Finalize weight update =====
-            result = await client.finalize_weight_update()
-            for server_url, resp in result.items():
-                assert resp["status"] == 200, f"Server {server_url} finalize failed: {resp}"
-            print("[Step 4] Weight update finalized")
-
-            # ===== Step 5: Query again - should produce correct output =====
+            # ===== Step 4: Query again - should produce correct output =====
             resp = await http_client.post(f"{router_url}/v1/completions", json=payload)
             assert resp.status_code == 200
 

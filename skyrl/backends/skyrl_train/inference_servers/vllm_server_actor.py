@@ -99,6 +99,8 @@ class VLLMServerActor(ServerActorProtocol):
         # Ensure vLLM sleep endpoints are enabled by using dev mode
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
+        # TODO (aaron): once native ipc stops needing this, remove
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
         # Ensure Ray executor is used (required for GPU inheritance in placement groups)
         self._ensure_ray_executor()
