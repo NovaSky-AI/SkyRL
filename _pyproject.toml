@@ -99,20 +99,29 @@ fsdp = [
     "skyrl[skyrl-train]",
     "vllm==0.16.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
+#    "torch==2.9.1; sys_platform == 'linux'",
+#    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision; sys_platform == 'linux'",
     "torch==2.10.0; sys_platform == 'linux'",
     "flashinfer-python==0.6.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "torchvision; sys_platform == 'linux'",
+
 ]
 
 megatron = [
-    "skyrl[skyrl-train]; python_version == '3.12'",
-    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
-    "flash-attn==2.8.1; sys_platform == 'linux' and python_version == '3.12'",
-    "torch==2.10.0; sys_platform == 'linux' and python_version == '3.12'",
-    "torchvision; sys_platform == 'linux' and python_version == '3.12'",
-    "megatron-bridge; sys_platform == 'linux' and python_version == '3.12'",
-    "megatron-core==0.15.0; sys_platform == 'linux' and python_version == '3.12'",
-    "nvidia-modelopt; sys_platform == 'linux' and python_version == '3.12'",
+    "skyrl[skyrl-train]",
+    "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
+    "flash-attn==2.8.1; sys_platform == 'linux'",
+    "vllm==0.16.0; sys_platform == 'linux'",
+    "torch==2.10.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    #"torch==2.9.1; sys_platform == 'linux'",
+    #"flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torchvision; sys_platform == 'linux'",
+    "megatron-bridge; sys_platform == 'linux'",
+    "megatron-core==0.16.0; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-modelopt; sys_platform == 'linux'",
 ]
 
 flashrl = [
@@ -163,10 +172,13 @@ version = {attr = "skyrl.__version__"}
 [tool.uv]
 # Resolve for both Linux (production) and macOS (dev)
 required-environments = [
-    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_full_version >= '3.12' and python_full_version < '3.13'",
+    "sys_platform == 'linux'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
-constraint-dependencies = []
+constraint-dependencies = [
+    "flashinfer-jit-cache==0.6.3",
+]
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras
 conflicts = [
@@ -197,10 +209,8 @@ override-dependencies = [
     "mamba-ssm; sys_platform == 'never'",
     "causal-conv1d; sys_platform == 'never'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
-    "megatron-core==0.15.0; sys_platform == 'linux'",
-    "ml_dtypes>=0.5.0; sys_platform == 'linux' and python_version == '3.12'",
-    "numpy>=2.0.0; sys_platform == 'linux'",
-    "opencv-python-headless>=4.11.0",
+    "megatron-core==0.16.0; sys_platform == 'linux'",
+    "ml_dtypes>=0.5.0; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -208,9 +218,8 @@ flash-attn = [{requirement = "torch", match-runtime = true}]
 transformer-engine = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "build_tools", "ninja"]
 
-[tool.uv.extra-build-variables]
-flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
-vllm = { VLLM_USE_PRECOMPILED = "1" }
+#[tool.uv.extra-build-variables]
+#flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -225,7 +234,6 @@ explicit = true
 [[tool.uv.index]]
 name = "jax-tpu"
 url = "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
-explicit = true
 
 [[tool.uv.index]]
 name = "flashinfer-cu128"
