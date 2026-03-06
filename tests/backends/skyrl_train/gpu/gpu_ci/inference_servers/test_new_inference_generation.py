@@ -32,6 +32,7 @@ from transformers import AutoTokenizer
 
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 SERVED_MODEL_NAME = "my_qwen"
@@ -585,3 +586,20 @@ def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngineState)
 
     decoded = asyncio.run(client.detokenize([token_ids]))[0]
     assert decoded == text
+
+
+@pytest.mark.vllm
+@pytest.mark.skipif(not _SKYRL_USE_NEW_INFERENCE, reason="Render API only supported with new inference client")
+def test_client_render_chat_completion(vllm_server: InferenceEngineState):
+    """Test render_chat_completion via RemoteInferenceClient against real vLLM."""
+    client = vllm_server.client
+    messages = [{"role": "user", "content": "Hello"}]
+    result = asyncio.run(client.render_chat_completion(messages=messages))
+    # vLLM returns [conversation, engine_prompts]
+    assert isinstance(result, list)
+    assert len(result) == 2
+    conversation, engine_prompts = result
+    # engine_prompts should have prompt_token_ids
+    assert len(engine_prompts) > 0
+    assert "prompt_token_ids" in engine_prompts[0]
+    assert len(engine_prompts[0]["prompt_token_ids"]) > 0
