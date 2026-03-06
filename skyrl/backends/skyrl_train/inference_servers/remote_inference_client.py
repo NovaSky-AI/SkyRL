@@ -298,6 +298,7 @@ class RemoteInferenceClient:
         prompt_token_ids: List[int],
         num_samples: int,
         sampling_params: Dict[str, Any],
+        session_id: Optional[Union[str, int]] = None,
     ) -> InferenceEngineOutput:
         """
         Generate multiple independent samples for the same prompt.
@@ -310,6 +311,7 @@ class RemoteInferenceClient:
             prompt_token_ids: Token IDs for the prompt.
             num_samples: Number of independent samples to generate.
             sampling_params: Sampling parameters for generation.
+            session_id: Optional session ID for consistent routing via X-Session-ID header.
 
         Returns:
             InferenceEngineOutput with num_samples responses.
@@ -320,7 +322,7 @@ class RemoteInferenceClient:
             self._generate_single(
                 prompt_token_ids=prompt_token_ids,
                 sampling_params=sampling_params,
-                session_id=None,
+                session_id=session_id,
             )
             for _ in range(num_samples)
         ]
