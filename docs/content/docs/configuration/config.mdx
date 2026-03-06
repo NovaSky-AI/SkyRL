@@ -595,12 +595,12 @@ def ppo_policy_loss(
 ```yaml
 fully_async:
   max_staleness_steps: 4
-  num_parallel_generation_workers: 768
+  num_parallel_generation_workers: 1024
 
 ```
 
-- `fully_async.max_staleness_steps`: Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*, then `j - i <= max_staleness_steps`. Larger values increase throughput but also off-policy-ness.
-- `fully_async.num_parallel_generation_workers`: Number of generation workers to spawn. Should be \>= `policy_mini_batch_size` and \<= `policy_mini_batch_size * (max_staleness_steps + 1)`.
+- `fully_async.max_staleness_steps`: Maximum off-policy outer training step budget used by the async staleness capacity controller. This is an aggregate bound, not a strict per-trajectory guarantee. Larger values increase throughput but also off-policy-ness.
+- `fully_async.num_parallel_generation_workers`: Number of generation workers to spawn. Should be \>= `train_batch_size` and \<= `train_batch_size * (max_staleness_steps + 1)`.
 
 ## Generator Configuration
 

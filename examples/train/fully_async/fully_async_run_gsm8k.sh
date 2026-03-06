@@ -23,9 +23,10 @@ set -x
 : "${INFERENCE_BACKEND:=vllm}"
 
 # Fully async specific configuration knobs:
-: "${MINI_BATCH_SIZE:=256}"
+: "${TRAIN_BATCH_SIZE:=256}"
+: "${POLICY_MINI_BATCH_SIZE:=256}"
 : "${MAX_STALENESS_STEPS:=4}"
-: "${NUM_PARALLEL_GENERATION_WORKERS:=$(( MINI_BATCH_SIZE * (MAX_STALENESS_STEPS + 1) ))}"
+: "${NUM_PARALLEL_GENERATION_WORKERS:=$TRAIN_BATCH_SIZE}"
 
 TIS_TYPE=token
 TIS_IMP_RATIO_CAP=2.0
@@ -53,8 +54,8 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.eval_before_train=false \
   trainer.eval_interval=4 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=${MINI_BATCH_SIZE} \
-  trainer.policy_mini_batch_size=${MINI_BATCH_SIZE} \
+  trainer.train_batch_size=${TRAIN_BATCH_SIZE} \
+  trainer.policy_mini_batch_size=${POLICY_MINI_BATCH_SIZE} \
   trainer.micro_forward_batch_size_per_gpu=8 \
   trainer.micro_train_batch_size_per_gpu=8 \
   trainer.ckpt_interval=10 \

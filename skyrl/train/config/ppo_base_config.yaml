@@ -202,18 +202,18 @@ trainer:
   
   # Fully async specific knobs. For more see https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training
   fully_async:
-    # The maximum number of off-policy steps allowed. If a group of trajectory is scheduled at step i,
-    # and it is used to train at step j, it is guaranteed that j - i <= max_staleness_steps.
+    # The maximum off-policy outer training step budget used by the async staleness capacity controller.
+    # This is an aggregate bound, not a strict per-trajectory guarantee.
     # The larger the max_staleness_steps, the more off-policy the training is, and the more throughput we get.
     max_staleness_steps: 4
 
     # The number of generation workers to spawn, where each worker works on a group of trajcetories,
     # being the same prompt repeated `generator.n_samples_per_prompt` times.
-    # It should be >= policy_mini_batch_size to avoid wasted throughput, and <= policy_mini_batch_size * (max_staleness_steps + 1)
+    # It should be >= train_batch_size to avoid wasted throughput, and <= train_batch_size * (max_staleness_steps + 1)
     # since it would be wasted due to capacity control.
     # The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
-    # Default value is: policy_mini_batch_size * (max_staleness_steps / 2 + 1) = 256 * (4 / 2 + 1) = 768
-    num_parallel_generation_workers: 768
+    # Default value matches train_batch_size to satisfy the minimum capacity without overprovisioning workers.
+    num_parallel_generation_workers: 1024
 
   gradient_checkpointing: true
   gradient_checkpointing_use_reentrant: false
