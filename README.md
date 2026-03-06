@@ -17,17 +17,19 @@
 
 SkyRL is a full-stack RL library that provides the following components:
 
+- [skyrl](./skyrl): Our new unified library for RL on your own hardware, with support for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview). `skyrl` combines our previous work:
+
+  * [`skyrl-train`](./skyrl-train): A modular, performant training framework for RL.  
+  * [`skyrl-tx`](./skyrl-tx): A cross-platform library implementing a backend for the [Tinker API](https://docs.skyrl.ai/docs/tinker/overview), with a unified engine for training and inference.
 - [`skyrl-agent`](./skyrl-agent): Our agent layer for training long-horizon, real-world agents. For exact reproduction of [SkyRL-v0](https://novasky-ai.notion.site/skyrl-v0) results, please checkout to commit a0d50c482436af7fac8caffa4533616a78431d66.
-- [`skyrl-train`](./skyrl-train): Our modular, performant training framework for RL.
 - [`skyrl-gym`](./skyrl-gym): Our gymnasium of tool-use tasks, including a library of math, coding, search and SQL environments implemented in the Gymnasium API.
-- [`skyrl-tx`](./skyrl-tx): A cross-platform library to enable users to expose a local [Tinker](https://thinkingmachines.ai/tinker/)-like REST API for model post-training.
 
 
 # Getting Started
 
 For a guide on developing with SkyRL, take at look at our [Development Guide](https://docs.skyrl.ai/docs/getting-started/development) docs.
 
-For model training, checkout [`skyrl-train`](./skyrl-train) to start using, modifying, or building on top of the SkyRL training stack. See our [quickstart docs](https://docs.skyrl.ai/docs/index) to ramp up!
+For model training, checkout [`skyrl`](./skyrl) to start using, modifying, or building on top of the SkyRL training stack. See our [quickstart docs](https://docs.skyrl.ai/docs/index) to ramp up!
 
 For building environments, checkout [`skyrl-gym`](./skyrl-gym) to integrate your task in the simple gymnasium interface.
 
@@ -64,7 +66,7 @@ For agentic pipelines, check out [`skyrl-agent`](./skyrl-agent) for our work on 
 
 # Acknowledgement
 
-This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.edu/) in collaboration with [**Anyscale**](https://www.anyscale.com/), with generous compute support from [**Anyscale**](https://www.anyscale.com/), [**Databricks**](https://www.databricks.com/), [**NVIDIA**](https://developer.nvidia.com/brev), [**Lambda Labs**](https://lambdalabs.com/service/gpu-cloud?srsltid=AfmBOop5FnmEFTkavVtdZDsLWvHWNg6peXtat-OXJ9MW5GMNsk756PE5), [**AMD**](https://www.amd.com/en), [**AWS**](https://aws.amazon.com/), and [**Modal**](https://modal.com/).
+This work is done at [**Berkeley Sky Computing Lab**](https://sky.cs.berkeley.edu/) in collaboration with [**Anyscale**](https://www.anyscale.com/), with generous compute support from [**Anyscale**](https://www.anyscale.com/), [**Databricks**](https://www.databricks.com/), [**NVIDIA**](https://developer.nvidia.com/brev), [**Lambda Labs**](https://lambdalabs.com/service/gpu-cloud?srsltid=AfmBOop5FnmEFTkavVtdZDsLWvHWNg6peXtat-OXJ9MW5GMNsk756PE5), [**AMD**](https://www.amd.com/en), [**AWS**](https://aws.amazon.com/), [**Modal**](https://modal.com/), and [**Daytona**](https://www.daytona.io/).
 
 We adopt many lessons and code from several great projects such as [veRL](https://github.com/volcengine/verl), [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Search-R1](https://github.com/PeterGriffinJin/Search-R1), [OpenReasonerZero](https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero), and [NeMo-RL](https://github.com/NVIDIA-NeMo/RL). We appreciate each of these teams and their contributions to open-source research!
 

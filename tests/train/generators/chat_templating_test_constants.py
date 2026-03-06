@@ -1,6 +1,6 @@
 """
 Expected templated strings used for
-skyrl-train/tests/train/generators/test_skyrl_gym_generator_chat_templating.py::test_skyrl_gym_generator_chat_templating_exact
+tests/train/generators/test_skyrl_gym_generator_chat_templating.py::test_skyrl_gym_generator_chat_templating_exact
 """
 
 from datetime import date

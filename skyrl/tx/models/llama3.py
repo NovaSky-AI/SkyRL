@@ -265,7 +265,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
         self.model = Llama3Model(config, dtype=dtype, rngs=rngs)
 
         if config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens.T
+            self.lm_head = None
         else:
             self.lm_head = LoRALinear(
                 config.hidden_size,
@@ -282,12 +282,7 @@ class Llama3ForCausalLM(nnx.Module, ModelForCausalLM, GeneratorMixin, LogitsProc
 
     def get_lm_head(self) -> LMHead:
         """Return the lm_head callable for logits computation."""
-        return self.lm_head
-
-    @staticmethod
-    def is_lora_param(path: tuple, _value) -> bool:
-        """Return True if a parameter path corresponds to LoRA weights."""
-        return any(name in path for name in ("lora_A", "lora_B"))
+        return self.lm_head or self.model.embed_tokens.T
 
     def __call__(
         self,

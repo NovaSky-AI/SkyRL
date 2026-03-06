@@ -2,9 +2,10 @@
 Main entrypoint for fully async training.
 """
 
-import hydra
-from omegaconf import DictConfig
-from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+import sys
+
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 import asyncio
 from skyrl.train.utils import initialize_ray
@@ -41,14 +42,14 @@ class FullyAsyncPPOExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     # make sure that the training loop is not run on the head node.
     exp = FullyAsyncPPOExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # validate the arguments
     validate_cfg(cfg)
 

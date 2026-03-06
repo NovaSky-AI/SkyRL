@@ -1,21 +1,12 @@
 __pycache__/
 /wandb/
-/skyrl-train/wandb/
 **/*.egg-info/
 # hydra logs
 /outputs/
-/skyrl-train/outputs/
 /data/lcb
 
-# Documentation build artifacts
-/skyrl-train/docs/_build/
-docs/_build/
-docs/_static/
-docs/_templates/
-docs/_autosummary/
-docs/api/_autosummary/
-docs/generated/
-docs/_spelling/
+# MkDocs build output (generated during build)
+docs/public/api-ref/
 
 # Documentation cache
 .doctrees/
@@ -28,10 +19,8 @@ docs/_spelling/
 # .env
 
 # .env files inside directories can be ignored
-/skyrl-train/.env
 /skyrl-gym/.env 
 
-/skyrl_train/.venv
 /skyrl-gym/.venv
 
 # build
@@ -62,6 +51,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!docs/lib/
 lib64/
 parts/
 sdist/

@@ -44,7 +44,9 @@ jobs:
         uvx ruff check
     - name: Run pytest
       run: |
-        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train
+        # Note: Qwen 3.5 currently needs transformers v5, but we are not ready to fully migrate to it yet
+        uv run --extra tinker --extra jax --extra dev --with transformers==5.2.0 pytest --forked -s tests/tx/models/test_qwen3_5.py
+        uv run --extra tinker --extra jax --extra dev pytest --forked -s tests --ignore=tests/tx/gpu --ignore=tests/train --ignore=tests/backends/skyrl_train --ignore=tests/tx/models/test_qwen3_5.py
     - name: Run engine benchmarks
       run: |
         uv run --extra tinker --extra dev python skyrl/benchmarks/benchmark_engine.py --base-model trl-internal-testing/tiny-Qwen3ForCausalLM --backend-config '{"max_lora_adapters": 3, "max_lora_rank": 1}' --num-warmup-steps 1 --num-steps 1 --num-requests 1 --seq-len 8 --sample-max-tokens 16

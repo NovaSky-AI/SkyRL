@@ -1,10 +1,9 @@
 """
 Test pause and continue generation with inference engine client HTTP endpoint.
 
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_pause_and_continue_generation.py -m "vllm"
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_pause_and_continue_generation.py
 """
 
-import pytest
 import asyncio
 from tests.backends.skyrl_train.gpu.gpu_ci.test_inference_engine_client_http_endpoint import get_test_actor_config
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
@@ -25,7 +24,6 @@ SERVER_PORT = 8123
 SERVER_HOST = "127.0.0.1"
 
 
-@pytest.mark.vllm
 def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
     """
     We send 6 requests via `/chat/completions` to two engines concurrently with vLLM `max_num_seqs=2`
@@ -44,7 +42,7 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
         # 1. Build engine and start server
         cfg = get_test_actor_config(num_inference_engines=num_engines, model=MODEL)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         sampling_params = {
             "max_tokens": 2048,
@@ -61,12 +59,12 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
         engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,
             # We test aborting 2 running requests and 1 waiting requests
             max_num_seqs=max_num_seqs,
@@ -173,7 +171,6 @@ def test_continue_generation_vllm_engine_chat_completion(ray_init_fixture):
             engines.close()
 
 
-@pytest.mark.vllm
 def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     """
     Identical to `test_continue_generation_vllm_engine_chat_completion` except we use `generate()`
@@ -194,7 +191,7 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     # 1. Build engines (no HTTP server needed for generate())
     cfg = get_test_actor_config(num_inference_engines=num_engines, model=MODEL)
     cfg.trainer.placement.colocate_all = True
-    cfg.generator.weight_sync_backend = "nccl"
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
     sampling_params = {
         "max_tokens": 2048,
@@ -208,12 +205,12 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
     with InferenceEngineState.create(
         cfg=cfg,
         use_local=True,
-        async_engine=cfg.generator.async_engine,
-        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         backend="vllm",
         model=MODEL,
-        num_inference_engines=cfg.generator.num_inference_engines,
+        num_inference_engines=cfg.generator.inference_engine.num_engines,
         sleep_level=1,
         max_num_seqs=max_num_seqs,
     ) as engines:
@@ -273,7 +270,6 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
             print(f"Output first 1500 chars: {out['responses'][0][:1500]}...")
 
 
-@pytest.mark.vllm
 def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     """
     Test that keep-mode pause freezes in-flight requests and resume lets them
@@ -285,7 +281,7 @@ def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     """
     cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
     cfg.trainer.placement.colocate_all = True
-    cfg.generator.weight_sync_backend = "nccl"
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
     sampling_params = {
         "max_tokens": 64,
@@ -299,12 +295,12 @@ def test_pause_keep_generation_vllm_engine(ray_init_fixture):
     with InferenceEngineState.create(
         cfg=cfg,
         use_local=True,
-        async_engine=cfg.generator.async_engine,
-        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         backend="vllm",
         model=MODEL,
-        num_inference_engines=cfg.generator.num_inference_engines,
+        num_inference_engines=cfg.generator.inference_engine.num_engines,
         sleep_level=1,
         max_num_seqs=2,
     ) as engines:
@@ -356,3 +352,84 @@ def test_pause_keep_generation_vllm_engine(ray_init_fixture):
                     f"Expected non-abort finish reason with keep-mode pause, "
                     f"got {out['choices'][0].get('finish_reason')}"
                 )
+
+
+def test_abort_generation_vllm_engine(ray_init_fixture):
+    """
+    We send 4 requests that are really long to `InferenceEngineInterface.engines[0].chat_completion`
+    and then call abort directly on the engine. We set max_num_seqs=2 to test aborting 2 running
+    requests and 2 waiting requests. We expect 2 requests to be returned with completion_tokens=0
+    and 2 with non-zero completion_tokens. We also expect the finish_reason to be "abort" for all
+    requests.
+    """
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    cfg.trainer.strategy = "fsdp2"
+    sampling_params = {
+        "max_tokens": 8192,
+        "stop": None,
+        "stop_token_ids": None,
+        "ignore_eos": True,
+        "stream": False,
+    }
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
+    with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        backend="vllm",
+        model=MODEL,
+        num_inference_engines=cfg.generator.inference_engine.num_engines,
+        sleep_level=1,
+        max_num_seqs=2,
+    ) as engines:
+        client = engines.client
+
+        for api in ["chat_completion", "completion"]:
+            convs: List[ConversationType] = [
+                [
+                    {"role": "system", "content": "You are a token generator that keeps talking endlessly."},
+                    {"role": "user", "content": "Write a very long rambling response without ending."},
+                ]
+                for _ in range(4)
+            ]
+
+            async def run_requests_then_abort():
+                async def one_req(i: int):
+                    if api == "chat_completion":
+                        body = {
+                            "model": MODEL,
+                            "messages": convs[i],
+                            **sampling_params,
+                        }
+                        return await client.engines[0].chat_completion({"json": body, "headers": {}})
+                    else:
+                        prompt_str = tokenizer.apply_chat_template(convs[i], add_generation_prompt=True, tokenize=False)
+                        body = {
+                            "model": MODEL,
+                            "prompt": prompt_str,
+                            **sampling_params,
+                        }
+                        return await client.engines[0].completion({"json": body, "headers": {}})
+
+                tasks = [asyncio.create_task(one_req(i)) for i in range(4)]
+                await asyncio.sleep(1)
+                await client.engines[0].abort_generation()
+                return await asyncio.gather(*tasks)
+
+            outputs = asyncio.run(run_requests_then_abort())
+
+            num_completion_tokens_is_zero = 0
+            for out in outputs:
+                assert "choices" in out and len(out["choices"]) == 1
+                if out["usage"]["completion_tokens"] == 0:
+                    num_completion_tokens_is_zero += 1
+                assert out["choices"][0].get("finish_reason") == "abort"
+
+            assert (
+                num_completion_tokens_is_zero == 2
+            ), f"Expected 2 requests with completion_tokens=0, got {num_completion_tokens_is_zero}."

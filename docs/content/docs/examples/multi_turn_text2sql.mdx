@@ -2,6 +2,9 @@
 title: "Multi-Turn GRPO Text2SQL with Async Rollouts"
 ---
 
+<Callout type="info">
+This example uses the `fsdp` backend.
+</Callout>
 
 In this example, we walk through how to train an effective multi-turn Text2SQL model (beating GPT-4o) with SkyRL using async rollouts.
 
@@ -74,13 +77,13 @@ unzip <path_to_file.zip>
 
 Now that we have our dataset and database files, let's walk through the some of the key training configurations.
 
-```bash title="examples/text_to_sql/run_skyrl_sql.sh"
+```bash title="examples/train/text_to_sql/run_skyrl_sql.sh"
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/sql"
 # path for .db files for environment interaction
 DB_PATH="$HOME/path/to/db_files"
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
     #### Environment configuration
     environment.env_class=text2sql \
     environment.skyrl_gym.text2sql.db_path=$DB_PATH \
@@ -89,7 +92,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     # this is used to set the max turns for the environment
     generator.max_turns=6 \
     # we need to make sure to set async_engine=true for async rollouts
-    generator.async_engine=true \
+    generator.inference_engine.async_engine=true \
     # we need to make sure to set batched=false for async rollouts
     generator.batched=false \
 
@@ -101,7 +104,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     # generator.sampling_params.max_generate_length is the max length of the generated response for EACH turn
     generator.sampling_params.max_generate_length=3000 \
 
-    #### multi-turn generation format - see `skyrl_train/generators/skyrl_gym_generator.py` for more details
+    #### multi-turn generation format - see `skyrl/train/generators/skyrl_gym_generator.py` for more details
     generator.use_conversation_multi_turn=false \
 
     #### data configuration
@@ -114,8 +117,8 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     trainer.placement.colocate_all=true \
     trainer.placement.policy_num_gpus_per_node=8 \
     # inference engine placement configuration
-    generator.num_inference_engines=2 \
-    generator.inference_engine_tensor_parallel_size=4 \
+    generator.inference_engine.num_engines=2 \
+    generator.inference_engine.tensor_parallel_size=4 \
 
     #### algorithm configuration
     trainer.epochs=30 \
@@ -139,21 +142,21 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
     trainer.eval_batch_size=1024 \
     trainer.eval_before_train=true \
     trainer.eval_interval=5 \
-    ... # Other parameters (see `examples/text_to_sql/run_skyrl_sql.sh` for the full script)
+    ... # Other parameters (see `examples/train/text_to_sql/run_skyrl_sql.sh` for the full script)
 
 ```
 
 - All we have to do to enable multi-turn training with async rollouts is to simply set `generator.max_turns` to the maximum number of turns we want the agent to take,
-  and to make sure `generator.async_engine=true` and `generator.batched=false`. 
+  and to make sure `generator.inference_engine.async_engine=true` and `generator.batched=false`. 
 
 - Chat templating and loss masking for multi-turn conversations are handled by the `SkyRLGymGenerator` class.
 
   - In the above example, we set `use_conversation_multi_turn=false` to enforce that the multi-turn conversation is formatted as a single assistant response.
   - We also set `stop='["</sql>", "</solution>"]'` for both `sampling_params` and `eval_sampling_params` as a part
     of the training recipe.
-  - If you are using `generator.use_conversation_multi_turn=true`, you might want to append an EOS token ID to the end of the response after these stop strings to adhere to the model's behavior (i.e. ending generation with an EOS token ID rather than say `</solution>`). This can be done by setting `generator.append_eos_token_after_stop_str_in_multi_turn=true` in the generator config. The full script is available in `examples/text_to_sql/run_skyrl_sql_conversation_format.sh`.
+  - If you are using `generator.use_conversation_multi_turn=true`, you might want to append an EOS token ID to the end of the response after these stop strings to adhere to the model's behavior (i.e. ending generation with an EOS token ID rather than say `</solution>`). This can be done by setting `generator.append_eos_token_after_stop_str_in_multi_turn=true` in the generator config. The full script is available in `examples/train/text_to_sql/run_skyrl_sql_conversation_format.sh`.
   - If you want to use a conversation-based format, you can set `use_conversation_multi_turn=true` and the model will generate a separate assistant response for each turn. This is supported only with `backend="vllm"` as of now.
-  - See `skyrl_train/generators/skyrl_gym_generator.py` for more details on both options!
+  - See `skyrl/train/generators/skyrl_gym_generator.py` for more details on both options!
 
 ## Launching Your Training Run
 
@@ -161,7 +164,7 @@ Let's get our training run started! Make sure to set your WandB API key for logg
 
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
-bash examples/text_to_sql/run_skyrl_sql.sh
+bash examples/train/text_to_sql/run_skyrl_sql.sh
 
 ```
 

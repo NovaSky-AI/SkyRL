@@ -51,7 +51,7 @@ agent:
     temperature: 1.0
 
     # Model info for token budgeting
-    # NOTE: max_input_tokens should match +generator.engine_init_kwargs.max_model_len
+    # NOTE: max_input_tokens should match generator.inference_engine.engine_init_kwargs.max_model_len
     model_info:
       max_input_tokens: 32768
       max_output_tokens: 32768

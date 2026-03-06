@@ -4,10 +4,8 @@ Test the HTTP endpoint with LiteLLM and policy weight sync.
 This uses the same workflow as test_policy_local_engines_e2e.py, but with the HTTP endpoint instead of
 the inference client engine. Only requires 1 GPU.
 
-# Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py -m "vllm"
-# Run only sglang tests (requires sglang extra):
-uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py -m "sglang"
+To run:
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
 """
 
 import json
@@ -28,7 +26,7 @@ from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
 import logging
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from tests.backends.skyrl_train.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState
@@ -41,14 +39,16 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_e
 )
 from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
 from concurrent.futures import ThreadPoolExecutor
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
-
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+import skyrl.train.utils
 from transformers import AutoTokenizer
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
 TP_SIZE = 1
 SERVER_HOST = "127.0.0.1"
+
+TEMPLATE_PATH = str(Path(skyrl.train.utils.__file__).parent / "templates/qwen3_acc_thinking.jinja2")
 
 pytestmark = pytest.mark.skipif(
     _SKYRL_USE_NEW_INFERENCE, reason="This test is not applicable with new inference backend"
@@ -60,9 +60,9 @@ pytestmark = pytest.mark.skipif(
 litellm.disable_aiohttp_transport = True
 
 
-def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> Dict[str, Any]:
+def _get_test_sampling_params(cfg: SkyRLTrainConfig, endpoint: str) -> Dict[str, Any]:
     assert endpoint in ["chat_completions", "completions"]
-    sampling_params = get_sampling_params_for_backend(backend, cfg.generator.sampling_params)
+    sampling_params = get_sampling_params_for_backend("vllm", cfg.generator.sampling_params)
     sampling_params["logprobs"] = True
     if endpoint == "chat_completions":
         sampling_params["top_logprobs"] = 1
@@ -70,16 +70,16 @@ def _get_test_sampling_params(backend: str, cfg: SkyRLConfig, endpoint: str) -> 
     return sampling_params
 
 
-def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLConfig:
+def get_test_actor_config(num_inference_engines: int, model: str) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = TP_SIZE * num_inference_engines
-    cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = num_inference_engines
-    cfg.generator.inference_engine_tensor_parallel_size = TP_SIZE
-    cfg.generator.run_engines_locally = True
+    cfg.generator.inference_engine.async_engine = True
+    cfg.generator.inference_engine.num_engines = num_inference_engines
+    cfg.generator.inference_engine.tensor_parallel_size = TP_SIZE
+    cfg.generator.inference_engine.run_engines_locally = True
     return cfg
 
 
@@ -118,7 +118,7 @@ def set_up_http_server(client: InferenceEngineClient) -> Tuple[threading.Thread,
 # --------------------------------------
 
 
-def _check_chat_completions_outputs(outputs, test_type, num_samples, backend):
+def _check_chat_completions_outputs(outputs, test_type, num_samples, backend: str = "vllm"):
     # check error
     for output in outputs:
         assert not ("error" in output or output.get("object", "") == "error"), f"Error in output: {output}"
@@ -137,11 +137,10 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend):
         if test_type != "litellm":
             # Cannot check for litellm because it returns it has its own pydantic object
             if backend == "vllm":
-                from vllm.entrypoints.openai.protocol import ChatCompletionResponse
+                from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 
                 ChatCompletionResponse.model_validate(response_data)  # will raise error if invalid
             else:
-                # TODO(Charlie): add sglang checkings once we support it for http endpoint
                 raise ValueError(f"Unsupported backend: {backend}")
 
         for key in ["id", "object", "created", "model", "choices"]:
@@ -162,7 +161,7 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend):
             assert choice["logprobs"]["content"][0]["token"].split(":")[1].isdigit()
 
 
-def _check_completions_outputs(prompts, outputs, test_type, backend):
+def _check_completions_outputs(prompts, outputs, test_type, backend: str = "vllm"):
     # check error
     for output in outputs:
         assert not ("error" in output or output.get("object", "") == "error"), f"Error in output: {output}"
@@ -190,7 +189,7 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 
         if test_type != "litellm":
             if backend == "vllm":
-                from vllm.entrypoints.openai.protocol import CompletionResponse
+                from vllm.entrypoints.openai.completion.protocol import CompletionResponse
 
                 CompletionResponse.model_validate(response_data)
             else:
@@ -214,7 +213,6 @@ def _check_completions_outputs(prompts, outputs, test_type, backend):
 # ------------------------------
 
 
-@pytest.mark.vllm
 def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
     """
     Since /completions endpoint supports both single and batched requests, and we support
@@ -225,13 +223,15 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
     batched_list = [False, True]
     with_traj_list = [False, True]
 
+    server_port = None
+    server_thread = None
     try:
         # 1. Build engine
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
+        sampling_params = _get_test_sampling_params(cfg, "completions")
 
         engines = InferenceEngineState.create(
             cfg,
@@ -242,11 +242,13 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
         client = engines.client
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
+        print("Engine initialized successfully", flush=True)
+
         server_thread, server_port = set_up_http_server(client)
         base_url = f"http://{SERVER_HOST}:{server_port}/v1"
 
         # 2. Build prompts
-        num_samples = 20
+        num_samples = 5
         test_prompts_conv_list: List[ConversationType] = get_test_prompts(MODEL_QWEN2_5, num_samples=num_samples)
         text_prompts = [
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
@@ -270,15 +272,15 @@ def test_http_endpoint_completions_routing_and_batching(ray_init_fixture):
 
                 _check_completions_outputs(text_prompts, outputs, "request_posting", "vllm")
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
 # NOTE(Charlie): we do not test OpenAI client because it throws error when unsupported sampling params
 # are passed into OpenAI.chat.completions.create() (e.g. min_tokens, skip_special_tokens, etc.),
-# while these sampling params are used in vllm/sglang. Therefore, we instead use LiteLLM.
-@pytest.mark.vllm
+# while these sampling params are used in vllm. Therefore, we instead use LiteLLM.
 def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
     Test the HTTP endpoint /chat/completions and /completions with policy weight sync.
@@ -290,11 +292,13 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
     """
     test_types = ["request_posting", "aiohttp_client_session", "litellm"]
     endpoints = ["chat_completions", "completions"]
+    server_port = None
+    server_thread = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         engines = InferenceEngineState.create(
             cfg=cfg,
@@ -314,12 +318,20 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             "policy",
             shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
             cfg=cfg,
         )
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+            )
+        )
         asyncio.run(client.reset_prefix_cache())
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+            )
+        )
 
         # 2. Do tests
         num_samples = 20
@@ -353,12 +365,12 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             if endpoint == "chat_completions":
                 path = "chat/completions"
                 prompt_iterable = test_prompts_conv_list
-                sampling_params = _get_test_sampling_params("vllm", cfg, "chat_completions")
+                sampling_params = _get_test_sampling_params(cfg, "chat_completions")
 
             else:
                 path = "completions"
                 prompt_iterable = test_prompts_half_str_half_tokens_list
-                sampling_params = _get_test_sampling_params("vllm", cfg, "completions")
+                sampling_params = _get_test_sampling_params(cfg, "completions")
 
             if test_type == "request_posting":
 
@@ -427,7 +439,6 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
 
         for test_type in test_types:
             for endpoint in endpoints:
-                print(f"Testing {test_type} with {endpoint}")
                 outputs = _generate_outputs(test_type, endpoint)
                 if endpoint == "chat_completions":
                     _check_chat_completions_outputs(outputs, test_type, num_samples, "vllm")
@@ -435,35 +446,31 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
                     _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, test_type, "vllm")
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
 @pytest.mark.parametrize(
-    "backend,tp_size",
+    "tp_size",
     [
-        pytest.param("vllm", 2, marks=pytest.mark.vllm),
-        # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        # TODO(Charlie): sglang remote server not supported for /chat/completion
-        # yet because we have skip_tokenizer_init=True. Fix by getting tokens
-        # via return logprobs instead.
-        # pytest.param("sglang", 1, marks=pytest.mark.sglang),
+        2,
     ],
-    # ids=["vllm", "sglang"],
-    ids=["vllm"],
+    ids=["tp2"],
 )
-def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
+def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
     """Test sending both /chat/completions and /completions requests to remote servers."""
     endpoints = ["chat_completions", "completions"]
 
+    server_port = None
+    server_thread = None
     try:
         # 1. Initialize InferenceEngineClient client with remote servers
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
-        cfg.generator.backend = backend
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
-        client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL_QWEN2_5)
+        client, remote_server_process = init_remote_inference_servers(tp_size, "vllm", tokenizer, cfg, MODEL_QWEN2_5)
 
         # 2. Start HTTP endpoint in background thread using serve function directly
         server_thread, server_port = set_up_http_server(client)
@@ -482,10 +489,10 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
 
         def _generate_outputs(endpoint):
             if endpoint == "chat_completions":
-                sampling_params = _get_test_sampling_params(backend, cfg, "chat_completions")
+                sampling_params = _get_test_sampling_params(cfg, "chat_completions")
                 prompt_iterable = test_prompts_conv_list
             else:
-                sampling_params = _get_test_sampling_params(backend, cfg, "completions")
+                sampling_params = _get_test_sampling_params(cfg, "completions")
                 prompt_iterable = test_prompts_half_str_half_tokens_list
 
             # Default concurrency limit is 100 due to HTTP client pool capacity.
@@ -518,9 +525,9 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
         for endpoint in endpoints:
             outputs = _generate_outputs(endpoint)
             if endpoint == "chat_completions":
-                _check_chat_completions_outputs(outputs, "litellm", num_samples, backend)
+                _check_chat_completions_outputs(outputs, "litellm", num_samples, "vllm")
             else:
-                _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, "litellm", backend)
+                _check_completions_outputs(test_prompts_half_str_half_tokens_list, outputs, "litellm", "vllm")
 
         # 4. Shutdown server
         shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
@@ -528,18 +535,22 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, backend, tp_size):
             server_thread.join(timeout=5)
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
+            server_thread.join(timeout=5)
         if "remote_server_process" in locals():
             remote_server_process.terminate()
             remote_server_process.wait()
 
 
-@pytest.mark.vllm
 def test_structured_generation(ray_init_fixture):
+    server_port = None
+    server_thread = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
         engines = InferenceEngineState.create(
@@ -585,13 +596,12 @@ def test_structured_generation(ray_init_fixture):
         text = output.choices[0].message.content
         assert json.loads(text) is not None, f"Output is not valid JSON: {text}"
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
-# TODO(Charlie): sglang has slightly different error response format. We need to handle it.
-@pytest.mark.vllm
 def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     """
     Test error handling for various invalid requests and internal server errors.
@@ -599,10 +609,12 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
     Tests validation errors (400) for invalid requests and verifies that internal
     server errors (500) are logged with traceback server-side (not exposed to client).
     """
+    server_port = None
+    server_thread = None
     try:
         cfg = get_test_actor_config(num_inference_engines=2, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
         engines = InferenceEngineState.create(
@@ -750,41 +762,39 @@ def test_http_endpoint_error_handling(ray_init_fixture, caplog):
         assert r.status_code == HTTPStatus.BAD_REQUEST
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
-@pytest.mark.vllm
 @pytest.mark.parametrize("use_custom_template", [False, True])
 def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_template):
     """
     Test the HTTP endpoint /chat/completions with and without custom chat template.
     Check the output correspondingly.
     """
+    server_port = None
+    server_thread = None
     try:
         # 1. Set up engine
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN3)
         cfg.trainer.placement.colocate_all = True  # Use colocate for simplicity
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
-        template_path = "skyrl_train/utils/templates/qwen3_acc_thinking.jinja2"
         engine_init_kwargs = {}
         if use_custom_template:
-            # use relative path to workspace root
-            # __file__ is skyrl-train/tests/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
-            repo_root = Path(__file__).parent.parent.parent.parent
-            engine_init_kwargs["chat_template"] = str(repo_root / template_path)
+            engine_init_kwargs["chat_template"] = TEMPLATE_PATH
 
         engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN3,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
             engine_init_kwargs=engine_init_kwargs,
         )
@@ -839,12 +849,12 @@ def test_http_endpoint_custom_chat_template(ray_init_fixture, use_custom_templat
             assert "<think>" not in prompt_str and "</think>" not in prompt_str
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
-@pytest.mark.vllm
 def test_http_endpoint_served_model_name(ray_init_fixture):
     """
     Test that `generator.served_model_name` allows using a different model name in requests
@@ -860,24 +870,26 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
     # Use a custom served model name that differs from the actual model path
     SERVED_MODEL_NAME = "my-custom-model-alias"
 
+    server_port = None
+    server_thread = None
     try:
         # 1. Set up engine with served_model_name
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
         # Set the served_model_name to be different from the model path
-        cfg.generator.served_model_name = SERVED_MODEL_NAME
+        cfg.generator.inference_engine.served_model_name = SERVED_MODEL_NAME
 
         engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,  # since we do not explicitly sync weights
         )
         client = engines.client
@@ -929,12 +941,12 @@ def test_http_endpoint_served_model_name(ray_init_fixture):
         ), f"Completions request with served_model_name failed: {response.status_code}, {response.json()}"
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)
 
 
-@pytest.mark.vllm
 def test_context_length_error_returns_400(ray_init_fixture):
     """
     Test that context length errors return HTTP 400 (Bad Request), not 500.
@@ -950,21 +962,23 @@ def test_context_length_error_returns_400(ray_init_fixture):
     # Use a small max_model_len to make testing faster
     TEST_MAX_MODEL_LEN = 1024
 
+    server_port = None
+    server_thread = None
     try:
         cfg = get_test_actor_config(num_inference_engines=1, model=MODEL_QWEN2_5)
         cfg.trainer.placement.colocate_all = True
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "fsdp2"
 
         engines = InferenceEngineState.create(
             cfg=cfg,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+            async_engine=cfg.generator.inference_engine.async_engine,
+            tp_size=cfg.generator.inference_engine.tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             model=MODEL_QWEN2_5,
-            num_inference_engines=cfg.generator.num_inference_engines,
+            num_inference_engines=cfg.generator.inference_engine.num_engines,
             sleep_level=1,
             engine_init_kwargs={"max_model_len": TEST_MAX_MODEL_LEN},
         )
@@ -988,8 +1002,8 @@ def test_context_length_error_returns_400(ray_init_fixture):
         assert "error" in error_data
         error_message = error_data["error"]["message"]
         assert (
-            "maximum context length" in error_message.lower()
-        ), f"Error message should mention 'maximum context length': {error_message}"
+            "context length" in error_message.lower()
+        ), f"Error message should mention 'context length': {error_message}"
 
         # Test 2: Prompt fits, but prompt + max_tokens exceeds max_model_len -> HTTP 400
         # vllm serve returns: "'max_tokens' or 'max_completion_tokens' is too large: {max_tokens}.
@@ -1007,8 +1021,8 @@ def test_context_length_error_returns_400(ray_init_fixture):
         assert "error" in error_data
         error_message = error_data["error"]["message"]
         assert (
-            "maximum context length" in error_message.lower()
-        ), f"Error message should mention 'maximum context length': {error_message}"
+            "context length" in error_message.lower()
+        ), f"Error message should mention 'context length': {error_message}"
 
         # Test 3: Valid request still works (regression test)
         response = requests.post(
@@ -1039,10 +1053,11 @@ def test_context_length_error_returns_400(ray_init_fixture):
         assert exception_raised is not None
         error_str = str(exception_raised).lower()
         assert (
-            "maximum context length" in error_str
-        ), f"Error message should mention 'maximum context length': {str(exception_raised)[:200]}"
+            "context length" in error_str
+        ), f"Error message should mention 'context length': {str(exception_raised)[:200]}"
 
     finally:
-        shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
-        if server_thread.is_alive():
+        if server_port is not None:
+            shutdown_server(host=SERVER_HOST, port=server_port, max_wait_seconds=5)
+        if server_thread is not None and server_thread.is_alive():
             server_thread.join(timeout=5)

@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Optional
@@ -8,7 +9,7 @@ from skyrl.train.generators.utils import get_rollout_metrics, get_response_ids_a
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.utils.rate_limiter import create_rate_limiter
-from tqdm.asyncio import tqdm
+from tqdm import tqdm
 from omegaconf import DictConfig, OmegaConf
 from harbor.trial.trial import Trial
 from harbor.models.trial.config import TrialConfig
@@ -56,24 +57,24 @@ class HarborGenerator(GeneratorInterface):
             tokenizer: tokenizer object for encoding and decoding text
             max_seq_len: Maximum total sequence length (prompt + response). Used to truncate responses.
         """
-        self.base_url = f"http://{generator_cfg.http_endpoint_host}:{generator_cfg.http_endpoint_port}"
+        ie_cfg = generator_cfg.inference_engine
+        self.base_url = f"http://{ie_cfg.http_endpoint_host}:{ie_cfg.http_endpoint_port}"
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
-        self.model_name = generator_cfg.model_name
 
         # Harbor config template - users can specify any Harbor TrialConfig options in YAML or command line.
         # SkyRL injects: model_name and api_base (once at init), task.path and session_id (per trial)
-        self._harbor_trial_config_template = OmegaConf.to_container(harbor_cfg, resolve=True)
+        self._harbor_trial_config_template = deepcopy(harbor_cfg)
 
         # Set model_name and api_base once (constant across all trials)
-        assert generator_cfg.served_model_name is not None, "served_model_name must be set"
+        assert ie_cfg.served_model_name is not None, "served_model_name must be set"
         assert (
-            "/" not in generator_cfg.served_model_name
+            "/" not in ie_cfg.served_model_name
         ), "served_model_name must not contain '/', Harbor expects hosted_vllm/{model_name}"
         self._harbor_trial_config_template.setdefault("agent", {})[
             "model_name"
-        ] = f"hosted_vllm/{generator_cfg.served_model_name}"
+        ] = f"hosted_vllm/{ie_cfg.served_model_name}"
         self._harbor_trial_config_template["agent"].setdefault("kwargs", {})["api_base"] = f"{self.base_url}/v1"
 
         logger.info(
@@ -83,7 +84,7 @@ class HarborGenerator(GeneratorInterface):
         )
 
         # Read custom chat template
-        custom_chat_template_path = generator_cfg.engine_init_kwargs.get("chat_template", None)
+        custom_chat_template_path = ie_cfg.engine_init_kwargs.get("chat_template", None)
         if custom_chat_template_path:
             with open(custom_chat_template_path, "r") as f:
                 self.custom_chat_template_content = f.read()
@@ -92,25 +93,39 @@ class HarborGenerator(GeneratorInterface):
             self.custom_chat_template_content = None
 
         # Initialize rate limiter from generator config (not part of Harbor TrialConfig)
-        rate_limit_config = generator_cfg.get("rate_limit", None)
+        rate_limit_config = getattr(generator_cfg, "rate_limit", None)
         self._rate_limiter = create_rate_limiter(rate_limit_config)
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        tasks = []
-        for i in range(len(input_batch["prompts"])):
-            tasks.append(
-                self.harbor_agent_loop(
-                    prompt=input_batch["prompts"][i],
-                    trajectory_id=input_batch["trajectory_ids"][i],
-                )
+        prompts = input_batch["prompts"]
+        trajectory_ids = input_batch["trajectory_ids"]
+
+        if trajectory_ids is None:
+            raise ValueError("`trajectory_ids` is required in the input batch")
+        if len(prompts) != len(trajectory_ids):
+            raise ValueError(
+                f"Prompt count ({len(prompts)}) doesn't match " f"trajectory_ids count ({len(trajectory_ids)})"
             )
 
-        all_outputs: List[HarborAgentOutput] = await tqdm.gather(
-            *tasks,
+        all_outputs: List[HarborAgentOutput] = [None] * len(prompts)  # type: ignore[list-item]
+        progress = tqdm(
+            total=len(prompts),
             desc="Generating Trajectories",
-            miniters=max(1, len(tasks) // 10),
+            miniters=max(1, len(prompts) // 10),
             mininterval=5,
         )
+
+        async def _worker(idx, prompt, trajectory_id):
+            result = await self.harbor_agent_loop(prompt=prompt, trajectory_id=trajectory_id)
+            all_outputs[idx] = result
+            progress.update(1)
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                for idx, (prompt, trajectory_id) in enumerate(zip(prompts, trajectory_ids)):
+                    tg.create_task(_worker(idx, prompt, trajectory_id))
+        finally:
+            progress.close()
         all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(all_outputs)
 
         generator_output: GeneratorOutput = {

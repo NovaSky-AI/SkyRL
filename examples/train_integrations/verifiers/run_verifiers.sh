@@ -18,8 +18,8 @@ uv run --isolated --with verifiers --extra fsdp -m examples.train_integrations.v
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.num_inference_engines=$NUM_GPUS \
-  generator.inference_engine_tensor_parallel_size=1 \
+  generator.inference_engine.num_engines=$NUM_GPUS \
+  generator.inference_engine.tensor_parallel_size=1 \
   generator.n_samples_per_prompt=5 \
   trainer.epochs=20 \
   trainer.eval_before_train=true \
@@ -31,8 +31,8 @@ uv run --isolated --with verifiers --extra fsdp -m examples.train_integrations.v
   trainer.max_prompt_length=8192 \
   generator.max_input_length=8192 \
   generator.sampling_params.max_generate_length=1024 \
-  generator.enable_http_endpoint=true \
-  generator.gpu_memory_utilization=0.8 \
+  generator.inference_engine.enable_http_endpoint=true \
+  generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   environment.env_class="$ENV_ID" \
   trainer.project_name="verifiers" \

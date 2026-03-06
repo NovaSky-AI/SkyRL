@@ -147,7 +147,6 @@ async def handle_openai_request(raw_request: Request, endpoint: str) -> JSONResp
             response = await _global_inference_engine_client.completion(payload)
 
         if "error" in response or response.get("object", "") == "error":
-            # former is vllm format, latter is sglang format
             error_code = response["error"]["code"] if "error" in response else response["code"]
             return JSONResponse(content=response, status_code=error_code)
         else:
@@ -264,7 +263,7 @@ def create_app() -> fastapi.FastAPI:
 
         Note that the specific fields inside the request and response depend on the backend you use.
         If `config.generator.backend` is `vllm`, then the request and response will be vLLM's.
-        Same for SGLang. SkyRL does not perform field validation beyond `model` and `session_id`,
+        SkyRL does not perform field validation beyond `model` and `session_id`,
         and otherwise depends on the underlying engines' validation.
 
         Make sure you add in `session_id` (a string or an integer) to ensure load balancing and
@@ -274,7 +273,6 @@ def create_app() -> fastapi.FastAPI:
 
         API reference:
         - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
-        - https://docs.sglang.ai/basic_usage/openai_api_completions.html
         """
         return await handle_openai_request(raw_request, endpoint="/chat/completions")
 
@@ -298,7 +296,6 @@ def create_app() -> fastapi.FastAPI:
 
         API reference:
         - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
-        - https://docs.sglang.ai/basic_usage/openai_api_completions.html
         """
         return await handle_openai_request(raw_request, endpoint="/completions")
 

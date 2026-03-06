@@ -2,12 +2,15 @@
 title: "(Experimental) Fully Async Training: In-flight Weight Update / Multi-Turn Partial Rollout"
 ---
 
+<Callout type="info">
+Fully async training is supported with the `fsdp` and `megatron` backends.
+</Callout>
 
 SkyRL supports fully async training for any generator that implements the `GeneratorInterface`, including your **arbitrary agent harness (both single-turn and multi-turn)**, to address the **straggler issues in long-horizon tasks**.
 
 We treat "fully async training" synonymous to the terms **"in-flight weight update"** and **"multi-turn partial rollout"**, as discussed in works like AReal, PipelineRL, ScaleRL, etc.
 
-The core logic of fully async training lives in [fully_async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/fully_async_trainer.py), a subclass of the synchronous trainer class in [trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/skyrl_train/trainer.py). This `fully_async_trainer.py` works out-of-the-box with any generator that the user implements -- so users do not need to implement any additional logic for fully async training.
+The core logic of fully async training lives in [fully_async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/fully_async_trainer.py), a subclass of the synchronous trainer class in [trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/trainer.py). This `fully_async_trainer.py` works out-of-the-box with any generator that the user implements -- so users do not need to implement any additional logic for fully async training.
 
 ![Systems Diagram of Fully Async Training in SkyRL](/images/tutorials/skyrl_fully_async.png)
 
@@ -57,23 +60,23 @@ The fully async trainer class is implemented in `fully_async_trainer.py::FullyAs
 
 This trainer class is generator-agnostic, meaning it can support any generator that implements the `GeneratorInterface` interface, including your arbitrary agent harness.
 
-We provide an example script in `examples/fully_async`, where we train Qwen2.5-1.5B-Instruct on GSM8K with the fully async approach.
+We provide an example script in `examples/train/fully_async`, where we train Qwen2.5-1.5B-Instruct on GSM8K with the fully async approach.
 
 We break down the usage into two simple steps.
 
 ### Step 1: Define your `main_async.py`
 
-Following [examples/fully_async/main_async.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/main_async.py), subclass the base entrypoint class `BasePPOExp`:
+Following [examples/train/fully_async/main_fully_async.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/fully_async/main_fully_async.py), subclass the base entrypoint class `BasePPOExp`:
 
 - Override `get_trainer()` to use fully async trainer class `FullyAsyncRayPPOTrainer`
 - Override `get_generator()` to use your custom generator class. Note that currently we only support generators that use `/chat/completions` (hence the `SkyRLGymHTTPGenerator` used in the example).
 
 ### Step 2: Config knobs to tune for fully async training
 
-Following [examples/fully_async/async_run_gsm8k.sh](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/fully_async/async_run_gsm8k.sh), update the training configuration to use your new entrypoint `main_async.py`:
+Following [examples/train/fully_async/fully_async_run_gsm8k.sh](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/fully_async/fully_async_run_gsm8k.sh), update the training configuration to use your new entrypoint `main_async.py`:
 
 ```bash
-uv run --isolated --extra vllm -m examples.fully_async.main_async \
+uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
 ...
 
 ```
@@ -96,8 +99,8 @@ trainer.placement.colocate_all=false \
 trainer.placement.colocate_policy_ref=true \
 trainer.placement.policy_num_gpus_per_node=4 \
 trainer.placement.ref_num_gpus_per_node=4 \
-generator.num_inference_engines=4 \
-generator.inference_engine_tensor_parallel_size=1
+generator.inference_engine.num_engines=4 \
+generator.inference_engine.tensor_parallel_size=1
 
 ```
 
@@ -105,7 +108,7 @@ Other restrictions (will be validated by the trainer):
 
 - `trainer.train_batch_size`: Must be set to the same as `trainer.policy_mini_batch_size`.
 - `generator.batched`: Must be set to `false` to use non-batched vLLM engines.
-- `generator.async_engine`: Must be set to `true` to use async vLLM engines.
+- `generator.inference_engine.async_engine`: Must be set to `true` to use async vLLM engines.
 - `trainer.algorithm.dynamic_sampling.type`: Must be set to `"none"` to disable dynamic sampling (not supported yet).
 
 ## III. Design and Implementation of Fully Async Training in SkyRL

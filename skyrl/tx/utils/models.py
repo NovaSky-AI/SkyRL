@@ -18,6 +18,7 @@ import safetensors.numpy
 from transformers import PretrainedConfig
 import peft
 
+from skyrl.tx.layers.connectors import is_connector_path
 from skyrl.tx.models.configs import ModelConfig
 from skyrl.utils.log import logger
 from skyrl.utils.storage import download_and_unpack, pack_and_upload
@@ -65,6 +66,7 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
     import skyrl.tx.models.llama3
     import skyrl.tx.models.qwen3
+    import skyrl.tx.models.qwen3_5
     import skyrl.tx.models.deepseekv3
 
     for architecture in config.architectures or []:
@@ -72,6 +74,8 @@ def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
             return getattr(skyrl.tx.models.llama3, architecture)
         if hasattr(skyrl.tx.models.qwen3, architecture):
             return getattr(skyrl.tx.models.qwen3, architecture)
+        if hasattr(skyrl.tx.models.qwen3_5, architecture):
+            return getattr(skyrl.tx.models.qwen3_5, architecture)
         if hasattr(skyrl.tx.models.deepseekv3, architecture):
             return getattr(skyrl.tx.models.deepseekv3, architecture)
 
@@ -104,17 +108,16 @@ def get_adapter_idx(path: tuple, adapter_index: int) -> tuple:
     return (adapter_index,)
 
 
-def get_lora_adapter_slice(path: tuple, adapter_index: int, rank: int) -> tuple | None:
-    """Return index tuple for accessing a single adapter's LoRA weight in an unstacked param.
-
-    After unstack_state, LoRA params have shape (num_adapters, ..., max_rank, ...).
-    Returns the slice to extract/insert one adapter's trimmed-rank weights, or None
-    for non-LoRA params.
-    """
+def get_adapter_slice(path: tuple, adapter_index: int | None, rank: int | None) -> tuple | None:
+    """Return adapter slice for LoRA/connector params in unstacked state, else None."""
+    if adapter_index is None:
+        return None
     if "lora_A" in path:
         return (adapter_index, slice(None), slice(None, rank))
     if "lora_B" in path:
         return (adapter_index, slice(None, rank), slice(None))
+    if is_connector_path(path):
+        return (adapter_index,)
     return None
 
 
@@ -122,6 +125,8 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
     "Get the safetensors key for a given model path."
     if path[-1] in {"embedding", "kernel"}:
         path = (*path[:-1], "weight")
+    elif path[-1] == "conv1d_weight":
+        path = (*path[:-1], "conv1d", "weight")
     elif path[-1] in {"lora_A", "lora_B"}:
         path = (*path, "weight")
     return prefix + ".".join(map(str, path))
@@ -164,17 +169,26 @@ def load_safetensors(
         # Skip LoRA parameters if requested
         if skip_lora and ("lora_A" in path or "lora_B" in path or "lora_scaling" in path or "lora_ranks" in path):
             continue
-        if key not in tensors:
+        # Skip connector parameters
+        if skip_lora and is_connector_path(path):
             continue
         if "experts" in path:
-            tensor = np.stack([tensors[get_expert_key(path, i)].T for i in range(config.get_num_experts())], axis=0)
+            num_experts = config.get_num_experts()
+            assert num_experts is not None
+            expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
+            missing_keys = [expert_key for expert_key in expert_keys if expert_key not in tensors]
+            if missing_keys:
+                raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+            tensor = np.stack([tensors[expert_key].T for expert_key in expert_keys], axis=0)
         else:
+            if key not in tensors:
+                raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
             tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
-        lora_idx = get_lora_adapter_slice(path, adapter_index, rank) if adapter_index is not None else None
-        if lora_idx is not None:
+        adapter_idx = get_adapter_slice(path, adapter_index, rank)
+        if adapter_idx is not None:
             # Load into specific adapter slot via ArrayRef write-through
             arr = param[...]
-            param[...] = arr.at[lora_idx].set(jnp.array(tensor, dtype=arr.dtype))
+            param[...] = arr.at[adapter_idx].set(jnp.array(tensor, dtype=arr.dtype))
         else:
             if path[-2] in {"q_proj", "k_proj", "v_proj", "o_proj"}:
                 tensor = tensor.reshape(param.shape)
@@ -209,9 +223,9 @@ def save_safetensors(
             continue
         key = get_param_key(path, prefix=prefix)
         # Extract specific adapter's LoRA weights when adapter_index is provided
-        lora_idx = get_lora_adapter_slice(path, adapter_index, rank) if adapter_index is not None else None
-        if lora_idx is not None:
-            param = param[lora_idx]
+        adapter_idx = get_adapter_slice(path, adapter_index, rank)
+        if adapter_idx is not None:
+            param = param[adapter_idx]
         if "experts" in path:
             for i in range(config.get_num_experts()):
                 tensors[get_expert_key(path, i)] = param[i, :, :].T
@@ -260,7 +274,10 @@ def load_lora_checkpoint(
             model,
             skip_lora=False,
             prefix="base_model.model.",
-            filter_fn=lambda path: ("lora_A" in path or "lora_B" in path) and filter_lora(adapter_config, path),
+            filter_fn=lambda path: (
+                (("lora_A" in path or "lora_B" in path) and filter_lora(adapter_config, path))
+                or (model.config.mhc_expansion_rate > 1 and is_connector_path(path))
+            ),
             adapter_index=adapter_index,
             rank=adapter_config.rank,
         )
@@ -272,6 +289,7 @@ def save_lora_checkpoint(
     adapter_config: LoraConfig,
     adapter_index: int,
     output_path: Path | CloudPath,
+    rank: int,
 ):
     """Save a LoRA checkpoint as a tar.gz archive.
 
@@ -280,19 +298,23 @@ def save_lora_checkpoint(
         adapter_config: LoRA adapter configuration
         adapter_index: Index of the adapter to save
         output_path: Path to save the checkpoint tar.gz file
+        rank: The process rank for distributed saving
     """
     peft_config = peft.LoraConfig(
         base_model_name_or_path=base_model_name, r=adapter_config.rank, lora_alpha=adapter_config.alpha
     )
 
-    with pack_and_upload(output_path, rank=jax.process_index()) as temp_dir:
+    with pack_and_upload(output_path, rank=rank) as temp_dir:
 
         save_safetensors(
             model.config,
             model,
             temp_dir / "adapter_model.safetensors",
             prefix="base_model.model.",
-            filter_fn=lambda path: ("lora_A" in path or "lora_B" in path) and filter_lora(adapter_config, path),
+            filter_fn=lambda path: (
+                (("lora_A" in path or "lora_B" in path) and filter_lora(adapter_config, path))
+                or (model.config.mhc_expansion_rate > 1 and is_connector_path(path))
+            ),
             adapter_index=adapter_index,
             rank=adapter_config.rank,
         )
@@ -319,10 +341,14 @@ def extract_adapter_state(adapter_index: int, lora_params: nnx.GraphState, rank:
 
     def extract_state(path: tuple, p: jnp.ndarray):
         key = path[-2].key
-        if key not in {"lora_A", "lora_B"}:
+        is_connector = is_connector_path(path)
+        is_lora_weight = key in {"lora_A", "lora_B"}
+        if not (is_connector or is_lora_weight):
             return p
-        assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
         idx = get_adapter_idx(path, adapter_index)
+        if is_connector:
+            return p[*idx]
+        assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
         if key == "lora_A":
             return p[*idx, ..., :rank]
         return p[*idx, ..., :rank, :]
@@ -339,10 +365,14 @@ def insert_adapter_state(
 
     def insert_state(path: tuple, p: jax.Array, new: jax.Array):
         key = path[-2].key
-        if key not in {"lora_A", "lora_B"}:
+        is_connector = is_connector_path(path)
+        is_lora_weight = key in {"lora_A", "lora_B"}
+        if not (is_connector or is_lora_weight):
             return new
-        assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
         idx = get_adapter_idx(path, adapter_index)
+        if is_connector:
+            return p.at[*idx].set(new)
+        assert p.ndim in {3, 4, 5}, f"LoRA parameters must have 3-5 dimensions, got shape {p.shape}"
         if key == "lora_A":
             return p.at[*idx, ..., :rank].set(new)
         return p.at[*idx, ..., :rank, :].set(new)

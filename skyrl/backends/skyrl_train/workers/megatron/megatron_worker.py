@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import torch.distributed
 import ray
-from transformers import AutoTokenizer, AutoConfig
+from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
 import os
 from datetime import timedelta
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING
 from collections import defaultdict
 from omegaconf import OmegaConf
 
@@ -31,7 +31,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     broadcast_object_across_pp_ranks,
 )
 from skyrl.train.utils.utils import update_model_config, str_to_torch_dtype
-from skyrl.backends.skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl.backends.skyrl_train.workers.worker import (
@@ -42,6 +42,72 @@ from skyrl.backends.skyrl_train.workers.worker import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl.utils.tok import get_tokenizer
+
+if TYPE_CHECKING:
+    from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
+    from skyrl.train.config.config import InferenceEngineConfig
+
+# ---------------------------------------------------------------------------
+# Register additional model bridges for architectures not yet in the upstream
+# Megatron-Bridge package. GLM-4.7-Flash uses the same architecture as
+# DeepSeek-V3 (MLA + MoE) so we reuse that bridge with a trivial subclass.
+# ---------------------------------------------------------------------------
+try:
+    from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
+    from megatron.bridge.models.deepseek.common import get_common_configs
+    from megatron.bridge.models.deepseek.deepseek_provider import DeepSeekV3ModelProvider
+    from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
+    from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
+    from megatron.core.models.gpt.gpt_model import GPTModel
+
+    @MegatronModelBridge.register_bridge(
+        source="Glm4MoeLiteForCausalLM",
+        target=GPTModel,
+    )
+    class _GLM47FlashBridge(DeepSeekV3Bridge):
+        """Bridge for GLM-4.7-Flash (Glm4MoeLiteForCausalLM).
+
+        GLM-4.7-Flash is architecturally identical to DeepSeek-V3 (MLA + MoE)
+        but its HF config differs in rope_scaling format:
+        - DeepSeek: rope_scaling has factor/mscale/mscale_all_dim, top-level rope_theta
+        - GLM-4.7-Flash: rope_scaling has rope_theta/rope_type, no mscale fields
+        """
+
+        def provider_bridge(self, hf_pretrained: PreTrainedCausalLM) -> DeepSeekV3ModelProvider:
+            hf_config = hf_pretrained.config
+
+            # Temporarily normalize rope_scaling so get_common_configs works.
+            # GLM-4.7-Flash uses default rope (no scaling), so set factor=1.0.
+            orig_rope_scaling = hf_config.rope_scaling
+            orig_rope_theta = getattr(hf_config, "rope_theta", None)
+            rope_theta = orig_rope_scaling.get("rope_theta", 10000.0) if orig_rope_scaling else 10000.0
+            hf_config.rope_scaling = None  # triggers the else branch (defaults to 1.0)
+            hf_config.rope_theta = rope_theta
+
+            try:
+                configs = get_common_configs(hf_pretrained)
+            finally:
+                hf_config.rope_scaling = orig_rope_scaling
+                if orig_rope_theta is None:
+                    delattr(hf_config, "rope_theta")
+                else:
+                    hf_config.rope_theta = orig_rope_theta
+
+            configs["fp16"] = self.dtype_from_hf(hf_config, default=torch.float32) == torch.float16
+            configs["bf16"] = self.dtype_from_hf(hf_config, default=torch.float32) == torch.bfloat16
+            configs["params_dtype"] = self.dtype_from_hf(hf_config, default=torch.float32)
+
+            configs["make_vocab_size_divisible_by"] = 1280
+            configs["moe_router_score_function"] = "sigmoid"
+            configs["moe_router_enable_expert_bias"] = True
+            if hasattr(hf_config, "aux_loss_alpha"):
+                configs["moe_aux_loss_coeff"] = hf_config.aux_loss_alpha
+
+            return DeepSeekV3ModelProvider(**configs)
+
+except ImportError:
+    pass  # megatron-bridge not installed (e.g. CPU-only environment)
 
 
 class MegatronWeightExtractor(WeightExtractor):
@@ -200,7 +266,7 @@ class MegatronWorker:
         """
         Initialize the Megatron-Bridge bridge and provider objects + hf_config and tokenizer
         """
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        tokenizer = get_tokenizer(model_path, trust_remote_code=True)
         hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
         override_config_kwargs = {
@@ -219,7 +285,7 @@ class MegatronWorker:
         )
         transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
-        if not self.cfg.trainer.gradient_checkpointing:
+        if not self.cfg.gradient_checkpointing:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
@@ -235,9 +301,18 @@ class MegatronWorker:
         provider.attention_backend = "flash" if flash_attn else "fused"
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
-        provider.moe_token_dispatcher_type = "alltoall"
-        provider.moe_router_load_balancing_type = "none"
+        # Apply explicit MoE config fields to the provider.
+        # These replace the previously hardcoded values and can be further
+        # overridden by transformer_config_kwargs if needed.
+        provider.moe_token_dispatcher_type = megatron_config.moe_token_dispatcher_type
+        provider.moe_router_load_balancing_type = megatron_config.moe_router_load_balancing_type
+        provider.moe_grouped_gemm = megatron_config.moe_grouped_gemm
+        if megatron_config.moe_router_score_function is not None:
+            provider.moe_router_score_function = megatron_config.moe_router_score_function
+        if megatron_config.moe_router_enable_expert_bias is not None:
+            provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
 
+        # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
         provider.finalize()
@@ -262,7 +337,7 @@ class MegatronWorker:
                 lora_A_init_method=lora_config.init_method,
                 lora_B_init_method="zero",
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
-                lora_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
+                lora_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
             )
         elif lora_type == "canonical_lora":
             self.lora_cls = CanonicalLoRA(
@@ -327,7 +402,7 @@ class MegatronWorker:
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
         # Run in micro batches grouped into a single mini-batch
-        micro_bsz = self.cfg.trainer.micro_forward_batch_size_per_gpu
+        micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
 
         # Build micro-batch dicts expected by policy.forward_mini_batch
@@ -357,7 +432,7 @@ class MegatronWorker:
                 micro_batches=micro_dicts,
                 seq_len=seq_len,
                 micro_batch_size=mbs,
-                temperature=self.cfg.generator.sampling_params.temperature,
+                temperature=self.cfg.algorithm.temperature,
             )
 
         log_probs = log_probs.to("cpu")
@@ -383,7 +458,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.scheduler: OptimizerParamScheduler = None
         self.optimizer: DistributedOptimizer = None
         self.profiler: Profiler = None
-        self._is_lora = self.cfg.trainer.policy.model.lora.rank > 0
+        self._is_lora = self.cfg.policy.model.lora.rank > 0
 
     def offload_to_cpu(self, pin_memory=True, non_blocking=True, offload_optimizer=True, offload_model=True):
         self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
@@ -421,9 +496,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             torch.distributed._skyrl_broadcast_no_grad_patched = True
 
         self.strategy = MegatronStrategy(
-            megatron_config=self.cfg.trainer.policy.megatron_config,
-            optimizer_config=self.cfg.trainer.policy.optimizer_config,
-            seed=self.cfg.trainer.seed,
+            megatron_config=self.cfg.policy.megatron_config,
+            optimizer_config=self.cfg.policy.optimizer_config,
+            seed=self.cfg.seed,
             is_lora=self._is_lora,
         )
         self.strategy.setup_distributed()
@@ -445,20 +520,20 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # initialize the bridge and provider objects
         self.init_configs(
             model_path,
-            self.cfg.trainer.policy.megatron_config,
-            self.cfg.trainer.policy.megatron_config.model_config_kwargs,
-            self.cfg.trainer.policy.megatron_config.transformer_config_kwargs,
-            bf16=self.cfg.trainer.bf16,
-            flash_attn=self.cfg.trainer.flash_attn,
+            self.cfg.policy.megatron_config,
+            self.cfg.policy.megatron_config.model_config_kwargs,
+            self.cfg.policy.megatron_config.transformer_config_kwargs,
+            bf16=self.cfg.bf16,
+            flash_attn=self.cfg.flash_attn,
         )
 
         # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=True,
-            ddp_config=self.cfg.trainer.policy.megatron_config.ddp_config,
-            lora_config=self.cfg.trainer.policy.model.lora if self._is_lora else None,
-            lora_type=self.cfg.trainer.policy.megatron_config.lora_config.lora_type,
-            bf16=self.cfg.trainer.bf16,
+            ddp_config=self.cfg.policy.megatron_config.ddp_config,
+            lora_config=self.cfg.policy.model.lora if self._is_lora else None,
+            lora_type=self.cfg.policy.megatron_config.lora_config.lora_type,
+            bf16=self.cfg.bf16,
         )
 
         if self._local_rank == 0 and not os.path.exists(
@@ -471,19 +546,19 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             print_model_size(self.actor_module[0])
 
         # create profiler
-        if self.cfg.trainer.policy.megatron_config.torch_profiler_config.enable:
-            self.profiler = Profiler(self.cfg.trainer.policy.megatron_config.torch_profiler_config)
+        if self.cfg.policy.megatron_config.torch_profiler_config.enable:
+            self.profiler = Profiler(self.cfg.policy.megatron_config.torch_profiler_config)
 
         # create optimizer
         optim_config = init_megatron_optim_config(
-            self.cfg.trainer.policy.optimizer_config, self.cfg.trainer.policy.megatron_config.optimizer_config_kwargs
+            self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
         )
         self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
 
         # create scheduler
         self.scheduler = get_megatron_optimizer_param_scheduler(
             optimizer=self.optimizer,
-            config=self.cfg.trainer.policy.optimizer_config,
+            config=self.cfg.policy.optimizer_config,
             num_training_steps=num_training_steps,
         )
 
@@ -495,20 +570,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             policy_loss_fn=self.policy_loss_fn,
         )
 
-        # Initialize weight extractor
-        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
-        # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
-
-        self.weight_extractor = MegatronWeightExtractor(
-            bridge=self.bridge,
-            actor_module=self.actor_module,
-            enable_bucketing=self._transfer_strategy_cls is CudaIpcTransferStrategy,
-            bucket_size_threshold_GB=self.cfg.generator.weight_transfer_threshold_cuda_ipc_GB,
-            training_dtype=torch.bfloat16 if self.cfg.trainer.bf16 else torch.float32,
-        )
-
-        self.empty_cuda_cache = self.cfg.trainer.policy.megatron_config.empty_cuda_cache
+        self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
 
     def forward_backward(
         self,
@@ -536,7 +598,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
             chunk.zero_grad_buffer()
 
-        micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+        micro_batch_size = self.cfg.micro_train_batch_size_per_gpu
         all_metrics = defaultdict(list)
 
         # Move data to GPU
@@ -575,7 +637,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             micro_batches=micro_buffer,
             seq_len=seq_len,
             micro_batch_size=micro_bsz,
-            temperature=self.cfg.generator.sampling_params.temperature,
+            temperature=self.cfg.algorithm.temperature,
             loss_fn=loss_fn,
             loss_fn_config=loss_fn_config,
         )
@@ -656,9 +718,31 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = learning_rate
 
-    async def broadcast_to_inference_engines(self, inference_engine_client):
-        use_prefix_cache = self.cfg.generator.enable_prefix_caching
-        generator_dtype = str_to_torch_dtype(self.cfg.generator.model_dtype)
+    async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
+        # Call super first to set _transfer_strategy_cls and create sender/receivers
+        await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
+
+        # Initialize weight extractor
+        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
+        # transfer strategy, we can enable it for other strategies as well.
+        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
+
+        enable_bucketing = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        self.weight_extractor = MegatronWeightExtractor(
+            bridge=self.bridge,
+            actor_module=self.actor_module,
+            enable_bucketing=enable_bucketing,
+            bucket_size_threshold_GB=(
+                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if enable_bucketing else 0.0
+            ),
+            training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
+        )
+
+    async def broadcast_to_inference_engines(
+        self, inference_engine_client: "InferenceEngineInterface", inference_engine_cfg: "InferenceEngineConfig"
+    ):
+        use_prefix_cache = inference_engine_cfg.enable_prefix_caching
+        generator_dtype = str_to_torch_dtype(inference_engine_cfg.model_dtype)
         cache_reset_task = None
         if use_prefix_cache and torch.distributed.get_rank() == 0:
             # clear prefix cache
@@ -707,9 +791,9 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             )
 
         self.strategy = MegatronStrategy(
-            megatron_config=self.cfg.trainer.ref.megatron_config,
+            megatron_config=self.cfg.ref.megatron_config,
             optimizer_config=None,
-            seed=self.cfg.trainer.seed,
+            seed=self.cfg.seed,
         )
         self.strategy.setup_distributed()
 
@@ -730,17 +814,17 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
         # initialize the bridge and provider objects
         self.init_configs(
             model_path,
-            self.cfg.trainer.ref.megatron_config,
-            self.cfg.trainer.ref.megatron_config.model_config_kwargs,
-            self.cfg.trainer.ref.megatron_config.transformer_config_kwargs,
-            bf16=self.cfg.trainer.bf16,
-            flash_attn=self.cfg.trainer.flash_attn,
+            self.cfg.ref.megatron_config,
+            self.cfg.ref.megatron_config.model_config_kwargs,
+            self.cfg.ref.megatron_config.transformer_config_kwargs,
+            bf16=self.cfg.bf16,
+            flash_attn=self.cfg.flash_attn,
         )
 
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=False,
             ddp_config=None,
-            bf16=self.cfg.trainer.bf16,
+            bf16=self.cfg.bf16,
         )
 
         # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)

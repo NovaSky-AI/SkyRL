@@ -2,6 +2,10 @@
 title: "LLM as a Judge for GSM8K"
 ---
 
+<Callout type="info">
+This example uses the `fsdp` backend.
+</Callout>
+
 
 This example demonstrates how to train a model using LLM as a judge for reward computation on the GSM8K dataset. Instead of using rule-based reward functions, this approach leverages an LLM (like GPT-4o-mini) to evaluate the quality of generated solutions.
 
@@ -21,7 +25,7 @@ The LLM judge provides a binary reward (0 or 1) based on these criteria.
 To download and prepare the dataset, run the following script:
 
 ```bash
-uv run examples/llm_as_a_judge/gsm8k_dataset_judge.py --output_dir $HOME/data/gsm8k_llm_judge
+uv run examples/train/llm_as_a_judge/gsm8k_dataset_judge.py --output_dir $HOME/data/gsm8k_llm_judge
 
 ```
 
@@ -29,7 +33,7 @@ This script downloads the GSM8K dataset, extracts ground truth answers, and form
 
 ## Environment Implementation
 
-The LLM judge environment is implemented in `examples/llm_as_a_judge/llm_judge_env.py`. We use the OpenAI API to access the LLM judge.
+The LLM judge environment is implemented in `examples/train/llm_as_a_judge/llm_judge_env.py`. We use the OpenAI API to access the LLM judge.
 
 The environment sends the following prompt to the judge:
 
@@ -78,7 +82,7 @@ Do not include any explanation after the final score.
 
 The training configuration uses GRPO with colocated training and generation. Key parameters include:
 
-**Training configuration** (from `examples/llm_as_a_judge/run_llm_judge.sh`):
+**Training configuration** (from `examples/train/llm_as_a_judge/run_llm_judge.sh`):
 
 ```bash
 # Data and model paths
@@ -90,7 +94,7 @@ NUM_GPUS=4
 NUM_INFERENCE_ENGINES=4
 TP_SIZE=1
 
-uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_judge.main_llm_judge \
+uv run --isolated --extra fsdp --env-file .env.llm_judge -m examples.train.llm_as_a_judge.main_llm_judge \
   # Data configuration
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -108,16 +112,16 @@ uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_ju
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
 
   # Generator configuration
-  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine_tensor_parallel_size=$TP_SIZE \
-  generator.backend=vllm \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$TP_SIZE \
+  generator.inference_engine.backend=vllm \
   generator.n_samples_per_prompt=5 \
 
   # Environment and LLM judge configuration
   environment.env_class=llm_as_a_judge \
   environment.skyrl_gym.llm_as_a_judge.model="gpt-4o-mini" \
 
-  # Other parameters (see the `examples/llm_as_a_judge/run_llm_judge.sh` for the full script)
+  # Other parameters (see the `examples/train/llm_as_a_judge/run_llm_judge.sh` for the full script)
   ...
 
 ```
@@ -127,7 +131,7 @@ uv run --isolated --extra vllm --env-file .env.llm_judge -m examples.llm_as_a_ju
 Now you can launch your training run with the following command:
 
 ```bash
-bash examples/llm_as_a_judge/run_llm_judge.sh
+bash examples/train/llm_as_a_judge/run_llm_judge.sh
 
 ```
 

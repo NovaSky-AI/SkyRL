@@ -1,0 +1,26 @@
+---
+title: "API Reference"
+description: "API reference for SkyRL packages."
+---
+
+# API Reference
+
+## SkyRL
+
+- [**Backends**](/docs/api-ref/skyrl/backends) — `AbstractBackend`, `JaxBackend`, `SkyRLTrainBackend`
+- [**Tinker Engine**](/docs/api-ref/skyrl/tinker-engine) — Orchestration engine for RL training
+- [**Types**](/docs/api-ref/skyrl/types) — Request/response types for the Tinker API
+- [**TX Models**](/docs/api-ref/skyrl/tx-models) — `ModelConfig`, `ModelForCausalLM`, `CausalLMOutput`
+- [**Entrypoint**](/docs/api-ref/skyrl/entrypoints) — `BasePPOExp`, `EvalOnlyEntrypoint`
+- [**Configuration**](/docs/api-ref/skyrl/config) — Configuration dataclasses for SkyRL training
+- [**Environment Variables**](/docs/api-ref/skyrl/env-vars) — Configuration via environment variables
+- **SkyRL-Train Backend:**
+  - [**Data Interface**](/docs/api-ref/skyrl/skyrl-train/data) — `TensorBatch`, `TrainingInput`, `GeneratorInput`, `GeneratorOutput`
+  - [**Generator**](/docs/api-ref/skyrl/skyrl-train/generators) — `GeneratorInterface`, `InferenceEngineInterface`
+  - [**Trainer**](/docs/api-ref/skyrl/skyrl-train/trainer) — `RayPPOTrainer`, `Dispatch`, `Worker`, `PPORayActorGroup`
+  - [**Algorithm Registry**](/docs/api-ref/skyrl/skyrl-train/registry) — Advantage estimators, policy loss registries
+
+## SkyRL-Gym
+
+- [**Environment**](/docs/api-ref/skyrl-gym/environment) — `Env`, `BaseTextEnv`, `EnvStepOutput`
+- [**Tools**](/docs/api-ref/skyrl-gym/tools) — `ToolGroup`, `tool`

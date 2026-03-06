@@ -68,5 +68,5 @@ to
 When using `/chat/completions` with vllm via the HTTP endpoint for rollout, you can pass this in with 
 
 ```bash
-+generator.engine_init_kwargs.chat_template=/path/to/templates/qwen3_acc_thinking.jinja2
+generator.engine_init_kwargs.chat_template=/path/to/templates/qwen3_acc_thinking.jinja2
 ```

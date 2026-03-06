@@ -2,10 +2,13 @@
 title: "Async Training: One-Step Off-Policy Pipelining"
 ---
 
+<Callout type="info">
+Async training is supported with the `fsdp` and `megatron` backends.
+</Callout>
 
 This example demonstrates how to implement asynchronous training with one-off pipelining, showcasing the flexibility of the training framework to support different execution plans with minimal code changes.
 
-The complete code from this example is available at [examples/async](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/async).
+The complete code from this example is available at [examples/train/async](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/async).
 
 ## Overview
 
@@ -32,7 +35,7 @@ The original `train()` method performs generation and training sequentially, so 
 
 The generation loop passes the training loop completed trajectories via an `asyncio.Queue` and coordinates weight synchronization using asyncio events.
 
-We include a minimal version here, please see [examples/async/async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl-train/examples/async/async_trainer.py) for full details:
+We include a minimal version here, please see [examples/train/async/async_trainer.py](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/async/async_trainer.py) for full details:
 
 ```python
 class AsyncRayPPOTrainer(RayPPOTrainer):
@@ -92,29 +95,29 @@ That's it! The rest of the entrypoint logic for launching the training run remai
 Finally, we modify the training configuration to use our new entrypoint and disable model colocation:
 
 ```bash
-uv run --isolated --extra vllm -m examples.async.main_async \
+uv run --isolated --extra fsdp -m examples.train.async.main_async \
   trainer.placement.colocate_all=false \
   trainer.placement.colocate_policy_ref=true \
   trainer.placement.policy_num_gpus_per_node=4 \
   trainer.placement.ref_num_gpus_per_node=4 \
-  generator.num_inference_engines=4 \
-  generator.inference_engine_tensor_parallel_size=1
+  generator.inference_engine.num_engines=4 \
+  generator.inference_engine.tensor_parallel_size=1
 
 ```
 
 Key configuration changes:
 
-* **examples.async.main_async**: Point the bash script to the new entrypoint
+* **examples.train.async.main_async**: Point the bash script to the new entrypoint
 * **colocate_all=false, colocate_policy_ref=true**: Disables colocation of generation and training models (but keeps the policy and reference models colocated).
 
 Now we can train!
 
 ```bash
 # Prepare the dataset
-uv run --isolated examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+uv run --isolated examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
  # Run the training script
 export WANDB_API_KEY=your_wandb_api_key  # or set trainer.logger="console" to print to stdout
-bash examples/async/async_run_gsm8k.sh
+bash examples/train/async/async_run_gsm8k.sh
 
 ```

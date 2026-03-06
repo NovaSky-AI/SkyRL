@@ -2,7 +2,7 @@
 Test for route_prompts_to_engines function that routes prompts to inference engines in inference engine client.
 
 Run with:
-uv run --isolated --extra dev pytest tests/backends/skyrl_train/inf_engines/test_route_prompts_to_engines.py
+uv run --isolated --extra dev pytest tests/backends/skyrl_train/inference_engines/test_route_prompts_to_engines.py
 """
 
 from unittest.mock import patch

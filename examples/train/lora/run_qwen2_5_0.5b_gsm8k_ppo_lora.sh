@@ -2,9 +2,9 @@ set -x
 
 # Colocated PPO LoRA training + generation for Qwen2.5-0.5B-Instruct on GSM8K.
 
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+# uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/lora/run_qwen2_5_0.5b_gsm8k_ppo_lora.sh
+# bash examples/train/lora/run_qwen2_5_0.5b_gsm8k_ppo_lora.sh
 
 DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
@@ -26,9 +26,10 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.strategy=fsdp2 \
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.num_inference_engines=$NUM_GPUS \
-  generator.inference_engine_tensor_parallel_size=1 \
+  generator.inference_engine.num_engines=$NUM_GPUS \
+  generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
@@ -45,14 +46,14 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.policy.optimizer_config.lr=3.0e-5 \
   trainer.critic.optimizer_config.lr=3.0e-5 \
   trainer.algorithm.use_kl_loss=true \
-  generator.backend=$INFERENCE_BACKEND \
-  generator.run_engines_locally=true \
-  generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
+  generator.inference_engine.backend=$INFERENCE_BACKEND \
+  generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.weight_sync_backend=nccl \
+  generator.inference_engine.async_engine=true \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.gpu_memory_utilization=0.8 \
+  generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k_0.5b_lora" \
   trainer.run_name="gsm8k_0.5b_lora_ppo" \

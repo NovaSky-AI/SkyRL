@@ -10,7 +10,7 @@ import torch
 from jaxtyping import Float, Integer
 from pytest import approx
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.utils.utils import validate_batch_sizes
@@ -21,7 +21,7 @@ from tests.train.util import example_dummy_config
 
 
 @pytest.fixture
-def dummy_config() -> SkyRLConfig:
+def dummy_config() -> SkyRLTrainConfig:
     return example_dummy_config()
 
 
@@ -199,12 +199,12 @@ def test_micro_batches_accumulated_initialized():
         def _forward_micro_batch(self, micro_batch):
             pass
 
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.algorithm.policy_loss_type = "regular"
 
     # PolicyWorker has _micro_batches_accumulated initialized at construction
     policy_worker = TestPolicyWorker(
-        cfg=cfg,
+        cfg=cfg.trainer,
         world_size=4,
         rank=0,
         local_rank=0,
@@ -217,7 +217,7 @@ def test_micro_batches_accumulated_initialized():
 
     # CriticWorker has _micro_batches_accumulated initialized at construction
     critic_worker = TestCriticWorker(
-        cfg=cfg,
+        cfg=cfg.trainer,
         world_size=4,
         rank=0,
         local_rank=0,
@@ -248,7 +248,7 @@ def test_validate_batch_sizes():
         critic_model_path=None,
     ):
         """Helper to create config for validation testing."""
-        cfg = SkyRLConfig()
+        cfg = SkyRLTrainConfig()
         cfg.trainer.train_batch_size = train_batch_size
         cfg.trainer.policy_mini_batch_size = policy_mini_batch_size
         cfg.trainer.critic_mini_batch_size = critic_mini_batch_size
@@ -408,7 +408,7 @@ def test_forward_backward_batch_calculations():
     """
 
     # Create test configuration
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.update_epochs_per_batch = 1
     cfg.trainer.algorithm.policy_loss_type = "regular"
@@ -436,7 +436,7 @@ def test_forward_backward_batch_calculations():
     # Helper function to create worker with minimal setup
     def create_test_worker(worker_class):
         worker = worker_class(
-            cfg=cfg,
+            cfg=cfg.trainer,
             world_size=1,
             rank=0,
             local_rank=0,
@@ -529,7 +529,7 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     """Ensure train_batch_size is >= lcm(policy_dp, ref_dp) when ref is used; else >= policy_dp."""
 
     def create_config(train_batch_size, policy_dp, ref_dp, include_ref=True):
-        cfg = SkyRLConfig()
+        cfg = SkyRLTrainConfig()
         cfg.trainer.train_batch_size = train_batch_size
         cfg.trainer.policy_mini_batch_size = train_batch_size
         cfg.trainer.critic_mini_batch_size = 1

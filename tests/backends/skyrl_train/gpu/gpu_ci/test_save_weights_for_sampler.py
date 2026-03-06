@@ -4,13 +4,13 @@ Test save_weights_for_sampler() method
 GPU Requirements: 2 GPUs
 
 Run with:
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_save_weights_for_sampler.py -v
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_weights_for_sampler.py -v
 """
 
 import asyncio
 
 import pytest
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl.train.utils.utils import validate_cfg
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
@@ -26,16 +26,16 @@ from tests.backends.skyrl_train.gpu.utils import (
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_config() -> SkyRLConfig:
+def get_test_config() -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 1
-    cfg.generator.inference_engine_tensor_parallel_size = 1
-    cfg.generator.async_engine = True
-    cfg.generator.num_inference_engines = 1
-    cfg.generator.run_engines_locally = True
+    cfg.generator.inference_engine.tensor_parallel_size = 1
+    cfg.generator.inference_engine.async_engine = True
+    cfg.generator.inference_engine.num_engines = 1
+    cfg.generator.inference_engine.run_engines_locally = True
     cfg.trainer.use_sample_packing = False
     cfg.trainer.logger = "console"
 
@@ -45,17 +45,17 @@ def get_test_config() -> SkyRLConfig:
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "strategy", "backend"),
+    ("colocate_all", "strategy"),
     [
-        pytest.param(False, "fsdp2", "vllm", marks=pytest.mark.vllm),
-        pytest.param(True, "fsdp2", "vllm", marks=pytest.mark.vllm),
+        pytest.param(False, "fsdp2"),
+        pytest.param(True, "fsdp2"),
     ],
     ids=[
-        "no_colocate_fsdp2_vllm",
-        "colocate_fsdp2_vllm",
+        "no_colocate_fsdp2",
+        "colocate_fsdp2",
     ],
 )
-def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all, strategy, backend):
+def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all, strategy):
     """
     Test that save_weights_for_sampler() correctly syncs weights before sampling.
 
@@ -67,16 +67,14 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
     cfg = get_test_config()
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.trainer.strategy = strategy
-    cfg.generator.backend = backend
 
     with InferenceEngineState.create(
         cfg=cfg,
         model=MODEL,
         use_local=True,
-        async_engine=cfg.generator.async_engine,
-        tp_size=cfg.generator.inference_engine_tensor_parallel_size,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
-        backend=backend,
         sleep_level=2,  # Full sleep since we explicitly sync weights
     ) as engines:
         client, pg = engines.client, engines.pg
@@ -118,7 +116,9 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
 
         # === Step 3: Sample using inference engine ===
         asyncio.run(client.reset_prefix_cache())
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=5), sampling_params))
 
         # Verify we got responses
@@ -132,22 +132,19 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         print(f"Example output: {outputs['responses'][0][:3]}...")
 
 
-@pytest.mark.parametrize("backend", [pytest.param("vllm", marks=pytest.mark.vllm)])
-def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, backend):
+def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
     """
     Test that multiple training steps followed by one save_weights_for_sampler works correctly.
     """
     cfg = get_test_config()
     cfg.trainer.placement.colocate_all = False
     cfg.trainer.strategy = "fsdp2"
-    cfg.generator.backend = backend
 
     # Initialize inference engine (uses 1 GPU)
     with InferenceEngineState.create(
         cfg=cfg,
         model=MODEL,
         use_local=True,
-        backend=backend,
         sleep_level=2,
     ) as engines:
         client, pg = engines.client, engines.pg
@@ -184,6 +181,8 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture, back
 
         # Verify inference works
         asyncio.run(client.reset_prefix_cache())
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params))
         assert len(outputs["responses"]) == 2, "Should get 2 responses"

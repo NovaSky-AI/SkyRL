@@ -6,14 +6,15 @@ ensuring that training can resume exactly where it left off.
 
 Run with:
 For FSDP and FSDP2, run:
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "not megatron"
 
 For Megatron, run:
-uv run --isolated --extra dev --extra mcore pytest tests/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
+uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
 """
 
 import ray
 import pytest
+from omegaconf import OmegaConf
 import torch
 import os
 import shutil
@@ -22,7 +23,7 @@ from torch.utils.data import Dataset
 from unittest.mock import MagicMock
 from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.trainer import RayPPOTrainer
 from tests.backends.skyrl_train.gpu.utils import import_worker, ray_init_for_tests
@@ -47,9 +48,9 @@ class DummyDataset(Dataset):
         return batch
 
 
-def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLConfig:
+def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> SkyRLTrainConfig:
     """Create minimal trainer config for testing"""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.critic.model.path = MODEL_NAME  # Enable critic for testing
     cfg.trainer.strategy = strategy
@@ -72,8 +73,8 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> S
     cfg.trainer.epochs = 1
     cfg.trainer.logger = "console"
     cfg.generator.n_samples_per_prompt = 1
-    cfg.generator.num_inference_engines = NUM_GPUS // 2
-    cfg.generator.inference_engine_tensor_parallel_size = 2
+    cfg.generator.inference_engine.num_engines = NUM_GPUS // 2
+    cfg.generator.inference_engine.tensor_parallel_size = 2
 
     # Megatron-specific
     if strategy == "megatron":
@@ -94,7 +95,7 @@ def get_test_trainer_config(strategy: str, fsdp2_cpu_offload: bool = False) -> S
     return cfg
 
 
-def create_minimal_trainer(cfg: SkyRLConfig):
+def create_minimal_trainer(cfg: SkyRLTrainConfig):
     """Create a minimal trainer setup for testing"""
     # Create minimal tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -213,10 +214,12 @@ def test_trainer_full_checkpointing(ray_init_fixture, strategy, fsdp2_cpu_offloa
         )
 
         # Check key configuration values are preserved
+        config_as_omegaconf = OmegaConf.create(loaded_trainer_state["config"])
+        loaded_trainer_config = SkyRLTrainConfig.from_dict_config(config_as_omegaconf)
         assert (
-            loaded_trainer_state["config"].trainer.train_batch_size == cfg.trainer.train_batch_size
+            loaded_trainer_config.trainer.train_batch_size == cfg.trainer.train_batch_size
         ), "train_batch_size not preserved in checkpoint"
-        assert loaded_trainer_state["config"].trainer.strategy == strategy, "strategy not preserved in checkpoint"
+        assert loaded_trainer_config.trainer.strategy == strategy, "strategy not preserved in checkpoint"
         assert loaded_trainer_state["global_step"] == saved_global_step, "global_step not preserved in checkpoint"
 
         # Cleanup first trainer

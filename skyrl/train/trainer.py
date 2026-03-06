@@ -3,9 +3,9 @@ import math
 import os
 import shutil
 from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from omegaconf import DictConfig
 
 import numpy as np
 import ray
@@ -17,7 +17,7 @@ from ray.util.placement_group import PlacementGroup, placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
@@ -26,7 +26,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     ActorInfo,
     MeshRank,
 )
-from skyrl.train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -78,7 +78,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 class RayPPOTrainer:
     def __init__(
         self,
-        cfg: Union[SkyRLConfig, DictConfig],
+        cfg: SkyRLTrainConfig,
         tracker: Tracking,
         tokenizer: AutoTokenizer,
         train_dataset: Optional[PromptDataset],
@@ -211,13 +211,15 @@ class RayPPOTrainer:
                     generator_input, uids = prepare_generator_input(
                         rand_prompts,
                         self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        get_sampling_params_for_backend(
+                            self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
+                        ),
                         self.cfg.environment.env_class,
                         "train",
                         self.global_step,
                     )
 
-                    # 1.1 generation phase
+                    # 1.1. generation phase
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = await self.generate(generator_input)
 
@@ -251,20 +253,21 @@ class RayPPOTrainer:
                         reward=generator_output["rewards"][0],
                     )
 
+                    # 3. Convert GeneratorOutput to TrainingInputBatch
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
                         logger.info(f"Number of sequences: {len(training_input['sequences'])}")
 
-                    # 1.4 inference and calculate values, log probs, rewards, kl divergence
+                    # 4. Inference and calculate values, log probs, rewards, kl divergence
                     with Timer("fwd_logprobs_values_reward", self.all_timings):
                         training_input = self.fwd_logprobs_values_reward(training_input)
 
-                    # 1.5 apply kl divergence penalty to rewards
+                    # 5. apply kl divergence penalty to rewards
                     if self.cfg.trainer.algorithm.use_kl_in_reward:
                         with Timer("apply_reward_kl_penalty", self.all_timings):
                             training_input = self.apply_reward_kl_penalty(training_input)
 
-                    # 3. calculate advantages and returns
+                    # 6. calculate advantages and returns
                     with Timer("compute_advantages_and_returns", self.all_timings):
                         training_input = self.compute_advantages_and_returns(training_input)
                         # remove some unwanted keys
@@ -280,12 +283,12 @@ class RayPPOTrainer:
                         with Timer("dump_data_batch"):
                             self.dump_data(training_input, file_name=f"global_step_{self.global_step}_training_input")
 
-                    # 4. train policy/critic model
+                    # 7. train policy/critic model
                     # Policy model is backloaded to GPU during training
                     with Timer("train_critic_and_policy", self.all_timings):
                         status = self.train_critic_and_policy(training_input)
 
-                    # 5. conditionally save checkpoints and hf model
+                    # 8. conditionally save checkpoints and hf model
                     if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
                         with Timer("save_checkpoints", self.all_timings):
                             self.save_checkpoints()
@@ -296,7 +299,7 @@ class RayPPOTrainer:
                         with Timer("save_hf_model", self.all_timings):
                             self.save_models()
 
-                    # 6. conditionally sync policy and ref at the end of the epoch
+                    # 9. conditionally sync policy and ref at the end of the epoch
                     if (
                         self.cfg.trainer.update_ref_every_epoch
                         and self.ref_model is not None
@@ -306,11 +309,11 @@ class RayPPOTrainer:
                         with Timer("update_ref_with_policy", self.all_timings):
                             self.update_ref_with_policy()
 
-                    # 7. Prepare weights for sampling
+                    # 10. Prepare weights for sampling
                     with Timer("sync_weights", self.all_timings):
                         await self.dispatch.save_weights_for_sampler()
 
-                # 8. set logs
+                # 11. set logs
                 logger.info(status)
                 # log epoch info
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
@@ -348,6 +351,7 @@ class RayPPOTrainer:
             with Timer("save_hf_model", self.all_timings):
                 self.save_models()
                 logger.info("Saved final model.")
+        self.tracker.finish()
         logger.info("Training done!")
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
@@ -387,11 +391,12 @@ class RayPPOTrainer:
             num_policy_gpus = cfg.trainer.placement.policy_num_gpus_per_node * cfg.trainer.placement.policy_num_nodes
             num_critic_gpus = cfg.trainer.placement.critic_num_gpus_per_node * cfg.trainer.placement.critic_num_nodes
             num_ref_gpus = cfg.trainer.placement.ref_num_gpus_per_node * cfg.trainer.placement.ref_num_nodes
+            ie_cfg = cfg.generator.inference_engine
             num_rollout_gpus = (
-                cfg.generator.num_inference_engines
-                * cfg.generator.inference_engine_tensor_parallel_size
-                * cfg.generator.inference_engine_pipeline_parallel_size
-                * cfg.generator.inference_engine_data_parallel_size
+                ie_cfg.num_engines
+                * ie_cfg.tensor_parallel_size
+                * ie_cfg.pipeline_parallel_size
+                * ie_cfg.data_parallel_size
             )
             assert (
                 num_policy_gpus == num_rollout_gpus
@@ -399,7 +404,7 @@ class RayPPOTrainer:
             pg = self.colocate_pg
 
             policy_model = PPORayActorGroup(
-                cfg,
+                cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
                 PolicyWorker,
@@ -414,7 +419,7 @@ class RayPPOTrainer:
                     num_policy_gpus == num_ref_gpus
                 ), "num_policy_gpus and num_ref_gpus must be the same when colocating policy and ref model"
                 ref_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
                     RefWorker,
@@ -431,7 +436,7 @@ class RayPPOTrainer:
                     num_policy_gpus == num_critic_gpus
                 ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
                 critic_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
                     CriticWorker,
@@ -461,7 +466,7 @@ class RayPPOTrainer:
                 get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
             policy_model = PPORayActorGroup(
-                cfg,
+                cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
                 PolicyWorker,
@@ -472,7 +477,7 @@ class RayPPOTrainer:
             )
             if use_ref_model:
                 ref_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
                     RefWorker,
@@ -486,7 +491,7 @@ class RayPPOTrainer:
 
             if cfg.trainer.critic.model.path:
                 critic_model = PPORayActorGroup(
-                    cfg,
+                    cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
                     CriticWorker,
@@ -586,7 +591,10 @@ class RayPPOTrainer:
         TODO(tgriggs): Remove this method when migration is complete.
         """
         return self.policy_model.async_run_ray_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            "pass_through",
+            "broadcast_to_inference_engines",
+            self.inference_engine_client,
+            self.cfg.generator.inference_engine,
         )
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
@@ -776,27 +784,22 @@ class RayPPOTrainer:
 
         if self.cfg.generator.step_wise_trajectories:
             is_last_step = data["is_last_step"].bool()
-            response_mask = data["response_mask"]
             index = np.array(data.metadata["uids"])
-            adv_estimator = self.cfg.trainer.algorithm.advantage_estimator
-            config = self.cfg.trainer.algorithm
             values = data["values"]
-            gamma = self.cfg.trainer.algorithm.gamma
-            lambd = self.cfg.trainer.algorithm.lambd
-            grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
-            last_step_rewards = token_level_rewards[is_last_step]
-            # compatible with any advantage estimator
+            # Use the last step of each trajectory to compute advantages. Compatible with any advantage estimator
+            # NOTE(Charlie): so we ignore per-step rewards in step-wise training.
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
-                token_level_rewards=last_step_rewards,
-                response_mask=response_mask[is_last_step],
+                token_level_rewards=token_level_rewards[is_last_step],
+                response_mask=data["response_mask"][is_last_step],
                 index=index[is_last_step.cpu().numpy()],
-                adv_estimator=adv_estimator,
+                adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
                 values=values[is_last_step] if values is not None else None,
-                config=config,
-                gamma=gamma,
-                lambd=lambd,
-                grpo_norm_by_std=grpo_norm_by_std,
+                config=self.cfg.trainer.algorithm,
+                gamma=self.cfg.trainer.algorithm.gamma,
+                lambd=self.cfg.trainer.algorithm.lambd,
+                grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
             )
+            # Broadcast each trajectory's advantage and return to all steps of each trajectory.
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
             )
@@ -1218,7 +1221,7 @@ class RayPPOTrainer:
         # Save additional trainer state
         trainer_state = {
             "global_step": self.global_step,
-            "config": self.cfg,
+            "config": asdict(self.cfg),
         }
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         with io.open_file(trainer_state_path, "wb") as f:

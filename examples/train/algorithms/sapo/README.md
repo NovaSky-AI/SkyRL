@@ -7,7 +7,7 @@
 ## Quick Start
 
 1. Set/Export your `WANDB_API_KEY`.
-2. Ensure you have `uv` installed and the environment is set up in `skyrl-train`.
+2. Ensure you have `uv` installed and the environment is set up.
 3. Submit the job:
 
    ```bash

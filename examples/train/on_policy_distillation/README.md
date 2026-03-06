@@ -17,13 +17,12 @@ We provide a full writeup at https://novasky-ai.notion.site/on-policy-distillati
 To get started, first set up the dataset from the DAPO example:
 
 ```bash
-# Run from the `skyrl-train` directory
-bash examples/algorithms/dapo/prepare_dapo_data.sh
+bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 ```
 
 Then, just make sure to set the path to your desired teacher model, and you're ready to kick off training!
 
 ```bash
 TEACHER_MODEL=<YOUR_MODEL_HERE>
-bash examples/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh trainer.ref.mode.path=$TEACHER_MODEL
+bash examples/train/on_policy_distillation/run_on_policy_distill_math_qwen3_4b.sh trainer.ref.mode.path=$TEACHER_MODEL
 ```

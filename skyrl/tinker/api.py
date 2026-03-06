@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
 import os
+import psutil
 import signal
 import random
 import threading
@@ -38,8 +39,56 @@ from skyrl.utils.log import logger, get_uvicorn_log_config
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 ID_MAX_LENGTH = 255
 
+API_SERVER_STARTUP_ARGS = ["-m", "skyrl.tinker.api"]
+
 # Timeout for graceful shutdown when engine crashes
 SHUTDOWN_TIMEOUT_SECONDS = 10
+
+
+def _get_parent_uv_run_args(parent_cmd: list[str]) -> list[str]:
+    """Extract parent `uv run <uv run args>` flags for the engine launch given the parent process's startup command
+
+    `uv run` starts this Python API process as a child. To recover the original
+    `uv run <uv run args> ...` flags, we inspect the parent process command line
+    and extract all the uv run args before the script argument.
+    """
+    # the API server startup command can be
+    # uv run <uv run args> -m skyrl.tinker.api
+    # or uv run <uv run args> python -m skyrl.tinker.api
+    # or uv run <uv run args> -- python -m skyrl.tinker.api
+    stop_strings = ["--", "python"]
+    detected = False
+    for i in range(len(parent_cmd) - 1):
+        if parent_cmd[i] in stop_strings or parent_cmd[i : i + len(API_SERVER_STARTUP_ARGS)] == API_SERVER_STARTUP_ARGS:
+            detected = True
+            break
+    if not detected or i < 2:
+        raise ValueError(
+            f"Unable to parse tinker API server startup command: {parent_cmd}. "
+            "Ensure that the tinker API server was started with `uv run <uv run args> -m skyrl.tinker.api`"
+        )
+    parent_cmd = parent_cmd[2:i]  # ignore uv run
+    return parent_cmd
+
+
+def _build_uv_run_cmd_engine(parent_cmd: list[str], engine_config: BaseModel) -> list[str]:
+    """Builds uv run command for the engine
+
+    Args:
+        parent_cmd: The command for the parent process starting the engine
+        engine_config: Engine configuration
+    Returns:
+        cmd: The uv run command for the tinker engine
+    """
+    cmd = ["uv", "run"]
+    parent_flags = _get_parent_uv_run_args(parent_cmd)
+    logger.debug(f"Detected API server uv run flags: {parent_flags}")
+    cmd.extend(parent_flags)
+    # NOTE: uv deduplicates extras so we can unconditionally add the tinker extra
+    cmd.extend(["--extra", "tinker", "--extra", engine_config.backend])
+    cmd.extend(["-m", "skyrl.tinker.engine"])
+    cmd.extend(config_to_argv(engine_config))
+    return cmd
 
 
 @asynccontextmanager
@@ -61,19 +110,9 @@ async def lifespan(app: FastAPI):
         app.state.external_inference_client = None
         logger.info("Using internal engine for inference")
 
-    # Build subprocess command with engine config parameters
-    cmd = [
-        "uv",
-        "run",
-        "--isolated",
-        "--extra",
-        "tinker",
-        "--extra",
-        app.state.engine_config.backend,
-        "-m",
-        "skyrl.tinker.engine",
-    ]
-    cmd.extend(config_to_argv(app.state.engine_config))
+    # Build subprocess command with engine config parameters.
+    parent_cmd = psutil.Process(os.getppid()).cmdline()
+    cmd = _build_uv_run_cmd_engine(parent_cmd, app.state.engine_config)
 
     background_engine = await asyncio.create_subprocess_exec(*cmd)
     app.state.background_engine = background_engine

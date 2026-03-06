@@ -9,7 +9,7 @@ Colocated test (CUDA IPC strategy) is deferred until vLLM weight sync endpoints 
 See: https://github.com/vllm-project/vllm/issues/31848
 
 Run:
-    uv run pytest tests/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
+    uv run pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
 """
 
 import time
@@ -18,9 +18,9 @@ import httpx
 import pytest
 import ray
 import torch
-import asyncio
 import argparse
 
+import pytest_asyncio
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
@@ -141,8 +141,8 @@ class Trainer:
         torch.cuda.synchronize()
 
 
-@pytest.fixture(scope="class")
-def weight_update_env(ray_init_fixture):
+@pytest_asyncio.fixture(scope="class")
+async def weight_update_env(ray_init_fixture):
     """
     Create environment for weight update testing.
 
@@ -211,15 +211,14 @@ def weight_update_env(ray_init_fixture):
         "client": client,
     }
 
-    asyncio.get_event_loop().run_until_complete(client.teardown())
+    await client.teardown()
     router.shutdown()
 
 
-@pytest.mark.vllm
+@pytest.mark.asyncio(loop_scope="class")
 class TestWeightUpdateFlow:
     """Tests for weight synchronization from trainer to inference server (non-colocated)."""
 
-    @pytest.mark.asyncio
     async def test_update_weights_flow(self, weight_update_env):
         """
         Full E2E weight sync test (non-colocated, NCCL broadcast):

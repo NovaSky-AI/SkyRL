@@ -2,14 +2,14 @@
 uv run --isolated --extra fsdp -m examples.train.algorithms.custom_policy_loss.main_custom_policy_loss
 """
 
+import sys
+
 import ray
-import hydra
 import torch
-from typing import Optional, Union
-from omegaconf import DictConfig
-from skyrl.train.config import SkyRLConfig
+from typing import Optional
+from skyrl.train.config import SkyRLTrainConfig, AlgorithmConfig
 from skyrl.train.utils import initialize_ray
-from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.entrypoints.main_base import BasePPOExp, validate_cfg
 from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry
 
 
@@ -18,7 +18,7 @@ def compute_reinforce_policy_loss(
     log_probs: torch.Tensor,
     old_log_probs: torch.Tensor,
     advantages: torch.Tensor,
-    config: Union[SkyRLConfig, DictConfig],
+    config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
 ):
     """
@@ -36,13 +36,13 @@ PolicyLossRegistry.register("reinforce", compute_reinforce_policy_loss)
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp = BasePPOExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # validate the arguments
     validate_cfg(cfg)
 

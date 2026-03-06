@@ -11,6 +11,7 @@ const folderOrder = [
   'checkpointing-logging',
   'troubleshooting',
   'skyagent',
+  'api-ref',
 ];
 
 // Define the order of pages within each folder
@@ -26,6 +27,10 @@ const pageOrder: Record<string, string[]> = {
   'checkpointing-logging': ['checkpointing'],
   'troubleshooting': ['troubleshooting'],
   'skyagent': ['agent-overview'],
+  'api-ref': ['index', 'skyrl', 'skyrl-gym'],
+  'skyrl': ['backends', 'tinker-engine', 'types', 'tx-models', 'entrypoints', 'config', 'env-vars', 'skyrl-train'],
+  'skyrl-train': ['trainer', 'data', 'generators', 'registry'],
+  'skyrl-gym': ['environment', 'tools'],
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,20 +48,26 @@ export function sortPageTree(tree: any): any {
     return aIndex - bIndex;
   });
 
-  // Sort pages within folders
+  // Sort pages and subfolders within folders (recursively)
   for (const item of sortedChildren) {
-    if (item.type === 'folder' && item.children && pageOrder[item.name]) {
-      const order = pageOrder[item.name];
-      item.children.sort((a: any, b: any) => {
-        const aSlug = a.type === 'page' ? a.slug : '';
-        const bSlug = b.type === 'page' ? b.slug : '';
-        const aIndex = order.indexOf(aSlug);
-        const bIndex = order.indexOf(bSlug);
-        if (aIndex === -1 && bIndex === -1) return 0;
-        if (aIndex === -1) return 1;
-        if (bIndex === -1) return -1;
-        return aIndex - bIndex;
-      });
+    if (item.type === 'folder' && item.children) {
+      if (pageOrder[item.name]) {
+        const order = pageOrder[item.name];
+        item.children.sort((a: any, b: any) => {
+          const aSlug = a.type === 'page' ? a.slug : a.name;
+          const bSlug = b.type === 'page' ? b.slug : b.name;
+          const aIndex = order.indexOf(aSlug);
+          const bIndex = order.indexOf(bSlug);
+          if (aIndex === -1 && bIndex === -1) return 0;
+          if (aIndex === -1) return 1;
+          if (bIndex === -1) return -1;
+          return aIndex - bIndex;
+        });
+      }
+      // Recurse into subfolders
+      item.children = item.children.map((child: any) =>
+        child.type === 'folder' && child.children ? sortPageTree(child) : child
+      );
     }
   }
 

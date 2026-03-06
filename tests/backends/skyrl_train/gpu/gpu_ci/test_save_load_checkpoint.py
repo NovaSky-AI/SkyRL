@@ -1,9 +1,9 @@
 """
 For FSDP and FSDP2, run:
-uv run --isolated --extra dev -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
+uv run --isolated --extra dev -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_load_checkpoint.py -m "not megatron"
 
 For Megatron, run:
-uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
+uv run --isolated --extra dev --extra mcore -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
 """
 
 import ray
@@ -14,7 +14,7 @@ import shutil
 import json
 from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
@@ -41,11 +41,11 @@ def run_one_training_step(
     ray.get(actor_group.async_run_ray_method("pass_through", "optim_step"))
 
 
-def get_test_actor_config(strategy: str) -> SkyRLConfig:
-    cfg = SkyRLConfig()
+def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = NUM_GPUS
-    cfg.generator.inference_engine_tensor_parallel_size = NUM_GPUS
+    cfg.generator.inference_engine.tensor_parallel_size = NUM_GPUS
     cfg.trainer.strategy = strategy
 
     cfg.trainer.ckpt_path = CKPT_PATH
@@ -58,15 +58,23 @@ def get_test_actor_config(strategy: str) -> SkyRLConfig:
 
 
 @pytest.mark.parametrize(
-    ("strategy", "lora"),
+    ("strategy", "lora", "fully_reshardable"),
     [
-        ("fsdp", False),
-        ("fsdp2", False),
-        pytest.param("megatron", False, marks=pytest.mark.megatron),
-        pytest.param("megatron", True, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        ("fsdp", False, False),
+        ("fsdp2", False, False),
+        pytest.param("megatron", False, False, marks=pytest.mark.megatron),
+        pytest.param("megatron", True, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
+        pytest.param("megatron", False, True, marks=pytest.mark.megatron),
+    ],
+    ids=[
+        "fsdp",
+        "fsdp2",
+        "megatron",
+        "megatron_lora",
+        "megatron_fully_reshardable",
     ],
 )
-def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
+def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardable):
     """
     Test checkpointing logic by:
     1. Creating model and doing one training step
@@ -80,6 +88,8 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora):
         from skyrl.train.config import SkyRLLoraConfig
 
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=32, alpha=32)
+    if fully_reshardable:
+        cfg.trainer.policy.megatron_config.dist_ckpt_optim_fully_reshardable = True
 
     try:
         actor_group = init_worker_with_type(

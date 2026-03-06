@@ -13,8 +13,7 @@ from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -23,7 +22,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.lora.request import LoRARequest
 from uuid import uuid4
 from skyrl.backends.skyrl_train.inference_engines.base import (
@@ -171,6 +170,18 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
+    @staticmethod
+    def _get_unfinished_request_ids(output_processor) -> list:
+        """Get unfinished request IDs suitable for abort/abort_request calls.
+
+        In vllm 0.16.0+, request_states is keyed by internal IDs (with a random suffix),
+        while abort() expects external IDs by default. We use external_req_ids when
+        available and fall back to request_states keys for older vllm versions.
+        """
+        if hasattr(output_processor, "external_req_ids"):
+            return list(output_processor.external_req_ids.keys())
+        return list(output_processor.request_states.keys())
+
     def reset_prefix_cache(self):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
@@ -246,7 +257,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "generation should be done before sleep() is called. Check for potential failures or "
                 "dangling requests in your Generator/Env. Aborting all unfinished requests."
             )
-            unfinished_request_ids = list(output_processor.request_states.keys())
+            unfinished_request_ids = self._get_unfinished_request_ids(output_processor)
             await asyncio.to_thread(engine.abort_request, unfinished_request_ids)
 
         level = 1 if self._is_lora else kwargs.get("level", 2)
@@ -344,8 +355,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             legacy_kwargs["model_config"] = model_config
 
         # Build request logger for debugging (off by default).
-        # Enable via: +generator.engine_init_kwargs.enable_log_requests=true
-        # Optionally limit logged chars: +generator.engine_init_kwargs.max_log_len=256
+        # Enable via: generator.engine_init_kwargs.enable_log_requests=true
+        # Optionally limit logged chars: generator.engine_init_kwargs.max_log_len=256
         request_logger = None
         if enable_log_requests:
             from vllm.entrypoints.logger import RequestLogger
@@ -458,7 +469,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "generation should be done before sleep() is called. Check for potential failures or "
                 "dangling requests in your Generator/Env. Aborting all unfinished requests."
             )
-            unfinished_request_ids = list(output_processor.request_states.keys())
+            unfinished_request_ids = self._get_unfinished_request_ids(output_processor)
             await engine.abort(unfinished_request_ids)
 
         # TODO(team): remove once vllm fixes this
@@ -522,8 +533,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.engine.protocol import ErrorInfo
-
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
@@ -561,9 +570,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             # NOTE(Charlie): This is hacky. With the refactored inference stack, we
             # should be able to directly reuse the error handling from the served vllm.
             error_message = str(e).lower()
-            is_context_length_error = (
-                "maximum context length" in error_message or "maximum model length" in error_message
-            )
+            is_context_length_error = "context length" in error_message or "maximum input length" in error_message
 
             if is_context_length_error:
                 http_status = HTTPStatus.BAD_REQUEST
@@ -571,8 +578,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.engine.protocol import ErrorInfo
-
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
@@ -625,8 +630,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         already-generated tokens with a stop_reason of "abort".
         """
         engine = self._get_engine()
-        # Collect all request IDs currently tracked by the scheduler/output processor
-        unfinished_request_ids = list(engine.output_processor.request_states.keys())
+        unfinished_request_ids = self._get_unfinished_request_ids(engine.output_processor)
         if unfinished_request_ids:
             await engine.abort(unfinished_request_ids)
         await engine.reset_prefix_cache()  # avoid KV-cache pollution
