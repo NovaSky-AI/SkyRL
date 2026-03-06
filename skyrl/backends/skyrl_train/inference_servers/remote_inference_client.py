@@ -293,6 +293,47 @@ class RemoteInferenceClient:
             "response_logprobs": response_logprobs if len(response_logprobs) > 0 else None,
         }
 
+    async def sample(
+        self,
+        prompt_token_ids: List[int],
+        num_samples: int,
+        sampling_params: Dict[str, Any],
+    ) -> InferenceEngineOutput:
+        """
+        Generate multiple independent samples for the same prompt.
+
+        Fires num_samples parallel calls to _generate_single with the same
+        prompt_token_ids and sampling_params, then aggregates into a single
+        InferenceEngineOutput.
+
+        Args:
+            prompt_token_ids: Token IDs for the prompt.
+            num_samples: Number of independent samples to generate.
+            sampling_params: Sampling parameters for generation.
+
+        Returns:
+            InferenceEngineOutput with num_samples responses.
+        """
+        get_logprobs = sampling_params.get("logprobs") is not None
+
+        tasks = [
+            self._generate_single(
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=sampling_params,
+                session_id=None,
+            )
+            for _ in range(num_samples)
+        ]
+
+        results = await asyncio.gather(*tasks)
+
+        return InferenceEngineOutput(
+            responses=[r["response"] for r in results],
+            stop_reasons=[r["stop_reason"] for r in results],
+            response_ids=[r["response_ids"] for r in results],
+            response_logprobs=[r["response_logprobs"] for r in results] if get_logprobs else None,
+        )
+
     async def chat_completion(
         self,
         request_payload: Dict[str, Any],

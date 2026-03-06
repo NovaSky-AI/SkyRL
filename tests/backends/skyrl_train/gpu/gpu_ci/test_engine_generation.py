@@ -286,8 +286,6 @@ def test_token_based_generation_consistency(ray_init_fixture, tp_size: int, pp_s
                 )
 
 
-# TODO: Remove this once sample API is also supported in the new inference pathway
-@pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="New inference pathway doesn't support sample API yet")
 @pytest.mark.parametrize(
     "tp_size,dp_size",
     [
