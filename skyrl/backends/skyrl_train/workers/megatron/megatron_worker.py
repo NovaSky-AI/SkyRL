@@ -253,6 +253,39 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
+    def debug_model_config(self):
+        """Return model config diagnostics for debugging logprob mismatch."""
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import get_model_config
+
+        config = get_model_config(self.actor_module[0])
+        diag = {
+            "attention_backend": str(getattr(config, "attention_backend", "unknown")),
+            "multi_latent_attention": getattr(config, "multi_latent_attention", "unknown"),
+            "q_lora_rank": getattr(config, "q_lora_rank", "unknown"),
+            "kv_lora_rank": getattr(config, "kv_lora_rank", "unknown"),
+            "qk_head_dim": getattr(config, "qk_head_dim", "unknown"),
+            "qk_pos_emb_head_dim": getattr(config, "qk_pos_emb_head_dim", "unknown"),
+            "v_head_dim": getattr(config, "v_head_dim", "unknown"),
+            "num_layers": getattr(config, "num_layers", "unknown"),
+            "hidden_size": getattr(config, "hidden_size", "unknown"),
+            "num_attention_heads": getattr(config, "num_attention_heads", "unknown"),
+            "rope_type": getattr(config, "rope_type", "unknown"),
+            "layernorm_epsilon": getattr(config, "layernorm_epsilon", "unknown"),
+            "sequence_parallel": getattr(config, "sequence_parallel", "unknown"),
+        }
+        weight_stats = {}
+        model = self.actor_module[0]
+        for name, param in model.named_parameters():
+            if any(k in name for k in ["layers.0.", "output_layer", "word_embeddings"]):
+                weight_stats[name] = {
+                    "shape": list(param.shape),
+                    "mean": param.float().mean().item(),
+                    "std": param.float().std().item(),
+                    "norm": param.float().norm().item(),
+                }
+        diag["weight_stats"] = weight_stats
+        return diag
+
     def _read_router_replay_state(self):
         """Read the current RouterReplay state from all instances."""
         from megatron.core.transformer.moe.router_replay import RouterReplay
@@ -301,13 +334,11 @@ class MegatronWorker:
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
-        # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = (
             transformer_config_kwargs
             if isinstance(transformer_config_kwargs, dict)
             else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         )
-        transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         if not self.cfg.gradient_checkpointing:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
@@ -315,6 +346,18 @@ class MegatronWorker:
 
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
         provider = bridge.to_megatron_provider()
+
+        # Determine attention backend. MLA (Multi-Latent Attention) with TE fused
+        # attention can produce NaN/incorrect results; fall back to unfused for MLA.
+        if "attention_backend" not in transformer_config_kwargs:
+            has_mla = getattr(provider, "multi_latent_attention", False)
+            if flash_attn:
+                transformer_config_kwargs["attention_backend"] = "flash"
+            elif has_mla:
+                transformer_config_kwargs["attention_backend"] = "unfused"
+            else:
+                transformer_config_kwargs["attention_backend"] = "fused"
+
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
         provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
@@ -322,7 +365,7 @@ class MegatronWorker:
         provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
         provider.expert_tensor_parallel_size = megatron_config.expert_tensor_parallel_size
         provider.sequence_parallel = megatron_config.tensor_model_parallel_size > 1
-        provider.attention_backend = "flash" if flash_attn else "fused"
+        provider.attention_backend = transformer_config_kwargs["attention_backend"]
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
         # Apply explicit MoE config fields to the provider.
@@ -557,6 +600,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
         )
+
+        if self.enable_router_replay:
+            from skyrl.backends.skyrl_train.utils.replay_utils import _patch_topk_router_layer_number
+
+            _patch_topk_router_layer_number()
 
         # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
@@ -859,6 +907,11 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
         )
+
+        if self.enable_router_replay:
+            from skyrl.backends.skyrl_train.utils.replay_utils import _patch_topk_router_layer_number
+
+            _patch_topk_router_layer_number()
 
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=False,

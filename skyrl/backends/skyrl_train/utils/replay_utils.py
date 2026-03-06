@@ -7,6 +7,38 @@ from typing import List
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
 
+def _patch_topk_router_layer_number():
+    """Monkey-patch TopKRouter.set_layer_number to propagate the global layer
+    number to the RouterReplay instance.
+
+    DeepSeek V3 (and similar) architectures have dense FFN layers before the MoE
+    layers.  vLLM reports routing indices for ALL transformer layers (including
+    dense), but Megatron only creates RouterReplay instances for MoE layers.
+    Storing the global layer_number on each RouterReplay instance lets us map
+    vLLM's per-layer data to the correct MoE router even when dense layers are
+    present.
+
+    Must be called BEFORE model creation (i.e. before make_megatron_module).
+    """
+    try:
+        from megatron.core.transformer.moe.router import TopKRouter
+    except ImportError:
+        return
+
+    if getattr(TopKRouter, "_set_layer_number_patched", False):
+        return
+
+    original_set_layer_number = TopKRouter.set_layer_number
+
+    def patched_set_layer_number(self, layer_number: int):
+        original_set_layer_number(self, layer_number)
+        if self.router_replay is not None:
+            self.router_replay.layer_number = layer_number
+
+    TopKRouter.set_layer_number = patched_set_layer_number
+    TopKRouter._set_layer_number_patched = True
+
+
 def _patch_alltoall_dispatcher_for_replay():
     """Monkey-patch MoEAlltoAllTokenDispatcher.preprocess to handle router replay.
 
@@ -96,6 +128,12 @@ def _setup_per_microbatch_replay(
 
     Handles sequence parallelism: when TP > 1, the sequence is split across
     TP ranks, so each rank's MoE router only sees its local chunk of tokens.
+
+    Handles dense-layer mismatch: DeepSeek V3-style models have dense FFN
+    layers before the MoE layers.  vLLM reports routing indices for ALL
+    transformer layers, but Megatron only has RouterReplay instances for MoE
+    layers.  We use each instance's global layer_number (set by the patched
+    TopKRouter.set_layer_number) to index into the correct slice of the data.
     """
     import megatron.core.parallel_state as mpu
     from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
@@ -111,7 +149,30 @@ def _setup_per_microbatch_replay(
         chunk_size = seq_len // tp_size
         aligned = aligned[:, tp_rank * chunk_size : (tp_rank + 1) * chunk_size, :, :]
 
-    RouterReplay.set_replay_data(_split_replay_indices(aligned))
+    per_layer_data = _split_replay_indices(aligned)
+    num_layers_in_data = len(per_layer_data)
+    instances = RouterReplay.global_router_replay_instances
+    num_instances = len(instances)
+
+    if num_layers_in_data == num_instances:
+        RouterReplay.set_replay_data(per_layer_data)
+    else:
+        # Dense-layer mismatch: map each MoE router to its global layer index.
+        # Prefer the patched layer_number; fall back to offset-based mapping
+        # (assumes dense layers precede MoE layers).
+        for i, router_instance in enumerate(instances):
+            layer_number = getattr(router_instance, "layer_number", None)
+            if layer_number is not None:
+                layer_idx = layer_number - 1  # layer_number is 1-based
+            else:
+                layer_idx = i + (num_layers_in_data - num_instances)
+            if layer_idx < 0 or layer_idx >= num_layers_in_data:
+                raise ValueError(
+                    f"Router replay layer index {layer_idx} out of range "
+                    f"for data with {num_layers_in_data} layers "
+                    f"({num_instances} router instances)"
+                )
+            router_instance.set_target_indices(per_layer_data[layer_idx])
     RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
 

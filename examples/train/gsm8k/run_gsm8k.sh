@@ -26,8 +26,8 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.inference_engine.num_engines=$NUM_GPUS \
-  generator.inference_engine.tensor_parallel_size=1 \
+  generator.inference_engine.num_engines=1 \
+  generator.inference_engine.tensor_parallel_size=4 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
