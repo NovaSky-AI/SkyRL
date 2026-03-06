@@ -39,7 +39,7 @@ export SKYRL_PYTHONPATH_EXPORT=true
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 export RAY_memory_usage_threshold=1.0
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-export NVTE_FUSED_ATTN=0
+export NVTE_FUSED_ATTN=1  # Enable cuDNN FA3 on Hopper (H200). Tested: 7% faster backward, metrics healthy.
 
 # Start ray head
 .venv/bin/ray stop --force 2>/dev/null; sleep 3
