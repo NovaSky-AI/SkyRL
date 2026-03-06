@@ -25,7 +25,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
 from skyrl.train.config import get_config_as_yaml_str
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
@@ -116,6 +116,8 @@ class SkyRLTrainBackend(AbstractBackend):
         self._tokenizer: AutoTokenizer = get_tokenizer(self.base_model)
         self._inference_engine_client = None
         self._inference_engines_initialized = False
+        self._server_group = None
+        self._inference_router = None
 
     def has_model(self, model_id: str) -> bool:
         return self._model_id == model_id
@@ -184,19 +186,89 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.init_weight_sync_state(self._inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
+    def _create_remote_inference_client(self):
+        """Create a RemoteInferenceClient using HTTP endpoints.
+
+        Mirrors main_base.py._get_new_inference_client() with the same 4-way
+        branching on external_proxy_url / external_server_urls.
+        """
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+        from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+        from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+        from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+
+        ie_cfg = self._cfg.generator.inference_engine
+        is_colocated = self._cfg.trainer.placement.colocate_all
+        external_proxy_url = ie_cfg.external_proxy_url
+        external_server_urls = ie_cfg.external_server_urls
+
+        has_external_proxy = external_proxy_url is not None
+        has_external_servers = external_server_urls is not None
+
+        if has_external_proxy and has_external_servers:
+            proxy_url = external_proxy_url
+            server_urls = list(external_server_urls)
+            logger.info(
+                f"HTTP Inference: Using fully external setup - proxy_url={proxy_url}, server_urls={server_urls}"
+            )
+
+        elif has_external_proxy and not has_external_servers:
+            proxy_url = external_proxy_url
+            server_urls = [proxy_url]
+            logger.info(f"HTTP Inference: Using external proxy for both data and control plane - proxy_url={proxy_url}")
+
+        elif has_external_servers and not has_external_proxy:
+            server_urls = list(external_server_urls)
+            self._inference_router = InferenceRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Created internal router over external "
+                f"servers - server_urls={server_urls}, proxy_url={proxy_url}"
+            )
+
+        else:
+            cli_args = build_vllm_cli_args(self._cfg)
+
+            self._server_group = ServerGroup(
+                cli_args=cli_args,
+                num_servers=ie_cfg.num_engines,
+                placement_group=self._colocate_pg if is_colocated else None,
+                enable_dp=ie_cfg.data_parallel_size > 1,
+            )
+            server_infos = self._server_group.start()
+            server_urls = [info.url for info in server_infos]
+
+            self._inference_router = InferenceRouter(server_urls=server_urls)
+            proxy_url = self._inference_router.start()
+            logger.info(
+                f"HTTP Inference: Built servers and router internally - "
+                f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
+            )
+
+        return RemoteInferenceClient(
+            proxy_url=proxy_url,
+            server_urls=server_urls,
+            model_name=self._cfg.trainer.policy.model.path,
+        )
+
     def _ensure_inference_engines(self):
         """Lazily create inference engines and init weight sync on first sampling-related call."""
         if self._inference_engines_initialized:
             return
 
-        logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} inference engines")
-        self._inference_engine_client = InferenceEngineClient(
-            create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
-            self._tokenizer,
-            self._cfg.trainer.policy.model.path,
-            self._cfg.trainer.policy.model.lora,
-            self._cfg.generator.inference_engine,
-        )
+        if _SKYRL_USE_NEW_INFERENCE:
+            logger.info("Using new HTTP-based inference client (RemoteInferenceClient)")
+            self._inference_engine_client = self._create_remote_inference_client()
+        else:
+            logger.info(f"Creating {self._cfg.generator.inference_engine.num_engines} inference engines")
+            self._inference_engine_client = InferenceEngineClient(
+                create_ray_wrapped_inference_engines_from_config(self._cfg, self._colocate_pg, self._tokenizer),
+                self._tokenizer,
+                self._cfg.trainer.policy.model.path,
+                self._cfg.trainer.policy.model.lora,
+                self._cfg.generator.inference_engine,
+            )
+
         self._dispatch.set_inference_engine_client(self._inference_engine_client)
         self.init_weight_sync_state()
         self._inference_engines_initialized = True
