@@ -32,6 +32,10 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
+    TrajectoryID,
+)
+from skyrl.train.step_wise_merge import (
+    merge_step_wise_turns_for_trajectory,
 )
 from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
@@ -606,6 +610,90 @@ class RayPPOTrainer:
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
 
+        num_samples_before_merge = len(prompt_ids)
+
+        if self.cfg.generator.step_wise_trajectories:
+            assert "trajectory_ids" in generator_output and "is_last_step" in generator_output
+            trajectory_ids_raw: List[TrajectoryID] = generator_output["trajectory_ids"]
+            is_last_step_list: List[bool] = generator_output["is_last_step"]
+
+            # Group consecutive indices by same trajectory (instance_id + repetition_id)
+            groups: List[Tuple[TrajectoryID, List[int]]] = []
+            current_key: Optional[str] = None
+            current_indices: List[int] = []
+            for i, tid in enumerate(trajectory_ids_raw):
+                key = tid.to_string()
+                if key != current_key:
+                    if current_indices:
+                        groups.append((trajectory_ids_raw[current_indices[0]], current_indices))
+                    current_key = key
+                    current_indices = [i]
+                else:
+                    current_indices.append(i)
+            if current_indices:
+                groups.append((trajectory_ids_raw[current_indices[0]], current_indices))
+
+            merged_prompt_ids: List[List[int]] = []
+            merged_response_ids: List[List[int]] = []
+            merged_rewards: List[List[float]] = []
+            merged_loss_masks: List[List[int]] = []
+            merged_logprobs: Optional[List[List[float]]] = [] if logprobs else None
+            merged_is_last_step: List[bool] = []
+            merged_trajectory_ids: List[TrajectoryID] = []
+            total_prefix_mismatch = 0
+
+            for traj_id, indices in groups:
+                turn_prompts = [prompt_ids[j] for j in indices]
+                turn_responses = [response_ids[j] for j in indices]
+                turn_rewards = [rewards[j] for j in indices]
+                turn_masks = [loss_masks[j] for j in indices]
+                turn_is_last = [is_last_step_list[j] for j in indices]
+                turn_logprobs = [logprobs[j] for j in indices] if logprobs else None
+
+                samples, mismatch_count = merge_step_wise_turns_for_trajectory(
+                    prompt_token_ids=turn_prompts,
+                    response_ids=turn_responses,
+                    rewards=turn_rewards,
+                    loss_masks=turn_masks,
+                    is_last_step=turn_is_last,
+                    rollout_logprobs=turn_logprobs,
+                )
+                total_prefix_mismatch += mismatch_count
+                for s in samples:
+                    merged_prompt_ids.append(s.prompt_token_ids)
+                    merged_response_ids.append(s.response_ids)
+                    merged_rewards.append(s.rewards)
+                    merged_loss_masks.append(s.loss_masks)
+                    if merged_logprobs is not None:
+                        merged_logprobs.append(s.rollout_logprobs or [0.0] * len(s.response_ids))
+                    merged_is_last_step.append(s.is_last_step)
+                    merged_trajectory_ids.append(traj_id)
+
+            num_samples_after_merge = len(merged_prompt_ids)
+            prompt_ids = merged_prompt_ids
+            response_ids = merged_response_ids
+            rewards = merged_rewards
+            loss_masks = merged_loss_masks
+            logprobs = merged_logprobs
+            generator_output = {
+                **generator_output,
+                "prompt_token_ids": prompt_ids,
+                "response_ids": response_ids,
+                "rewards": rewards,
+                "loss_masks": loss_masks,
+                "rollout_logprobs": logprobs,
+                "is_last_step": merged_is_last_step,
+                "trajectory_ids": merged_trajectory_ids,
+            }
+            uids = [tid.instance_id for tid in merged_trajectory_ids]
+
+            self.all_metrics["trainer/stepwise_num_samples_before"] = num_samples_before_merge
+            self.all_metrics["trainer/stepwise_num_samples_after"] = num_samples_after_merge
+            self.all_metrics["trainer/stepwise_merge_ratio"] = (
+                num_samples_after_merge / num_samples_before_merge if num_samples_before_merge else 0.0
+            )
+            self.all_metrics["trainer/stepwise_prefix_mismatch_count"] = total_prefix_mismatch
+
         (
             sequences_tensor,
             attention_masks_tensor,
@@ -657,11 +745,15 @@ class RayPPOTrainer:
             training_input.metadata["trajectory_ids"] = [
                 trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
             ]
-            training_input.metadata["avg_response_length"] = sum(
+            num_samples = len(response_ids)
+            last_step_response_lens = [
                 len(sample_response_ids)
-                for sample_response_ids, is_last_step in zip(response_ids, generator_output["is_last_step"])
-                if is_last_step
-            ) / len(response_ids)
+                for sample_response_ids, is_last in zip(response_ids, generator_output["is_last_step"])
+                if is_last
+            ]
+            training_input.metadata["avg_response_length"] = (
+                sum(last_step_response_lens) / num_samples if num_samples else 0.0
+            )
         else:
             training_input.metadata["avg_response_length"] = sum(
                 len(sample_response_ids) for sample_response_ids in response_ids
