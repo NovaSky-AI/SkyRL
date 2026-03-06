@@ -4,6 +4,7 @@ import os
 import shutil
 from collections import defaultdict
 from dataclasses import asdict
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -619,19 +620,10 @@ class RayPPOTrainer:
 
             # Group consecutive indices by same trajectory (instance_id + repetition_id)
             groups: List[Tuple[TrajectoryID, List[int]]] = []
-            current_key: Optional[str] = None
-            current_indices: List[int] = []
-            for i, tid in enumerate(trajectory_ids_raw):
-                key = tid.to_string()
-                if key != current_key:
-                    if current_indices:
-                        groups.append((trajectory_ids_raw[current_indices[0]], current_indices))
-                    current_key = key
-                    current_indices = [i]
-                else:
-                    current_indices.append(i)
-            if current_indices:
-                groups.append((trajectory_ids_raw[current_indices[0]], current_indices))
+            for _, group in groupby(enumerate(trajectory_ids_raw), key=lambda x: x[1].to_string()):
+                indices = [i for i, _ in group]
+                if indices:
+                    groups.append((trajectory_ids_raw[indices[0]], indices))
 
             merged_prompt_ids: List[List[int]] = []
             merged_response_ids: List[List[int]] = []
@@ -665,7 +657,7 @@ class RayPPOTrainer:
                     merged_rewards.append(s.rewards)
                     merged_loss_masks.append(s.loss_masks)
                     if merged_logprobs is not None:
-                        merged_logprobs.append(s.rollout_logprobs or [0.0] * len(s.response_ids))
+                        merged_logprobs.append(s.rollout_logprobs)
                     merged_is_last_step.append(s.is_last_step)
                     merged_trajectory_ids.append(traj_id)
 
@@ -745,14 +737,14 @@ class RayPPOTrainer:
             training_input.metadata["trajectory_ids"] = [
                 trajectory_id.to_string() for trajectory_id in generator_output["trajectory_ids"]
             ]
-            num_samples = len(response_ids)
             last_step_response_lens = [
                 len(sample_response_ids)
                 for sample_response_ids, is_last in zip(response_ids, generator_output["is_last_step"])
                 if is_last
             ]
+            num_last_steps = len(last_step_response_lens)
             training_input.metadata["avg_response_length"] = (
-                sum(last_step_response_lens) / num_samples if num_samples else 0.0
+                sum(last_step_response_lens) / num_last_steps if num_last_steps else 0.0
             )
         else:
             training_input.metadata["avg_response_length"] = sum(

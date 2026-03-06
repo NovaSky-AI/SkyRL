@@ -42,6 +42,9 @@ def merge_step_wise_turns_for_trajectory(
     Merge consecutive turns for a single trajectory when the next observation
     has the previous full sequence (prompt + response) as an exact prefix.
 
+    No data leakage: prompt is the first turn's observation only; response is
+    resp1 + delta_ob2 + resp2 + ... (delta_ob tokens have zero loss mask).
+
     Args:
         prompt_token_ids: Per-turn prompt (observation) token IDs.
         response_ids: Per-turn response (action) token IDs.
@@ -63,26 +66,25 @@ def merge_step_wise_turns_for_trajectory(
     merged: List[MergedStepWiseSample] = []
     prefix_mismatch_count = 0
 
-    # Full sequence so far (obs + response) for prefix check and for building merged prompt
+    # Full sequence so far (obs + response) for prefix check only
     full_sequence: List[int] = []
+    # Initial observation only — prompt so that prompt + response = correct full sequence with no overlap
+    initial_prompt: List[int] = []
+    # Response stream: resp1 + delta_ob2 + resp2 + ... (delta_ob with zero loss so no duplicate tokens)
     acc_response_ids: List[int] = []
     acc_rewards: List[float] = []
     acc_loss_masks: List[int] = []
     acc_logprobs: List[float] = []
     acc_is_last_step = False
-    last_response_len = 0  # length of last turn's response (for prompt = full_sequence[:-last_response_len])
 
     def flush() -> None:
         """Emit current accumulated sample and reset."""
-        nonlocal full_sequence, acc_response_ids, acc_rewards, acc_loss_masks, acc_logprobs, acc_is_last_step, last_response_len
-        if not full_sequence and not acc_response_ids:
+        nonlocal full_sequence, initial_prompt, acc_response_ids, acc_rewards, acc_loss_masks, acc_logprobs, acc_is_last_step
+        if not initial_prompt and not acc_response_ids:
             return
-        # Merged prompt = full context = everything except the last turn's response
-        prompt_len = len(full_sequence) - last_response_len
-        prompt_tokens = full_sequence[:prompt_len] if prompt_len > 0 else []
         merged.append(
             MergedStepWiseSample(
-                prompt_token_ids=prompt_tokens,
+                prompt_token_ids=list(initial_prompt),
                 response_ids=list(acc_response_ids),
                 rewards=list(acc_rewards),
                 loss_masks=list(acc_loss_masks),
@@ -91,12 +93,12 @@ def merge_step_wise_turns_for_trajectory(
             )
         )
         full_sequence = []
+        initial_prompt = []
         acc_response_ids = []
         acc_rewards = []
         acc_loss_masks = []
         acc_logprobs = []
         acc_is_last_step = False
-        last_response_len = 0
 
     for i in range(n):
         ob_tokens = prompt_token_ids[i]
@@ -107,12 +109,19 @@ def merge_step_wise_turns_for_trajectory(
 
         if len(full_sequence) == 0:
             delta_ob = ob_tokens
+            initial_prompt = list(delta_ob)
         elif _is_prefix(full_sequence, ob_tokens):
             delta_ob = ob_tokens[len(full_sequence) :]
+            # Interleave: delta_ob goes into response stream with zero loss so prompt+response = full sequence
+            acc_response_ids.extend(delta_ob)
+            acc_rewards.extend([0.0] * len(delta_ob))
+            acc_loss_masks.extend([0] * len(delta_ob))
+            acc_logprobs.extend([0.0] * len(delta_ob))
         else:
             prefix_mismatch_count += 1
             flush()
             delta_ob = ob_tokens
+            initial_prompt = list(delta_ob)
 
         full_sequence.extend(delta_ob)
         full_sequence.extend(ac_tokens)
@@ -121,7 +130,6 @@ def merge_step_wise_turns_for_trajectory(
         acc_loss_masks.extend(ac_masks)
         acc_logprobs.extend(ac_logprobs_i)
         acc_is_last_step = acc_is_last_step or is_last_step[i]
-        last_response_len = len(ac_tokens)
 
     flush()
     return merged, prefix_mismatch_count
