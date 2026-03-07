@@ -191,7 +191,7 @@
         - heading: null
           description: ""
           objects:
-            - skyrl.train.env_vars
+            - skyrl.env_vars
 
 - path: skyrl/skyrl-train
   pages:

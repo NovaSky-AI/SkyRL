@@ -31,7 +31,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     broadcast_object_across_pp_ranks,
 )
 from skyrl.train.utils.utils import update_model_config, str_to_torch_dtype
-from skyrl.backends.skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
 from skyrl.backends.skyrl_train.workers.worker import (
@@ -188,6 +188,34 @@ class MegatronWeightExtractor(WeightExtractor):
                 curr_size = 0
             self.param_buckets[-1].append(task)
             curr_size += size
+
+    def get_weight_metadata(self, dtype: torch.dtype) -> dict:
+        """Return weight metadata without keeping tensors in memory.
+
+        On first call, runs export_hf_weights to discover HF names and shapes
+        (tensors are discarded immediately). Result is cached for subsequent calls.
+        TODO (aaron): find a better way to get all metadata without materializing tensors.
+        """
+        if hasattr(self, "_weight_metadata_cache"):
+            return self._weight_metadata_cache
+
+        names = []
+        dtype_names = []
+        shapes = []
+        dtype_name = str(dtype).split(".")[-1]
+        device = torch.cuda.current_device()
+        for name, tensor in self.bridge.export_hf_weights(
+            self.actor_module,
+            show_progress=False,
+            conversion_tasks=None,
+        ):
+            tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+            names.append(name)
+            dtype_names.append(dtype_name)
+            shapes.append(list(tensor.shape))
+            del tensor
+        self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
+        return self._weight_metadata_cache
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from Megatron model.
@@ -751,7 +779,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.cuda.empty_cache()
 
         # Extract and send weights using the sender created at init time
-        await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
+        weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+        await self._weight_transfer_sender.send_chunks(
+            self.weight_extractor.extract_weights(generator_dtype),
+            weight_metadata=weight_metadata,
+        )
 
         if cache_reset_task is not None:
             await cache_reset_task

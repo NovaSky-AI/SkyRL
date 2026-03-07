@@ -39,16 +39,16 @@ from skyrl.backends.skyrl_train.distributed.ulysses import (
     set_ulysses_sequence_parallel_group,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import (
+    _SKYRL_USE_NEW_INFERENCE,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+)
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
     get_reordered_bundle_indices,
     ray_noset_visible_devices,
-)
-from skyrl.backends.skyrl_train.env_vars import (
-    SKYRL_RAY_PG_TIMEOUT_IN_S,
-    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -324,7 +324,7 @@ class Worker(DistributedTorchRayActor):
         # For legacy path, calculate from config
         inference_world_size = None
         if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
-            inference_world_size = await inference_engine_client.get_world_size()
+            inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(

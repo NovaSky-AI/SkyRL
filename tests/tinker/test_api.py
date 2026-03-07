@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from urllib.parse import urlparse
 
 import pytest
+from skyrl.tinker.config import EngineConfig
+from skyrl.tinker.api import _build_uv_run_cmd_engine
 import tinker
 from tinker import types
 from transformers import AutoTokenizer
@@ -430,3 +432,161 @@ def test_stale_session_cleanup(api_server_fast_cleanup):
         return "Auto-unloaded stale model" in log_output and "Deleted model" in log_output
 
     assert wait_for_condition(cleanup_logs_found, timeout_sec=10, poll_interval_sec=1), "Cleanup logs not found"
+
+
+@pytest.mark.parametrize(
+    "engine_config, parent_process_cmd, expected_cmd_start",
+    [
+        # jax backend, no args
+        (
+            EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
+            ["uv", "run", "-m", "skyrl.tinker.api"],
+            ["uv", "run", "--extra", "tinker", "--extra", "jax", "-m", "skyrl.tinker.engine"],
+        ),
+        # skyrl-train backend, with args
+        (
+            EngineConfig(backend="skyrl_train", base_model="Qwen/Qwen3-0.6B"),
+            ["uv", "run", "--env-file", ".env", "--extra", "tinker", "-m", "skyrl.tinker.api"],
+            # NOTE: we end up with duplicate tinker extra, but this is fine because uv run with deduplicate extras
+            [
+                "uv",
+                "run",
+                "--env-file",
+                ".env",
+                "--extra",
+                "tinker",
+                "--extra",
+                "tinker",
+                "--extra",
+                "skyrl_train",
+                "-m",
+                "skyrl.tinker.engine",
+            ],
+        ),
+        (
+            # jax backend with `python -m skyrl.tinker.api` in the startup command
+            EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
+            [
+                "uv",
+                "run",
+                "--isolated",
+                "--with",
+                "mypackage",
+                "--env-file",
+                ".env",
+                "--extra",
+                "tinker",
+                "python",
+                "-m",
+                "skyrl.tinker.api",
+            ],
+            [
+                "uv",
+                "run",
+                "--isolated",
+                "--with",
+                "mypackage",
+                "--env-file",
+                ".env",
+                "--extra",
+                "tinker",
+                "--extra",
+                "tinker",
+                "--extra",
+                "jax",
+                "-m",
+                "skyrl.tinker.engine",
+            ],
+        ),
+        (
+            # jax backend with -- python in the api server startup commmand
+            EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
+            [
+                "uv",
+                "run",
+                "--with",
+                "mypackage",
+                "--env-file",
+                ".env",
+                "--extra",
+                "tinker",
+                "--",
+                "python",
+                "-m",
+                "skyrl.tinker.api",
+            ],
+            [
+                "uv",
+                "run",
+                "--with",
+                "mypackage",
+                "--env-file",
+                ".env",
+                "--extra",
+                "tinker",
+                "--extra",
+                "tinker",
+                "--extra",
+                "jax",
+                "-m",
+                "skyrl.tinker.engine",
+            ],
+        ),
+        (
+            # Jax backend gpu extra
+            EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
+            [
+                "uv",
+                "run",
+                "--with",
+                "mypackage",
+                "--env-file",
+                ".env",
+                "--extra",
+                "tinker",
+                "--extra",
+                "gpu",
+                "-m",
+                "skyrl.tinker.api",
+            ],
+            [
+                "uv",
+                "run",
+                "--with",
+                "mypackage",
+                "--env-file",
+                ".env",
+                "--extra",
+                "tinker",
+                "--extra",
+                "gpu",
+                "--extra",
+                "tinker",
+                "--extra",
+                "jax",
+                "-m",
+                "skyrl.tinker.engine",
+            ],
+        ),
+    ],
+)
+def test_build_cmd_engine(engine_config, parent_process_cmd, expected_cmd_start):
+
+    cmd = " ".join(_build_uv_run_cmd_engine(parent_process_cmd, engine_config))
+    assert cmd.startswith(" ".join(expected_cmd_start))
+
+
+@pytest.mark.parametrize(
+    "engine_config, parent_process_cmd",
+    [
+        (
+            EngineConfig(backend="jax", base_model="Qwen/Qwen3-0.6B"),
+            # invalid parent process startup command
+            ["python", "-m", "skyrl.tinker.api"],
+        ),
+    ],
+)
+def test_build_cmd_engine_invalid_arg(engine_config, parent_process_cmd):
+
+    with pytest.raises(ValueError, match="Unable to parse tinker API server startup command"):
+        _build_uv_run_cmd_engine(parent_process_cmd, engine_config)
