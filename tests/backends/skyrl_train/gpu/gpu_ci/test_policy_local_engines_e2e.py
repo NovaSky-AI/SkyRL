@@ -15,7 +15,7 @@ from tests.backends.skyrl_train.gpu.utils import (
     run_inference,
 )
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -36,7 +36,7 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     return cfg
 
 
-# TODO (aaron): add back tests when we support nccl/ gloo
+# TODO (aaron): add back tests when we support gloo
 _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
 
@@ -44,11 +44,11 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
     ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
     [
         pytest.param(False, "nccl", "fsdp", 2),
-        pytest.param(True, "nccl", "fsdp", 2, marks=_skip_new_inference),
+        pytest.param(True, "nccl", "fsdp", 2),
         pytest.param(False, "gloo", "fsdp", 2, marks=_skip_new_inference),
         pytest.param(True, "gloo", "fsdp", 2, marks=_skip_new_inference),
         pytest.param(False, "nccl", "fsdp2", 2),
-        pytest.param(True, "nccl", "fsdp2", 2, marks=_skip_new_inference),
+        pytest.param(True, "nccl", "fsdp2", 2),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",

@@ -102,6 +102,11 @@ class VLLMServerActor(ServerActorProtocol):
         # TODO (aaron): once native ipc stops needing this, remove
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
+        # Register custom weight transfer engines not yet in this vLLM version
+        from skyrl.backends.skyrl_train.weight_sync.vllm_ipc_engine import register_ipc_engine
+
+        register_ipc_engine()
+
         # Ensure Ray executor is used (required for GPU inheritance in placement groups)
         self._ensure_ray_executor()
 

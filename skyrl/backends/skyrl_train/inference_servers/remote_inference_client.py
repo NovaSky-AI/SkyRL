@@ -446,7 +446,12 @@ class RemoteInferenceClient:
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
         async with session.request(method, url, json=json) as resp:
-            body = await resp.json() if resp.content_length else None
+            body = None
+            if resp.content_length:
+                try:
+                    body = await resp.json()
+                except Exception:
+                    body = {"error": {"message": await resp.text()}}
             raise_for_status(resp, body)
             return server_url, {"status": resp.status, "body": body}
 

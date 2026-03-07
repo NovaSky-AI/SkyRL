@@ -43,9 +43,20 @@ def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> T
     Returns:
         The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
     """
-    if weight_sync_backend == "nccl" and colocate_all:
+    # if weight_sync_backend == "nccl" and colocate_all:
+    #     return CudaIpcTransferStrategy
+    # return BroadcastTransferStrategy
+    strategy = get_transfer_strategy(weight_sync_backend, colocate_all)
+    if strategy == "ipc":
         return CudaIpcTransferStrategy
     return BroadcastTransferStrategy
+
+
+def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
+    """Get the appropriate transfer strategy string based on config."""
+    if weight_sync_backend == "nccl" and colocate_all:
+        return "ipc"
+    return "nccl"
 
 
 __all__ = [
