@@ -53,8 +53,8 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_num_groups"] = 1
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_group_topk"] = 1
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_pre_softmax"] = True
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["attention_backend"] = "unfused"
-        cfg.trainer.flash_attn = False
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["attention_backend"] = "unfused"
+        # cfg.trainer.flash_attn = False
     validate_cfg(cfg)
     return cfg
 
