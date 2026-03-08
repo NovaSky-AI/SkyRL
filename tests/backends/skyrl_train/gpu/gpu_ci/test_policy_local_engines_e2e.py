@@ -15,7 +15,7 @@ from tests.backends.skyrl_train.gpu.utils import (
     run_inference,
 )
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
