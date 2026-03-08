@@ -9,6 +9,7 @@ from skyrl.train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     _AsyncStalenessManager,
 )
+from skyrl.train.trainer import ResumeMode
 from tests.train.util import example_dummy_config
 
 
@@ -61,6 +62,7 @@ def make_fully_async_config(train_batch_size: int, policy_mini_batch_size: int, 
     cfg.trainer.hf_save_interval = 0
     cfg.trainer.eval_before_train = False
     cfg.trainer.placement.colocate_all = False
+    cfg.trainer.resume_mode = ResumeMode.NONE
     cfg.trainer.fully_async.num_parallel_generation_workers = num_workers
     cfg.trainer.fully_async.max_staleness_steps = 1
     cfg.trainer.micro_train_batch_size_per_gpu = 1
@@ -165,8 +167,9 @@ async def test_fully_async_train_aggregates_outer_batch_and_runs_inner_minibatch
 
 
 @pytest.mark.asyncio
-async def test_fully_async_resume_uses_train_batch_size_for_consumed_uids():
+async def test_fully_async_resume_uses_train_batch_size_for_consumed_uids(monkeypatch):
     cfg = make_fully_async_config(train_batch_size=4, policy_mini_batch_size=1, num_workers=4)
+    cfg.trainer.resume_mode = ResumeMode.LATEST
     trainer = make_trainer(cfg, dataset_size=4)
     trainer.dispatch = DummyDispatch()
     trainer.init_weight_sync_state = MagicMock()
@@ -176,6 +179,15 @@ async def test_fully_async_resume_uses_train_batch_size_for_consumed_uids():
     )
     trainer.async_train_dataloader.load_state_from_checkpoint = MagicMock()
     trainer._staleness_manager.load_state_from_checkpoint = MagicMock()
+    trainer._run_training = AsyncMock(return_value={})
+    trainer.convert_generation_group_train_batch_to_training_input = lambda generated_groups: make_dummy_training_input(
+        batch_size=len(generated_groups)
+    )
+    monkeypatch.setattr(
+        fully_async_module,
+        "prepare_generator_input",
+        lambda prompts, *args, **kwargs: ({"prompts": prompts}, [prompts[0]["uid"]]),
+    )
 
     await trainer.train()
 
