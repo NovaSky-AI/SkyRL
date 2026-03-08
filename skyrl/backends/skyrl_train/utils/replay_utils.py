@@ -20,6 +20,32 @@ def _patch_topk_router_layer_number():
 
     Must be called BEFORE model creation (i.e. before make_megatron_module).
     """
+    # try:
+    #     from megatron.core.transformer.moe.router import TopKRouter
+    # except ImportError:
+    #     return
+
+    # if getattr(TopKRouter, "_set_layer_number_patched", False):
+    #     return
+
+    # original_init = TopKRouter.__init__
+    # original_set_layer_number = TopKRouter.set_layer_number
+
+    # def patched_set_layer_number(self, layer_number: int):
+    #     original_set_layer_number(self, layer_number)
+    #     if self.router_replay is not None:
+    #         self.router_replay.layer_number = layer_number
+
+    # def patched_init(self, *args, **kwargs):
+    #     # set_layer_num might not be regsitering before self.router_replay creation, enforce explicitly
+    #     original_init(self, *args, **kwargs)
+    #     if (self.router_replay is not None and hasattr(self, "layer_number") and self.layer_number is not None):
+    #         self.router_replay.layer_number = self.layer_number
+
+    # TopKRouter.__init__ = patched_init
+    # TopKRouter.set_layer_number = patched_set_layer_number
+    # TopKRouter._set_layer_number_patched = True
+
     try:
         from megatron.core.transformer.moe.router import TopKRouter
     except ImportError:
@@ -32,7 +58,7 @@ def _patch_topk_router_layer_number():
 
     def patched_set_layer_number(self, layer_number: int):
         original_set_layer_number(self, layer_number)
-        if self.router_replay is not None:
+        if getattr(self, "router_replay", None) is not None:
             self.router_replay.layer_number = layer_number
 
     TopKRouter.set_layer_number = patched_set_layer_number
@@ -70,6 +96,21 @@ def _patch_alltoall_dispatcher_for_replay():
 
     MoEAlltoAllTokenDispatcher.preprocess = patched_preprocess
     MoEAlltoAllTokenDispatcher._preprocess_patched = True
+
+
+def filter_all_zero_layers_from_rii(rollout_inference_indices: torch.Tensor) -> torch.Tensor:
+    if rollout_inference_indices is None or rollout_inference_indices.dim() != 4:
+        return rollout_inference_indices
+    num_layers = rollout_inference_indices.shape[2]
+    first_moe_layer = 0
+    for layer_idx in range(num_layers):
+        layer_slice = rollout_inference_indices[:, :, layer_idx, :]
+        if (layer_slice != 0).any().item():
+            first_moe_layer = layer_idx
+            break
+    if first_moe_layer == 0:
+        return rollout_inference_indices
+    return rollout_inference_indices[:, :, first_moe_layer:, :].contiguous()
 
 
 def _split_replay_indices(rollout_inference_indices: torch.Tensor) -> List[torch.Tensor]:
@@ -135,13 +176,17 @@ def _setup_per_microbatch_replay(
     layers.  We use each instance's global layer_number (set by the patched
     TopKRouter.set_layer_number) to index into the correct slice of the data.
     """
+    import logging
     import megatron.core.parallel_state as mpu
     from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
+
+    # Drop leading all-zero layers (dense layers in DeepSeek-style models)
+    rollout_inference_indices = filter_all_zero_layers_from_rii(rollout_inference_indices)
 
     _patch_alltoall_dispatcher_for_replay()
 
     aligned = _remove_left_padding_from_indices(rollout_inference_indices, attention_mask)
-
+    logger = logging.getLogger(__name__)
     tp_size = mpu.get_tensor_model_parallel_world_size()
     if tp_size > 1:
         tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -161,6 +206,11 @@ def _setup_per_microbatch_replay(
         # Prefer the patched layer_number; fall back to offset-based mapping
         # (assumes dense layers precede MoE layers).
         for i, router_instance in enumerate(instances):
+            layer_numbers = [getattr(inst, "layer_number", None) for inst in instances]
+            logger.info(
+                f"[RouterReplay] Dense-layer: data has {num_layers_in_data} layers, "
+                f"{num_instances} router instances. layer_numbers={layer_numbers}"
+            )
             layer_number = getattr(router_instance, "layer_number", None)
             if layer_number is not None:
                 layer_idx = layer_number - 1  # layer_number is 1-based
@@ -176,7 +226,11 @@ def _setup_per_microbatch_replay(
     RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
 
-def setup_router_replay_forward(data: TrainingInputBatch, enable_router_replay: bool) -> bool:
+def setup_router_replay_forward(
+    data: TrainingInputBatch,
+    enable_router_replay: bool,
+    use_sample_packing: bool = False,
+) -> bool:
     """
     Set up router replay for forward pass (ref/policy inference).
     """
@@ -187,15 +241,24 @@ def setup_router_replay_forward(data: TrainingInputBatch, enable_router_replay: 
     if rollout_inference_indices is None:
         return False
 
-    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
+    attention_mask = data.get("attention_mask")
+    if attention_mask is not None:
+        # Use the same dense-layer-aware replay setup as real forward path.
+        _setup_per_microbatch_replay(rollout_inference_indices, attention_mask)
+    else:
+        from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
 
-    RouterReplay.set_replay_data(_split_replay_indices(rollout_inference_indices))
-    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+        RouterReplay.set_replay_data(_split_replay_indices(rollout_inference_indices))
+        RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
     return True
 
 
-def setup_router_replay_backward(data: TrainingInputBatch, enable_router_replay: bool) -> bool:
+def setup_router_replay_backward(
+    data: TrainingInputBatch,
+    enable_router_replay: bool,
+    use_sample_packing: bool = False,
+) -> bool:
     """
     Set up router replay for training forward/backward pass.
     """
@@ -206,11 +269,15 @@ def setup_router_replay_backward(data: TrainingInputBatch, enable_router_replay:
     if rollout_inference_indices is None:
         return False
 
-    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
+    attention_mask = data.get("attention_mask")
+    if attention_mask is not None:
+        _setup_per_microbatch_replay(rollout_inference_indices, attention_mask)
+    else:
+        from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
 
-    RouterReplay.set_replay_data(_split_replay_indices(rollout_inference_indices))
-    # Use REPLAY_FORWARD - Megatron handles REPLAY_BACKWARD automatically
-    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+        RouterReplay.set_replay_data(_split_replay_indices(rollout_inference_indices))
+        # Use REPLAY_FORWARD - Megatron handles REPLAY_BACKWARD automatically
+        RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
     return True
 
@@ -221,4 +288,4 @@ def clear_router_replay():
 
     RouterReplay.clear_global_indices()
     RouterReplay.clear_global_router_replay_action()
-    RouterReplay.clear_global_router_replay_instances()
+    # RouterReplay.clear_global_router_replay_instances()

@@ -258,21 +258,72 @@ class MegatronWorker:
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import get_model_config
 
         config = get_model_config(self.actor_module[0])
-        diag = {
-            "attention_backend": str(getattr(config, "attention_backend", "unknown")),
-            "multi_latent_attention": getattr(config, "multi_latent_attention", "unknown"),
-            "q_lora_rank": getattr(config, "q_lora_rank", "unknown"),
-            "kv_lora_rank": getattr(config, "kv_lora_rank", "unknown"),
-            "qk_head_dim": getattr(config, "qk_head_dim", "unknown"),
-            "qk_pos_emb_head_dim": getattr(config, "qk_pos_emb_head_dim", "unknown"),
-            "v_head_dim": getattr(config, "v_head_dim", "unknown"),
-            "num_layers": getattr(config, "num_layers", "unknown"),
-            "hidden_size": getattr(config, "hidden_size", "unknown"),
-            "num_attention_heads": getattr(config, "num_attention_heads", "unknown"),
-            "rope_type": getattr(config, "rope_type", "unknown"),
-            "layernorm_epsilon": getattr(config, "layernorm_epsilon", "unknown"),
-            "sequence_parallel": getattr(config, "sequence_parallel", "unknown"),
-        }
+        # diag = {
+        #     "attention_backend": str(getattr(config, "attention_backend", "unknown")),
+        #     "multi_latent_attention": getattr(config, "multi_latent_attention", "unknown"),
+        #     "q_lora_rank": getattr(config, "q_lora_rank", "unknown"),
+        #     "kv_lora_rank": getattr(config, "kv_lora_rank", "unknown"),
+        #     "qk_head_dim": getattr(config, "qk_head_dim", "unknown"),
+        #     "qk_pos_emb_head_dim": getattr(config, "qk_pos_emb_head_dim", "unknown"),
+        #     "v_head_dim": getattr(config, "v_head_dim", "unknown"),
+        #     "num_layers": getattr(config, "num_layers", "unknown"),
+        #     "hidden_size": getattr(config, "hidden_size", "unknown"),
+        #     "num_attention_heads": getattr(config, "num_attention_heads", "unknown"),
+        #     "rope_type": getattr(config, "rope_type", "unknown"),
+        #     "layernorm_epsilon": getattr(config, "layernorm_epsilon", "unknown"),
+        #     "sequence_parallel": getattr(config, "sequence_parallel", "unknown"),
+        # }
+
+        _cfg_fields = [
+            "attention_backend",
+            "multi_latent_attention",
+            "q_lora_rank",
+            "kv_lora_rank",
+            "qk_head_dim",
+            "qk_pos_emb_head_dim",
+            "v_head_dim",
+            "num_layers",
+            "hidden_size",
+            "ffn_hidden_size",
+            "num_attention_heads",
+            "num_query_groups",
+            "rope_type",
+            "layernorm_epsilon",
+            "sequence_parallel",
+            "tensor_model_parallel_size",
+            "pipeline_model_parallel_size",
+            "expert_model_parallel_size",
+            "num_moe_experts",
+            "moe_router_topk",
+            "moe_router_pre_softmax",
+            "moe_router_score_function",
+            "moe_router_dtype",
+            "moe_router_enable_expert_bias",
+            "moe_router_bias_update_rate",
+            "moe_router_num_groups",
+            "moe_router_group_topk",
+            "moe_router_topk_scaling_factor",
+            "moe_router_load_balancing_type",
+            "moe_token_dispatcher_type",
+            "moe_grouped_gemm",
+            "moe_shared_expert_intermediate_size",
+            "moe_shared_expert_gate",
+            "moe_shared_expert_overlap",
+            "moe_layer_freq",
+            "moe_ffn_hidden_size",
+            "moe_enable_routing_replay",
+            "fp16",
+            "bf16",
+            "params_dtype",
+            "masked_softmax_fusion",
+            "variable_seq_lengths",
+        ]
+        diag = {}
+        for field in _cfg_fields:
+            val = getattr(config, field, "NOT_PRESENT")
+            if isinstance(val, torch.dtype):
+                val = str(val)
+            diag[field] = val
         weight_stats = {}
         model = self.actor_module[0]
         for name, param in model.named_parameters():
@@ -284,6 +335,7 @@ class MegatronWorker:
                     "norm": param.float().norm().item(),
                 }
         diag["weight_stats"] = weight_stats
+        diag["cfg_flash_attn"] = getattr(self.cfg, "flash_attn", "NOT_PRESENT")
         return diag
 
     def _read_router_replay_state(self):
@@ -293,22 +345,77 @@ class MegatronWorker:
         # See https://docs.nvidia.com/megatron-core/developer-guide/0.15.0/api-guide/router_replay.html docs for more info
         instances = RouterReplay.global_router_replay_instances or []
         action = instances[0].router_replay_action if instances else None
-
+        layer_numbers = [inst.layer_number for inst in instances if inst.layer_number is not None]
         target_indices = [inst.target_topk_idx.detach().cpu() for inst in instances if inst.target_topk_idx is not None]
 
         return {
             "action": str(action),
             "target_indices": target_indices,
             "num_instances": len(instances),
+            "layer_numbers": layer_numbers
         }
 
     def debug_setup_router_replay_state(self, data: TrainingInputBatch):
         from skyrl.backends.skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
-
-        setup_router_replay_forward(data, enable_router_replay=True)
+        
+        setup_router_replay_forward(
+            data,
+            enable_router_replay=True,
+        )
         state = self._read_router_replay_state()
         clear_router_replay()
         return state
+
+    def debug_router_replay_summary(self, data: Optional[TrainingInputBatch] = None):
+        """Return compact RouterReplay diagnostics useful for layer-offset debugging."""
+        from megatron.core.transformer.moe.router_replay import RouterReplay
+        from skyrl.backends.skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
+
+        did_setup = False
+        if data is not None:
+            setup_router_replay_forward(
+                data,
+                enable_router_replay=True,
+            )
+            did_setup = True
+
+        instances = RouterReplay.global_router_replay_instances or []
+        summary = []
+        for i, inst in enumerate(instances):
+            tgt = inst.target_topk_idx
+            if tgt is None:
+                summary.append(
+                    {
+                        "instance": i,
+                        "layer_number": getattr(inst, "layer_number", None),
+                        "shape": None,
+                        "all_zero_rows": None,
+                        "min": None,
+                        "max": None,
+                    }
+                )
+                continue
+            tgt_cpu = tgt.detach().to("cpu")
+            all_zero_rows = (tgt_cpu == 0).all(dim=-1).sum().item()
+            summary.append(
+                {
+                    "instance": i,
+                    "layer_number": getattr(inst, "layer_number", None),
+                    "shape": list(tgt_cpu.shape),
+                    "all_zero_rows": int(all_zero_rows),
+                    "min": int(tgt_cpu.min().item()),
+                    "max": int(tgt_cpu.max().item()),
+                }
+            )
+
+        result = {
+            "num_instances": len(instances),
+            "action": str(instances[0].router_replay_action) if instances else None,
+            "layers": summary,
+        }
+        if did_setup:
+            clear_router_replay()
+        return result
 
     def init_configs(
         self,
