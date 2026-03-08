@@ -149,7 +149,9 @@ async def test_fully_async_train_aggregates_outer_batch_and_runs_inner_minibatch
         aggregated_group_counts.append(len(generated_groups))
         return make_dummy_training_input(batch_size=len(generated_groups))
 
-    trainer.convert_generation_group_train_batch_to_training_input = convert_generation_group_train_batch_to_training_input
+    trainer.convert_generation_group_train_batch_to_training_input = (
+        convert_generation_group_train_batch_to_training_input
+    )
 
     await trainer.train()
 
@@ -174,9 +176,7 @@ async def test_fully_async_resume_uses_train_batch_size_for_consumed_uids(monkey
     trainer.dispatch = DummyDispatch()
     trainer.init_weight_sync_state = MagicMock()
     trainer.async_sync_policy_weights_to_inference_engines = AsyncMock()
-    trainer.load_checkpoints = MagicMock(
-        return_value=(1, "/tmp/global_step_1", {"0", "1", "2", "3"})
-    )
+    trainer.load_checkpoints = MagicMock(return_value=(1, "/tmp/global_step_1", {"0", "1", "2", "3"}))
     trainer.async_train_dataloader.load_state_from_checkpoint = MagicMock()
     trainer._staleness_manager.load_state_from_checkpoint = MagicMock()
     trainer._run_training = AsyncMock(return_value={})

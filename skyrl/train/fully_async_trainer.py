@@ -415,13 +415,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     # GeneratorOutput, and convert to training format.
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input = await asyncio.to_thread(
-                            self.convert_generation_group_train_batch_to_training_input, cur_generation_group_train_batch
+                            self.convert_generation_group_train_batch_to_training_input,
+                            cur_generation_group_train_batch,
                         )
 
                     # 3. Run training and update consumed UIDs.
                     with Timer("run_training", self.all_timings):
                         status = await self._run_training(training_input)
-                        await self.async_train_dataloader.mark_consumed_uids([g.uid for g in cur_generation_group_train_batch])
+                        await self.async_train_dataloader.mark_consumed_uids(
+                            [g.uid for g in cur_generation_group_train_batch]
+                        )
 
                     # 4. After training: pause generation, sync weights, resume.
                     with Timer("sync_weights", self.all_timings):
