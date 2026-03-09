@@ -3,7 +3,7 @@ import logging
 import os
 import socket
 from collections import defaultdict
-from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
+from ctypes import CDLL, c_int
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
@@ -171,21 +171,13 @@ class DistributedTorchRayActor:
             cuda_visible_devices = [
                 int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7").split(",")
             ]
-            return cuda_visible_devices[local_rank]
-
-        rank = local_rank_to_real_gpu_id(rank)
+            return cuda_visible_devices[local_rank % len(cuda_visible_devices)]
 
         global _SET_AFFINITY
         if _SET_AFFINITY:
             return
 
         from ctypes.util import find_library
-
-        class bitmask_t(Structure):
-            _fields_ = [
-                ("size", c_ulong),
-                ("maskp", POINTER(c_ulong)),
-            ]
 
         try:
             LIBNUMA = CDLL(find_library("numa"))
@@ -194,26 +186,47 @@ class DistributedTorchRayActor:
             _SET_AFFINITY = True
             return
 
-        LIBNUMA.numa_parse_nodestring.argtypes = [c_char_p]
-        LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
-        LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
-        LIBNUMA.numa_run_on_node_mask.restype = c_int
-        LIBNUMA.numa_set_membind.argtypes = [POINTER(bitmask_t)]
-        LIBNUMA.numa_set_membind.restype = c_void_p
-        LIBNUMA.numa_num_configured_nodes.argtypes = []
-        LIBNUMA.numa_num_configured_nodes.restype = c_int
+        # Check NUMA is actually functional
+        LIBNUMA.numa_available.restype = c_int
+        LIBNUMA.numa_available.argtypes = []
+        if LIBNUMA.numa_available() < 0:
+            logger.warning("NUMA not available on this system, skipping affinity")
+            _SET_AFFINITY = True
+            return
 
-        def numa_bind(nid: int):
-            bitmask = LIBNUMA.numa_parse_nodestring(bytes(str(nid), "ascii"))
-            LIBNUMA.numa_run_on_node_mask(bitmask)
-            LIBNUMA.numa_set_membind(bitmask)
+        # Use numa_max_node() NOT numa_num_configured_nodes().
+        # On NVLink/GB200 systems, numa_num_configured_nodes() incorrectly counts
+        # virtual NVLink NUMA IDs (e.g. 2,10,18,26) giving wrong total (e.g. 4).
+        # numa_max_node() returns the real highest physical NUMA node index (e.g. 1).
+        LIBNUMA.numa_max_node.restype = c_int
+        LIBNUMA.numa_max_node.argtypes = []
+        max_node = LIBNUMA.numa_max_node()  # e.g. 1 → real nodes are 0 and 1
+        if max_node < 0:
+            logger.warning("numa_max_node() returned <0, skipping affinity")
+            _SET_AFFINITY = True
+            return
+        real_numa_nodes = max_node + 1  # e.g. 2
 
-        numa_nodes = LIBNUMA.numa_num_configured_nodes()
-        if numa_nodes <= 0:
-            numa_nodes = 1
-        num_gpu_pre_numa_node = max(1, 8 // numa_nodes)
-        target_nid = min(numa_nodes - 1, self._local_rank // num_gpu_pre_numa_node)
-        numa_bind(target_nid)
+        # Use integer API — avoids bitmask pointer corruption that causes segfaults
+        LIBNUMA.numa_run_on_node.restype = c_int
+        LIBNUMA.numa_run_on_node.argtypes = [c_int]
+        LIBNUMA.numa_set_preferred.restype = None
+        LIBNUMA.numa_set_preferred.argtypes = [c_int]
+
+        real_gpu_id = local_rank_to_real_gpu_id(self._local_rank)
+        num_gpus_per_numa = max(1, 8 // real_numa_nodes)  # e.g. 8//2 = 4
+        # Clamp to [0, max_node] — guaranteed safe
+        target_nid = min(max_node, real_gpu_id // num_gpus_per_numa)
+
+        logger.info(
+            f"NUMA affinity: local_rank={self._local_rank}, real_gpu={real_gpu_id}, "
+            f"real_numa_nodes={real_numa_nodes}, max_node={max_node}, target={target_nid}"
+        )
+
+        ret = LIBNUMA.numa_run_on_node(target_nid)
+        if ret != 0:
+            logger.warning(f"numa_run_on_node({target_nid}) returned {ret}, may not have bound")
+        LIBNUMA.numa_set_preferred(target_nid)
         _SET_AFFINITY = True
 
 
@@ -711,6 +724,12 @@ class PolicyWorkerBase(Worker):
 
         result = reduce_metrics(dict(all_metrics))
 
+        # All-reduce metrics across DP workers AFTER all backward passes complete.
+        # This must NOT happen inside _forward_backward_micro because FSDP2's
+        # backward gradient reductions may still be in-flight on the NCCL stream;
+        # issuing dist.all_reduce there causes a deadlock with MoE/hybrid models.
+        result = all_reduce_metrics(result, self.strategy)
+
         # Add back loss_fn_outputs (concatenated across micro-batches)
         if all_loss_fn_outputs:
             result["loss_fn_outputs"] = all_loss_fn_outputs
@@ -763,7 +782,10 @@ class PolicyWorkerBase(Worker):
             loss_fn_config: Optional config overrides for the loss function
 
         Returns:
-            All-reduced metrics dict for this micro batch
+            Raw (non-reduced) metrics dict for this micro batch.
+            All-reduce happens in the caller (forward_backward) after all
+            micro-batches complete, to avoid issuing NCCL collectives while
+            FSDP2 backward reductions are still in-flight.
         """
         self.model.train()
 
@@ -925,15 +947,6 @@ class PolicyWorkerBase(Worker):
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
 
-        loss_fn_outputs = status.pop("loss_fn_outputs", None)
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
-
-        # Add back loss_fn_outputs after all_reduce
-        if loss_fn_outputs is not None:
-            status["loss_fn_outputs"] = loss_fn_outputs
-
         return status
 
     def optim_step(self) -> float:
@@ -1074,7 +1087,13 @@ class CriticWorkerBase(Worker):
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
-        return reduce_metrics(dict(all_metrics))
+        result = reduce_metrics(dict(all_metrics))
+
+        # All-reduce metrics across DP workers AFTER all backward passes complete.
+        # Same rationale as policy worker: avoid NCCL deadlock with FSDP2 + MoE.
+        result = all_reduce_metrics(result, self.strategy)
+
+        return result
 
     def forward_backward_from_staged(self, data: TrainingInputBatch, start_idx: int, end_idx: int) -> Dict[str, float]:
         """
@@ -1106,7 +1125,9 @@ class CriticWorkerBase(Worker):
             experience: Experience object for one micro batch
 
         Returns:
-            All-reduced metrics dict for this micro batch
+            Raw (non-reduced) metrics dict for this micro batch.
+            All-reduce happens in the caller (forward_backward) after all
+            micro-batches complete, to avoid NCCL deadlock with FSDP2.
         """
         self.model.train()
 
@@ -1144,9 +1165,6 @@ class CriticWorkerBase(Worker):
             "values_clipfrac": clipfrac,
             "critic_lr": self.scheduler.get_last_lr()[0],
         }
-
-        # All-reduce metrics across DP workers
-        status = all_reduce_metrics(status, self.strategy)
 
         return status
 

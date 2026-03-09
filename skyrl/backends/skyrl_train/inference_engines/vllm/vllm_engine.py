@@ -8,7 +8,7 @@ from http import HTTPStatus
 import ray
 import asyncio
 import vllm
-from types import SimpleNamespace
+from types import SimpleNamespace, MethodType
 from vllm import SamplingParams
 from vllm.inputs import TokensPrompt
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
@@ -53,6 +53,12 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ.pop("ROCR_VISIBLE_DEVICES", None)
         os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        # Ensure RAY_ADDRESS is set so that vLLM's EngineCore subprocess can
+        # connect back to the Ray cluster and query placement group state.
+        # Without this, the subprocess fails with KeyError: 'bundles' when
+        # accessing placement_group_table() because it can't reach the GCS.
+        if "RAY_ADDRESS" not in os.environ:
+            os.environ["RAY_ADDRESS"] = ray.get_runtime_context().gcs_address
     elif noset_visible_devices:
         # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
         # when the distributed_executor_backend is not rayargs and
@@ -245,6 +251,10 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         """Only supported in AsyncVLLMInferenceEngine."""
         raise NotImplementedError("`completion` is only supported in AsyncVLLMInferenceEngine.")
 
+    async def anthropic_messages(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Only supported in AsyncVLLMInferenceEngine."""
+        raise NotImplementedError("`anthropic_messages` is only supported in AsyncVLLMInferenceEngine.")
+
     async def wake_up(self, *args: Any, **kwargs: Any):
         await asyncio.to_thread(self.llm.wake_up, tags=kwargs.get("tags", None))
 
@@ -312,6 +322,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
+        self._active_lora_id = None
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
@@ -374,6 +385,25 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             **openai_kwargs,
         )
 
+        if self._is_lora:
+            original = self.openai_serving_chat._maybe_get_adapters
+            async_engine = self  # capture outer self safely
+
+            def patched(self_chat, request, *args, **kwargs):
+                active_lora_id = getattr(async_engine, "_active_lora_id", None)
+                if active_lora_id is not None:
+                    return LoRARequest(
+                        lora_name=str(active_lora_id),
+                        lora_int_id=active_lora_id,
+                        lora_path="/dummy_lora_path",
+                    )
+                return original(request, *args, **kwargs)
+
+            self.openai_serving_chat._maybe_get_adapters = MethodType(
+                patched,
+                self.openai_serving_chat,
+            )
+
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
         self.openai_serving_completion = OpenAIServingCompletion(
@@ -409,26 +439,45 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             return None
 
     async def _load_lora_from_disk(self, lora_path: str):
-        """Load LoRA adapters from disk using vLLM's native add_lora method."""
-        lora_id = int(time.time_ns() % 0x7FFFFFFF)
-        lora_request = LoRARequest(lora_name=f"{lora_id}", lora_int_id=lora_id, lora_path=lora_path)
-        result = await self.llm.add_lora(lora_request)
-        return result
+        """Swap LoRA adapter: abort in-flight requests, remove old, add new, reset cache."""
+        await self.abort_generation()
+
+        if self._active_lora_id is not None:
+            try:
+                await self.llm.remove_lora(self._active_lora_id)
+                logger.info(f"Removed old LoRA {self._active_lora_id}")
+            except Exception as e:
+                logger.error(f"Failed removing old LoRA: {e}")
+
+        new_id = int(time.time_ns() % 0x7FFFFFFF)
+
+        await self.llm.add_lora(
+            LoRARequest(
+                lora_name=str(new_id),
+                lora_int_id=new_id,
+                lora_path=lora_path,
+            )
+        )
+
+        self._active_lora_id = new_id
+
+        await self.reset_prefix_cache()
+
+        logger.info(f"Loaded new LoRA {new_id}")
+        return {"status": "ok", "lora_id": new_id}
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
         """Collect outputs for a single prompt."""
-        # Check if LoRA is enabled and create LoRA request
+        # Check if LoRA is enabled and create LoRA request using tracked _active_lora_id
         final_output = None
         lora_request = None
 
-        if self._is_lora:
-            lora_int_ids = list(await self.llm.list_loras())
-            if len(lora_int_ids) > 0:
-                lora_int_id = lora_int_ids[0]
-                # dummy_lora_path for placeholder (actual loading done in add_lora())
-                lora_request = LoRARequest(
-                    lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="/dummy_lora_path"
-                )
+        if self._is_lora and self._active_lora_id is not None:
+            lora_request = LoRARequest(
+                lora_name=str(self._active_lora_id),
+                lora_int_id=self._active_lora_id,
+                lora_path="/dummy_lora_path",
+            )
 
         async for request_output in self.llm.generate(
             prompt=TokensPrompt(prompt_token_ids=prompt_token_ids),
@@ -611,6 +660,100 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         in vllm.entrypoints.openai.protocol.
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
+
+    async def anthropic_messages(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert Anthropic Messages format to OpenAI chat completions and back."""
+        request_json = request_payload.get("json", {})
+        headers = request_payload.get("headers", {})
+
+        if "model" not in request_json:
+            return {"error": {"message": "The field `model` is required", "type": "invalid_request_error"}}
+        if "messages" not in request_json or not request_json["messages"]:
+            return {"error": {"message": "The field `messages` is required and cannot be empty", "type": "invalid_request_error"}}
+
+        try:
+            openai_request = {
+                "model": request_json["model"],
+                "messages": [],
+                "stream": False,
+            }
+
+            if "system" in request_json and request_json["system"]:
+                system_content = request_json["system"]
+                if isinstance(system_content, list):
+                    text_parts = []
+                    for block in system_content:
+                        if block.get("type") == "text":
+                            text_parts.append(block["text"])
+                    system_content = "\n".join(text_parts)
+                openai_request["messages"].append({"role": "system", "content": system_content})
+
+            for msg in request_json["messages"]:
+                content = msg["content"]
+                if isinstance(content, list):
+                    text_parts = []
+                    for block in content:
+                        if block.get("type") == "text":
+                            text_parts.append(block["text"])
+                    content = "\n".join(text_parts)
+                openai_msg = {"role": msg["role"], "content": content}
+                openai_request["messages"].append(openai_msg)
+
+            if "max_tokens" in request_json:
+                openai_request["max_tokens"] = request_json["max_tokens"]
+            if "temperature" in request_json:
+                openai_request["temperature"] = request_json["temperature"]
+            if "top_p" in request_json:
+                openai_request["top_p"] = request_json["top_p"]
+            if "stop_sequences" in request_json:
+                openai_request["stop"] = request_json["stop_sequences"]
+
+            payload = {
+                "json": openai_request,
+                "headers": headers,
+            }
+            openai_response = await self.chat_completion(payload)
+
+            if "error" in openai_response or openai_response.get("object") == "error":
+                return openai_response
+
+            finish_reason = openai_response["choices"][0].get("finish_reason", "stop")
+            stop_reason_map = {
+                "stop": "end_turn",
+                "length": "max_tokens",
+                "content_filter": "end_turn",
+                "tool_calls": "tool_use",
+                "function_call": "tool_use",
+            }
+            stop_reason = stop_reason_map.get(finish_reason, "end_turn")
+
+            message_content = openai_response["choices"][0]["message"]["content"]
+            if message_content is None:
+                message_content = ""
+
+            anthropic_response = {
+                "id": openai_response.get("id", "msg-" + str(int(time.time()))),
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": message_content}],
+                "model": openai_response.get("model", request_json["model"]),
+                "stop_reason": stop_reason,
+                "usage": {
+                    "input_tokens": openai_response.get("usage", {}).get("prompt_tokens", 0),
+                    "output_tokens": openai_response.get("usage", {}).get("completion_tokens", 0),
+                },
+            }
+
+            return anthropic_response
+
+        except Exception as e:
+            logger.error(f"anthropic_messages error: {e}")
+            return {
+                "error": {
+                    "message": f"Error converting response: {str(e)}",
+                    "type": "internal_error",
+                }
+            }
 
     async def abort_generation(self) -> None:
         """

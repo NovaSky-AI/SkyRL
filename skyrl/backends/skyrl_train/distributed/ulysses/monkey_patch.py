@@ -35,6 +35,33 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     get_ulysses_sequence_parallel_world_size,
 )
 
+# Module-level storage for position_ids (both sliced and all-gathered versions).
+# Pre-computed in model_wrapper.py via set_ulysses_position_ids() before the model call,
+# so that _ulysses_flash_attention_forward can use the cached version instead of running
+# NCCL all_gather during gradient checkpointing backward recompute.
+# Safe as a global because each Ray worker is a separate process with a single training thread.
+_ulysses_position_ids_sliced: Optional[torch.Tensor] = None
+_ulysses_position_ids_gathered: Optional[torch.Tensor] = None
+
+
+def set_ulysses_position_ids(position_ids: Optional[torch.Tensor]):
+    """Store position_ids and pre-compute all-gathered version for use by _ulysses_flash_attention_forward.
+
+    Must be called outside the checkpointed region (i.e., in model_wrapper.py before the model call).
+    """
+    global _ulysses_position_ids_sliced, _ulysses_position_ids_gathered
+    _ulysses_position_ids_sliced = position_ids
+    if position_ids is not None:
+        sp_size = get_ulysses_sequence_parallel_world_size()
+        if sp_size > 1:
+            position_ids_list = [torch.empty_like(position_ids) for _ in range(sp_size)]
+            torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
+            _ulysses_position_ids_gathered = torch.concat(position_ids_list, dim=-1)
+        else:
+            _ulysses_position_ids_gathered = position_ids
+    else:
+        _ulysses_position_ids_gathered = None
+
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """
@@ -75,6 +102,10 @@ def _ulysses_flash_attention_forward(
 
     ########## AlltoAll for Ulysses ##########
     if ulysses_sp_size > 1:
+        # For models that don't pass position_ids through decoder layers (e.g., GraniteMoeHybrid),
+        # fall back to the pre-gathered global set by model_wrapper.py.
+        if position_ids is None:
+            position_ids = _ulysses_position_ids_sliced
         assert position_ids is not None, "position_ids is required for Ulysses sequence parallelism"
         # NOTE: repeat kv heads to be divided by sequence parallel. Instead of repeating nheads_q//nheads_k,
         # we choose to repeat sp_size//nheads_k, since flash_attention supports MQA/GQA.
@@ -91,13 +122,17 @@ def _ulysses_flash_attention_forward(
         key_states = gather_seq_scatter_heads(key_states, seq_dim=1, head_dim=2)
         value_states = gather_seq_scatter_heads(value_states, seq_dim=1, head_dim=2)
 
-        # TODO: all_gather position_ids because `prepare_fa2_from_position_ids` needs it, we can eliminate
-        # this all_gather by passing cu_seq_lens_q, cu_seq_lens_k, max_length_k, max_length_q explicitly.
-        # https://github.com/huggingface/transformers/pull/33932
+        # Use pre-gathered position_ids to avoid NCCL all_gather during gradient
+        # checkpointing backward recompute. The pre-gathered version is computed once
+        # in model_wrapper.py via set_ulysses_position_ids() before the model call.
         # (bsz, seq_len/n) -> (bsz, seq_len)
-        position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
-        torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
-        position_ids = torch.concat(position_ids_list, dim=-1)
+        if _ulysses_position_ids_gathered is not None:
+            position_ids = _ulysses_position_ids_gathered
+        else:
+            # Fallback: inline all_gather (only for non-checkpointed paths)
+            position_ids_list = [torch.empty_like(position_ids) for _ in range(ulysses_sp_size)]
+            torch.distributed.all_gather(position_ids_list, position_ids, group=get_ulysses_sequence_parallel_group())
+            position_ids = torch.concat(position_ids_list, dim=-1)
 
     if attention_mask is not None:
         # all gather attention mask

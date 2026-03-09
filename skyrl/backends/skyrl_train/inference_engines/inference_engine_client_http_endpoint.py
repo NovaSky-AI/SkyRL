@@ -299,6 +299,53 @@ def create_app() -> fastapi.FastAPI:
         """
         return await handle_openai_request(raw_request, endpoint="/completions")
 
+    @app.post("/v1/messages")
+    async def anthropic_messages(raw_request: Request):
+        """Anthropic-compatible Messages API endpoint."""
+        try:
+            request_json = await raw_request.json()
+
+            if _global_inference_engine_client is None:
+                return JSONResponse(
+                    content={"error": {"message": "Inference engine client not initialized", "type": "internal_error"}},
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                )
+            if "model" not in request_json:
+                return JSONResponse(
+                    content={"error": {"message": "The field `model` is required", "type": "invalid_request_error"}},
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                )
+            if "messages" not in request_json or not request_json["messages"]:
+                return JSONResponse(
+                    content={"error": {"message": "The field `messages` is required and cannot be empty", "type": "invalid_request_error"}},
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                )
+
+            payload = {
+                "json": request_json,
+                "headers": dict(raw_request.headers) if hasattr(raw_request, "headers") else {},
+            }
+            anthropic_response = await _global_inference_engine_client.anthropic_messages(payload)
+
+            if "error" in anthropic_response:
+                error_type = anthropic_response["error"].get("type", "internal_error")
+                status_code = HTTPStatus.BAD_REQUEST.value if error_type == "invalid_request_error" else HTTPStatus.INTERNAL_SERVER_ERROR.value
+                return JSONResponse(content=anthropic_response, status_code=status_code)
+
+            return JSONResponse(content=anthropic_response)
+
+        except json.JSONDecodeError as e:
+            return JSONResponse(
+                content={"error": {"message": f"Invalid JSON: {str(e)}", "type": "invalid_request_error"}},
+                status_code=HTTPStatus.BAD_REQUEST.value,
+            )
+        except Exception as e:
+            logger.error(f"Error in /v1/messages: {e}\n{traceback.format_exc()}")
+            return JSONResponse(
+                content={"error": {"message": f"Internal error: {str(e)}", "type": "internal_error"}},
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            )
+
     # Health check endpoint
     # All inference engine replicas are initialized before creating `InferenceEngineClient`, and thus
     # we can start receiving requests as soon as the FastAPI server starts

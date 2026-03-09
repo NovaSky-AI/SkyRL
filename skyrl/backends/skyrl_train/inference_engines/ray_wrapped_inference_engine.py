@@ -74,6 +74,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.completion.remote(request_payload)
 
+    async def anthropic_messages(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self.inference_engine_actor.anthropic_messages.remote(request_payload)
+
     async def abort_generation(self) -> None:
         return await self.inference_engine_actor.abort_generation.remote()
 
