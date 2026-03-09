@@ -11,7 +11,7 @@ Run:
     uv run --isolated --extra dev --extra fsdp pytest \
         tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_backend_weight_sync.py -v -s
 """
-ßßß
+
 import os
 import time
 from unittest import mock
@@ -165,7 +165,6 @@ class TestBackendWeightSync:
 
             # ===== Step 7: Sync weights via save_sampler_checkpoint =====
             with mock.patch("skyrl.backends.skyrl_train_backend._SKYRL_USE_NEW_INFERENCE", True):
-                backend.save_sampler_checkpoint("/tmp/test_backend_weight_sync.tar", model_id, persist=False)
                 backend._validate_model_state(model_id)
                 backend._ensure_inference_engines()
                 await backend._dispatch.save_weights_for_sampler()
