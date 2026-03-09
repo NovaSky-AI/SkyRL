@@ -20,7 +20,7 @@ uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backend
 #     echo "$add_integrations"
 # fi
 
-# TODO (sumanthrh): Migrate flashrl to vllm 0.16.0 and renable integration test
+# TODO (sumanthrh): Migrate flashrl to vllm 0.16.0 and re-enable integration test
 # Run tests for vllm 0.9.2
 # TODO (sumanthrh): We should have a better way to override without pinning a flash-attn wheel
 # uv run --isolated --extra fsdp --extra dev \
