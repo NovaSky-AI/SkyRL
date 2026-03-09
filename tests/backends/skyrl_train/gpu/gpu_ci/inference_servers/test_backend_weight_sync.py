@@ -110,7 +110,7 @@ class TestBackendWeightSync:
 
         # ===== Step 1: Create backend =====
         overrides = {
-            "trainer.placement.colocate_all": True,
+            "trainer.placement.colocate_all": False,
             "trainer.placement.policy_num_gpus_per_node": 2,
             "trainer.placement.policy_num_nodes": 1,
             "trainer.logger": "console",
