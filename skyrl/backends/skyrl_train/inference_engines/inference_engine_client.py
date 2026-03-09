@@ -449,6 +449,19 @@ class InferenceEngineClient(InferenceEngineInterface):
         # Always use the retry loop which also issues the first request inside
         return await self._chat_completion_with_retry(engine_idx, request_payload)
 
+    async def anthropic_messages(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Route Anthropic Messages API requests to engines.
+        Similar to chat_completion, routes based on session_id for sticky routing.
+        """
+        session_id = request_payload["json"].pop("session_id", None)
+        if session_id is None:
+            engine_idx = random.randint(0, len(self.engines) - 1)
+        else:
+            assert isinstance(session_id, (str, int)), "Session ID must be an integer or string for `/v1/messages`"
+            engine_idx = hash_with_sha256(str(session_id)) % len(self.engines)
+        logger.info(f"[InferenceEngineClient] Routing /v1/messages to engine {engine_idx}/{len(self.engines)}")
+        return await self.engines[engine_idx].anthropic_messages(request_payload)
+
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Handles an OpenAI /completions request.

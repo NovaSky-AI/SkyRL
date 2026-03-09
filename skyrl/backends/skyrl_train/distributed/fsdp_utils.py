@@ -281,33 +281,55 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_sd: dict, cpu_offloa
             tensor = tensor.contiguous()
         return tensor
 
-    if dist.get_rank() == 0:
-        for (param_name, full_param), sharded_param in zip(full_sd.items(), meta_sharded_sd.values()):
-            full_param = full_param.detach().cuda()
+    # Batched broadcast: coalesce many small tensors into fewer NCCL calls.
+    # For MoE models with 18,000+ params, this reduces init from minutes to seconds.
+    BATCH_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB per coalesced broadcast
+
+    param_names = list(meta_sharded_sd.keys())
+    batch_tensors = []
+    batch_names = []
+    batch_bytes = 0
+
+    def _flush_batch():
+        """Broadcast current batch and distribute to shards."""
+        if not batch_tensors:
+            return
+        pg = dist.distributed_c10d._get_default_group()
+        if len(batch_tensors) > 1:
+            dist._broadcast_coalesced(pg, batch_tensors, BATCH_SIZE_BYTES, 0)
+        else:
+            dist.broadcast(batch_tensors[0], src=0)
+
+        for name, full_tensor in zip(batch_names, batch_tensors):
+            sharded_param = meta_sharded_sd[name]
             mesh = sharded_param.device_mesh
-            dist.broadcast(full_param, src=0)
-            sharded_tensor = distribute_tensor(full_param, mesh, sharded_param.placements)
-            to_contiguous, casting_dtype = _infer_parameter_dtype(
-                model,
-                param_name,
-                full_param,
-            )
-            sharded_tensor = _cast_and_contiguous(sharded_tensor, to_contiguous, casting_dtype)
-            sharded_sd[param_name] = sharded_tensor
-    # We need this else to have a matching `broadcast` for all of the ranks, else we deadlock
-    else:
-        for param_name, sharded_param in meta_sharded_sd.items():
-            full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
-            mesh = sharded_param.device_mesh
-            dist.broadcast(full_tensor, src=0)
             sharded_tensor = distribute_tensor(full_tensor, mesh, sharded_param.placements)
-            to_contiguous, casting_dtype = _infer_parameter_dtype(
-                model,
-                param_name,
-                full_tensor,
-            )
+            to_contiguous, casting_dtype = _infer_parameter_dtype(model, name, full_tensor)
             sharded_tensor = _cast_and_contiguous(sharded_tensor, to_contiguous, casting_dtype)
-            sharded_sd[param_name] = sharded_tensor
+            sharded_sd[name] = sharded_tensor
+
+    for param_name in param_names:
+        sharded_param = meta_sharded_sd[param_name]
+        if dist.get_rank() == 0:
+            full_tensor = full_sd.pop(param_name).detach().cuda()
+        else:
+            full_tensor = torch.empty(sharded_param.size(), device="cuda", dtype=sharded_param.dtype)
+
+        tensor_bytes = full_tensor.nelement() * full_tensor.element_size()
+
+        # If adding this tensor exceeds batch size, flush current batch first
+        if batch_bytes + tensor_bytes > BATCH_SIZE_BYTES and batch_tensors:
+            _flush_batch()
+            batch_tensors.clear()
+            batch_names.clear()
+            batch_bytes = 0
+
+        batch_tensors.append(full_tensor)
+        batch_names.append(param_name)
+        batch_bytes += tensor_bytes
+
+    # Flush remaining tensors
+    _flush_batch()
 
     # we set `assign=True` because our params can be on meta device
     model.load_state_dict(sharded_sd, assign=True)

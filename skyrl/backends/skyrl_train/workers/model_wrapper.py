@@ -12,6 +12,7 @@ from peft.tuners.lora import LoraLayer
 import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 import numpy as np
+from skyrl.backends.skyrl_train.distributed.ulysses.monkey_patch import set_ulysses_position_ids
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl.backends.skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 from flash_attn.bert_padding import pad_input, unpad_input
@@ -164,7 +165,8 @@ class HFModelWrapper(nn.Module):
 
             # MoE - balancing loss
             model_config = self.model.config.to_dict()
-            if "output_router_logits" in model_config:
+            num_experts = model_config.get("num_local_experts", 0)
+            if "output_router_logits" in model_config and num_experts > 0:
                 logger.info("[MoE] set output_router_logits as True")
                 self.model.config.output_router_logits = True
 
@@ -301,6 +303,12 @@ class HFModelWrapper(nn.Module):
             sequences_rolled, _, _, _ = ulysses_pad_and_slice_inputs(
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
+
+        # Store position_ids in module-level globals (safe: single-threaded Ray worker process)
+        # for architectures that don't propagate position_ids through decoder layers.
+        # Must be set here (outside the model) to survive gradient checkpointing backward recompute.
+        if self.sequence_parallel_size > 1:
+            set_ulysses_position_ids(position_ids_fwd)
 
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
         if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
@@ -462,6 +470,9 @@ def _get_critic_model(
                     input_ids_fwd, position_ids_fwd, attention_mask_fwd, self.sequence_parallel_size
                 )
 
+            if self.sequence_parallel_size > 1:
+                set_ulysses_position_ids(position_ids_fwd)
+
             if self.sequence_parallel_size > 1 and self.config._attn_implementation == "flash_attention_2":
                 outputs = getattr(self, self.base_model_prefix)(input_ids_fwd, position_ids=position_ids_fwd)
             else:
@@ -596,7 +607,8 @@ def get_llm_for_sequence_regression(
 
     # MoE - balancing loss
     model_config = model.config.to_dict()
-    if "output_router_logits" in model_config:
+    num_experts = model_config.get("num_local_experts", 0)
+    if "output_router_logits" in model_config and num_experts > 0:
         logger.info("[MoE] set output_router_logits as True")
         model.config.output_router_logits = True
 

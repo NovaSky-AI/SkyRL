@@ -8,11 +8,13 @@ Automatically handles GPU placement:
 The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import ray
 from ray import ObjectRef
+from loguru import logger
 
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
@@ -62,6 +64,10 @@ class WorkerDispatch:
 
         # GPU state tracking (only matters when colocated)
         self._gpu_state: Dict[str, GPUState] = {name: GPUState() for name in self._actor_groups.keys()}
+
+    def get_dp_size(self, model: str) -> int:
+        """Get dp_size for a specific model."""
+        return self._actor_groups[model].actor_infos[0].rank.dp_size
 
     def get_lcm_dp_size(self) -> int:
         """Get LCM of all models' dp_size."""
@@ -259,17 +265,25 @@ class WorkerDispatch:
             end_idx=end_idx,
             **kwargs,
         )
+        t0 = time.time()
         statuses = ray.get(refs)
+        logger.info(f"[dispatch] ray.get(forward_backward) done in {time.time() - t0:.1f}s")
 
+        t0 = time.time()
         self._save_memory_snapshot(model, "forward_backward")
+        logger.info(f"[dispatch] _save_memory_snapshot(forward_backward) done in {time.time() - t0:.1f}s")
         return statuses[0]
 
     def optim_step(self, model: str) -> Optional[float]:
         """Run optimizer step. Model should already be on GPU from forward_backward."""
+        t0 = time.time()
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
         grad_norms = ray.get(refs)
+        logger.info(f"[dispatch] ray.get(optim_step) done in {time.time() - t0:.1f}s")
 
+        t0 = time.time()
         self._save_memory_snapshot(model, "optim_step")
+        logger.info(f"[dispatch] _save_memory_snapshot(optim_step) done in {time.time() - t0:.1f}s")
         return grad_norms[0]
 
     def set_lr(self, model: str, learning_rate: float) -> None:
