@@ -87,22 +87,6 @@ class MegatronModelWrapper:
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
-            if tp_rank == 0 and mpu.get_data_parallel_rank() == 0:
-                import os
-
-                if os.environ.get("SKYRL_DEBUG_LOGITS"):
-                    print(
-                        f"[DEBUG] logits shape={logits.shape}, "
-                        f"mean={logits.float().mean().item():.4f}, "
-                        f"std={logits.float().std().item():.4f}, "
-                        f"min={logits.float().min().item():.4f}, "
-                        f"max={logits.float().max().item():.4f}, "
-                        f"sequences shape={sequences.shape}, "
-                        f"attention_backend={getattr(get_model_config(self.actor_module[0]), 'attention_backend', 'unknown')}, "
-                        f"multi_latent_attention={getattr(get_model_config(self.actor_module[0]), 'multi_latent_attention', 'unknown')}, "
-                        f"q_lora_rank={getattr(get_model_config(self.actor_module[0]), 'q_lora_rank', 'unknown')}"
-                    )
-
             if temperature != 1.0:
                 logits.div_(temperature)
 

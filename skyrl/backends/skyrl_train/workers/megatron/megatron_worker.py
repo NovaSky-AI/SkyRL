@@ -350,11 +350,11 @@ class MegatronWorker:
         # Determine attention backend. MLA (Multi-Latent Attention) with TE fused
         # attention can produce NaN/incorrect results; fall back to unfused for MLA.
         if "attention_backend" not in transformer_config_kwargs:
-            has_mla = getattr(provider, "multi_latent_attention", False)
+            # has_mla = getattr(provider, "multi_latent_attention", False)
             if flash_attn:
                 transformer_config_kwargs["attention_backend"] = "flash"
-            elif has_mla:
-                transformer_config_kwargs["attention_backend"] = "unfused"
+            # elif has_mla:
+            #     transformer_config_kwargs["attention_backend"] = "unfused"
             else:
                 transformer_config_kwargs["attention_backend"] = "fused"
 
