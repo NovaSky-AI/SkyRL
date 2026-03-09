@@ -6,7 +6,6 @@ import asyncio
 import logging
 import os
 import pickle
-import socket
 import time
 from argparse import Namespace
 from typing import Any, Dict, Optional, Tuple
@@ -29,7 +28,7 @@ from skyrl.env_vars import (
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
-from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo, get_node_ip
+from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo, find_and_reserve_port, get_node_ip
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.inference_servers.vllm_worker import VLLM_WORKER_EXTENSION_CLS
 
@@ -97,7 +96,7 @@ class VLLMServerActor(ServerActorProtocol):
         """
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
-        self._port, self._port_reservation = self._find_and_reserve_port(start_port)
+        self._port, self._port_reservation = find_and_reserve_port(start_port)
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
 
@@ -148,30 +147,6 @@ class VLLMServerActor(ServerActorProtocol):
         # Initialized lazily to not block the actor initialization.
         self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
-
-    @staticmethod
-    def _find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
-        """Find an available port and hold the socket to prevent TOCTOU races.
-
-        Unlike get_open_port() which tests-then-releases, this keeps the socket
-        bound so no other process can claim the same port between discovery and
-        actual server startup.
-
-        Returns:
-            (port, socket) — caller must close the socket before rebinding.
-        """
-        port = start_port
-        while True:
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sock.bind(("", port))
-                sock.listen(1)
-                return port, sock
-            except OSError:
-                port += 1
-                if port > 65535:
-                    raise RuntimeError(f"No available port found starting from {start_port}")
 
     def _ensure_worker_extension(self) -> None:
         """
