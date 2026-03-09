@@ -1046,9 +1046,6 @@ class RayPPOTrainer:
         loss_mask = data["loss_mask"]
         response_mask = data["response_mask"]
 
-        # NOTE: Do not modify the tensor in place!
-        # Otherwise subsequent epochs will keep dividing the same tensor.
-
         # Step 1: Z-score normalization (if enabled)
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
             num_actions = response_mask.sum()
@@ -1061,6 +1058,21 @@ class RayPPOTrainer:
         # Option 1: token mean
         if self.cfg.trainer.algorithm.loss_reduction == "token_mean":
             data["advantages"] = advantages / loss_mask.sum().clamp(min=1)
+
+        # Option 1b: token-mean within each microbatch, then mean across microbatches
+        elif self.cfg.trainer.algorithm.loss_reduction == "token_mean_baseline":
+            micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
+            num_micro_batches = len(data) // micro_batch_size
+            for i in range(num_micro_batches):
+                start_idx = i * micro_batch_size
+                end_idx = (i + 1) * micro_batch_size
+                microbatch_advantages = advantages[start_idx:end_idx]
+                microbatch_loss_mask = loss_mask[start_idx:end_idx]
+                # Compute token-mean within each microbatch
+                microbatch_advantages = microbatch_advantages / microbatch_loss_mask.sum().clamp(min=1)
+                # Average across microbatches
+                microbatch_advantages /= num_micro_batches
+                data["advantages"][start_idx:end_idx] = microbatch_advantages
 
         # Option 2: sequence mean
         elif self.cfg.trainer.algorithm.loss_reduction == "sequence_mean":
