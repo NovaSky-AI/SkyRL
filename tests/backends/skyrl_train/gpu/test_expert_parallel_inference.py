@@ -101,7 +101,7 @@ def init_ray_inference_engines(
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
         enforce_eager=True,
-        shared_pg=shared_pg,
+        shared_pgs=[shared_pg] if shared_pg is not None else None,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=False,
         async_engine=True,

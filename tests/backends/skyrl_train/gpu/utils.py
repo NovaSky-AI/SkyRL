@@ -505,7 +505,7 @@ class InferenceEngineState:
                 vllm_v1_disable_multiproc=True,
                 enable_prefix_caching=ie_cfg.enable_prefix_caching,
                 enforce_eager=ie_cfg.enforce_eager,
-                shared_pg=pg,
+                shared_pgs=[pg] if pg is not None else None,
                 gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
                 inference_engine_enable_sleep=sleep,
                 async_engine=ie_cfg.async_engine,

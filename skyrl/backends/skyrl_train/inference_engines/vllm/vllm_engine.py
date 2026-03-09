@@ -46,16 +46,25 @@ class Logprob:
 
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
-    if kwargs.get("distributed_executor_backend") == "ray":
-        # a hack to make the script work.
-        # stop ray from manipulating *_VISIBLE_DEVICES
-        # at the top-level when the distributed_executor_backend is ray.
+    mp_cuda_visible_devices = kwargs.pop("mp_cuda_visible_devices", None)
+
+    if kwargs.get("distributed_executor_backend") == "mp" and mp_cuda_visible_devices is not None:
+        # For mp backend in colocated mode, set CUDA_VISIBLE_DEVICES to the
+        # pre-computed GPU IDs for this engine so spawned workers see the
+        # correct GPUs (not all GPUs on the node).
+        os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
+        os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+        os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        logger.info(f"mp backend: setting CUDA_VISIBLE_DEVICES={mp_cuda_visible_devices}")
+    elif kwargs.get("distributed_executor_backend") in ("ray", "mp"):
+        # For ray backend (and non-colocate mp), clear CUDA_VISIBLE_DEVICES
+        # so vLLM workers can discover GPUs via their own scheduling.
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ.pop("ROCR_VISIBLE_DEVICES", None)
         os.environ.pop("HIP_VISIBLE_DEVICES", None)
     elif noset_visible_devices:
         # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
-        # when the distributed_executor_backend is not rayargs and
+        # when the distributed_executor_backend is not ray/mp and
         # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
         os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
 

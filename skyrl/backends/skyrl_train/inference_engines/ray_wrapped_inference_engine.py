@@ -90,7 +90,7 @@ def create_ray_wrapped_inference_engines(
     expert_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
-    shared_pg=None,
+    shared_pgs=None,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
     async_engine=False,
@@ -108,14 +108,25 @@ def create_ray_wrapped_inference_engines(
     rope_theta: float | None = None,
     enable_ray_prometheus_stats: bool = False,
     served_model_name: str | None = None,
+    distributed_executor_backend: str = "auto",
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
     instances.
+
+    Args:
+        shared_pgs: A list of placement groups for colocated training, or None.
+            For the "ray"/"auto" distributed executor backend, this is typically a
+            single-element list containing one large PG.
+            For the "mp" backend, this is a list of per-engine PGs (one per engine).
+        distributed_executor_backend: vLLM distributed executor backend.
+            "auto" selects "uni" for single-GPU and "ray" for multi-GPU.
+            "mp" uses multiprocessing (single-node only) with per-engine placement groups.
     """
     from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
     from skyrl.train.utils.utils import (
         get_all_env_variables,
+        get_gpu_ids_for_pg_bundles,
         get_ray_pg_ready_with_timeout,
         ray_noset_visible_devices,
     )
@@ -136,31 +147,84 @@ def create_ray_wrapped_inference_engines(
 
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
-    # NOTE: we use the ray backend for tensor parallel size > 1 or pipeline parallel size > 1
-    # to explicitly manage resource allocation
-    # TODO: we should be able to support mp backend by allocating resources at engine level
-    distributed_executor_backend = "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else "ray"
+
+    use_mp_backend = distributed_executor_backend == "mp"
+    if distributed_executor_backend == "auto":
+        resolved_executor_backend = "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else "ray"
+    else:
+        resolved_executor_backend = distributed_executor_backend
+
     data_parallel_backend = "mp"
-    use_hybrid_engine = shared_pg is not None
-    num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
-
-    if use_hybrid_engine and tensor_parallel_size == 1 and pipeline_parallel_size == 1:
-        # Every worker will use 0.2 GPU, so that we can schedule
-        # inference and training workers on the same GPUs.
-        num_gpus_per_actor = 0.2
-
+    use_hybrid_engine = shared_pgs is not None
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
-    if not use_hybrid_engine:
-        # Create a big placement group to ensure that all inference engines are packed
-        bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
-        shared_pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+
+    if use_mp_backend:
+        # For mp backend, the Ray actor is a lightweight head process.
+        # GPU resources are managed by the placement group; vLLM's mp workers
+        # discover GPUs via CUDA_VISIBLE_DEVICES set from pre-computed PG GPU IDs.
+        if use_hybrid_engine:
+            if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
+                num_gpus_per_actor = 0.2
+            else:
+                num_gpus_per_actor = 0
+        else:
+            if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
+                num_gpus_per_actor = 1
+            else:
+                num_gpus_per_actor = 0
+    else:
+        num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
+        if use_hybrid_engine and tensor_parallel_size == 1 and pipeline_parallel_size == 1:
+            num_gpus_per_actor = 0.2
+
+    if use_mp_backend:
+        if not use_hybrid_engine:
+            # Non-colocate: create one PG per engine with individual GPU bundles
+            engine_pgs = []
+            for _ in range(num_inference_engines):
+                pg = placement_group(
+                    [{"GPU": 1, "CPU": 1}] * per_engine_gpu_count,
+                    strategy="PACK",
+                )
+                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                engine_pgs.append(pg)
+        else:
+            # Colocate: shared_pgs is a list of per-engine PGs (one per engine)
+            assert len(shared_pgs) == num_inference_engines, (
+                f"For mp backend with colocate, expected {num_inference_engines} placement groups "
+                f"(one per engine), got {len(shared_pgs)}"
+            )
+            engine_pgs = shared_pgs
+
+        # Pre-compute GPU IDs per engine so we can set CUDA_VISIBLE_DEVICES for the
+        # mp-spawned workers to see the correct GPUs (not all GPUs on the node).
+        engine_gpu_ids_map = {}
+        if per_engine_gpu_count > 1:
+            for engine_idx, epg in enumerate(engine_pgs):
+                bundle_indices = list(range(per_engine_gpu_count))
+                engine_gpu_ids_map[engine_idx] = get_gpu_ids_for_pg_bundles(epg, bundle_indices)
+    else:
+        # ray/auto backend: single shared PG
+        if use_hybrid_engine:
+            assert len(shared_pgs) == 1, (
+                f"For ray/auto backend with colocate, expected a single shared placement group, "
+                f"got {len(shared_pgs)}"
+            )
+            shared_pg = shared_pgs[0]
+        else:
+            bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
+            shared_pg = placement_group(bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
     for i in range(num_inference_engines):
-        base_pg_index = i * per_engine_gpu_count
-
-        # Get DP group rendezvous (addr, port) on the same node as DP rank 0 for this engine.
-        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, base_pg_index)
+        if use_mp_backend:
+            engine_pg = engine_pgs[i]
+            base_pg_index = 0  # each engine has its own PG
+            data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(engine_pg, 0)
+        else:
+            engine_pg = shared_pg
+            base_pg_index = i * per_engine_gpu_count
+            data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, base_pg_index)
 
         if backend == "vllm":
             if async_engine:
@@ -202,11 +266,19 @@ def create_ray_wrapped_inference_engines(
                 # Contiguous TP*PP slice reserved for a single DP rank.
                 tp_pp_size = tensor_parallel_size * pipeline_parallel_size
                 base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
-                dp_rank_bundles = (
-                    list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
-                )
+
+                if use_mp_backend:
+                    dp_rank_bundles = None
+                    mp_gpu_ids = engine_gpu_ids_map.get(i)
+                    mp_gpu_ids_str = ",".join(str(g) for g in mp_gpu_ids) if mp_gpu_ids is not None else None
+                else:
+                    dp_rank_bundles = (
+                        list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
+                    )
+                    mp_gpu_ids_str = None
+
                 dp_rank_sched = PlacementGroupSchedulingStrategy(
-                    placement_group=shared_pg,
+                    placement_group=engine_pg,
                     placement_group_capture_child_tasks=True,
                     placement_group_bundle_index=base_dp_pg_index,
                 )
@@ -223,6 +295,10 @@ def create_ray_wrapped_inference_engines(
                     else {}
                 )
 
+                mp_kwargs = {}
+                if mp_gpu_ids_str is not None:
+                    mp_kwargs["mp_cuda_visible_devices"] = mp_gpu_ids_str
+
                 engine = actor_class.options(
                     num_cpus=num_gpus_per_actor,
                     num_gpus=num_gpus_per_actor,
@@ -234,7 +310,7 @@ def create_ray_wrapped_inference_engines(
                     tensor_parallel_size=tensor_parallel_size,
                     pipeline_parallel_size=pipeline_parallel_size,
                     enable_expert_parallel=expert_parallel_size > 1,
-                    distributed_executor_backend=distributed_executor_backend,
+                    distributed_executor_backend=resolved_executor_backend,
                     seed=seed + i * data_parallel_size + dp_rank,
                     enable_prefix_caching=enable_prefix_caching,
                     dtype=model_dtype,
@@ -254,6 +330,7 @@ def create_ray_wrapped_inference_engines(
                     **lora_kwargs,
                     **rope_engine_kwargs,
                     **other_kwargs,
+                    **mp_kwargs,
                 )
                 inference_engine_actors.append(engine)
 

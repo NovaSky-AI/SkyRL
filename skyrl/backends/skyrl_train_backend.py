@@ -234,21 +234,40 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Created model {model_id} using RayPPOTrainer")
 
     def _create_colocate_pg(self):
-        """Create placement group for colocated training + inference (following main_base.py pattern)."""
-        total_gpu_slots = (
-            self._cfg.generator.inference_engine.num_engines
-            * self._cfg.generator.inference_engine.tensor_parallel_size
-            * self._cfg.generator.inference_engine.pipeline_parallel_size
-            * self._cfg.generator.inference_engine.data_parallel_size
-        )
-        logger.info(f"Creating placement group with {total_gpu_slots} GPU slots for colocated training+inference")
-        pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
+        """Create placement group(s) for colocated training + inference.
 
-        logger.info("Waiting for placement group to be ready...")
-        get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        logger.info("Placement group ready!")
+        For the ``"mp"`` distributed executor backend, returns a list of per-engine
+        placement groups.  For ``"ray"``/``"auto"``, returns a single-element list
+        containing one large placement group.
+        """
+        ie_cfg = self._cfg.generator.inference_engine
+        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
 
-        return pg
+        if ie_cfg.distributed_executor_backend == "mp":
+            pgs = []
+            for _ in range(ie_cfg.num_engines):
+                pg = placement_group(
+                    [{"GPU": 1, "CPU": 1}] * per_engine_gpu_count,
+                    strategy="PACK",
+                )
+                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                pgs.append(pg)
+            total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+            logger.info(
+                f"Created {len(pgs)} placement groups ({total_gpu_slots} GPU slots total) "
+                f"for colocated training+inference (mp backend)"
+            )
+            return pgs
+        else:
+            total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+            logger.info(f"Creating placement group with {total_gpu_slots} GPU slots for colocated training+inference")
+            pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
+
+            logger.info("Waiting for placement group to be ready...")
+            get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            logger.info("Placement group ready!")
+
+            return [pg]
 
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:
@@ -713,7 +732,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg: PlacementGroup | None, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainConfig, colocate_pgs: list[PlacementGroup] | None, tokenizer: PreTrainedTokenizerBase
 ):
     engine_kwargs = {
         "num_inference_engines": cfg.generator.inference_engine.num_engines,
@@ -727,7 +746,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "enforce_eager": cfg.generator.inference_engine.enforce_eager,
         "expert_parallel_size": cfg.generator.inference_engine.expert_parallel_size,
         "data_parallel_size": cfg.generator.inference_engine.data_parallel_size,
-        "shared_pg": colocate_pg,
+        "shared_pgs": colocate_pgs,
         "gpu_memory_utilization": cfg.generator.inference_engine.gpu_memory_utilization,
         "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
         "async_engine": cfg.generator.inference_engine.async_engine,
@@ -737,6 +756,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "backend": cfg.generator.inference_engine.backend,
         "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
         "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
+        "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled

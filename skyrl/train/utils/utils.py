@@ -761,6 +761,65 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     return pg_reordered_bundle_indices
 
 
+def get_reordered_bundle_indices_multi_pg(pgs):
+    """Get globally reordered (pg, bundle_index) assignments across multiple placement groups.
+
+    Probes every bundle across all PGs, sorts by (node_id, gpu_id), and returns
+    a list of (PlacementGroup, bundle_index) tuples — one per global rank.
+    """
+    all_info_actors = []
+    pg_bundle_refs = []
+    for pg in pgs:
+        pg_data = placement_group_table(pg)
+        num_bundles = len(pg_data["bundles"])
+        bundle_to_node_ids = pg_data["bundles_to_node_id"]
+        for i in range(num_bundles):
+            actor = InfoActor.options(
+                num_cpus=0.01,
+                num_gpus=0.01,
+                resources=None,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=i,
+                ),
+            ).remote()
+            all_info_actors.append(actor)
+            pg_bundle_refs.append((pg, i, bundle_to_node_ids[i]))
+
+    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in all_info_actors])
+    for actor in all_info_actors:
+        ray.kill(actor)
+
+    # (pg, bundle_index, node_id, gpu_id)
+    bundle_infos = [
+        (pg_bundle_refs[j][0], pg_bundle_refs[j][1], pg_bundle_refs[j][2], gpu_ids[j])
+        for j in range(len(pg_bundle_refs))
+    ]
+    sorted_infos = sorted(bundle_infos, key=lambda x: (x[2], x[3]))
+    return [(info[0], info[1]) for info in sorted_infos]
+
+
+def get_gpu_ids_for_pg_bundles(pg, bundle_indices):
+    """Get the physical GPU IDs for specific bundles in a placement group."""
+    info_actors = []
+    for idx in bundle_indices:
+        info_actors.append(
+            InfoActor.options(
+                num_cpus=0.01,
+                num_gpus=0.01,
+                resources=None,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=idx,
+                ),
+            ).remote()
+        )
+    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in info_actors])
+    for actor in info_actors:
+        ray.kill(actor)
+    return gpu_ids
+
+
 def torch_dtype_to_str(dtype: torch.dtype) -> str:
     if dtype == torch.bfloat16:
         return "bfloat16"

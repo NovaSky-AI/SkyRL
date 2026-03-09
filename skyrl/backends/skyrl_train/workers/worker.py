@@ -16,7 +16,6 @@ import torch.nn as nn
 from loguru import logger
 from ray import ObjectRef
 from ray.util.placement_group import (
-    PlacementGroup,
     PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
@@ -48,6 +47,7 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, Traini
 from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
     get_reordered_bundle_indices,
+    get_reordered_bundle_indices_multi_pg,
     ray_noset_visible_devices,
 )
 from skyrl.backends.skyrl_train.utils.io import io
@@ -407,7 +407,7 @@ class PPORayActorGroup:
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[Worker],
-        pg: Optional[PlacementGroup] = None,
+        pg=None,
         num_gpus_per_actor: float = 1.0,
         resources: Optional[Dict[str, float]] = None,
         num_resources_per_node: Optional[int] = None,
@@ -415,6 +415,12 @@ class PPORayActorGroup:
         sequence_parallel_size: int = 1,
         record_memory: bool = False,
     ) -> None:
+        """
+        Args:
+            pg: Placement group(s) for the worker group. Accepts a single
+                PlacementGroup, a list of PlacementGroups (for multi-PG
+                colocate_all with mp backend), or None.
+        """
         self.cfg = cfg
         self._num_nodes = num_nodes
         self._num_gpus_per_node = num_gpus_per_node
@@ -429,118 +435,121 @@ class PPORayActorGroup:
         self.record_memory = record_memory
         self._initiate_actors(pg, num_gpus_per_actor)
 
-    def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
+    def _initiate_actors(self, pg, num_gpus_per_actor: float):
         """Initialize Ray actors in the worker group.
 
         Args:
-            pg: The placement group for the worker group
+            pg: Placement group(s) for the worker group. Can be a single
+                PlacementGroup, a list of PlacementGroups, or None.
             num_gpus_per_actor: The number of gpus to allocate per actor.
         """
         world_size = self._num_nodes * self._num_gpus_per_node
+
+        # Normalize pg input: support both single PG and list of PGs
+        if isinstance(pg, list):
+            pgs = pg
+        elif pg is not None:
+            pgs = [pg]
+        else:
+            pgs = None
+
         if self.colocate_all:
             assert (
-                pg is not None
-            ), "if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
-            pg_data = placement_group_table(pg)
-            assert (
-                len(pg_data["bundles"]) == world_size
-            ), "if colocate_all is True, the number of bundles in the shared placement group must match the world size"
+                pgs is not None
+            ), "if colocate_all is True, the shared placement group(s) must be provided to PPORayActorGroup"
+            total_bundles = sum(len(placement_group_table(p)["bundles"]) for p in pgs)
+            assert total_bundles == world_size, (
+                f"if colocate_all is True, the total number of bundles across all placement groups "
+                f"must match world_size. Got {total_bundles} bundles but world_size={world_size}"
+            )
 
-        reordered_bundle_indices = []
-        if pg is not None:
-            pg_data = placement_group_table(pg)
-            should_reorder_bundles = len(pg_data["bundles"]) == world_size
-            if should_reorder_bundles:
-                reordered_bundle_indices = get_reordered_bundle_indices(pg)
+        # Build rank → (pg, bundle_index) assignments.
+        # rank_pg_assignments is a list of (PlacementGroup, bundle_idx) tuples,
+        # one per rank, sorted by (node_id, gpu_id) for deterministic ordering.
+        rank_pg_assignments = []
+        if pgs is not None:
+            if len(pgs) > 1:
+                total_bundles = sum(len(placement_group_table(p)["bundles"]) for p in pgs)
+                if total_bundles == world_size:
+                    rank_pg_assignments = get_reordered_bundle_indices_multi_pg(pgs)
+            elif len(pgs) == 1:
+                single_pg = pgs[0]
+                pg_data = placement_group_table(single_pg)
+                if len(pg_data["bundles"]) == world_size:
+                    indices = get_reordered_bundle_indices(single_pg)
+                    rank_pg_assignments = [(single_pg, idx) for idx in indices]
 
-        if self._num_gpus_per_node > 1 and pg is None:
+        # If no PGs provided, create one internally (legacy multi-node case)
+        if pgs is None and self._num_gpus_per_node > 1:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
                 resources_name = list(self._resources.keys())[0]
                 for i in range(len(bundles)):
                     bundles[i][resources_name] = self._num_resources_per_node
 
-            pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        if pg:
-            master_actor = self.ray_actor_type.options(
-                num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
-                resources=self._resources,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
-                ),
-            ).remote(
-                cfg=self.cfg,
-                world_size=world_size,
-                rank=0,
-                local_rank=0,
-                master_addr=None,
-                master_port=None,
-                sequence_parallel_size=self.sequence_parallel_size,
-                record_memory=self.record_memory,
-            )
-        else:
-            master_actor = self.ray_actor_type.options(
-                num_cpus=num_gpus_per_actor,
-                num_gpus=num_gpus_per_actor,
-                resources=self._resources,
-            ).remote(
-                cfg=self.cfg,
-                world_size=world_size,
-                rank=0,
-                local_rank=0,
-                master_addr=None,
-                master_port=None,
-                sequence_parallel_size=self.sequence_parallel_size,
-                record_memory=self.record_memory,
-            )
+            internal_pg = placement_group(bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(internal_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+            pgs = [internal_pg]
+
+        def _scheduling_strategy_for_rank(rank):
+            if rank_pg_assignments:
+                pg_for_rank, bundle_idx = rank_pg_assignments[rank]
+                return PlacementGroupSchedulingStrategy(
+                    placement_group=pg_for_rank,
+                    placement_group_bundle_index=bundle_idx,
+                )
+            elif pgs:
+                return PlacementGroupSchedulingStrategy(
+                    placement_group=pgs[0],
+                    placement_group_bundle_index=rank // self._num_gpus_per_node,
+                )
+            return None
+
+        sched = _scheduling_strategy_for_rank(0)
+        actor_options = {
+            "num_cpus": num_gpus_per_actor,
+            "num_gpus": num_gpus_per_actor,
+            "resources": self._resources,
+        }
+        if sched is not None:
+            actor_options["scheduling_strategy"] = sched
+
+        master_actor = self.ray_actor_type.options(**actor_options).remote(
+            cfg=self.cfg,
+            world_size=world_size,
+            rank=0,
+            local_rank=0,
+            master_addr=None,
+            master_port=None,
+            sequence_parallel_size=self.sequence_parallel_size,
+            record_memory=self.record_memory,
+        )
         self._actor_handlers = [master_actor]
-        # Create worker actors
+
         if world_size > 1:
             master_addr, master_port = ray.get(master_actor.get_master_addr_port.remote())
             for rank in range(1, world_size):
                 local_rank = rank % self._num_gpus_per_node
 
-                if pg:
-                    worker_actor = self.ray_actor_type.options(
-                        num_cpus=num_gpus_per_actor,
-                        num_gpus=num_gpus_per_actor,
-                        resources=self._resources,
-                        scheduling_strategy=PlacementGroupSchedulingStrategy(
-                            placement_group=pg,
-                            placement_group_bundle_index=(
-                                reordered_bundle_indices[rank]
-                                if reordered_bundle_indices
-                                else rank // self._num_gpus_per_node
-                            ),
-                        ),
-                    ).remote(
-                        cfg=self.cfg,
-                        world_size=world_size,
-                        rank=rank,
-                        local_rank=local_rank,
-                        master_addr=master_addr,
-                        master_port=master_port,
-                        sequence_parallel_size=self.sequence_parallel_size,
-                        record_memory=self.record_memory,
-                    )
-                else:
-                    worker_actor = self.ray_actor_type.options(
-                        num_cpus=num_gpus_per_actor,
-                        num_gpus=num_gpus_per_actor,
-                        resources=self._resources,
-                    ).remote(
-                        cfg=self.cfg,
-                        world_size=world_size,
-                        rank=rank,
-                        local_rank=local_rank,
-                        master_addr=master_addr,
-                        master_port=master_port,
-                        sequence_parallel_size=self.sequence_parallel_size,
-                        record_memory=self.record_memory,
-                    )
+                sched = _scheduling_strategy_for_rank(rank)
+                actor_options = {
+                    "num_cpus": num_gpus_per_actor,
+                    "num_gpus": num_gpus_per_actor,
+                    "resources": self._resources,
+                }
+                if sched is not None:
+                    actor_options["scheduling_strategy"] = sched
+
+                worker_actor = self.ray_actor_type.options(**actor_options).remote(
+                    cfg=self.cfg,
+                    world_size=world_size,
+                    rank=rank,
+                    local_rank=local_rank,
+                    master_addr=master_addr,
+                    master_port=master_port,
+                    sequence_parallel_size=self.sequence_parallel_size,
+                    record_memory=self.record_memory,
+                )
                 self._actor_handlers.append(worker_actor)
 
         # Initialize process group

@@ -2,6 +2,7 @@
 Main entrypoint for training.
 """
 
+from typing import List, Optional
 from ray.util.placement_group import placement_group, PlacementGroup
 
 from transformers import PreTrainedTokenizerBase
@@ -39,7 +40,9 @@ __all__ = ["BasePPOExp", "config_dir"]
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainConfig,
+    colocate_pgs: Optional[List[PlacementGroup]],
+    tokenizer: PreTrainedTokenizerBase,
 ):
     from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
         create_ray_wrapped_inference_engines,
@@ -58,7 +61,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "enforce_eager": ie_cfg.enforce_eager,
         "expert_parallel_size": ie_cfg.expert_parallel_size,
         "data_parallel_size": ie_cfg.data_parallel_size,
-        "shared_pg": colocate_pg,
+        "shared_pgs": colocate_pgs,
         "gpu_memory_utilization": ie_cfg.gpu_memory_utilization,
         "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
         "async_engine": ie_cfg.async_engine,
@@ -68,6 +71,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "backend": ie_cfg.backend,
         "engine_init_kwargs": ie_cfg.engine_init_kwargs,
         "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
+        "distributed_executor_backend": ie_cfg.distributed_executor_backend,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -175,31 +179,43 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> PlacementGroup:
-        """Initializes a placement group for colocated training.
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[List[PlacementGroup]]:
+        """Initializes placement group(s) for colocated training.
 
-        A single placement group that packs all the inference engines together is created.
+        For the ``"mp"`` distributed executor backend, one placement group per
+        inference engine is created (single-node packing per engine).  For
+        ``"ray"``/``"auto"``, a single placement group that packs all inference
+        engines together is created (wrapped in a list for a uniform interface).
 
         Args:
-            timeout (int): The timeout for the placement group to be ready.
+            timeout (int): The timeout for each placement group to be ready.
 
         Returns:
-            PlacementGroup: The placement group for colocated training.
+            A list of PlacementGroup(s) when colocate_all is True, else None.
         """
-        if self.cfg.trainer.placement.colocate_all:
-            ie_cfg = self.cfg.generator.inference_engine
+        if not self.cfg.trainer.placement.colocate_all:
+            return None
+
+        ie_cfg = self.cfg.generator.inference_engine
+        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+
+        if ie_cfg.distributed_executor_backend == "mp":
+            pgs = []
+            for _ in range(ie_cfg.num_engines):
+                pg = placement_group(
+                    [{"GPU": 1, "CPU": 1}] * per_engine_gpu_count,
+                    strategy="PACK",
+                )
+                get_ray_pg_ready_with_timeout(pg, timeout=timeout)
+                pgs.append(pg)
+            return pgs
+        else:
             pg = placement_group(
-                [{"GPU": 1, "CPU": 1}]
-                * ie_cfg.num_engines
-                * ie_cfg.tensor_parallel_size
-                * ie_cfg.pipeline_parallel_size
-                * ie_cfg.data_parallel_size,
+                [{"GPU": 1, "CPU": 1}] * ie_cfg.num_engines * per_engine_gpu_count,
                 strategy="PACK",
             )
             get_ray_pg_ready_with_timeout(pg, timeout=timeout)
-            return pg
-        else:
-            return None
+            return [pg]
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         """Initializes the generator.
@@ -343,10 +359,18 @@ class BasePPOExp:
             # Case: Neither - build servers and router internally
             cli_args = build_vllm_cli_args(self.cfg)
 
+            colocate_pg_for_server = None
+            if is_colocated and self.colocate_pg is not None:
+                assert len(self.colocate_pg) == 1, (
+                    "ServerGroup (new inference path) currently requires a single shared placement group. "
+                    "Use the legacy inference path for mp distributed_executor_backend with multiple PGs."
+                )
+                colocate_pg_for_server = self.colocate_pg[0]
+
             self._server_group = ServerGroup(
                 cli_args=cli_args,
                 num_servers=ie_cfg.num_engines,
-                placement_group=self.colocate_pg if is_colocated else None,
+                placement_group=colocate_pg_for_server,
                 enable_dp=ie_cfg.data_parallel_size > 1,
             )
             server_infos = self._server_group.start()
