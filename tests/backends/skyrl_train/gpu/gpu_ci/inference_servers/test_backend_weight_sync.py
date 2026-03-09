@@ -106,6 +106,7 @@ class TestBackendWeightSync:
         )
         from skyrl.tinker.types import LoraConfig
 
+        print("\n[TEST] Setting up SkyRLTrainBackend (colocated, 2 GPU)")
 
         # ===== Step 1: Create backend =====
         overrides = {
@@ -123,19 +124,23 @@ class TestBackendWeightSync:
         # ===== Step 2: Create model (real weights, FSDP2 sharded across 2 GPUs) =====
         model_id = "test-model"
         backend.create_model(model_id, LoraConfig(rank=0, alpha=0, seed=42))
+        print("[Step 2] Model created with real weights (FSDP2, 2 workers)")
 
         # ===== Step 3: Inject dummy weight config before inference engine creation =====
         backend._cfg.generator.inference_engine.engine_init_kwargs = {"load_format": "dummy"}
+        print("[Step 3] Injected load_format=dummy into engine_init_kwargs")
 
         # ===== Step 4: Create inference engines with dummy weights =====
         with mock.patch("skyrl.backends.skyrl_train_backend._SKYRL_USE_NEW_INFERENCE", True):
             backend._ensure_inference_engines()
+        print("[Step 4] Inference engines created (dummy weights)")
 
         # Wait for servers to be healthy
         server_urls = backend._server_group.get_server_urls()
         assert len(server_urls) == 2, f"Expected 2 server URLs, got {len(server_urls)}"
         for url in server_urls:
             assert wait_for_url(url), f"Server {url} failed to start"
+        print(f"[Step 4] Servers healthy: {server_urls}")
 
         try:
             # ===== Step 5: Verify dummy weights produce gibberish =====
@@ -151,16 +156,19 @@ class TestBackendWeightSync:
                 assert resp.status_code == 200, f"Completions request failed: {resp.text}"
 
                 text_before = resp.json()["choices"][0]["text"]
+                print(f"[Step 5] Dummy weights output: {text_before!r}")
                 assert "Paris" not in text_before, "Dummy weights unexpectedly produced correct answer"
 
             # ===== Step 6: Sleep inference engines (required before colocated weight sync) =====
             await backend._inference_engine_client.sleep()
+            print("[Step 6] Inference engines sleeping")
 
             # ===== Step 7: Sync weights via save_sampler_checkpoint =====
             with mock.patch("skyrl.backends.skyrl_train_backend._SKYRL_USE_NEW_INFERENCE", True):
                 backend._validate_model_state(model_id)
                 backend._ensure_inference_engines()
                 await backend._dispatch.save_weights_for_sampler()
+            print("[Step 7] save_sampler_checkpoint() completed (NCCL broadcast done)")
 
             # ===== Step 8: Verify real weights produce correct output =====
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as http_client:
@@ -168,8 +176,10 @@ class TestBackendWeightSync:
                 assert resp.status_code == 200, f"Completions request failed: {resp.text}"
 
                 text_after = resp.json()["choices"][0]["text"]
+                print(f"[Step 8] Real weights output: {text_after!r}")
                 assert "Paris" in text_after, f"Weight sync failed - expected 'Paris' but got: {text_after!r}"
 
+            print("[SUCCESS] Backend weight sync test passed!")
 
         finally:
             # Cleanup: teardown inference client session
