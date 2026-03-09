@@ -76,12 +76,10 @@ def get_open_port(start_port: int | None = None) -> int:
 
 
 def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
-    """Find an available port and hold the socket to prevent TOCTOU races.
+    """Find an available port and hold the socket to prevent race conditions.
 
-    Unlike get_open_port() which tests-then-releases, this keeps the socket
-    bound so no other process can claim the same port between discovery and
-    actual server startup.  Use SO_REUSEADDR on both this socket and the
-    eventual server socket for a seamless hand-off.
+    This keeps the socket bound so no other process can claim the same port
+    between discovery and actual server startup.
 
     Returns:
         (port, socket) -- caller must close the socket before rebinding.
