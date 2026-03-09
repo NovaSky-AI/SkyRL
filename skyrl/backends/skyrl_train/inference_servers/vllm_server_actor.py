@@ -5,6 +5,7 @@ vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 import asyncio
 import logging
 import os
+import socket
 import time
 from argparse import Namespace
 from typing import Optional, Tuple
@@ -27,8 +28,9 @@ from skyrl.env_vars import (
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
-from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_open_port
+from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo, get_node_ip
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
+from skyrl.backends.skyrl_train.inference_servers.vllm_worker import VLLM_WORKER_EXTENSION_CLS
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +94,7 @@ class VLLMServerActor(ServerActorProtocol):
         """
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
-        self._port = get_open_port(start_port)
+        self._port, self._port_reservation = self._find_and_reserve_port(start_port)
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
 
@@ -142,6 +144,43 @@ class VLLMServerActor(ServerActorProtocol):
         # Initialized lazily to not block the actor initialization.
         self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def _find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
+        """Find an available port and hold the socket to prevent TOCTOU races.
+
+        Unlike get_open_port() which tests-then-releases, this keeps the socket
+        bound so no other process can claim the same port between discovery and
+        actual server startup.
+
+        Returns:
+            (port, socket) — caller must close the socket before rebinding.
+        """
+        port = start_port
+        while True:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("", port))
+                sock.listen(1)
+                return port, sock
+            except OSError:
+                port += 1
+                if port > 65535:
+                    raise RuntimeError(f"No available port found starting from {start_port}")
+
+    def _ensure_worker_extension(self) -> None:
+        """
+        Ensure the SkyRL worker extension is configured.
+
+        The worker extension (WorkerWrap) provides the RPC methods needed for
+        weight synchronization (init_weight_update_communicator, load_weights).
+        """
+        if not hasattr(self._cli_args, "worker_extension_cls") or not self._cli_args.worker_extension_cls:
+            self._cli_args.worker_extension_cls = VLLM_WORKER_EXTENSION_CLS
+            logger.info(f"Using default worker extension: {VLLM_WORKER_EXTENSION_CLS}")
+        else:
+            logger.info(f"Using provided worker extension: {self._cli_args.worker_extension_cls}")
 
     def _ensure_ray_executor(self) -> None:
         """
@@ -239,6 +278,12 @@ class VLLMServerActor(ServerActorProtocol):
 
     async def _run_server(self) -> None:
         """Internal method to run the HTTP server."""
+        # Release the port reservation right before vLLM rebinds.
+        # SO_REUSEADDR on both sockets makes the hand-off atomic.
+        if self._port_reservation is not None:
+            self._port_reservation.close()
+            self._port_reservation = None
+
         sock_addr = (self._cli_args.host, self._cli_args.port)
         sock = create_server_socket(sock_addr)
         app = build_app(self._cli_args)
