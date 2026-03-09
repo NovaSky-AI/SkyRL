@@ -263,8 +263,9 @@ class TestDataPlane:
         assert len(result) == 2
         conversation, engine_prompts = result
         assert conversation == messages
-        assert len(engine_prompts) > 0
-        assert "prompt_token_ids" in engine_prompts[0]
+        assert len(engine_prompts) == 1
+        assert engine_prompts[0]["prompt_token_ids"] == [1, 2, 3]
+        assert engine_prompts[0]["prompt"] == "rendered prompt"
 
     @pytest.mark.asyncio
     async def test_tokenize(self, client):

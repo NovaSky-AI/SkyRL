@@ -593,13 +593,15 @@ def test_client_tokenize_detokenize_roundtrip(vllm_server: InferenceEngineState)
 def test_client_render_chat_completion(vllm_server: InferenceEngineState):
     """Test render_chat_completion via RemoteInferenceClient against real vLLM."""
     client = vllm_server.client
-    messages = [{"role": "user", "content": "Hello"}]
+    messages = [{"role": "user", "content": "Hello world!"}]
     result = asyncio.run(client.render_chat_completion(messages=messages))
     # vLLM returns [conversation, engine_prompts]
     assert isinstance(result, list)
     assert len(result) == 2
     conversation, engine_prompts = result
-    # engine_prompts should have prompt_token_ids
+    # engine_prompts should have prompt_token_ids matching local tokenizer output
     assert len(engine_prompts) > 0
     assert "prompt_token_ids" in engine_prompts[0]
-    assert len(engine_prompts[0]["prompt_token_ids"]) > 0
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
+    expected_token_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+    assert engine_prompts[0]["prompt_token_ids"] == expected_token_ids
