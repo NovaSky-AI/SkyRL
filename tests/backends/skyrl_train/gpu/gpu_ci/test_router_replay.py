@@ -28,7 +28,8 @@ MOE_MODEL_NAME = "/home/ray/moonlight16b"
 # MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 REPLAY_NUM_LAYERS = 2
 NUM_PROMPTS = 10
-N_SAMPLES_PER_PROMPT = 5
+N_SAMPLES_PER_PROMPT = 4
+MAX_GENERATE_LENGTH = 1024
 
 
 def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
@@ -36,24 +37,82 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     cfg.trainer.policy.model.path = model_name
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
-    cfg.trainer.use_sample_packing = False
+    cfg.trainer.use_sample_packing = True
+    # flash attn + mla works without sample packing, logprobs are crazy/wrong
+    # but flash-attn correctly throws error with sample packing
+    # we should add an assert that if you set use_sample_packing=False flash attn can accidentally be used
     cfg.trainer.logger = "console"
     if "moonlight" in model_name:
+        if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
         # flash attn not supported for moonlight16b
-        cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
-        cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "seq_aux_loss"
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_aux_loss_coeff"] = 0
-        cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
-        cfg.trainer.policy.megatron_config.moe_router_enable_expert_bias = True
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_bias_update_rate"] = 0
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_dtype"] = "fp32"
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_topk"] = 6
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_pre_softmax"] = True
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_group_topk"] = 1
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_num_groups"] = 1
+        # cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
+        # cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "seq_aux_loss"
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_aux_loss_coeff"] = 0
+        # cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
+        # cfg.trainer.policy.megatron_config.moe_router_enable_expert_bias = True
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_bias_update_rate"] = 0
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_dtype"] = "fp32"
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_topk"] = 6
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_pre_softmax"] = True
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_group_topk"] = 1
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_num_groups"] = 1
+        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers_in_last_pipeline_stage"] = 13
         cfg.trainer.flash_attn = False
     validate_cfg(cfg)
     return cfg
+
+
+def build_training_input_from_text_samples(
+    tokenizer: AutoTokenizer, prompt_response_pairs: list[tuple[str, str]]
+) -> TrainingInputBatch:
+    prompts = []
+    responses = []
+    rewards = []
+    loss_masks = []
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    for prompt_text, response_text in prompt_response_pairs:
+        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+        response_ids = tokenizer.encode(response_text, add_special_tokens=False)
+        if tokenizer.eos_token_id is not None and (not response_ids or response_ids[-1] != tokenizer.eos_token_id):
+            response_ids.append(tokenizer.eos_token_id)
+
+        prompts.append(prompt_ids)
+        responses.append(response_ids)
+        rewards.append([0.0] * len(response_ids))
+        loss_masks.append([1] * len(response_ids))
+
+    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = (
+        convert_prompts_responses_to_batch_tensors(
+            tokenizer=tokenizer,
+            prompts=prompts,
+            responses=responses,
+            rewards=rewards,
+            loss_masks=loss_masks,
+        )
+    )
+
+    num_actions = response_mask.shape[1]
+    batch_size = sequences.shape[0]
+    training_input = TrainingInputBatch(
+        {
+            "sequences": sequences,
+            "attention_mask": attention_mask,
+            "response_mask": response_mask,
+            "rewards": rewards_t,
+            "loss_mask": loss_mask_t,
+            "rollout_logprobs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+            "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+            "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+            "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
+            "action_mask": response_mask.to(dtype=torch.int64),
+        }
+    )
+    training_input.metadata = {"response_length": num_actions}
+    return training_input
 
 
 @pytest.mark.megatron
@@ -228,6 +287,96 @@ def test_megatron_router_replay(ray_init_fixture):
 
 
 @pytest.mark.megatron
+def test_moonlight_logprobs(ray_init_fixture):
+    """
+    Check magnitude of moonlight-16b-a3b logprobs without router replay.
+    """
+    actor_group = None
+    try:
+        cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
+        cfg.trainer.strategy = "megatron"
+
+        tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
+        input_batch: GeneratorInput = get_test_generator_input(
+            model=MOE_MODEL_NAME,
+            num_prompts=NUM_PROMPTS,
+            n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
+            max_prompt_length=512,
+            env_class="gsm8k",
+        )
+        training_input = build_training_input_from_text_samples(
+            tokenizer=tokenizer,
+            prompt_response_pairs=[
+                (
+                    tokenizer.apply_chat_template(
+                        prompt
+                        if any(message["role"] == "system" for message in prompt)
+                        else [{"role": "system", "content": "You are a helpful assistant."}] + prompt,
+                        add_generation_prompt=True,
+                        tokenize=False,
+                    ),
+                    " "
+                    + (
+                        " ".join(
+                            next(
+                                (
+                                    message["content"]
+                                    for message in reversed(prompt)
+                                    if message["role"] == "user"
+                                ),
+                                "",
+                            ).split()[:16]
+                        ).strip()
+                        or "I will solve this step by step."
+                    ),
+                )
+                for prompt in input_batch["prompts"]
+            ],
+        )
+
+        cfg.trainer.placement.policy_num_gpus_per_node = 8
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+        cfg.trainer.policy.megatron_config.context_parallel_size = 1
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        cfg.trainer.micro_forward_batch_size_per_gpu = 1
+        cfg.trainer.micro_train_batch_size_per_gpu = 1
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = {
+            **(cfg.trainer.policy.megatron_config.transformer_config_kwargs or {}),
+            "moe_enable_routing_replay": False,
+        }
+
+        actor_group = init_worker_with_type(
+            "policy",
+            shared_pg=None,
+            colocate_all=False,
+            num_gpus_per_node=8,
+            cfg=cfg,
+        )
+
+        with Timer("moonlight_forward"):
+            refs = actor_group.async_run_ray_method("mesh", "forward", data=training_input)
+            results = ray.get(refs)
+
+        action_log_probs = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results)["output"]
+        valid_log_probs = action_log_probs[training_input["response_mask"].bool()]
+        avg_logprob = valid_log_probs.mean().item()
+        print(
+            f"Moonlight Megatron logprobs - mean: {avg_logprob:.6f}, std: {valid_log_probs.std().item():.6f}, "
+            f"num_tokens: {valid_log_probs.numel()}"
+        )
+
+        assert valid_log_probs.numel() > 0, "Expected at least one valid response token"
+        assert torch.isfinite(valid_log_probs).all().item(), "Expected all response logprobs to be finite"
+        assert -20.0 < avg_logprob < -0.01, f"Unexpected average logprob magnitude: {avg_logprob:.6f}"
+    finally:
+        if actor_group is not None:
+            for actor in actor_group._actor_handlers:
+                ray.kill(actor)
+        ray.shutdown()
+
+@pytest.mark.megatron
 def test_logprobs(ray_init_fixture):
     """
     Check that logprob diff is lower when using router replay. Requires full 8xH100 setup to do full forward pass.
@@ -238,7 +387,7 @@ def test_logprobs(ray_init_fixture):
         cfg.generator.inference_engine.enable_return_routed_experts = True
         cfg.generator.inference_engine.tensor_parallel_size = 8
         cfg.generator.sampling_params = SamplingParams(
-            max_generate_length=128,
+            max_generate_length=MAX_GENERATE_LENGTH,
             logprobs=1,
             temperature=1.0,
         )
@@ -279,7 +428,7 @@ def test_logprobs(ray_init_fixture):
                     temperature=1.0,
                     top_p=1.0,
                     top_k=-1,
-                    max_generate_length=128,
+                    max_generate_length=MAX_GENERATE_LENGTH,
                     min_p=0.0,
                     logprobs=1,
                 ),
@@ -338,7 +487,7 @@ def test_logprobs(ray_init_fixture):
         training_input.metadata = {"response_length": num_actions}
 
         cfg.trainer.placement.policy_num_gpus_per_node = 8
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
         cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
         cfg.trainer.policy.megatron_config.context_parallel_size = 1
         cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
@@ -346,11 +495,7 @@ def test_logprobs(ray_init_fixture):
         cfg.trainer.micro_forward_batch_size_per_gpu = 1
         cfg.trainer.micro_train_batch_size_per_gpu = 1
 
-        import os
-
-        os.environ["SKYRL_DEBUG_LOGITS"] = "1"
-
-        def run_megatron_forward(enable_replay: bool, debug: bool = False) -> torch.Tensor:
+        def run_megatron_forward(enable_replay: bool) -> torch.Tensor:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {
                 "moe_enable_routing_replay": enable_replay,
             }
@@ -362,18 +507,6 @@ def test_logprobs(ray_init_fixture):
                 cfg=cfg,
             )
 
-            if debug:
-                diag = ray.get(actor_group.async_run_ray_method("pass_through", "debug_model_config"))[0]
-                print(f"\n=== Model Config (replay={enable_replay}) ===")
-                for k, v in diag.items():
-                    if k != "weight_stats":
-                        print(f"  {k}: {v}")
-                print(f"  weight_stats ({len(diag['weight_stats'])} params):")
-                for name, stats in sorted(diag["weight_stats"].items()):
-                    print(
-                        f"    {name}: shape={stats['shape']}, mean={stats['mean']:.6f}, std={stats['std']:.6f}, norm={stats['norm']:.2f}"
-                    )
-
             refs = actor_group.async_run_ray_method("mesh", "forward", data=training_input)
             results = ray.get(refs)
             outputs = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results)["output"]
@@ -382,7 +515,7 @@ def test_logprobs(ray_init_fixture):
                 ray.kill(actor)
             return outputs
 
-        r3_logprobs = run_megatron_forward(enable_replay=True, debug=True)
+        r3_logprobs = run_megatron_forward(enable_replay=True)
         no_r3_logprobs = run_megatron_forward(enable_replay=False)
 
         r3_diff = (logprobs_t - r3_logprobs).abs()
@@ -414,7 +547,7 @@ def test_forward_backward(ray_init_fixture):
         cfg.generator.inference_engine.enable_return_routed_experts = True
         cfg.generator.inference_engine.tensor_parallel_size = 8
         cfg.generator.sampling_params = SamplingParams(
-            max_generate_length=128,
+            max_generate_length=MAX_GENERATE_LENGTH,
             logprobs=1,
             temperature=1.0,
         )
@@ -455,7 +588,7 @@ def test_forward_backward(ray_init_fixture):
                     temperature=1.0,
                     top_p=1.0,
                     top_k=-1,
-                    max_generate_length=128,
+                    max_generate_length=MAX_GENERATE_LENGTH,
                     min_p=0.0,
                     logprobs=1,
                 ),
