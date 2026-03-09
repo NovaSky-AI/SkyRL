@@ -9,7 +9,7 @@ import base64
 import pickle
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -21,26 +21,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
-
-
-@dataclass
-class IPCTrainerSendWeightsArgs:
-    """Arguments for IPC trainer_send_weights method."""
-
-    mode: str
-    """Transport mode: 'http' or 'ray'."""
-    llm_handle: Any = None
-    """Ray ObjectRef to LLM handle (required for 'ray' mode)."""
-    url: Optional[str] = None
-    """Base URL for HTTP endpoint (required for 'http' mode)."""
-
-    def __post_init__(self):
-        if self.mode == "ray" and self.llm_handle is None:
-            raise ValueError("llm_handle is required for 'ray' mode")
-        if self.mode == "http" and self.url is None:
-            raise ValueError("url is required for 'http' mode")
-        if self.mode not in ("ray", "http"):
-            raise ValueError(f"mode must be 'ray' or 'http', got {self.mode}")
 
 
 @dataclass
@@ -184,8 +164,6 @@ def _patch_weight_transfer_config() -> None:
     WeightTransferConfig.__init__ = _patched_init
     WeightTransferConfig._skyrl_patched = True
 
-    print(f"[SkyRL] Patched WeightTransferConfig to accept 'ipc' backend " f"(PID={__import__('os').getpid()})")
-
 
 def register_ipc_engine() -> None:
     """Register the IPC engine with vLLM's WeightTransferEngineFactory.
@@ -198,14 +176,8 @@ def register_ipc_engine() -> None:
     from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 
     if "ipc" not in WeightTransferEngineFactory._registry:
-        print("\n" + "=" * 80)
-        print("[SkyRL] REGISTERING IPC WEIGHT TRANSFER ENGINE WITH VLLM FACTORY")
-        print(f"[SkyRL] PID={__import__('os').getpid()}")
-        print("=" * 80 + "\n")
         WeightTransferEngineFactory.register_engine(
             "ipc",
             "skyrl.backends.skyrl_train.weight_sync.vllm_ipc_engine",
             "IPCWeightTransferEngine",
         )
-    else:
-        print(f"[SkyRL] IPC engine already registered (PID={__import__('os').getpid()})")
