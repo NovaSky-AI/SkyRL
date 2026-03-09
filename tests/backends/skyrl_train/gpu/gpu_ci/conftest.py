@@ -33,7 +33,6 @@ def ray_init_fixture():
     # needed for megatron tests
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     env_vars["NVTE_FUSED_ATTN"] = "0"
-    env_vars["RAY_CGRAPH_get_timeout"] = "600"
 
     if SKYRL_PYTHONPATH_EXPORT:
         pythonpath = os.environ.get("PYTHONPATH")
