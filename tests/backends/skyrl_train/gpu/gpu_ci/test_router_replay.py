@@ -24,16 +24,13 @@ from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_te
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.replay_utils import _split_replay_indices
 
-# MOE_MODEL_NAME = "/home/ray/moonlight16b"
-# MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B"
 # MOE_MODEL_NAME = "zai-org/GLM-4.7-Flash"
+# MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 REPLAY_NUM_LAYERS = 2
 NUM_PROMPTS = 2
 N_SAMPLES_PER_PROMPT = 2
 
-def _shape_str(x) -> str:
-    return str(tuple(x.shape)) if x is not None else "None"
 
 def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
@@ -42,19 +39,23 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     cfg.trainer.micro_train_batch_size_per_gpu = 2
     cfg.trainer.use_sample_packing = False
     cfg.trainer.logger = "console"
-    if "Moonlight" in model_name or "DeepSeek" in model_name or "GLM-4.7" in model_name:
+    if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
+    model_name_lc = model_name.lower()
+    if "moonlight" in model_name_lc:
         cfg.trainer.policy.megatron_config.moe_token_dispatcher_type = "alltoall"
         cfg.trainer.policy.megatron_config.moe_router_load_balancing_type = "seq_aux_loss"
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_aux_loss_coeff"] = 0
         cfg.trainer.policy.megatron_config.moe_router_score_function = "sigmoid"
         cfg.trainer.policy.megatron_config.moe_router_enable_expert_bias = True
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_bias_update_rate"] = 0
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_dtype"] = "fp32"
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_topk"] = 6
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_num_groups"] = 1
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_group_topk"] = 1
         cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_pre_softmax"] = True
-        # cfg.trainer.policy.megatron_config.transformer_config_kwargs["attention_backend"] = "unfused"
-        # cfg.trainer.flash_attn = False
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_group_topk"] = 1
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_router_num_groups"] = 1
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["attention_backend"] = "flash"
+        cfg.trainer.flash_attn = True
     validate_cfg(cfg)
     return cfg
 
@@ -232,7 +233,6 @@ def test_megatron_router_replay(ray_init_fixture):
 def test_logprobs(ray_init_fixture):
     """
     Check that logprob diff is lower when using router replay. Requires full 8xH100 setup to do full forward pass.
-
     """
     try:
         cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
@@ -298,15 +298,6 @@ def test_logprobs(ray_init_fixture):
             assert len(indices) == len(
                 responses
             ), f"Batch size mismatch: {len(indices)} indices vs {len(responses)} responses"
-            print(
-                "Generator output summary: "
-                f"num_prompts={len(generator_output['prompt_token_ids'])}, "
-                f"num_responses={len(responses)}, "
-                f"response_len[min/mean/max]="
-                f"{min(len(r) for r in responses)}/"
-                f"{sum(len(r) for r in responses) / max(len(responses), 1):.2f}/"
-                f"{max(len(r) for r in responses)}"
-            )
             asyncio.run(client.sleep())
 
         rewards = generator_output["rewards"]
@@ -323,17 +314,8 @@ def test_logprobs(ray_init_fixture):
                 rollout_inference_indices=indices,
             )
         )
-        
 
         assert rii_tensor is not None
-        print(
-            "Batch tensor summary: "
-            f"sequences={_shape_str(sequences)}, "
-            f"attention_mask={_shape_str(attention_mask)}, "
-            f"response_mask={_shape_str(response_mask)}, "
-            f"logprobs_t={_shape_str(logprobs_t)}, "
-            f"rii_tensor={_shape_str(rii_tensor)}"
-        )
         num_actions = response_mask.shape[1]
         batch_size = sequences.shape[0]
         training_input = TrainingInputBatch(
@@ -371,7 +353,8 @@ def test_logprobs(ray_init_fixture):
         os.environ["SKYRL_DEBUG_LOGITS"] = "1"
 
         def run_megatron_forward(enable_replay: bool, debug: bool = False) -> torch.Tensor:
-            print("Trainer Config\n",cfg.trainer.policy.megatron_config.transformer_config_kwargs)
+            if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+                cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
             cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_enable_routing_replay"] = enable_replay
             actor_group = init_worker_with_type(
                 "policy",
@@ -382,13 +365,6 @@ def test_logprobs(ray_init_fixture):
             )
 
             if debug:
-                replay_summaries = ray.get(
-                    actor_group.async_run_ray_method(
-                        "pass_through",
-                        "debug_router_replay_summary",
-                        data=training_input,
-                    )
-                )
                 diag = ray.get(actor_group.async_run_ray_method("pass_through", "debug_model_config"))[0]
                 print(f"\n=== Model Config (replay={enable_replay}) ===")
                 for k, v in diag.items():
@@ -399,21 +375,6 @@ def test_logprobs(ray_init_fixture):
                     print(
                         f"    {name}: shape={stats['shape']}, mean={stats['mean']:.6f}, std={stats['std']:.6f}, norm={stats['norm']:.2f}"
                     )
-                    
-                print(f"\n=== Router Replay Summary (replay={enable_replay}) ===")
-                for rank, summary in enumerate(replay_summaries):
-                    num_no_layer_num = sum(1 for x in summary["layers"] if x["layer_number"] is None)
-                    print(
-                        f"  rank={rank}: action={summary['action']}, "
-                        f"num_instances={summary['num_instances']}, "
-                        f"instances_without_layer_number={num_no_layer_num}"
-                    )
-                    for l in summary["layers"][:5]:
-                        print(
-                            f"    inst={l['instance']} layer_number={l['layer_number']} "
-                            f"shape={l['shape']} min={l['min']} max={l['max']} "
-                            f"all_zero_rows={l['all_zero_rows']}"
-                        )
 
             refs = actor_group.async_run_ray_method("mesh", "forward", data=training_input)
             results = ray.get(refs)
@@ -423,55 +384,59 @@ def test_logprobs(ray_init_fixture):
                 ray.kill(actor)
             return outputs
 
-        print(f"\n=== Routing Indices Info ===")
-        print(f"  rii_tensor shape: {rii_tensor.shape}")
-        print(f"  rii_tensor nonzero: {rii_tensor.count_nonzero().item()}/{rii_tensor.numel()}")
-        print(f"  rii_tensor[0] nonzero per layer: {[(rii_tensor[0, :, l, :] != 0).any(dim=-1).sum().item() for l in range(min(rii_tensor.shape[2], 5))]}")
-        print(f"  sequences shape: {sequences.shape}, attention_mask sum per sample: {attention_mask.sum(dim=1).tolist()[:3]}")
-        print(f"  transformer_config_kwargs: {dict(cfg.trainer.policy.megatron_config.transformer_config_kwargs)}")
-
         r3_logprobs = run_megatron_forward(enable_replay=True, debug=True)
         no_r3_logprobs = run_megatron_forward(enable_replay=False)
 
         r3_diff = (logprobs_t - r3_logprobs).abs()
         no_r3_diff = (logprobs_t - no_r3_logprobs).abs()
+        valid_mask = response_mask.bool()
+        pad_mask = ~valid_mask
 
-        # Mask comparison to valid (non-padding) response tokens only.
-        # Padding positions have logprob ~log(1/vocab_size) ≈ -10.6 in Megatron
-        # (uniform logits from recover_left_padding) but 0.0 in vLLM (explicit padding).
-        # Without masking, this padding diff dominates and hides the routing replay effect.
-        valid = response_mask.bool()
-        num_valid = valid.sum().item()
+        def masked_mean_std(x: torch.Tensor, mask: torch.Tensor):
+            vals = x[mask]
+            if vals.numel() == 0:
+                return float("nan"), float("nan")
+            return vals.mean().item(), vals.std().item()
 
-        r3_diff_valid = (logprobs_t[valid] - r3_logprobs[valid]).abs().mean().item()
-        no_r3_diff_valid = (logprobs_t[valid] - no_r3_logprobs[valid]).abs().mean().item()
+        # Unmasked (includes padding positions) for continuity with previous logs.
+        print(f"vLLM logprobs (all)     - mean: {logprobs_t.mean().item():.6f}, std: {logprobs_t.std().item():.6f}")
+        print(f"Megatron replay (all)   - mean: {r3_logprobs.mean().item():.6f}, std: {r3_logprobs.std().item():.6f}")
+        print(f"Megatron no-replay (all)- mean: {no_r3_logprobs.mean().item():.6f}, std: {no_r3_logprobs.std().item():.6f}")
+        print(f"With replay diff (all)    - mean: {r3_diff.mean().item():.6f}, std: {r3_diff.std().item():.6f}")
+        print(f"Without replay diff (all) - mean: {no_r3_diff.mean().item():.6f}, std: {no_r3_diff.std().item():.6f}")
 
-        r3_diff_all = (logprobs_t - r3_logprobs).abs().mean().item()
-        no_r3_diff_all = (logprobs_t - no_r3_logprobs).abs().mean().item()
-
-        print(f"\n=== Logprob Comparison (valid tokens: {num_valid}/{logprobs_t.numel()}) ===")
-        print(f"vLLM logprobs     - mean: {logprobs_t[valid].mean().item():.6f}")
-        print(f"Megatron (replay) - mean: {r3_logprobs[valid].mean().item():.6f}")
-        print(f"Megatron (no rep) - mean: {no_r3_logprobs[valid].mean().item():.6f}")
-        print(f"With replay    - valid logprob diff mean: {r3_diff_valid:.6f}")
-        print(f"Without replay - valid logprob diff mean: {no_r3_diff_valid:.6f}")
-        print(f"  (unmasked: with={r3_diff_all:.6f}, without={no_r3_diff_all:.6f})")
-
-        assert r3_diff_valid < no_r3_diff_valid, (
-            f"Router replay should reduce logprob diff vs rollout on valid tokens, "
-            f"but with_replay={r3_diff_valid:.6f} >= without_replay={no_r3_diff_valid:.6f}"
+        # Masked (valid response tokens only) is the primary metric.
+        vllm_valid_mean, vllm_valid_std = masked_mean_std(logprobs_t, valid_mask)
+        r3_valid_mean, r3_valid_std = masked_mean_std(r3_logprobs, valid_mask)
+        no_r3_valid_mean, no_r3_valid_std = masked_mean_std(no_r3_logprobs, valid_mask)
+        r3_diff_valid_mean, r3_diff_valid_std = masked_mean_std(r3_diff, valid_mask)
+        no_r3_diff_valid_mean, no_r3_diff_valid_std = masked_mean_std(no_r3_diff, valid_mask)
+        print(
+            f"vLLM logprobs (valid={valid_mask.sum().item()})"
+            f" - mean: {vllm_valid_mean:.6f}, std: {vllm_valid_std:.6f}"
         )
+        print(f"Megatron replay (valid)    - mean: {r3_valid_mean:.6f}, std: {r3_valid_std:.6f}")
+        print(f"Megatron no-replay (valid) - mean: {no_r3_valid_mean:.6f}, std: {no_r3_valid_std:.6f}")
+        print(f"With replay diff (valid)    - mean: {r3_diff_valid_mean:.6f}, std: {r3_diff_valid_std:.6f}")
+        print(f"Without replay diff (valid) - mean: {no_r3_diff_valid_mean:.6f}, std: {no_r3_diff_valid_std:.6f}")
 
-        # print(f"vLLM logprobs     - mean: {logprobs_t.mean().item():.6f}, std: {logprobs_t.std().item():.6f}")
-        # print(f"Megatron (replay) - mean: {r3_logprobs.mean().item():.6f}, std: {r3_logprobs.std().item():.6f}")
-        # print(f"Megatron (no rep) - mean: {no_r3_logprobs.mean().item():.6f}, std: {no_r3_logprobs.std().item():.6f}")
-        # print(f"With replay    - logprob diff mean: {r3_diff.mean().item():.6f}, std: {r3_diff.std().item():.6f}")
-        # print(f"Without replay - logprob diff mean: {no_r3_diff.mean().item():.6f}, std: {no_r3_diff.std().item():.6f}")
+        # Optional padding diagnostics (often explains large unmasked mismatch).
+        num_pad = pad_mask.sum().item()
+        if num_pad > 0:
+            vllm_pad_mean, vllm_pad_std = masked_mean_std(logprobs_t, pad_mask)
+            r3_pad_mean, r3_pad_std = masked_mean_std(r3_logprobs, pad_mask)
+            no_r3_pad_mean, no_r3_pad_std = masked_mean_std(no_r3_logprobs, pad_mask)
+            print(
+                f"Padding-only stats (count={num_pad}): "
+                f"vLLM mean/std={vllm_pad_mean:.6f}/{vllm_pad_std:.6f}, "
+                f"replay mean/std={r3_pad_mean:.6f}/{r3_pad_std:.6f}, "
+                f"no-replay mean/std={no_r3_pad_mean:.6f}/{no_r3_pad_std:.6f}"
+            )
 
-        # assert r3_diff.mean().item() < no_r3_diff.mean().item(), (
-        #     f"Router replay should reduce logprob diff vs rollout, "
-        #     f"but with_replay={r3_diff.mean().item():.6f} >= without_replay={no_r3_diff.mean().item():.6f}"
-        # )
+        assert r3_diff_valid_mean < no_r3_diff_valid_mean, (
+            f"Router replay should reduce valid-token logprob diff vs rollout, "
+            f"but with_replay={r3_diff_valid_mean:.6f} >= without_replay={no_r3_diff_valid_mean:.6f}"
+        )
     finally:
         ray.shutdown()
 
@@ -547,15 +512,6 @@ def test_forward_backward(ray_init_fixture):
             assert len(indices) == len(
                 responses
             ), f"Batch size mismatch: {len(indices)} indices vs {len(responses)} responses"
-            print(
-                "Generator output summary: "
-                f"num_prompts={len(generator_output['prompt_token_ids'])}, "
-                f"num_responses={len(responses)}, "
-                f"response_len[min/mean/max]="
-                f"{min(len(r) for r in responses)}/"
-                f"{sum(len(r) for r in responses) / max(len(responses), 1):.2f}/"
-                f"{max(len(r) for r in responses)}"
-            )
             asyncio.run(client.sleep())
 
         rewards = generator_output["rewards"]
@@ -574,14 +530,6 @@ def test_forward_backward(ray_init_fixture):
         )
 
         assert rii_tensor is not None
-        print(
-            "Batch tensor summary: "
-            f"sequences={_shape_str(sequences)}, "
-            f"attention_mask={_shape_str(attention_mask)}, "
-            f"response_mask={_shape_str(response_mask)}, "
-            f"logprobs_t={_shape_str(logprobs_t)}, "
-            f"rii_tensor={_shape_str(rii_tensor)}"
-        )
         num_actions = response_mask.shape[1]
         batch_size = sequences.shape[0]
         training_input = TrainingInputBatch(
@@ -615,7 +563,10 @@ def test_forward_backward(ray_init_fixture):
         cfg.trainer.micro_train_batch_size_per_gpu = 1
 
         def run_megatron_forward_backward(enable_replay: bool) -> dict:
-            cfg.trainer.policy.megatron_config.transformer_config_kwargs["moe_enable_routing_replay"] = enable_replay
+            if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+                cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs[
+                "moe_enable_routing_replay"] = enable_replay
             actor_group = init_worker_with_type(
                 "policy",
                 shared_pg=pg,

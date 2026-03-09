@@ -17,7 +17,7 @@ dependencies = [
     "rich>=14.1.0",
     "safetensors>=0.6.2",
     "tokenizers>=0.21.2",
-    "transformers>=4.56.1,<5",
+    "transformers>=4.56.1",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
@@ -117,6 +117,7 @@ megatron = [
     "megatron-core==0.16.0; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
+    "transformers==5.0.0rc3; sys_platform == 'linux'",
 ]
 
 flashrl = [
@@ -165,6 +166,8 @@ version = {attr = "skyrl.__version__"}
 # The following is for supporting the skyrl-train dependency
 
 [tool.uv]
+# Allow pre-release packages (e.g. transformers 5.0.0rc3 for megatron/GLM model support)
+prerelease = "allow"
 # Resolve for both Linux (production) and macOS (dev)
 required-environments = [
     "sys_platform == 'linux'",
@@ -206,6 +209,8 @@ override-dependencies = [
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+    # Override megatron-bridge's transformers<5 constraint for GLM model support (transformers 5.0.0rc3)
+    "transformers>=4.56.1; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -249,7 +254,7 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 # pin megatron bridge commit to fix for MoE + LoRA merging. Update this when an official release is cut
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "02b5fccab5e5b21856d36c2e357839e0123b4b8f", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "a2e6b625ee72697c96f9fd528b73a7ff9d26985f", marker = "sys_platform == 'linux'"}
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
 
 [tool.black]

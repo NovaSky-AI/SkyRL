@@ -6,6 +6,7 @@ from transformers import AutoConfig
 from huggingface_hub import snapshot_download
 
 import os
+import importlib.util
 from datetime import timedelta
 from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING
 from collections import defaultdict
@@ -40,6 +41,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
 )
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
+from skyrl.backends.skyrl_train.workers.megatron.mla_patch import maybe_apply_mla_forward_patch
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk
 from skyrl.utils.tok import get_tokenizer
@@ -47,6 +49,11 @@ from skyrl.utils.tok import get_tokenizer
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
     from skyrl.train.config.config import InferenceEngineConfig
+
+
+def _has_fused_weight_gradient_mlp_cuda() -> bool:
+    """Check whether APEX fused gradient-accumulation extension is available."""
+    return importlib.util.find_spec("fused_weight_gradient_mlp_cuda") is not None
 
 # ---------------------------------------------------------------------------
 # Register additional model bridges for architectures not yet in the upstream
@@ -105,6 +112,52 @@ try:
                 configs["moe_aux_loss_coeff"] = hf_config.aux_loss_alpha
 
             return DeepSeekV3ModelProvider(**configs)
+
+    @MegatronModelBridge.register_bridge(
+        source="DeepseekV3ForCausalLM",
+        target=GPTModel,
+    )
+    class _DeepSeekV3RopeCompatBridge(DeepSeekV3Bridge):
+        """Compatibility bridge for DeepSeek-V3 derivatives with non-standard rope_scaling.
+
+        Some models (e.g. Moonlight-16B-A3B) expose DeepSeek-V3 architecture but
+        do not provide `rope_scaling.factor`. Upstream get_common_configs expects
+        that key and raises KeyError. We temporarily normalize to "no scaling"
+        semantics and defer to the upstream DeepSeekV3Bridge implementation.
+        """
+
+        def provider_bridge(self, hf_pretrained: PreTrainedCausalLM) -> DeepSeekV3ModelProvider:
+            hf_config = hf_pretrained.config
+            orig_rope_scaling = getattr(hf_config, "rope_scaling", None)
+            needs_compat = isinstance(orig_rope_scaling, dict) and "factor" not in orig_rope_scaling
+
+            if not needs_compat:
+                return super().provider_bridge(hf_pretrained)
+
+            orig_rope_theta = getattr(hf_config, "rope_theta", None)
+            rope_theta = orig_rope_scaling.get("rope_theta", orig_rope_theta if orig_rope_theta is not None else 10000.0)
+            rope_type = orig_rope_scaling.get("rope_type", None)
+            hf_config.rope_scaling = None
+            hf_config.rope_theta = rope_theta
+
+            try:
+                provider = super().provider_bridge(hf_pretrained)
+            finally:
+                hf_config.rope_scaling = orig_rope_scaling
+                if orig_rope_theta is None:
+                    delattr(hf_config, "rope_theta")
+                else:
+                    hf_config.rope_theta = orig_rope_theta
+
+            # DeepSeek provider defaults rope_type='yarn'. Moonlight exposes
+            # rope_scaling={"rope_type": "default", "rope_theta": ...}, so
+            # preserving DeepSeek yarn defaults introduces a positional encoding
+            # mismatch versus HF/vLLM.
+            if rope_type in ("default", "rope"):
+                provider.rope_type = "rope"
+                provider.rotary_scaling_factor = 1.0
+
+            return provider
 
 except ImportError:
     pass  # megatron-bridge not installed (e.g. CPU-only environment)
@@ -277,6 +330,7 @@ class MegatronWorker:
         _cfg_fields = [
             "attention_backend",
             "multi_latent_attention",
+            "gradient_accumulation_fusion",
             "q_lora_rank",
             "kv_lora_rank",
             "qk_head_dim",
@@ -336,6 +390,8 @@ class MegatronWorker:
                 }
         diag["weight_stats"] = weight_stats
         diag["cfg_flash_attn"] = getattr(self.cfg, "flash_attn", "NOT_PRESENT")
+        diag["skyrl_mla_patch_mode"] = os.environ.get("SKYRL_MLA_PATCH_MODE", "auto")
+        diag["skyrl_mla_patch_applied"] = getattr(self, "_mla_patch_applied", False)
         return diag
 
     def _read_router_replay_state(self):
@@ -451,6 +507,21 @@ class MegatronWorker:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
                 transformer_config_kwargs[key] = None
 
+        # Newer Megatron-Bridge/Megatron-Core may default gradient accumulation
+        # fusion to True, which requires APEX's fused_weight_gradient_mlp_cuda
+        # extension. Most SkyRL environments do not ship that extension.
+        has_fused_wgrad_ext = _has_fused_weight_gradient_mlp_cuda()
+        requested_grad_accum_fusion = transformer_config_kwargs.get("gradient_accumulation_fusion")
+        if requested_grad_accum_fusion is None and not has_fused_wgrad_ext:
+            transformer_config_kwargs["gradient_accumulation_fusion"] = False
+        elif requested_grad_accum_fusion is True and not has_fused_wgrad_ext:
+            if self._rank == 0:
+                print(
+                    "[SkyRL] gradient_accumulation_fusion=True requested but "
+                    "fused_weight_gradient_mlp_cuda is unavailable; forcing False."
+                )
+            transformer_config_kwargs["gradient_accumulation_fusion"] = False
+
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
         provider = bridge.to_megatron_provider()
 
@@ -563,7 +634,12 @@ class MegatronWorker:
 
         default_ddp_config = DistributedDataParallelConfig()
         if wrap_with_ddp:
-            default_ddp_config.use_distributed_optimizer = True
+            # Keep default behavior (True) unless explicitly overridden in config.
+            use_distributed_optimizer = True
+            opt_kwargs = getattr(self.cfg.policy.megatron_config, "optimizer_config_kwargs", None)
+            if isinstance(opt_kwargs, dict):
+                use_distributed_optimizer = opt_kwargs.get("use_distributed_optimizer", True)
+            default_ddp_config.use_distributed_optimizer = bool(use_distributed_optimizer)
         if ddp_config is not None:
             for k, v in get_config_as_dict(ddp_config).items():
                 setattr(default_ddp_config, k, v)
@@ -707,6 +783,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
         )
+
+        model_archs = getattr(self.strategy.hf_config, "architectures", None) or []
+        model_hint = " ".join([str(model_path), *[str(x) for x in model_archs]])
+        self._mla_patch_applied = maybe_apply_mla_forward_patch(
+            model_path=model_hint,
+            has_mla=bool(getattr(self.provider, "multi_latent_attention", False)),
+        )
+        if self._mla_patch_applied and self._rank == 0:
+            print(
+                f"[SkyRL] Applied MLA forward patch (SKYRL_MLA_PATCH_MODE={os.environ.get('SKYRL_MLA_PATCH_MODE', 'auto')})"
+            )
 
         if self.enable_router_replay:
             from skyrl.backends.skyrl_train.utils.replay_utils import _patch_topk_router_layer_number

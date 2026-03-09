@@ -188,10 +188,11 @@ class MegatronModelWrapper:
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
             log_probs = [o["log_probs"] for o in output]
             log_probs = torch.cat(log_probs, dim=0)
-            # take last num_actions tokens per micro; concatenate later
-            # Assume all micros have same num_actions
+            # Align token logprobs with response tokens:
+            # token_logprobs[t] corresponds to P(x_{t+1} | x_<=t), so for N
+            # response tokens we need positions [-N-1:-1], not [-N:].
             num_actions = micro_batches[0]["num_actions"]
-            log_probs = log_probs[:, -num_actions:]
+            log_probs = log_probs[:, -num_actions - 1 : -1]
         else:
             # return dummy tensor for non-last pp stages
             device = micro_batches[0]["sequences"].device
@@ -270,7 +271,8 @@ class MegatronModelWrapper:
                 chunk_size=None,
             )
 
-            action_log_probs = token_logprobs[:, -num_actions:]
+            # Same next-token alignment as forward() above.
+            action_log_probs = token_logprobs[:, -num_actions - 1 : -1]
 
             # policy loss should be calculated based on the selected token logprobs
             policy_loss, loss_metrics = current_loss_fn(

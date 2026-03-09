@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
@@ -103,6 +104,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 return_dict=True,
                 tokenize=True,
             )["input_ids"]
+        prompt_token_ids = self._normalize_prompt_token_ids(prompt_token_ids)
 
         num_prompts = len(prompt_token_ids)
         num_inference_engines = len(self.engines)
@@ -177,6 +179,50 @@ class InferenceEngineClient(InferenceEngineInterface):
             response_logprobs=response_logprobs if add_resp_logprobs else None,
             rollout_inference_indices=rollout_inference_indices if add_rollout_inference_indices else None,
         )
+
+    @staticmethod
+    def _normalize_prompt_token_ids(prompt_token_ids: Any) -> List[List[int]]:
+        """Normalize prompt token IDs to List[List[int]]. For GLM and updated transformers version.
+
+        Accepts common tokenizer outputs (BatchEncoding/dict/tensor/list) and
+        converts them into the batched token-id format expected by engines.
+        """
+        # BatchEncoding and dict-like outputs.
+        if isinstance(prompt_token_ids, Mapping):
+            if "input_ids" not in prompt_token_ids:
+                raise TypeError("Mapping prompt_token_ids must contain 'input_ids'.")
+            prompt_token_ids = prompt_token_ids["input_ids"]
+
+        if hasattr(prompt_token_ids, "tolist") and not isinstance(prompt_token_ids, list):
+            prompt_token_ids = prompt_token_ids.tolist()
+
+        if not isinstance(prompt_token_ids, list):
+            raise TypeError(f"Unsupported prompt_token_ids type: {type(prompt_token_ids)}")
+
+        if len(prompt_token_ids) == 0:
+            return []
+
+        # Unbatched case: List[int] -> List[List[int]]
+        if isinstance(prompt_token_ids[0], int):
+            return [list(prompt_token_ids)]
+
+        normalized: List[List[int]] = []
+        for item in prompt_token_ids:
+            # Handle list items that are BatchEncoding/dict-like.
+            if isinstance(item, Mapping):
+                if "input_ids" not in item:
+                    raise TypeError("Each mapping item in prompt_token_ids must contain 'input_ids'.")
+                item = item["input_ids"]
+
+            if hasattr(item, "tolist") and not isinstance(item, list):
+                item = item.tolist()
+
+            if not isinstance(item, list):
+                raise TypeError(f"Unsupported prompt item type: {type(item)}")
+
+            normalized.append([int(tok) for tok in item])
+
+        return normalized
 
     def _select_engine_idx(self, session_id: Optional[Union[str, int]] = None) -> int:
         """Select an engine index for routing a request.

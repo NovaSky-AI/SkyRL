@@ -9,6 +9,7 @@ import asyncio
 import copy
 from uuid import uuid4
 from dataclasses import asdict
+from collections.abc import Mapping
 import skyrl_gym
 from typing import List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
@@ -163,12 +164,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "I am a user."},
         ]
-        self.base_conversation_token_ids = tokenizer.apply_chat_template(
+        self.base_conversation_token_ids = self._normalize_unbatched_token_ids(tokenizer.apply_chat_template(
             self.base_conversation,
             add_generation_prompt=False,
             tokenize=True,
             **self.generator_cfg.chat_template_kwargs,
-        )
+        ))
         # We remove tokens after the last EOS token so that it can be captured in `observation_ids`.
         # For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator#multi-turn-tokenization-and-ti-to
         if self.tokenizer.eos_token_id in self.base_conversation_token_ids:
@@ -203,6 +204,40 @@ class SkyRLGymGenerator(GeneratorInterface):
             return await loop.run_in_executor(executor, func, *args, **kwargs)
         else:
             return func(*args, **kwargs)
+
+    @staticmethod
+    def _normalize_unbatched_token_ids(token_ids: Any) -> List[int]:
+        """Normalize tokenizer output to List[int]."""
+        if isinstance(token_ids, Mapping):
+            if "input_ids" not in token_ids:
+                raise TypeError("Tokenizer mapping output must contain 'input_ids'.")
+            token_ids = token_ids["input_ids"]
+        if hasattr(token_ids, "tolist") and not isinstance(token_ids, list):
+            token_ids = token_ids.tolist()
+        if not isinstance(token_ids, list):
+            raise TypeError(f"Unsupported token IDs type: {type(token_ids)}")
+        if len(token_ids) > 0 and isinstance(token_ids[0], list):
+            if len(token_ids) != 1:
+                raise TypeError("Expected unbatched token IDs (List[int]), got batched token IDs.")
+            token_ids = token_ids[0]
+        return [int(tok) for tok in token_ids]
+
+    @staticmethod
+    def _normalize_batched_token_ids(token_ids: Any) -> List[List[int]]:
+        """Normalize tokenizer output to List[List[int]]."""
+        if isinstance(token_ids, Mapping):
+            if "input_ids" not in token_ids:
+                raise TypeError("Tokenizer mapping output must contain 'input_ids'.")
+            token_ids = token_ids["input_ids"]
+        if hasattr(token_ids, "tolist") and not isinstance(token_ids, list):
+            token_ids = token_ids.tolist()
+        if not isinstance(token_ids, list):
+            raise TypeError(f"Unsupported token IDs type: {type(token_ids)}")
+        if len(token_ids) == 0:
+            return []
+        if isinstance(token_ids[0], int):
+            return [[int(tok) for tok in token_ids]]
+        return [[int(tok) for tok in seq] for seq in token_ids]
 
     async def agent_loop(
         self,
@@ -260,7 +295,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         # init() returns the first prompt to be given to the model, and optional metadata dict
         chat_history, _ = await self._run_in_executor_if_available(env.init, chat_history)
         initial_chat_history_length = len(chat_history)
-        initial_input_ids = self.tokenizer.apply_chat_template(
+        initial_input_ids = self._normalize_unbatched_token_ids(self.tokenizer.apply_chat_template(
             chat_history,
             # If retokenize_chat_history==True, avoid including the generation prompt in both the
             # prompt_ids and response_ids due to how `response_encodings["input_ids"]` works.
@@ -268,7 +303,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             chat_template=self.custom_chat_template if retokenize_chat_history else None,
             tokenize=True,
             **self.generator_cfg.chat_template_kwargs,
-        )
+        ))
 
         initial_prompt_length = len(initial_input_ids)
         loss_mask = []  # this excludes the prompt
@@ -306,13 +341,13 @@ class SkyRLGymGenerator(GeneratorInterface):
             # 1. Generate output
             if is_step_wise or retokenize_chat_history:
                 # re-apply whole chat template so length check is correct
-                agent_loop_state.input_ids = self.tokenizer.apply_chat_template(
+                agent_loop_state.input_ids = self._normalize_unbatched_token_ids(self.tokenizer.apply_chat_template(
                     chat_history,
                     chat_template=self.custom_chat_template if retokenize_chat_history else None,
                     add_generation_prompt=True,
                     tokenize=True,
                     **self.generator_cfg.chat_template_kwargs,
-                )
+                ))
                 agent_loop_state.loss_mask = []
                 agent_loop_state.rollout_logprobs = None
 
@@ -562,12 +597,12 @@ class SkyRLGymGenerator(GeneratorInterface):
             if len(new_obs) > 0:
                 # For Qwen, this will generate `\n<|user|>Some observation<|im_end|>\n`. Note that the
                 # first `\n` is generated since we stripped it in ``base_conversation_token_ids``.
-                obs_ids_to_add = self.tokenizer.apply_chat_template(
+                obs_ids_to_add = self._normalize_unbatched_token_ids(self.tokenizer.apply_chat_template(
                     [*self.base_conversation, *new_obs],
                     add_generation_prompt=not is_done,
                     tokenize=True,
                     **self.generator_cfg.chat_template_kwargs,
-                )[len(self.base_conversation_token_ids) :]
+                ))[len(self.base_conversation_token_ids) :]
             elif not is_done:
                 obs_ids_to_add = self.generation_prompt_ids
         else:
@@ -642,11 +677,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             envs.append(env)
 
         # for consistency, use token-in-token-out
-        prompt_token_ids = self.tokenizer.apply_chat_template(
+        prompt_token_ids = self._normalize_batched_token_ids(self.tokenizer.apply_chat_template(
             init_prompts,
             add_generation_prompt=True,
             tokenize=True,
-        )
+        ))
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
         engine_output = await self.inference_engine_client.generate(engine_input)
         outputs = engine_output["responses"]

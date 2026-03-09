@@ -141,9 +141,15 @@ def convert_prompts_responses_to_batch_tensors(
             padded = torch.zeros(len(rollout_inference_indices), total_seq_len, num_layers, topk, dtype=torch.int32)
             for i, sample_indices in enumerate(rollout_inference_indices):
                 if sample_indices:
+                    expected_len = prompt_token_lens[i] + response_token_lens[i]
+                    indices_to_place = list(sample_indices)
+                    # vLLM returns routed_experts with seq_len - 1 (final token is sampled, not forwarded).
+                    # Pad with one row (replicate last) to align with full sequence length.
+                    if len(indices_to_place) == expected_len - 1 and len(indices_to_place) > 0:
+                        indices_to_place = indices_to_place + [indices_to_place[-1]]
                     left_pad = max_input_len - prompt_token_lens[i]
-                    n = min(len(sample_indices), total_seq_len - left_pad)
-                    padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.int32)
+                    n = min(len(indices_to_place), total_seq_len - left_pad)
+                    padded[i, left_pad : left_pad + n] = torch.tensor(indices_to_place[:n], dtype=torch.int32)
             rollout_inference_indices_tensor = padded
 
     return (
