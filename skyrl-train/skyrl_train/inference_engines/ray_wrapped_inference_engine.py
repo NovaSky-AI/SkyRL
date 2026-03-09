@@ -158,8 +158,9 @@ def create_ray_wrapped_inference_engines(
             rope_engine_kwargs = {}
             # rope_scaling and rope_theta must be passed via hf_overrides.rope_parameters
             # for vLLM >= 0.8.3. See: https://docs.vllm.ai/en/latest/examples/offline_inference/context_extension/
-            # Use .get() since OmegaConf DictConfig in struct mode doesn't support .pop()
-            hf_overrides = dict(engine_init_kwargs.get("hf_overrides", {}) or {})
+            # Convert to regular dict so we can pop keys safely (OmegaConf struct mode doesn't support .pop())
+            engine_init_kwargs = dict(engine_init_kwargs)
+            hf_overrides = dict(engine_init_kwargs.pop("hf_overrides", {}) or {})
             if rope_scaling or rope_theta is not None:
                 # Convert to regular dict to avoid OmegaConf struct mode issues in vLLM
                 # vLLM expects rope_parameters, not rope_scaling

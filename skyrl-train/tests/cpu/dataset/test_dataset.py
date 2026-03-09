@@ -7,7 +7,7 @@ from skyrl_train.dataset import PromptDataset
 @pytest.fixture
 def mock_tokenizer():
     tokenizer = MagicMock()
-    tokenizer.apply_chat_template.side_effect = lambda x, add_generation_prompt: x
+    tokenizer.apply_chat_template.side_effect = lambda x, add_generation_prompt, **kwargs: x
     return tokenizer
 
 

@@ -37,18 +37,17 @@ on:
         description: "SkyPilot task name (YAML file in skyrl-train/tasks/)"
         type: choice
         options:
+          - openenv-fleet-grpo-qwen3_5-9b
           - openenv-fleet-grpo-qwen3-8b
           - openenv-fleet-grpo-qwen3-32b
           - openenv-fleet-grpo-qwen3-8b-step-wise
           - openenv-fleet-grpo-qwen3-vl-8b
-          - openenv-fleet-grpo-xlam-70b
-          - openenv-fleet-grpo-glm-4.7-flash
           - harbor-grpo-qwen3-8b
-        default: "openenv-fleet-grpo-qwen3-8b"
+        default: "openenv-fleet-grpo-qwen3_5-9b"
       data_version:
-        description: "Dataset version in S3 (v3=20,557 tasks, v4=15,169 tasks, v5=5,654 tasks recommended)"
+        description: "Dataset version in S3 (v3=20,557 tasks, v4=15,169 tasks, v52=latest curated)"
         type: string
-        default: "v5"
+        default: "v52"
       resume_run_name:
         description: "Resume from S3 checkpoint (W&B run name, e.g., fleet_tool_use_32b_d7167c1c)"
         type: string
@@ -81,6 +80,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          clean: true
 
       - name: Configure Cloud Credentials
         run: |
@@ -91,16 +92,25 @@ jobs:
           pip3 install "skypilot-nightly[primeintellect]" 2>/dev/null || true
           mkdir -p ~/.nebius && echo '${{ secrets.NEBIUS_CREDENTIALS_JSON }}' > ~/.nebius/credentials.json
           echo "${{ secrets.NEBIUS_TENANT_ID }}" > ~/.nebius/NEBIUS_TENANT_ID.txt
-          # GCP: write service account key and activate
+          # GCP: install gcloud CLI, write service account key, and activate
           if [ -n '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' ]; then
+            curl -sSL https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz | tar -xz -C $HOME
+            echo "$HOME/google-cloud-sdk/bin" >> $GITHUB_PATH
+            export PATH="$HOME/google-cloud-sdk/bin:$PATH"
             mkdir -p ~/.config/gcloud
             echo '${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}' > ~/.config/gcloud/application_default_credentials.json
-            export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json
+            gcloud auth activate-service-account --key-file=$HOME/.config/gcloud/application_default_credentials.json
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/application_default_credentials.json" >> $GITHUB_ENV
             pip3 install google-api-python-client google-cloud-storage 2>/dev/null || true
+          else
+            echo "WARNING: GCP_SERVICE_ACCOUNT_KEY secret not set — GCP clouds will be unavailable"
           fi
 
       - name: Verify Cloud Credentials
-        run: sky check lambda runpod vast primeintellect nebius gcp || true
+        run: |
+          sky api stop || true
+          sky api start || true
+          sky check lambda runpod vast primeintellect nebius gcp || true
 
       - name: Validate data version
         run: |
@@ -173,37 +183,11 @@ jobs:
           [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
           [ -n "${{ inputs.resume_run_name }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env RESUME_RUN_NAME=${{ inputs.resume_run_name }}"
           LAUNCH_CMD="$LAUNCH_CMD --env RUN_ID=${{ steps.cluster.outputs.run_id }}"
-          LAUNCH_CMD="$LAUNCH_CMD -y"  # No -d flag, run attached to stream logs
+          LAUNCH_CMD="$LAUNCH_CMD --retry-until-up -y"  # Retry until GPUs available, run attached
 
           echo "Command: $LAUNCH_CMD"
-
-          # Retry logic: 4 attempts with 2-4-8 minute intervals
-          MAX_ATTEMPTS=4
-          RETRY_DELAYS=(120 240 480)  # 2, 4, 8 minutes in seconds
-
-          for attempt in $(seq 1 $MAX_ATTEMPTS); do
-            echo "=== Attempt $attempt of $MAX_ATTEMPTS ==="
-            if eval "$LAUNCH_CMD"; then
-              echo "status=SUCCEEDED" >> $GITHUB_OUTPUT
-              echo "attempts=$attempt" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-
-            if [ $attempt -lt $MAX_ATTEMPTS ]; then
-              # Clean up failed cluster before retry
-              echo "Attempt $attempt failed. Cleaning up before retry..."
-              sky down "${{ steps.cluster.outputs.name }}" -y || true
-
-              DELAY=${RETRY_DELAYS[$((attempt-1))]}
-              echo "Waiting $((DELAY/60)) minutes before retry..."
-              sleep $DELAY
-            fi
-          done
-
-          echo "All $MAX_ATTEMPTS provisioning attempts failed"
-          echo "status=FAILED" >> $GITHUB_OUTPUT
-          echo "attempts=$MAX_ATTEMPTS" >> $GITHUB_OUTPUT
-          exit 1
+          eval "$LAUNCH_CMD"
+          echo "status=SUCCEEDED" >> $GITHUB_OUTPUT
 
       - name: Cleanup Cluster
         if: always()
@@ -285,4 +269,3 @@ jobs:
           echo "| Cluster | \`${{ steps.cluster.outputs.name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| WandB | \`${{ steps.cluster.outputs.wandb_run_name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Status | \`${{ steps.launch.outputs.status || 'FAILED' }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Provisioning Attempts | \`${{ steps.launch.outputs.attempts || '?' }}\` |" >> $GITHUB_STEP_SUMMARY

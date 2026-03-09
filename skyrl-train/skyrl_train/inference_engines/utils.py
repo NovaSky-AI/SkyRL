@@ -222,7 +222,18 @@ def get_rendezvous_addr_port(placement_group, pg_index: int) -> Tuple[str, int]:
 
     @ray.remote(num_cpus=0, num_gpus=0)
     def get_addr_port():
-        from ray.experimental.collective.util import get_address_and_port
+        try:
+            from ray.experimental.collective.util import get_address_and_port
+        except (ImportError, ModuleNotFoundError):
+            import socket
+
+            def get_address_and_port():
+                ip = ray.util.get_node_ip_address()
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(("", 0))
+                port = sock.getsockname()[1]
+                sock.close()
+                return ip, port
 
         return get_address_and_port()
 

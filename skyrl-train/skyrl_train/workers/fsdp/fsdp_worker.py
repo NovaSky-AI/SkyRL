@@ -140,6 +140,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
                 model_config_kwargs=self.cfg.trainer.policy.model_config_kwargs,
+                loss_chunk_size=self.cfg.trainer.loss_chunk_size,
             )
             # in-place patch
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
@@ -366,6 +367,7 @@ class FSDPRefWorkerBase(RefWorkerBase):
                 rope_scaling=get_rope_scaling_config(self.cfg.trainer),
                 rope_theta=get_rope_theta_config(self.cfg.trainer),
                 model_config_kwargs=self.cfg.trainer.ref.model_config_kwargs,
+                loss_chunk_size=self.cfg.trainer.loss_chunk_size,
             )
             self._seq_parallel_monkey_patch(model=wrapped_model.model)
 

@@ -167,11 +167,25 @@ def logprobs_from_logits_v2(
         logsumexp_values = torch.stack([torch.logsumexp(logit, dim=-1) for logit in logits])
         logprobs_labels = logits_labels - logsumexp_values  # log_softmax(x_i) = x_i - logsumexp(x)
     else:
-        # logsumexp approach is unstable with bfloat16, fall back to slightly less efficent approach
+        # Chunked gather + logsumexp in float32 to avoid materializing full (seqlen, vocab) tensors.
+        # F.log_softmax allocates a (seqlen, vocab) float32 output which OOMs for long sequences
+        # with large vocabs (e.g. 64K tokens * 151K vocab * 4 bytes = 36 GiB).
+        # Instead, chunk along the sequence dim and use gather + logsumexp per chunk.
+        # Use adaptive chunk size: each chunk is upcasted to float32, plus logsumexp needs
+        # an intermediate of the same size, so peak memory per chunk ≈ 2 * chunk_size * vocab * 4 bytes.
+        # Target ~64 MiB per chunk to leave headroom during training backward pass.
+        vocab_size = logits.shape[-1]
+        logprobs_chunk_size = max(1, min(CHUNK_SIZE, (64 * 1024 * 1024) // (vocab_size * 4)))
         logprobs_labels = []
-        for row_logits, row_labels in zip(logits, labels):  # loop to reduce peak mem consumption
-            row_logprobs = F.log_softmax(row_logits, dim=-1)
-            row_logprobs_labels = row_logprobs.gather(dim=-1, index=row_labels.unsqueeze(-1)).squeeze(-1)
-            logprobs_labels.append(row_logprobs_labels)
+        for row_logits, row_labels in zip(logits, labels):  # loop over batch dim
+            row_results = []
+            for start in range(0, row_logits.shape[0], logprobs_chunk_size):
+                chunk = row_logits[start : start + logprobs_chunk_size].float()  # (chunk, vocab) in float32
+                chunk_labels = row_labels[start : start + logprobs_chunk_size]
+                label_logits = chunk.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1)
+                lse = torch.logsumexp(chunk, dim=-1)
+                row_results.append(label_logits - lse)  # log_softmax(x_i) = x_i - logsumexp(x)
+                del chunk
+            logprobs_labels.append(torch.cat(row_results))
         logprobs_labels = torch.stack(logprobs_labels)
     return logprobs_labels

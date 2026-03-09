@@ -1,0 +1,248 @@
+# Fleet Task GRPO Training via SkyPilot - Qwen3.5-9B (Text-Only / Tool Use)
+# Usage: sky launch tasks/openenv-fleet-grpo-qwen3_5-9b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+#
+# Text-only (tool_use) training — replaces Qwen3-8B as the default.
+#
+# Model: Qwen/Qwen3.5-9B (9B parameters, natively multimodal, early fusion + GatedDeltaNet)
+# GPUs: 8x B200/H200 (RunPod, Lambda, Vast, Nebius)
+#
+# NOTE: Requires vLLM >= 0.17.0 for native Qwen3.5/GDN support + FlashAttention 4
+#
+# v0.1: Initial Qwen3.5-9B tool_use config adapted from CU version
+
+name: fleet-task-grpo-qwen3-5-9b
+
+resources:
+  disk_size: 750
+  ports: 6479
+  any_of:
+    # 8x GPUs (matching VL branch config)
+    - accelerators: H200-SXM:8
+      cloud: runpod
+    - accelerators: B200:8
+      cloud: runpod
+    - accelerators: B200:8
+      cloud: lambda
+    - accelerators: H200-SXM:8
+      cloud: vast
+    - accelerators: B200:8
+      cloud: nebius
+    - accelerators: H200-SXM:8
+      cloud: nebius
+    # GCP spot fallback — disabled (SkyPilot provisioning issues on GCP)
+    # - accelerators: B200:8
+    #   cloud: gcp
+    #   use_spot: true
+    #   image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    # - accelerators: H200:8
+    #   cloud: gcp
+    #   use_spot: true
+    #   image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+
+num_nodes: 1
+
+workdir:
+  url: https://github.com/fleet-ai/SkyRL.git
+  ref: feat/qwen3.5-9b-tool-use
+
+envs:
+  WANDB_API_KEY: ""
+  FLEET_API_KEY: ""
+  LOGGER: "wandb"
+  INFERENCE_BACKEND: "vllm"
+  # Dataset version: "v53" (v52 minus github tasks)
+  DATA_VERSION: "v53"
+  # Task selection: env_keys to filter (comma-separated, e.g., "github,booking,reddit")
+  ENV_KEYS: ""
+  # Difficulty filter: 1=easy, 2=medium, 3=hard (comma-separated, e.g., "1,2" for easy+medium)
+  DIFFICULTY: ""
+  # Modality: text-only tool use
+  MODALITY: "tool_use"
+  # Training parameters
+  MAX_TURNS: 50
+  MAX_INPUT_LENGTH: 64000
+  MAX_GENERATE_LENGTH: 4096
+  NUM_EPOCHS: 20
+  RUN_ID: ""
+  MAX_TASKS: ""
+  # AWS credentials (required for S3 dataset download, optional for checkpoint upload)
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_REGION: "us-east-1"
+  # S3 buckets
+  S3_DATASET_BUCKET: "fleet-internal-datasets"
+  S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
+  S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+
+setup: |
+  set -euo pipefail
+  cd skyrl-train
+
+  echo "Validating environment variables..."
+  if [ -z "$FLEET_API_KEY" ]; then
+    echo "ERROR: FLEET_API_KEY is required"
+    exit 1
+  fi
+  if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+    echo "ERROR: AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required for S3 dataset download"
+    exit 1
+  fi
+  if [ "$MODALITY" != "tool_use" ] && [ "$MODALITY" != "computer_use" ]; then
+    echo "ERROR: MODALITY must be 'tool_use' or 'computer_use', got: $MODALITY"
+    exit 1
+  fi
+  echo "Environment validation passed"
+
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+  # vLLM 0.17.0 has native Qwen3.5 support (GDN via torch.ops.vllm.gdn_attention_core),
+  # FlashAttention 4, and PyTorch 2.10.0
+  uv sync --extra vllm
+  # transformers from source: Qwen3.5 model type not in stable release yet
+  uv pip install -U "transformers @ git+https://github.com/huggingface/transformers.git"
+  # flash-attn 2.8.3 prebuilt wheel for torch 2.10 + CUDA 12 (training forward/backward)
+  uv pip install "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+  python -c "import torch; import torchvision; print(f'torch={torch.__version__}, torchvision={torchvision.__version__}')"
+  # FlashInfer JIT compilation requires CUDA toolkit (nvcc) for GatedDeltaNet kernels (Qwen3.5)
+  # pip CUDA packages are incomplete (missing nv/target headers); use NVIDIA apt repo instead
+  CUDA_HOME=""
+  for d in /usr/local/cuda /usr/local/cuda-12.8 /usr/local/cuda-12.6 /usr/local/cuda-12.4; do
+    if [ -x "$d/bin/nvcc" ]; then
+      CUDA_HOME="$d"
+      break
+    fi
+  done
+  if [ -z "$CUDA_HOME" ] && command -v nvcc &>/dev/null; then
+    NVCC_PATH=$(command -v nvcc)
+    CUDA_HOME=$(dirname "$(dirname "$NVCC_PATH")")
+  fi
+  if [ -z "$CUDA_HOME" ]; then
+    echo "nvcc not found on system. Installing CUDA toolkit from NVIDIA apt repo..."
+    apt-get update -qq
+    UBUNTU_VER=$(lsb_release -rs 2>/dev/null | tr -d '.' || echo "2204")
+    KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/ubuntu${UBUNTU_VER}/x86_64/cuda-keyring_1.1-1_all.deb"
+    echo "Installing CUDA keyring from $KEYRING_URL"
+    wget -qO /tmp/cuda-keyring.deb "$KEYRING_URL" 2>&1 || curl -sLo /tmp/cuda-keyring.deb "$KEYRING_URL"
+    file /tmp/cuda-keyring.deb
+    dpkg -i /tmp/cuda-keyring.deb
+    apt-get update -qq
+    apt-get install -y --no-install-recommends cuda-nvcc-12-8 libcublas-dev-12-8 cuda-nvrtc-dev-12-8
+    CUDA_HOME="/usr/local/cuda-12.8"
+  fi
+  export CUDA_HOME
+  export PATH="$CUDA_HOME/bin:$PATH"
+  echo "CUDA_HOME=$CUDA_HOME"
+  "$CUDA_HOME/bin/nvcc" --version
+  echo "export CUDA_HOME=$CUDA_HOME" > "$HOME/.cuda_env"
+  echo "export PATH=$CUDA_HOME/bin:\$PATH" >> "$HOME/.cuda_env"
+  uv pip install wandb boto3 awscli
+
+  uv pip install "litellm>=1.75.5" "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" fleet-python logfire "mcp>=1.0.0"
+
+  mkdir -p $HOME/data/fleet
+  TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
+  S3_PATH="s3://${S3_DATASET_BUCKET}/${DATA_VERSION}/openenv/all_${MODALITY}.json"
+  echo "Downloading dataset from $S3_PATH..."
+  aws s3 cp "$S3_PATH" "$TASKS_FILE"
+  TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['tasks']))")
+  echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
+
+  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+  PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
+  [ -n "$ENV_KEYS" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
+  [ -n "$DIFFICULTY" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
+  eval "$PREPARE_CMD"
+
+run: |
+  set -euo pipefail
+  cd skyrl-train
+  source .venv/bin/activate
+
+  TMP_DIR="$HOME/skyrl-tmp"
+  mkdir -p "$TMP_DIR"
+  export TMPDIR="$TMP_DIR"
+
+  # CUDA_HOME for FlashInfer JIT compilation (GatedDeltaNet kernels)
+  source "$HOME/.cuda_env" 2>/dev/null || true
+
+  # expandable_segments incompatible with vLLM memory pool in torch 2.10+
+  # (AssertionError: pytorch/pytorch#147851)
+
+  TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
+  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+
+  python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
+
+  export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
+  export RAY_object_store_memory=10000000000
+  if ! ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+    ray start --head --disable-usage-stats --port 6479 --object-store-memory=10000000000
+  fi
+
+  for i in $(seq 1 24); do
+    if ray status --address 127.0.0.1:6479 >/dev/null 2>&1; then
+      break
+    fi
+    sleep 5
+  done
+
+  TOTAL_GPUS=$SKYPILOT_NUM_GPUS_PER_NODE
+
+  # Run GRPO training with Fleet task integration
+  # Use python directly since venv was set up in setup with nightly overrides
+  # (uv run --isolated would re-resolve and conflict with nightly pins)
+  python -m integrations.fleet.entrypoints.main_fleet \
+    data.train_data="['${DATA_DIR}/train.parquet']" \
+    data.val_data="['${DATA_DIR}/validation.parquet']" \
+    environment.env_class=fleet_task \
+    environment.skyrl_gym.fleet_task.tasks_file="$TASKS_FILE" \
+    environment.skyrl_gym.fleet_task.ttl_seconds=900 \
+    trainer.algorithm.advantage_estimator="grpo" \
+    trainer.policy.model.path="Qwen/Qwen3.5-9B" \
+    trainer.placement.colocate_all=true \
+    trainer.strategy=fsdp2 \
+    trainer.flash_attn=true \
+    trainer.loss_chunk_size=4096 \
+    trainer.use_sample_packing=false \
+    trainer.placement.policy_num_gpus_per_node=$TOTAL_GPUS \
+    trainer.placement.ref_num_gpus_per_node=$TOTAL_GPUS \
+    generator.num_inference_engines=$TOTAL_GPUS \
+    generator.inference_engine_tensor_parallel_size=1 \
+    trainer.epochs=${NUM_EPOCHS} \
+    trainer.eval_batch_size=12 \
+    trainer.eval_before_train=false \
+    trainer.eval_interval=20 \
+    trainer.update_epochs_per_batch=1 \
+    trainer.train_batch_size=24 \
+    trainer.use_hybrid_env_sampling=true \
+    trainer.min_samples_per_env=1 \
+    trainer.policy_mini_batch_size=24 \
+    trainer.micro_forward_batch_size_per_gpu=1 \
+    trainer.micro_train_batch_size_per_gpu=1 \
+    trainer.ckpt_interval=10 \
+    trainer.max_prompt_length=2048 \
+    generator.max_input_length=$MAX_INPUT_LENGTH \
+    generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
+    generator.sampling_params.temperature=0.9 \
+    generator.sampling_params.top_p=0.95 \
+    generator.sampling_params.stop='["</tool_call>"]' \
+    generator.eval_sampling_params.stop='["</tool_call>"]' \
+    trainer.policy.optimizer_config.lr=1.0e-6 \
+    trainer.algorithm.use_kl_loss=true \
+    generator.max_turns=$MAX_TURNS \
+    generator.backend=$INFERENCE_BACKEND \
+    generator.run_engines_locally=true \
+    generator.weight_sync_backend=nccl \
+    generator.async_engine=true \
+    generator.batched=false \
+    +generator.chat_template_kwargs='{enable_thinking:true}' \
+    generator.use_conversation_multi_turn=true \
+    generator.n_samples_per_prompt=4 \
+    generator.eval_n_samples_per_prompt=3 \
+    generator.gpu_memory_utilization=0.85 \
+    trainer.logger="$LOGGER" \
+    trainer.project_name="fleet-task-grpo" \
+    trainer.run_name="fleet_qwen35_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
+    trainer.resume_mode=latest \
+    trainer.ckpt_path="$HOME/ckpts/fleet_qwen35_${MODALITY}" \
+    trainer.dump_data_batch=true

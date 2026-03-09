@@ -18,6 +18,7 @@
 import functools
 from contextlib import nullcontext
 from typing import Union
+from loguru import logger
 
 import torch
 import torch.distributed as dist
@@ -48,8 +49,32 @@ def init_fn(x: torch.nn.Module):
     return x
 
 
+def _patch_accelerate_for_torch_compat():
+    """Patch Parameter.__new__ to handle _is_hf_initialized incompatibility with torch 2.10+.
+
+    accelerate's register_empty_parameter grabs param.__dict__ (which includes
+    _is_hf_initialized set by transformers) and passes it as **kwargs to
+    Parameter(data, **kwargs). torch 2.10+ Parameter.__new__() rejects unknown kwargs.
+
+    Fix: make Parameter.__new__ accept and ignore extra kwargs.
+    See: https://github.com/volcengine/verl/issues/4522
+    """
+    if getattr(torch.nn.Parameter, "_skyrl_patched", False):
+        return
+
+    _original_param_new = torch.nn.Parameter.__new__
+
+    def _patched_param_new(cls, data=None, requires_grad=True, **_extra_kwargs):
+        return _original_param_new(cls, data, requires_grad)
+
+    torch.nn.Parameter.__new__ = _patched_param_new
+    torch.nn.Parameter._skyrl_patched = True
+
+
 def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = None):
     from accelerate import init_empty_weights
+
+    _patch_accelerate_for_torch_compat()
 
     def cpu_init_weights():
         return torch.device("cpu")
@@ -116,9 +141,12 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
             if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
+                logger.warning(f"Could not find transformer layer class '{layer_class}' in the model, skipping.")
+                continue
             else:
                 transformer_cls_to_wrap.add(transformer_cls)
+        if not transformer_cls_to_wrap:
+            raise Exception("Could not find any transformer layer class to wrap in the model.")
 
         transformer_policy = functools.partial(
             transformer_auto_wrap_policy,
@@ -365,6 +393,8 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
     if isinstance(fsdp_transformer_layer_cls_to_wrap, str):
         fsdp_transformer_layer_cls_to_wrap = [fsdp_transformer_layer_cls_to_wrap]
+    elif isinstance(fsdp_transformer_layer_cls_to_wrap, set):
+        fsdp_transformer_layer_cls_to_wrap = list(fsdp_transformer_layer_cls_to_wrap)
 
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
