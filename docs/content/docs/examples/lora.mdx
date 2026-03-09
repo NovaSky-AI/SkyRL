@@ -2,6 +2,9 @@
 title: "LoRA Training in SkyRL"
 ---
 
+<Callout type="info">
+LoRA training is supported with the `fsdp` and `megatron` backends.
+</Callout>
 
 This guide demonstrates how to use Low-Rank Adaptation (LoRA) for efficient reinforcement learning training in SkyRL. LoRA allows you to train large language models with significantly reduced memory footprint and computational requirements by only updating a small set of parameters.
 
@@ -56,7 +59,7 @@ Here's a complete example of running LoRA training on GSM8K:
 First, prepare your dataset:
 
 ```bash
-uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
 
 ```
 
@@ -73,7 +76,7 @@ NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 INFERENCE_BACKEND="vllm"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -85,8 +88,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra $INFERENCE_BACKEND -m sky
   trainer.placement.colocate_all=true \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.num_inference_engines=$NUM_GPUS \
-  generator.inference_engine_tensor_parallel_size=1 \
+  generator.inference_engine.num_engines=$NUM_GPUS \
+  generator.inference_engine.tensor_parallel_size=1 \
   trainer.train_batch_size=128 \
   trainer.policy_mini_batch_size=128 \
   trainer.micro_forward_batch_size_per_gpu=64 \
@@ -95,7 +98,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 uv run --isolated --extra $INFERENCE_BACKEND -m sky
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=3.0e-5 \
   trainer.algorithm.use_kl_loss=true \
-  generator.backend=$INFERENCE_BACKEND \
+  generator.inference_engine.backend=$INFERENCE_BACKEND \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=4 \
@@ -112,7 +115,7 @@ Set up your WandB API key and run the training:
 
 ```bash
 export WANDB_API_KEY=your_wandb_api_key
-bash examples/lora/run_qwen2_5_0.5b_gsm8k_grpo_lora.sh
+bash examples/train/lora/run_qwen2_5_0.5b_gsm8k_grpo_lora.sh
 
 ```
 

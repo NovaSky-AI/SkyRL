@@ -5,6 +5,10 @@
 
 </div>
 
+> [!IMPORTANT]
+> **Note:** SkyRL is undergoing a repo reorganization into the `SkyRL/skyrl` folder, which unifies the skyrl libraries (`skyrl-train`, `skyrl-tx`) into a single package. The code that was previously in the `skyrl-train` package can now be found in `skyrl/{backends/, train/, utils/}`. See issue: https://github.com/NovaSky-AI/SkyRL/issues/1145
+
+
 # Overview
 
  With a focus on modularity, `skyrl-train` makes it easy to prototype new training algorithms, environments, and execution plans—without compromising usability or speed. 
@@ -27,7 +31,7 @@ The `skyrl-train` package supports:
 - Synchronous RL, [async one-off pipelining](https://docs.skyrl.ai/docs/tutorials/one_step_off_async), or [fully async RL with in-flight weight updates](https://docs.skyrl.ai/docs/tutorials/fully_async)
 - Simple batched rollouts or Asynchronous rollouts for multi-turn conversations
 - Weight sync via NCCL, gloo, or checkpoint-and-load
-- Integration with `skyrl-gym`, [verifiers](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/integrations/verifiers), [OpenEnv](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/integrations/openenv), [Harbor/Terminal-Bench](https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-train/examples/harbor), and more!
+- Integration with `skyrl-gym`, [verifiers](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train_integrations/verifiers), [OpenEnv](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train_integrations/openenv), [Harbor/Terminal-Bench](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train_integrations/harbor), and more!
 - Sequence packing and Flash Attention 2
 - Algorithmic support for RLOO, REINFORCE, GSPO, CISPO, SAPO
 - Step-wise training for fully on policy multi-turn RL
@@ -35,7 +39,7 @@ The `skyrl-train` package supports:
 
 ## Documentation
 
-Find `skyrl-train` documentation at: [docs.skyrl.ai/docs/](https://docs.skyrl.ai/docs/)
+Find documentation at: [docs.skyrl.ai/docs/](https://docs.skyrl.ai/docs/)
 
 ## Quick Start
 
@@ -55,21 +59,21 @@ First, clone the repository:
 
 ```bash
 git clone --recurse-submodules https://github.com/NovaSky-AI/SkyRL
-cd SkyRL/skyrl-train
+cd SkyRL/
 ```
 
 Then, create a new virtual environment and install the dependencies:
 
 ```bash
 # creates a venv at .venv/
-uv sync --extra vllm 
+uv sync --extra fsdp 
 source .venv/bin/activate
 ```
 
 Then, prepare the dataset:
 
 ```bash
-uv run -- python examples/gsm8k/gsm8k_dataset.py
+uv run -- python examples/train/gsm8k/gsm8k_dataset.py
 ```
 
 Finally, before training, make sure to configure Ray to use `uv`:
@@ -84,7 +88,7 @@ You should now be able to run our example script (assumes at least 4 GPUs):
 
 ```bash
 export WANDB_API_KEY=<your wandb api key>
-bash examples/gsm8k/run_gsm8k.sh
+bash examples/train/gsm8k/run_gsm8k.sh
 ```
 
 For detailed installation instructions, as well as more examples, please refer to our [documentation](https://docs.skyrl.ai/docs/).
@@ -93,7 +97,7 @@ For detailed installation instructions, as well as more examples, please refer t
 
 To implement a new task or environment using the SkyRL-Gym interface, please see our [Walkthrough Docs](https://docs.skyrl.ai/docs/tutorials/new_env).
 
-If you don't want to use the SkyRL-Gym interface, or you have an existing task or agentic pipeline implementation and just want to train with it on top of SkyRL, we recommend you create a simple custom [`Generator`](skyrl_train/generators/base.py), which requires implementing a single method, `generate()`. We have one example of a custom Generator at [`SkyRLGymGenerator`](skyrl_train/generators/skyrl_gym_generator.py) which executes environments written in the SkyRL-Gym interface. We are working to provide more example integrations of agent harnesses -- please reach out if you'd like yours to be one of them!
+If you don't want to use the SkyRL-Gym interface, or you have an existing task or agentic pipeline implementation and just want to train with it on top of SkyRL, we recommend you create a simple custom [`Generator`](/skyrl/train/generators/base.py), which requires implementing a single method, `generate()`. We have one example of a custom Generator at [`SkyRLGymGenerator`](/skyrl/train/generators/skyrl_gym_generator.py) which executes environments written in the SkyRL-Gym interface. We are working to provide more example integrations of agent harnesses -- please reach out if you'd like yours to be one of them!
 
 ## Reproducing SkyRL-SQL
 We also test SkyRL by reproducing our prior release [SkyRL-SQL](https://novasky-ai.notion.site/skyrl-sql), which enabled efficient Multi-Turn RL for Text2SQL. 

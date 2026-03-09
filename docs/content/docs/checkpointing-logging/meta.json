@@ -1,6 +1,7 @@
 {
   "title": "Checkpointing and Logging",
   "pages": [
-    "checkpointing"
+    "checkpointing",
+    "logging"
   ]
 }

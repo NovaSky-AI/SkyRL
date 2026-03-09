@@ -6,12 +6,18 @@ on:
       - main 
       - rc/**
     paths:
+      - 'ci/**'
       - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - 'skyrl-gym/**'
       - '.github/workflows/cpu_skyrl_train.yaml'
   pull_request:
     paths:
+      - 'ci/**'
       - 'skyrl/**'
+      - 'tests/**'
+      - 'pyproject.toml'
       - 'skyrl-gym/**'
       - '.github/workflows/cpu_skyrl_train.yaml'
 
@@ -50,7 +56,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: ./skyrl
+        working-directory: .
 
     steps:
       - uses: actions/checkout@v4

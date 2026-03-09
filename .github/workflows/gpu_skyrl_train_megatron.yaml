@@ -5,14 +5,15 @@ on:
     branches: 
       - main
     paths:
-      - 'skyrl/skyrl/backends/skyrl_train/workers/**'
-      - 'skyrl/skyrl/backends/skyrl_train/distributed/megatron/**'
-      - 'skyrl/skyrl/train/config/**'
-      - 'skyrl/skyrl/train/trainer.py'
-      - 'skyrl/tests/backends/skyrl_train/gpu/gpu_ci/**'
-      - 'skyrl/pyproject.toml'
-      - '!skyrl/docs/**'
-      - '!skyrl/examples/**'
+      - 'ci/**'
+      - 'skyrl/backends/skyrl_train/workers/**'
+      - 'skyrl/backends/skyrl_train/distributed/megatron/**'
+      - 'skyrl/train/config/**'
+      - 'skyrl/train/trainer.py'
+      - 'tests/backends/skyrl_train/gpu/gpu_ci/**'
+      - 'pyproject.toml'
+      - '!docs/**'
+      - '!examples/**'
       - '.github/workflows/**'
   workflow_dispatch:
 
@@ -28,7 +29,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: ./skyrl
+        working-directory: .
 
     steps:
       - uses: actions/checkout@v4

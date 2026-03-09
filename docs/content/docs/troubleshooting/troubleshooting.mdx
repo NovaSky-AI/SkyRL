@@ -32,6 +32,6 @@ In some cases, you may encounter "illegal memory access" errors with vLLM >= 0.1
 With SkyRL, this can be done with the following overrides:
 
 ```bash
-uv run --isolated --extra vllm --with vllm==0.9.2 --with transformers==4.53.0 --with torch==2.7.0 --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" -- ...
+uv run --isolated --extra fsdp --with vllm==0.9.2 --with transformers==4.53.0 --with torch==2.7.0 --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" -- ...
 
 ```
