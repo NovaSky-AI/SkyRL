@@ -85,6 +85,7 @@ def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
         (port, socket) -- caller must close the socket before rebinding.
     """
     port = start_port
+    sock: socket.socket | None = None
     while True:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -93,6 +94,8 @@ def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
             sock.listen(1)
             return port, sock
         except OSError:
+            if sock:
+                sock.close()
             port += 1
             if port > 65535:
                 raise RuntimeError(f"No available port found starting from {start_port}")
