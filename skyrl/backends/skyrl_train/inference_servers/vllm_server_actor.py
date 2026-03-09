@@ -240,7 +240,6 @@ class VLLMServerActor(ServerActorProtocol):
     async def _run_server(self) -> None:
         """Internal method to run the HTTP server."""
         # Release the port reservation right before vLLM rebinds.
-        # SO_REUSEADDR on both sockets makes the hand-off atomic.
         if self._port_reservation is not None:
             self._port_reservation.close()
             self._port_reservation = None
