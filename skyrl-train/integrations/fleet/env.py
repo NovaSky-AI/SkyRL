@@ -120,6 +120,18 @@ class FleetTaskEnv(BaseTextEnv):
     Fleet's environment management.
     """
 
+    _trace_config: Optional[Dict[str, str]] = None
+
+    @classmethod
+    def set_trace_config(cls, job_id: str, model: str):
+        """Set trace config for uploading eval traces to Fleet."""
+        cls._trace_config = {"job_id": job_id, "model": model}
+
+    @classmethod
+    def clear_trace_config(cls):
+        """Clear trace config after eval is done."""
+        cls._trace_config = None
+
     def __init__(
         self,
         env_config: DictConfig,
@@ -393,9 +405,6 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
                 mcp_time = time.time() - mcp_start
                 error = str(e)
 
-        # Check if episode is done
-        episode_done = agent_done or max_turns_reached
-
         # Detect error patterns in tool_result (tool returned error as successful response)
         if not error and tool_result:
             result_str = str(tool_result) if not isinstance(tool_result, str) else tool_result
@@ -406,6 +415,33 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
             elif isinstance(tool_result, dict) and tool_result.get("error"):
                 error = tool_result["error"]
                 tool_result = None
+
+        # Check if episode is done
+        episode_done = agent_done or max_turns_reached
+
+        # Upload trace at episode end if trace config is set
+        if episode_done and FleetTaskEnv._trace_config:
+            try:
+                from envs.fleet_env.trace import upload_trace
+
+                inst_id = None
+                orch = getattr(self.openenv_task_env, "_orch", None)
+                if orch:
+                    fleet_env = getattr(orch, "_fleet_env", None)
+                    if fleet_env:
+                        inst_id = getattr(fleet_env, "instance_id", None)
+                await upload_trace(
+                    api_key=self.api_key,
+                    job_id=FleetTaskEnv._trace_config["job_id"],
+                    task_key=self.task_key,
+                    model=FleetTaskEnv._trace_config["model"],
+                    chat_history=self.chat_history,
+                    reward=reward,
+                    instance_id=inst_id,
+                    metadata={"env_key": self.task_config.get("env_key"), "turns": self.turns},
+                )
+            except Exception as e:
+                logger.warning(f"Failed to upload trace for {self.task_key}: {e}")
 
         # Build observation message
         if max_turns_reached:

@@ -150,22 +150,48 @@ class RayPPOTrainer:
         Returns:
             A dictionary of evaluation metrics.
         """
-        if self.cfg.generator.step_wise_trajectories:
-            eval_metrics = await evaluate_step_wise(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-            )
-        else:
-            eval_metrics = await evaluate(
-                eval_dataloader=self.eval_dataloader,
-                generator=self.generator,
-                cfg=self.cfg,
-                global_step=self.global_step,
-                tokenizer=self.tokenizer,
-            )
+        # Create Fleet trace job for eval traces (if FLEET_API_KEY is set)
+        trace_job_id = None
+        fleet_api_key = os.environ.get("FLEET_API_KEY")
+        if fleet_api_key:
+            try:
+                from envs.fleet_env.trace import create_trace_job
+                from integrations.fleet.env import FleetTaskEnv as FleetEnv
+
+                job_name = f"{self.cfg.trainer.run_name}_step_{self.global_step}"
+                trace_job_id = await create_trace_job(fleet_api_key, job_name)
+                model_path = self.cfg.trainer.policy.model.path
+                FleetEnv.set_trace_config(job_id=trace_job_id, model=model_path)
+                logger.info(f"Created Fleet trace job: {trace_job_id}")
+            except Exception as e:
+                logger.warning(f"Failed to create Fleet trace job: {e}")
+
+        try:
+            if self.cfg.generator.step_wise_trajectories:
+                eval_metrics = await evaluate_step_wise(
+                    eval_dataloader=self.eval_dataloader,
+                    generator=self.generator,
+                    cfg=self.cfg,
+                    global_step=self.global_step,
+                    tokenizer=self.tokenizer,
+                )
+            else:
+                eval_metrics = await evaluate(
+                    eval_dataloader=self.eval_dataloader,
+                    generator=self.generator,
+                    cfg=self.cfg,
+                    global_step=self.global_step,
+                    tokenizer=self.tokenizer,
+                )
+        finally:
+            if trace_job_id:
+                try:
+                    from integrations.fleet.env import FleetTaskEnv as FleetEnv
+
+                    FleetEnv.clear_trace_config()
+                except Exception:
+                    pass
+
         return eval_metrics
 
     async def train(self):
