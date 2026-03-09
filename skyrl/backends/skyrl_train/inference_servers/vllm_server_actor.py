@@ -29,7 +29,6 @@ from skyrl.env_vars import (
 )
 from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo, find_and_reserve_port, get_node_ip
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
-from skyrl.backends.skyrl_train.inference_servers.vllm_worker import VLLM_WORKER_EXTENSION_CLS
 
 logger = logging.getLogger(__name__)
 
@@ -143,19 +142,6 @@ class VLLMServerActor(ServerActorProtocol):
         # Initialized lazily to not block the actor initialization.
         self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
-
-    def _ensure_worker_extension(self) -> None:
-        """
-        Ensure the SkyRL worker extension is configured.
-
-        The worker extension (WorkerWrap) provides the RPC methods needed for
-        weight synchronization (init_weight_update_communicator, load_weights).
-        """
-        if not hasattr(self._cli_args, "worker_extension_cls") or not self._cli_args.worker_extension_cls:
-            self._cli_args.worker_extension_cls = VLLM_WORKER_EXTENSION_CLS
-            logger.info(f"Using default worker extension: {VLLM_WORKER_EXTENSION_CLS}")
-        else:
-            logger.info(f"Using provided worker extension: {self._cli_args.worker_extension_cls}")
 
     def _ensure_ray_executor(self) -> None:
         """
