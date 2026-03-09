@@ -27,7 +27,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 
 _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
