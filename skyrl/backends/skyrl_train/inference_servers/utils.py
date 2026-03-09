@@ -11,10 +11,6 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.config import WeightTransferConfig
 
-    from skyrl.backends.skyrl_train.weight_sync.vllm_ipc_engine import _patch_weight_transfer_config
-
-    _patch_weight_transfer_config()
-
     # Create common CLI args namespace
     parser = FlexibleArgumentParser()
     parser = FrontendArgs.add_cli_args(parser)

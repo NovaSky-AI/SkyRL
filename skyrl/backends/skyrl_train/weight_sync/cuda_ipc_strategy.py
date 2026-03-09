@@ -5,6 +5,7 @@ from training workers to inference engines using CUDA IPC handles.
 """
 
 import base64
+import copy
 import pickle
 from dataclasses import dataclass, asdict
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
@@ -44,7 +45,7 @@ class CudaIpcInitInfo(WeightSyncInitInfo):
 
     def for_servers(self, world_size_per_server: int, num_servers: int) -> List["CudaIpcInitInfo"]:
         """IPC init is a no-op, so return identical copies for each server."""
-        return [self] * num_servers
+        return [copy.deepcopy(self) for _ in range(num_servers)]
 
     def to_api_payload(self) -> Dict[str, Any]:
         """IPC needs no initialization parameters."""
@@ -208,8 +209,7 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             for param_idx in range(len(per_param_handles)):
                 merged: Dict[str, IpcHandle] = {}
                 for rank_handles in gathered:
-                    if rank_handles is not None:
-                        merged.update(rank_handles[param_idx])
+                    merged.update(rank_handles[param_idx])  # type: ignore[union-attr]
                 merged_handles.append(merged)
 
             pickled = base64.b64encode(pickle.dumps(merged_handles)).decode("utf-8")
@@ -221,8 +221,8 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
             }
             await self._inference_client.update_named_weights(update_info)
 
-        torch.cuda.ipc_collect()
         torch.distributed.barrier()
+        torch.cuda.ipc_collect()
         torch.cuda.synchronize()
 
     async def _send_chunks_legacy(self, chunks: Iterable[WeightChunk]) -> None:

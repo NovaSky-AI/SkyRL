@@ -15,71 +15,22 @@ Run:
 
 import base64
 import pickle
-import time
 
 import httpx
 import pytest
 import ray
 import torch
-import argparse
 
 import pytest_asyncio
-from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip, get_open_port
-from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
-from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcInitInfo
+from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-
-
-def make_vllm_cli_args(
-    model: str,
-    tp_size: int = 2,
-    load_format: str = "auto",
-    gpu_memory_utilization: float = 0.5,
-) -> argparse.Namespace:
-    """Create CLI args for vLLM server using official parser."""
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-    from vllm.config import WeightTransferConfig
-
-    parser = FlexibleArgumentParser(description="vLLM server")
-    parser = make_arg_parser(parser)
-    args = parser.parse_args(
-        [
-            "--model",
-            model,
-            "--tensor-parallel-size",
-            str(tp_size),
-            "--enforce-eager",
-            "--gpu-memory-utilization",
-            str(gpu_memory_utilization),
-            "--max-model-len",
-            "2048",
-            "--load-format",
-            load_format,
-        ]
-    )
-    args.weight_transfer_config = WeightTransferConfig(backend="nccl")
-    return args
-
-
-def wait_for_url(url: str, timeout: float = 180.0) -> bool:
-    """Wait for a URL to become available."""
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            resp = httpx.get(f"{url}/health", timeout=5.0)
-            if resp.status_code == 200:
-                return True
-        except httpx.RequestError:
-            time.sleep(2.0)
-    return False
 
 
 @ray.remote
@@ -166,72 +117,34 @@ async def weight_update_env(ray_init_fixture):
     Create environment for weight update testing.
 
     Non-colocated setup with TP=2 for both trainer and inference server:
-    - 4 GPUs total: trainer on GPUs 0-1, server on GPUs 2-3
+    - Trainer on separate GPU(s), server (TP=2) on its own GPUs
     - Uses NCCL broadcast for weight sync
     """
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = MODEL
 
-    # Create server with dummy weights (TP=2)
-    cli_args = make_vllm_cli_args(
-        MODEL,
+    engines = InferenceEngineState.create(
+        cfg,
+        model=MODEL,
         tp_size=2,
-        load_format="dummy",
+        colocate_all=False,
         gpu_memory_utilization=0.5,
+        use_new_inference_servers=True,
+        engine_init_kwargs={"load_format": "dummy"},
     )
-    start_port = get_open_port()
 
-    # 4 bundles: trainer on 0-1, server on 2-3
-    pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(4)])
-    ray.get(pg.ready())
-
-    # Trainer on bundle 0 (uses GPU 0-1 with TP=2 via the model itself)
-    trainer = Trainer.options(
-        num_gpus=1.0,
-        scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=pg,
-            placement_group_bundle_index=0,
-        ),
-    ).remote(MODEL)
-
+    trainer = Trainer.options(num_gpus=1.0).remote(MODEL)
     ray.get(trainer.ready.remote())
 
-    # Server on bundles 2-3 (separate from trainer)
-    group = ServerGroup(
-        cli_args=cli_args,
-        num_servers=1,
-        start_port=start_port,
-        placement_group=pg,
-        placement_group_bundle_offset=2,
-    )
-    server_infos = group.start()
-    server_urls = [info.url for info in server_infos]
-
-    for url in server_urls:
-        assert wait_for_url(url), f"Server {url} failed to start"
-
-    # Create router
-    router_port = get_open_port()
-    router = InferenceRouter(server_urls, host="0.0.0.0", port=router_port)
-    router_url = router.start()
-    assert wait_for_url(router_url), "Router failed to start"
-
-    # Create RemoteInferenceClient for control plane operations
-    client = RemoteInferenceClient(
-        proxy_url=router_url,
-        server_urls=server_urls,
-        model_name=MODEL,
-    )
-
     yield {
-        "group": group,
-        "server_urls": server_urls,
-        "router": router,
-        "router_url": router_url,
+        "engines": engines,
         "trainer": trainer,
-        "client": client,
+        "client": engines.client,
+        "router_url": engines.client.proxy_url,
     }
 
-    await client.teardown()
-    router.shutdown()
+    await engines.client.teardown()
+    engines.close()
 
 
 @pytest.mark.asyncio(loop_scope="class")
@@ -416,75 +329,42 @@ async def ipc_weight_update_env(ray_init_fixture):
     Create environment for colocated IPC weight update testing.
 
     Colocated setup with TP=1:
-    - 2 GPU bundles, trainer and server share bundle 0 (GPU 0)
+    - Trainer and server share the same GPU via placement group
     - Server uses CUDA IPC backend for weight sync
     """
-    from skyrl.backends.skyrl_train.weight_sync.vllm_ipc_engine import _patch_weight_transfer_config
-    from vllm.config import WeightTransferConfig
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = MODEL
 
-    _patch_weight_transfer_config()
-
-    cli_args = make_vllm_cli_args(
-        MODEL,
+    engines = InferenceEngineState.create(
+        cfg,
+        model=MODEL,
         tp_size=1,
-        load_format="dummy",
+        colocate_all=True,
         gpu_memory_utilization=0.5,
+        use_new_inference_servers=True,
+        engine_init_kwargs={"load_format": "dummy"},
     )
-    cli_args.weight_transfer_config = WeightTransferConfig(backend="ipc")
-    cli_args.enable_sleep_mode = True
 
-    start_port = get_open_port()
-
-    pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(2)])
-    ray.get(pg.ready())
-
-    # Trainer on bundle 0 — fractional GPU so it coexists with the server
+    # Trainer on same PG bundle as server (colocated) with fractional GPU
     trainer = IpcTrainer.options(
         num_gpus=0.2,
         num_cpus=0.2,
         scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=pg,
+            placement_group=engines.pg,
             placement_group_bundle_index=0,
         ),
     ).remote(MODEL)
     ray.get(trainer.ready.remote())
 
-    # Server on bundle 0 (colocated — same GPU as trainer)
-    group = ServerGroup(
-        cli_args=cli_args,
-        num_servers=1,
-        start_port=start_port,
-        placement_group=pg,
-        placement_group_bundle_offset=0,
-    )
-    server_infos = group.start()
-    server_urls = [info.url for info in server_infos]
-
-    for url in server_urls:
-        assert wait_for_url(url), f"Server {url} failed to start"
-
-    router_port = get_open_port()
-    router = InferenceRouter(server_urls, host="0.0.0.0", port=router_port)
-    router_url = router.start()
-    assert wait_for_url(router_url), "Router failed to start"
-
-    client = RemoteInferenceClient(
-        proxy_url=router_url,
-        server_urls=server_urls,
-        model_name=MODEL,
-    )
-
     yield {
-        "group": group,
-        "server_urls": server_urls,
-        "router": router,
-        "router_url": router_url,
+        "engines": engines,
         "trainer": trainer,
-        "client": client,
+        "client": engines.client,
+        "router_url": engines.client.proxy_url,
     }
 
-    await client.teardown()
-    router.shutdown()
+    await engines.client.teardown()
+    engines.close()
 
 
 @pytest.mark.asyncio(loop_scope="class")
