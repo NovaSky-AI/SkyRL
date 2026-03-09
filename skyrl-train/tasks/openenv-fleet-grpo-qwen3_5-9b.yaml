@@ -139,15 +139,15 @@ setup: |
 
   uv pip install "litellm>=1.75.5" "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" fleet-python logfire "mcp>=1.0.0"
 
-  mkdir -p $HOME/data/fleet
-  TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
+  mkdir -p /workspace/data/fleet
+  TASKS_FILE="/workspace/data/fleet/tasks_${MODALITY}.json"
   S3_PATH="s3://${S3_DATASET_BUCKET}/${DATA_VERSION}/openenv/all_${MODALITY}.json"
   echo "Downloading dataset from $S3_PATH..."
   aws s3 cp "$S3_PATH" "$TASKS_FILE"
   TASK_COUNT=$(python3 -c "import json; print(len(json.load(open('$TASKS_FILE'))['tasks']))")
   echo "Downloaded $TASK_COUNT tasks for modality: $MODALITY"
 
-  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+  DATA_DIR="/workspace/data/fleet/${MODALITY}"
   PREPARE_CMD="python -m integrations.fleet.prepare_dataset --tasks-json $TASKS_FILE --output-dir $DATA_DIR --modality $MODALITY"
   [ -n "$ENV_KEYS" ] && PREPARE_CMD="$PREPARE_CMD --env-filter $ENV_KEYS"
   [ -n "$DIFFICULTY" ] && PREPARE_CMD="$PREPARE_CMD --difficulty-filter $DIFFICULTY"
@@ -158,7 +158,7 @@ run: |
   cd skyrl-train
   source .venv/bin/activate
 
-  TMP_DIR="$HOME/skyrl-tmp"
+  TMP_DIR="/workspace/skyrl-tmp"
   mkdir -p "$TMP_DIR"
   export TMPDIR="$TMP_DIR"
 
@@ -168,8 +168,8 @@ run: |
   # expandable_segments incompatible with vLLM memory pool in torch 2.10+
   # (AssertionError: pytorch/pytorch#147851)
 
-  TASKS_FILE="$HOME/data/fleet/tasks_${MODALITY}.json"
-  DATA_DIR="$HOME/data/fleet/${MODALITY}"
+  TASKS_FILE="/workspace/data/fleet/tasks_${MODALITY}.json"
+  DATA_DIR="/workspace/data/fleet/${MODALITY}"
 
   python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
 
@@ -244,5 +244,6 @@ run: |
     trainer.project_name="fleet-task-grpo" \
     trainer.run_name="fleet_qwen35_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
     trainer.resume_mode=latest \
-    trainer.ckpt_path="$HOME/ckpts/fleet_qwen35_${MODALITY}" \
+    trainer.ckpt_path="/workspace/ckpts/fleet_qwen35_${MODALITY}" \
+    trainer.export_path="/workspace/exports" \
     trainer.dump_data_batch=true
