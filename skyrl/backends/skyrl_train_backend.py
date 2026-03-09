@@ -31,6 +31,10 @@ from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine i
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.utils.tok import get_tokenizer
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 
 
 class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
@@ -192,11 +196,6 @@ class SkyRLTrainBackend(AbstractBackend):
         Mirrors main_base.py._get_new_inference_client() with the same 4-way
         branching on external_proxy_url / external_server_urls.
         """
-        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
-        from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
-        from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-        from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
-
         ie_cfg = self._cfg.generator.inference_engine
         is_colocated = self._cfg.trainer.placement.colocate_all
         external_proxy_url = ie_cfg.external_proxy_url
