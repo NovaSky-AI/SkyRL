@@ -19,6 +19,7 @@ from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B"
 
 
 def get_test_actor_config() -> SkyRLTrainConfig:
@@ -192,21 +193,22 @@ def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: i
 
 
 @pytest.mark.parametrize(
-    "tp_size,pp_size,dp_size",
+    "tp_size,pp_size,dp_size,model",
     [
-        pytest.param(2, 1, 1),
-        pytest.param(2, 2, 1),
-        pytest.param(2, 1, 2),
+        pytest.param(2, 1, 1, MODEL),
+        pytest.param(2, 2, 1, MODEL),
+        pytest.param(2, 1, 2, MOE_MODEL),
     ],
     ids=["tp2_pp1_dp1", "tp2_pp2_dp1", "tp2_pp1_dp2"],
 )
-def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int):
+def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str):
     """Test generation using prompt_token_ids."""
 
     cfg = get_test_actor_config()
+    cfg.trainer.policy.model.path = model
 
-    prompts = get_test_prompts(MODEL, 3)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompts = get_test_prompts(model, 3)
+    tokenizer = AutoTokenizer.from_pretrained(model)
     prompt_token_ids = tokenizer.apply_chat_template(
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"]
