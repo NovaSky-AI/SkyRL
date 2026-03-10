@@ -786,7 +786,10 @@ def dppo_policy_loss(
     """
     loss_reduction = config.loss_reduction
 
-    ratio = safe_exp_delta(log_probs - old_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    # Use rollout logprobs as behavior policy for both ratio and mask
+    # See Section 5.2 of paper
+    mu_log_probs = rollout_logprobs if rollout_logprobs is not None else old_log_probs
+    ratio = safe_exp_delta(log_probs - mu_log_probs, clip=20.0, out_dtype=log_probs.dtype)
 
     dppo_type = config.dppo.dppo_type
     delta_low = config.dppo.delta_low
@@ -794,8 +797,6 @@ def dppo_policy_loss(
 
     # Compute DPPO mask
     with torch.no_grad():
-        # Use rollout logprobs as the behavior policy if available (default in reference implementation).
-        mu_log_probs = rollout_logprobs if rollout_logprobs is not None else old_log_probs
         current_probs = torch.exp(log_probs)
         mu_probs = torch.exp(mu_log_probs)
         prob_diff = current_probs - mu_probs  # Use actual probabilities
