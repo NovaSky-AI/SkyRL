@@ -168,7 +168,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
 
-        if len(rollout_inference_indices) == 0 and _routed_experts is None:
+        if len(rollout_inference_indices) == 0 and rollout_inference_indices[0] is None:
             rollout_inference_indices = None  # hack: assume uniform sampling params
 
         return InferenceEngineOutput(

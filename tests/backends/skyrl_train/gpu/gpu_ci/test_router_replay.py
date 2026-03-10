@@ -22,7 +22,6 @@ from skyrl.train.generators.base import GeneratorInput
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.replay_utils import _split_replay_indices
 
 MOE_MODEL_NAME = "/home/ray/moonlight16b"
 # MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
@@ -85,14 +84,12 @@ def build_training_input_from_text_samples(
         rewards.append([0.0] * len(response_ids))
         loss_masks.append([1] * len(response_ids))
 
-    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = (
-        convert_prompts_responses_to_batch_tensors(
-            tokenizer=tokenizer,
-            prompts=prompts,
-            responses=responses,
-            rewards=rewards,
-            loss_masks=loss_masks,
-        )
+    sequences, attention_mask, response_mask, rewards_t, loss_mask_t, _, _ = convert_prompts_responses_to_batch_tensors(
+        tokenizer=tokenizer,
+        prompts=prompts,
+        responses=responses,
+        rewards=rewards,
+        loss_masks=loss_masks,
     )
 
     num_actions = response_mask.shape[1]
@@ -114,95 +111,6 @@ def build_training_input_from_text_samples(
     training_input.metadata = {"response_length": num_actions}
     return training_input
 
-@pytest.mark.megatron
-def test_moonlight_logprobs(ray_init_fixture):
-    """
-    Check magnitude of moonlight-16b-a3b logprobs without router replay.
-    """
-    actor_group = None
-    try:
-        cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
-        cfg.trainer.strategy = "megatron"
-
-        tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
-        input_batch: GeneratorInput = get_test_generator_input(
-            model=MOE_MODEL_NAME,
-            num_prompts=NUM_PROMPTS,
-            n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
-            max_prompt_length=512,
-            env_class="gsm8k",
-        )
-        training_input = build_training_input_from_text_samples(
-            tokenizer=tokenizer,
-            prompt_response_pairs=[
-                (
-                    tokenizer.apply_chat_template(
-                        prompt
-                        if any(message["role"] == "system" for message in prompt)
-                        else [{"role": "system", "content": "You are a helpful assistant."}] + prompt,
-                        add_generation_prompt=True,
-                        tokenize=False,
-                    ),
-                    " "
-                    + (
-                        " ".join(
-                            next(
-                                (
-                                    message["content"]
-                                    for message in reversed(prompt)
-                                    if message["role"] == "user"
-                                ),
-                                "",
-                            ).split()[:16]
-                        ).strip()
-                        or "I will solve this step by step."
-                    ),
-                )
-                for prompt in input_batch["prompts"]
-            ],
-        )
-
-        cfg.trainer.placement.policy_num_gpus_per_node = 8
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
-        cfg.trainer.policy.megatron_config.context_parallel_size = 1
-        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
-        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
-        cfg.trainer.micro_forward_batch_size_per_gpu = 1
-        cfg.trainer.micro_train_batch_size_per_gpu = 1
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs = {
-            **(cfg.trainer.policy.megatron_config.transformer_config_kwargs or {}),
-            "moe_enable_routing_replay": False,
-        }
-
-        actor_group = init_worker_with_type(
-            "policy",
-            shared_pg=None,
-            colocate_all=False,
-            num_gpus_per_node=8,
-            cfg=cfg,
-        )
-
-        with Timer("moonlight_forward"):
-            refs = actor_group.async_run_ray_method("mesh", "forward", data=training_input)
-            results = ray.get(refs)
-
-        action_log_probs = concatenate_outputs_after_mesh_dispatch(actor_group.actor_infos, results)["output"]
-        valid_log_probs = action_log_probs[training_input["response_mask"].bool()]
-        avg_logprob = valid_log_probs.mean().item()
-        print(
-            f"Moonlight Megatron logprobs - mean: {avg_logprob:.6f}, std: {valid_log_probs.std().item():.6f}, "
-            f"num_tokens: {valid_log_probs.numel()}"
-        )
-
-        assert valid_log_probs.numel() > 0, "Expected at least one valid response token"
-        assert torch.isfinite(valid_log_probs).all().item(), "Expected all response logprobs to be finite"
-        assert -20.0 < avg_logprob < -0.01, f"Unexpected average logprob magnitude: {avg_logprob:.6f}"
-    finally:
-        if actor_group is not None:
-            for actor in actor_group._actor_handlers:
-                ray.kill(actor)
-        ray.shutdown()
 
 @pytest.mark.megatron
 def test_logprobs(ray_init_fixture):

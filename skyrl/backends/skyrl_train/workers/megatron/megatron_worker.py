@@ -33,7 +33,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
 from skyrl.train.utils.utils import update_model_config, str_to_torch_dtype
 from skyrl.backends.skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics, all_reduce_metrics
+from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics, all_reduce_metrics, BatchIterator
 from skyrl.backends.skyrl_train.workers.worker import (
     PolicyWorkerBase,
     RefWorkerBase,
@@ -253,63 +253,6 @@ class MegatronWeightExtractor(WeightExtractor):
 
 
 class MegatronWorker:
-    def debug_model_config(self):
-        """Return model config diagnostics for debugging logprob mismatch."""
-        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import get_model_config
-
-        config = get_model_config(self.actor_module[0])
-        diag = {
-            "attention_backend": str(getattr(config, "attention_backend", "unknown")),
-            "multi_latent_attention": getattr(config, "multi_latent_attention", "unknown"),
-            "q_lora_rank": getattr(config, "q_lora_rank", "unknown"),
-            "kv_lora_rank": getattr(config, "kv_lora_rank", "unknown"),
-            "qk_head_dim": getattr(config, "qk_head_dim", "unknown"),
-            "qk_pos_emb_head_dim": getattr(config, "qk_pos_emb_head_dim", "unknown"),
-            "v_head_dim": getattr(config, "v_head_dim", "unknown"),
-            "num_layers": getattr(config, "num_layers", "unknown"),
-            "hidden_size": getattr(config, "hidden_size", "unknown"),
-            "num_attention_heads": getattr(config, "num_attention_heads", "unknown"),
-            "rope_type": getattr(config, "rope_type", "unknown"),
-            "layernorm_epsilon": getattr(config, "layernorm_epsilon", "unknown"),
-            "sequence_parallel": getattr(config, "sequence_parallel", "unknown"),
-        }
-        weight_stats = {}
-        model = self.actor_module[0]
-        for name, param in model.named_parameters():
-            if any(k in name for k in ["layers.0.", "output_layer", "word_embeddings"]):
-                weight_stats[name] = {
-                    "shape": list(param.shape),
-                    "mean": param.float().mean().item(),
-                    "std": param.float().std().item(),
-                    "norm": param.float().norm().item(),
-                }
-        diag["weight_stats"] = weight_stats
-        return diag
-
-    def _read_router_replay_state(self):
-        """Read the current RouterReplay state from all instances."""
-        from megatron.core.transformer.moe.router_replay import RouterReplay
-
-        # See https://docs.nvidia.com/megatron-core/developer-guide/0.15.0/api-guide/router_replay.html docs for more info
-        instances = RouterReplay.global_router_replay_instances or []
-        action = instances[0].router_replay_action if instances else None
-
-        target_indices = [inst.target_topk_idx.detach().cpu() for inst in instances if inst.target_topk_idx is not None]
-
-        return {
-            "action": str(action),
-            "target_indices": target_indices,
-            "num_instances": len(instances),
-        }
-
-    def debug_setup_router_replay_state(self, data: TrainingInputBatch):
-        from skyrl.backends.skyrl_train.utils.replay_utils import setup_router_replay_forward, clear_router_replay
-
-        setup_router_replay_forward(data, enable_router_replay=True)
-        state = self._read_router_replay_state()
-        clear_router_replay()
-        return state
-
     def init_configs(
         self,
         model_path,
@@ -347,17 +290,6 @@ class MegatronWorker:
         bridge = AutoBridge.from_hf_pretrained(model_path, trust_remote_code=True)
         provider = bridge.to_megatron_provider()
 
-        # Determine attention backend. MLA (Multi-Latent Attention) with TE fused
-        # attention can produce NaN/incorrect results; fall back to unfused for MLA.
-        if "attention_backend" not in transformer_config_kwargs:
-            # has_mla = getattr(provider, "multi_latent_attention", False)
-            if flash_attn:
-                transformer_config_kwargs["attention_backend"] = "flash"
-            # elif has_mla:
-            #     transformer_config_kwargs["attention_backend"] = "unfused"
-            else:
-                transformer_config_kwargs["attention_backend"] = "fused"
-
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
         provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
@@ -365,7 +297,7 @@ class MegatronWorker:
         provider.expert_model_parallel_size = megatron_config.expert_model_parallel_size
         provider.expert_tensor_parallel_size = megatron_config.expert_tensor_parallel_size
         provider.sequence_parallel = megatron_config.tensor_model_parallel_size > 1
-        provider.attention_backend = transformer_config_kwargs["attention_backend"]
+        provider.attention_backend = "flash" if flash_attn else "fused"
         provider.variable_seq_lengths = True
         provider.masked_softmax_fusion = True
         # Apply explicit MoE config fields to the provider.
@@ -510,7 +442,6 @@ class MegatronWorker:
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
-        self._last_router_replay_state = self._read_router_replay_state()
         clear_router_replay()
         return output
 
@@ -685,31 +616,29 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Move data to GPU
         data.to(torch.cuda.current_device())
 
-        # Chunk manually so we can propagate rollout_inference_indices for
-        # per-micro-batch router replay (BatchIterator/Experience don't carry them).
+        # Build micro-batch dicts expected by forward_backward_mini_batch
         micro_buffer = []
-        for micro in data.chunk(micro_batch_size):
-            sequences = micro["sequences"]
-            attention_mask = micro["attention_mask"]
+        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
+            sequences = experience.sequences
+            attention_mask = experience.attention_mask
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
 
-            micro_dict = {
-                "sequences": sequences,
-                "attention_mask": attention_mask,
-                "position_ids": position_ids,
-                "num_actions": micro.metadata["response_length"],
-                "old_action_log_probs": micro.get("action_log_probs"),
-                "base_action_log_probs": micro.get("base_action_log_probs"),
-                "advantages": micro.get("advantages"),
-                "loss_mask": micro.get("loss_mask"),
-                "rollout_action_logprobs": micro.get("rollout_logprobs"),
-                "action_mask": micro.get("action_mask"),
-            }
-            rii = micro.get("rollout_inference_indices")
-            if rii is not None and self.enable_router_replay:
-                micro_dict["rollout_inference_indices"] = rii
-            micro_buffer.append(micro_dict)
+            micro_buffer.append(
+                {
+                    "sequences": sequences,
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "num_actions": experience.num_actions,
+                    "old_action_log_probs": experience.action_log_probs,
+                    "base_action_log_probs": experience.base_action_log_probs,
+                    "advantages": experience.advantages,
+                    "loss_mask": experience.loss_mask,
+                    "rollout_action_logprobs": experience.rollout_logprobs,
+                    "action_mask": experience.action_mask,
+                    "rollout_inference_indices": experience.rollout_inference_indices,
+                }
+            )
 
         if not micro_buffer:
             return {}
@@ -750,7 +679,6 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if all_loss_fn_outputs:
             status["loss_fn_outputs"] = all_loss_fn_outputs
 
-        self._last_router_replay_state = self._read_router_replay_state()
         clear_router_replay()
 
         return status
@@ -907,11 +835,6 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.bf16,
             flash_attn=self.cfg.flash_attn,
         )
-
-        if self.enable_router_replay:
-            from skyrl.backends.skyrl_train.utils.replay_utils import _patch_topk_router_layer_number
-
-            _patch_topk_router_layer_number()
 
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=False,

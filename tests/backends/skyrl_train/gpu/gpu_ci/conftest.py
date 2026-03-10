@@ -32,17 +32,13 @@ def ray_init_fixture():
 
     # needed for megatron tests
     env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
-    env_vars["NVTE_FUSED_ATTN"] = "0"
+    # env_vars["NVTE_FUSED_ATTN"] = "0"
 
     if SKYRL_PYTHONPATH_EXPORT:
         pythonpath = os.environ.get("PYTHONPATH")
         if pythonpath is None:
             raise RuntimeError("SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment")
         env_vars["PYTHONPATH"] = pythonpath
-
-    # RAY_CGRAPH_get_timeout must be set in os.environ so that vLLM subprocesses
-    # (EngineCore) inherit it — runtime_env alone doesn't propagate to subprocesses.
-    os.environ["RAY_CGRAPH_get_timeout"] = env_vars.pop("RAY_CGRAPH_get_timeout")
 
     logger.info(f"Initializing Ray with environment variables: {env_vars}")
     ray.init(runtime_env={"env_vars": env_vars})

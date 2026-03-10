@@ -801,7 +801,7 @@ def run_p2p_access_check():
     if device_count < 2:
         return False
 
-    # # Check P2P access between all GPU pairs
+    # Check P2P access between all GPU pairs
     for i in range(device_count):
         for j in range(device_count):
             if i != j:

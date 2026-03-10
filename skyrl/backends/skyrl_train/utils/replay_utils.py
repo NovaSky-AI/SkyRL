@@ -4,7 +4,6 @@ Utility functions for MoE Router Replay.
 
 import torch
 from typing import List
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
 
 def _patch_topk_router_layer_number():
@@ -46,6 +45,8 @@ def _patch_alltoall_dispatcher_for_replay():
     routing_map.sum() < num_tokens * topk, leading to a split size mismatch
     in the alltoall collective.  We fix this by deriving num_out_tokens from
     the routing map instead of the static num_tokens * topk formula.
+
+    Reference: https://github.com/verl-project/verl/pull/4986
     """
     try:
         from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
@@ -119,7 +120,7 @@ def _remove_left_padding_from_indices(
     return new_rii
 
 
-def _setup_per_microbatch_replay(
+def setup_per_microbatch_replay(
     rollout_inference_indices: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> None:
@@ -174,45 +175,6 @@ def _setup_per_microbatch_replay(
                 )
             router_instance.set_target_indices(per_layer_data[layer_idx])
     RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-
-
-def setup_router_replay_forward(data: TrainingInputBatch, enable_router_replay: bool) -> bool:
-    """
-    Set up router replay for forward pass (ref/policy inference).
-    """
-    if not enable_router_replay:
-        return False
-
-    rollout_inference_indices = data.get("rollout_inference_indices")
-    if rollout_inference_indices is None:
-        return False
-
-    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
-
-    RouterReplay.set_replay_data(_split_replay_indices(rollout_inference_indices))
-    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-
-    return True
-
-
-def setup_router_replay_backward(data: TrainingInputBatch, enable_router_replay: bool) -> bool:
-    """
-    Set up router replay for training forward/backward pass.
-    """
-    if not enable_router_replay:
-        return False
-
-    rollout_inference_indices = data.get("rollout_inference_indices")
-    if rollout_inference_indices is None:
-        return False
-
-    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
-
-    RouterReplay.set_replay_data(_split_replay_indices(rollout_inference_indices))
-    # Use REPLAY_FORWARD - Megatron handles REPLAY_BACKWARD automatically
-    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-
-    return True
 
 
 def clear_router_replay():
