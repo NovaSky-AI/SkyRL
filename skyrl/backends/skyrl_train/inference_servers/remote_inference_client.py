@@ -76,13 +76,13 @@ class PauseMode(Enum):
         KEEP: Freeze in-flight requests in the scheduler. They resume
             exactly where they left off when ``/resume`` is called.
             No retry needed. KV cache is preserved.
-        FINISH: Wait for in-flight requests to complete before pausing.
+        WAIT: Wait for in-flight requests to complete before pausing.
             New requests are blocked. No retry needed.
     """
 
     ABORT = "abort"
     KEEP = "keep"
-    FINISH = "finish"
+    WAIT = "wait"
 
 
 @dataclass
@@ -407,13 +407,13 @@ class RemoteInferenceClient:
 
         Args:
             mode: Pause mode determining how in-flight requests are handled.
-                Can be a PauseMode enum or string ("abort", "keep", "finish").
+                Can be a PauseMode enum or string ("abort", "keep", "wait").
                 - KEEP / "keep": Freeze in-flight requests in the scheduler.
                     They resume where they left off on /resume. KV cache is
                     preserved. No retry needed. (default)
                 - ABORT / "abort": Abort in-flight requests immediately. Clients
                     receive partial tokens and must retry with accumulated context.
-                - FINISH / "finish": Wait for in-flight requests to complete before
+                - WAIT / "wait": Wait for in-flight requests to complete before
                     pausing. New requests are blocked. No retry needed.
 
         Returns:

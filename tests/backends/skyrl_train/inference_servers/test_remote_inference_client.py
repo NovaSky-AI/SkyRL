@@ -283,13 +283,13 @@ class TestControlPlane:
             assert response["body"]["mode"] == "abort"
 
     @pytest.mark.asyncio
-    async def test_pause_finish_mode(self, client):
-        """Test pause with FINISH mode fans out to all servers with mode=finish."""
-        result = await client.pause(mode=PauseMode.FINISH)
+    async def test_pause_wait_mode(self, client):
+        """Test pause with WAIT mode fans out to all servers with mode=wait."""
+        result = await client.pause(mode=PauseMode.WAIT)
         assert len(result) == 2
         for url, response in result.items():
             assert response["status"] == 200
-            assert response["body"]["mode"] == "finish"
+            assert response["body"]["mode"] == "wait"
 
     @pytest.mark.asyncio
     async def test_pause_generation_uses_keep_mode(self, client):
