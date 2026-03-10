@@ -27,6 +27,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     WeightChunk,
     CudaIpcTransferStrategy,
     BroadcastTransferStrategy,
+    RdtTransferStrategy,
     WeightSyncInitInfo,
 )
 from skyrl.train.utils.utils import get_free_port, str_to_torch_dtype
@@ -384,5 +385,30 @@ class TestBroadcastTransferStrategy:
             num_training_ranks=2,
             num_inference_engines=2,
             send_individually=True,
+            colocate=False,
+        )
+
+
+class TestRdtTransferStrategy:
+    """Integration tests for RDT transfer strategy.
+
+    Tests weight synchronization using Ray Direct Transport with serialized tensor passing.
+    Requires 4 GPUs (2 training ranks + 2 inference engines, non-colocated).
+    """
+
+    def test_weight_sync_e2e(self, ray_init_fixture):
+        """Test RDT strategy end-to-end with 2 training ranks and 2 inference engines."""
+        cfg = make_cfg(
+            weight_sync_backend="rdt",
+            model_dtype="bfloat16",
+            num_inference_engines=2,
+            colocate_all=False,
+        )
+        _run_weight_sync_e2e(
+            RdtTransferStrategy,
+            cfg,
+            num_training_ranks=2,
+            num_inference_engines=2,
+            send_individually=False,
             colocate=False,
         )
