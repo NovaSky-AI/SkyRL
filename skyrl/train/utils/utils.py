@@ -437,14 +437,16 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             f"parallel size. "
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
-    
+
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     pp_size = ie_cfg.pipeline_parallel_size
     inference_engine_size = dp_size * tp_size * pp_size
     num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
     if inference_engine_size > num_gpus_per_node and ie_cfg.distributed_executor_backend == "mp":
-        raise ValueError("Each inference engine must fit within a single node with the vLLM mp backend.")
+        raise ValueError(
+            "Each inference engine must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
+        )
 
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
@@ -487,7 +489,9 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
         )
 
     if cfg.generator.inference_engine.distributed_executor_backend == "mp" and is_colocated:
-        raise ValueError("the mp backend for vLLM is not yet fully supported with colocated mode for the new inference backend.")
+        raise ValueError(
+            "the mp backend for vLLM is not yet fully supported with colocated mode for the new inference backend."
+        )
 
 
 @ray.remote
