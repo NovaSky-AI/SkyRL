@@ -14,7 +14,6 @@ from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_c
 from skyrl.train.generators.base import GeneratorOutput
 
 
-
 class FullyAsyncDAPOTrainer(FullyAsyncRayPPOTrainer):
     @torch.no_grad()
     def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:

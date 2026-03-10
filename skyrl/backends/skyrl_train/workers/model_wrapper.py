@@ -14,6 +14,7 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndByt
 import numpy as np
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl.backends.skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
+
 try:
     from flash_attn.bert_padding import pad_input, unpad_input
 except ImportError:
@@ -38,6 +39,8 @@ except ImportError:
         )
         output[indices] = hidden_states
         return output.reshape(batch, seqlen, *hidden_states.shape[1:])
+
+
 from packaging.version import Version
 
 
