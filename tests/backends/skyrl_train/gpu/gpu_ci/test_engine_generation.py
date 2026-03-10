@@ -199,7 +199,7 @@ def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: i
         pytest.param(2, 2, 1, MODEL),
         pytest.param(2, 1, 2, MOE_MODEL),
     ],
-    ids=["tp2_pp1_dp1", "tp2_pp2_dp1", "tp2_pp1_dp2"],
+    ids=["tp2_pp1_dp1", "tp2_pp2_dp1", "tp2_pp1_dp2_moe"],
 )
 def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str):
     """Test generation using prompt_token_ids."""
