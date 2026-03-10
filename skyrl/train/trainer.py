@@ -5,7 +5,7 @@ import shutil
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import ray
@@ -74,8 +74,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
 
-if TYPE_CHECKING:
-    from skyrl.train.utils.utils import SkyRLPlacementGroup
+from skyrl.train.utils.utils import SkyRLPlacementGroup
 
 
 class RayPPOTrainer:
@@ -87,7 +86,7 @@ class RayPPOTrainer:
         train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
         generator: GeneratorInterface,
-        colocate_pg: Optional["SkyRLPlacementGroup"] = None,
+        colocate_pg: Optional[SkyRLPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
     ):
         self.cfg = cfg
@@ -465,8 +464,9 @@ class RayPPOTrainer:
                     }
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                raw_pg = placement_group(bundles, strategy="PACK")
+                get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                pg = SkyRLPlacementGroup(raw_pg)
 
             policy_model = PPORayActorGroup(
                 cfg.trainer,

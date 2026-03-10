@@ -147,8 +147,9 @@ def init_worker_with_type(
         num_gpus_per_actor = 0.2
     else:
         bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
-        pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group(bundles, strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = SkyRLPlacementGroup(raw_pg)
         num_gpus_per_actor = 0.75
 
     worker_cls = import_worker(cfg.trainer.strategy, worker_type)

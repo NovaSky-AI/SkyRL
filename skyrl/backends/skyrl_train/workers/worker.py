@@ -395,7 +395,7 @@ class PPORayActorGroup:
         num_nodes (int): Number of nodes for this actor group.
         num_gpus_per_node (int): Number of gpus for this actor group.
         ray_actor_type (Type[Worker]): PPO model type that this actor group serve on.
-        pg (PlacementGroup, optional): Placement group to schedule actor on.
+        pg (SkyRLPlacementGroup, optional): Placement group to schedule actor on.
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
             If < 1.0, multiple models can share same gpu. Defaults to 1.
@@ -407,7 +407,7 @@ class PPORayActorGroup:
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[Worker],
-        pg: Optional[PlacementGroup] = None,
+        pg: Optional[SkyRLPlacementGroup] = None,
         num_gpus_per_actor: float = 1.0,
         resources: Optional[Dict[str, float]] = None,
         num_resources_per_node: Optional[int] = None,
@@ -429,7 +429,7 @@ class PPORayActorGroup:
         self.record_memory = record_memory
         self._initiate_actors(pg, num_gpus_per_actor)
 
-    def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
+    def _initiate_actors(self, pg: Optional[SkyRLPlacementGroup], num_gpus_per_actor: float):
         """Initialize Ray actors in the worker group.
 
         Args:
@@ -444,8 +444,9 @@ class PPORayActorGroup:
         # don't need reordering since each bundle already represents a full node.
         reordered_bundle_indices = []
         if pg is not None:
-            if not isinstance(pg, SkyRLPlacementGroup):
-                pg = SkyRLPlacementGroup(pg)
+            assert isinstance(pg, SkyRLPlacementGroup), (
+                f"pg must be a `SkyRLPlacementGroup` got {type(pg)}."
+            )
             if len(placement_group_table(pg.pg)["bundles"]) == world_size:
                 reordered_bundle_indices = pg.reordered_bundle_indices
             raw_pg = pg.pg

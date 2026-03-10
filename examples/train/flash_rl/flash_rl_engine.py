@@ -70,11 +70,13 @@ def create_ray_wrapped_inference_engines_flashrl(
     if not use_hybrid_engine:
         # Create a big placement group to ensure that all inference engines are packed
         bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * tensor_parallel_size)]
-        shared_pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        raw_pg = placement_group(bundles, strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        shared_pg = SkyRLPlacementGroup(raw_pg)
 
-    if not isinstance(shared_pg, SkyRLPlacementGroup):
-        shared_pg = SkyRLPlacementGroup(shared_pg)
+    assert isinstance(shared_pg, SkyRLPlacementGroup), (
+        f"shared_pg must be a `SkyRLPlacementGroup` got {type(shared_pg)}."
+    )
 
     # Use reordered bundle indices to ensure GPU-aware ordering.
     reordered = shared_pg.reordered_bundle_indices

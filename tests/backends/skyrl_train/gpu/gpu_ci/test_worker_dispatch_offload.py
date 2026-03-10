@@ -14,7 +14,7 @@ from ray.util.placement_group import placement_group
 
 from tests.backends.skyrl_train.gpu.utils import make_dummy_training_batch, get_rank_0_memory
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.utils import validate_cfg
+from skyrl.train.utils.utils import validate_cfg, SkyRLPlacementGroup
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch, GPUState
 from tests.backends.skyrl_train.gpu.utils import import_worker
@@ -73,8 +73,9 @@ async def test_colocate_all_only_one_model_on_gpu(ray_init_fixture):
 
     try:
         # Create shared placement group
-        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = SkyRLPlacementGroup(raw_pg)
 
         # Initialize both actor groups on shared GPU
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
