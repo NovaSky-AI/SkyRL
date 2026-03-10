@@ -17,18 +17,18 @@ set -x
 : "${INFERENCE_BACKEND:=vllm}"
 
 
-_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
+uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
-  trainer.placement.colocate_all=false \
+  trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=2 \
-  trainer.placement.critic_num_gpus_per_node=2 \
-  trainer.placement.ref_num_gpus_per_node=2 \
-  generator.inference_engine.num_engines=1 \
-  generator.inference_engine.tensor_parallel_size=2 \
+  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
+  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
+  generator.inference_engine.num_engines=$NUM_GPUS \
+  generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
@@ -47,7 +47,6 @@ _SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp -m skyrl.train.entrypo
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
   generator.inference_engine.async_engine=true \
-  generator.inference_engine.distributed_executor_backend=mp \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
