@@ -11,6 +11,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     compute_approx_kl,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
+    compute_maxrl_advantage,
     compute_advantages_and_returns,
     AdaptiveKLController,
     FixedKLController,
@@ -169,6 +170,32 @@ def test_compute_grpo_outcome_advantage_norm_std_false():
 
     assert adv.shape == token_level_rewards.shape
     assert torch.allclose(adv, ret), "Advantages and returns should be equal with GRPO"
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_compute_maxrl_advantage():
+    # Two groups: [6.0, 3.0] mean=4.5, [9.0, 12.0] mean=10.5
+    token_level_rewards = torch.tensor(
+        [
+            [1.0, 2.0, 3.0],  # sum = 6.0, group 0
+            [1.0, 1.0, 1.0],  # sum = 3.0, group 0
+            [3.0, 3.0, 3.0],  # sum = 9.0, group 1
+            [4.0, 4.0, 4.0],  # sum = 12.0, group 1
+        ]
+    )
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array([0, 0, 1, 1])
+
+    adv, ret = compute_maxrl_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+    )
+
+    expected = torch.tensor([1.5 / 4.5, -1.5 / 4.5, -1.5 / 10.5, 1.5 / 10.5]).unsqueeze(-1) * response_mask
+
+    assert adv.shape == token_level_rewards.shape
+    assert torch.allclose(adv, ret), "Advantages and returns should be equal with MAXRL"
     assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
 
 
