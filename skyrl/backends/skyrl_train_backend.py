@@ -23,7 +23,7 @@ from ray.util.placement_group import placement_group, PlacementGroup
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout, SkyRLPlacementGroup
 from skyrl.train.config import get_config_as_yaml_str
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
@@ -248,7 +248,7 @@ class SkyRLTrainBackend(AbstractBackend):
         get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         logger.info("Placement group ready!")
 
-        return pg
+        return SkyRLPlacementGroup(pg)
 
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:

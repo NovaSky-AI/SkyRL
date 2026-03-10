@@ -46,8 +46,8 @@ from skyrl.env_vars import (
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
 from skyrl.train.utils.utils import (
+    SkyRLPlacementGroup,
     get_ray_pg_ready_with_timeout,
-    get_reordered_bundle_indices,
     ray_noset_visible_devices,
 )
 from skyrl.backends.skyrl_train.utils.io import io
@@ -437,6 +437,19 @@ class PPORayActorGroup:
             num_gpus_per_actor: The number of gpus to allocate per actor.
         """
         world_size = self._num_nodes * self._num_gpus_per_node
+
+        # Extract raw Ray PlacementGroup and pre-computed reordered indices from SkyRLPlacementGroup.
+        # Only use reordered indices when the PG has one bundle per GPU (single-GPU bundles),
+        # i.e. the bundle count matches world_size. Multi-GPU bundles (whole-node bundles)
+        # don't need reordering since each bundle already represents a full node.
+        reordered_bundle_indices = []
+        if pg is not None:
+            if not isinstance(pg, SkyRLPlacementGroup):
+                pg = SkyRLPlacementGroup(pg)
+            if len(placement_group_table(pg.pg)["bundles"]) == world_size:
+                reordered_bundle_indices = pg.reordered_bundle_indices
+            pg = pg.pg
+
         if self.colocate_all:
             assert (
                 pg is not None
@@ -445,13 +458,6 @@ class PPORayActorGroup:
             assert (
                 len(pg_data["bundles"]) == world_size
             ), "if colocate_all is True, the number of bundles in the shared placement group must match the world size"
-
-        reordered_bundle_indices = []
-        if pg is not None:
-            pg_data = placement_group_table(pg)
-            should_reorder_bundles = len(pg_data["bundles"]) == world_size
-            if should_reorder_bundles:
-                reordered_bundle_indices = get_reordered_bundle_indices(pg)
 
         if self._num_gpus_per_node > 1 and pg is None:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]

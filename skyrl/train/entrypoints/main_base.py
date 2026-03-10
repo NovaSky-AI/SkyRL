@@ -12,7 +12,7 @@ from skyrl.train.trainer import RayPPOTrainer
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
+from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout, SkyRLPlacementGroup
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.generators.base import GeneratorInterface
@@ -175,16 +175,17 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> PlacementGroup:
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> SkyRLPlacementGroup | None:
         """Initializes a placement group for colocated training.
 
         A single placement group that packs all the inference engines together is created.
+        The returned wrapper computes GPU-aware bundle ordering at init time.
 
         Args:
             timeout (int): The timeout for the placement group to be ready.
 
         Returns:
-            PlacementGroup: The placement group for colocated training.
+            SkyRLPlacementGroup: The placement group wrapper for colocated training, or None.
         """
         if self.cfg.trainer.placement.colocate_all:
             ie_cfg = self.cfg.generator.inference_engine
@@ -197,7 +198,7 @@ class BasePPOExp:
                 strategy="PACK",
             )
             get_ray_pg_ready_with_timeout(pg, timeout=timeout)
-            return pg
+            return SkyRLPlacementGroup(pg)
         else:
             return None
 
@@ -346,7 +347,7 @@ class BasePPOExp:
             self._server_group = ServerGroup(
                 cli_args=cli_args,
                 num_servers=ie_cfg.num_engines,
-                placement_group=self.colocate_pg if is_colocated else None,
+                placement_group=self.colocate_pg.pg if is_colocated else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
             )
             server_infos = self._server_group.start()

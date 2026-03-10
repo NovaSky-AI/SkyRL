@@ -115,6 +115,7 @@ def create_ray_wrapped_inference_engines(
     """
     from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
     from skyrl.train.utils.utils import (
+        SkyRLPlacementGroup,
         get_all_env_variables,
         get_ray_pg_ready_with_timeout,
         ray_noset_visible_devices,
@@ -156,11 +157,22 @@ def create_ray_wrapped_inference_engines(
         shared_pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
+    if not isinstance(shared_pg, SkyRLPlacementGroup):
+        shared_pg = SkyRLPlacementGroup(shared_pg)
+
+    # Use reordered bundle indices to ensure GPU-aware ordering.
+    # Ray placement groups don't guarantee bundle order, so bundles on the same node
+    # may not have consecutive indices. The reordered indices map logical positions
+    # to physical bundle indices sorted by (node_id, gpu_id).
+    reordered = shared_pg.reordered_bundle_indices
+    raw_pg = shared_pg.pg
+
     for i in range(num_inference_engines):
-        base_pg_index = i * per_engine_gpu_count
+        logical_base = i * per_engine_gpu_count
+        base_pg_index = reordered[logical_base]
 
         # Get DP group rendezvous (addr, port) on the same node as DP rank 0 for this engine.
-        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, base_pg_index)
+        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(raw_pg, base_pg_index)
 
         if backend == "vllm":
             if async_engine:
@@ -201,12 +213,13 @@ def create_ray_wrapped_inference_engines(
 
                 # Contiguous TP*PP slice reserved for a single DP rank.
                 tp_pp_size = tensor_parallel_size * pipeline_parallel_size
-                base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
+                logical_dp_base = logical_base + dp_rank * tp_pp_size
+                base_dp_pg_index = reordered[logical_dp_base]
                 dp_rank_bundles = (
-                    list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
+                    [reordered[logical_dp_base + k] for k in range(tp_pp_size)] if tp_pp_size > 1 else None
                 )
                 dp_rank_sched = PlacementGroupSchedulingStrategy(
-                    placement_group=shared_pg,
+                    placement_group=raw_pg,
                     placement_group_capture_child_tasks=True,
                     placement_group_bundle_index=base_dp_pg_index,
                 )

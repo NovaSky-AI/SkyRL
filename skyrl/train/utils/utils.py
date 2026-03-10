@@ -1,3 +1,4 @@
+import functools
 import ipaddress
 import os
 import time
@@ -759,6 +760,24 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
         bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
     ]  # sort by node_id, then gpu_id
     return pg_reordered_bundle_indices
+
+
+class SkyRLPlacementGroup:
+    """Wrapper around Ray PlacementGroup that computes and stores reordered bundle indices.
+
+    Ray placement groups don't guarantee bundle ordering (bundles on the same node
+    may not have consecutive indices). This wrapper computes a GPU-aware ordering
+    on first access so that consumers can index bundles in (node_id, gpu_id) order.
+
+    Use .pg to access the underlying Ray PlacementGroup for Ray APIs.
+    """
+
+    def __init__(self, pg: PlacementGroup):
+        self.pg = pg
+
+    @functools.cached_property
+    def reordered_bundle_indices(self):
+        return get_reordered_bundle_indices(self.pg)
 
 
 def torch_dtype_to_str(dtype: torch.dtype) -> str:
