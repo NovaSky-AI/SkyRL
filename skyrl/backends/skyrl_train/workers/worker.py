@@ -19,6 +19,7 @@ from ray.util.placement_group import (
     PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
+    PlacementGroup,
 )
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
@@ -395,7 +396,7 @@ class PPORayActorGroup:
         num_nodes (int): Number of nodes for this actor group.
         num_gpus_per_node (int): Number of gpus for this actor group.
         ray_actor_type (Type[Worker]): PPO model type that this actor group serve on.
-        pg (PlacementGroup, optional): Placement group to schedule actor on.
+        pg (PlacementGroup, optional): Placement group or list of placement groups to schedule actor on.
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
             If < 1.0, multiple models can share same gpu. Defaults to 1.
@@ -407,7 +408,7 @@ class PPORayActorGroup:
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[Worker],
-        pg=None,
+        pg: Optional[Union[PlacementGroup, List[PlacementGroup]]] = None,
         num_gpus_per_actor: float = 1.0,
         resources: Optional[Dict[str, float]] = None,
         num_resources_per_node: Optional[int] = None,
@@ -419,7 +420,8 @@ class PPORayActorGroup:
         Args:
             pg: Placement group(s) for the worker group. Accepts a single
                 PlacementGroup, a list of PlacementGroups (for multi-PG
-                colocate_all with mp backend), or None.
+                colocate_all with mp backend), or None. Note that if colocate_all is True,
+                the total number of bundles across all placement groups must match world_size.
         """
         self.cfg = cfg
         self._num_nodes = num_nodes
@@ -435,7 +437,7 @@ class PPORayActorGroup:
         self.record_memory = record_memory
         self._initiate_actors(pg, num_gpus_per_actor)
 
-    def _initiate_actors(self, pg, num_gpus_per_actor: float):
+    def _initiate_actors(self, pg: Optional[Union[PlacementGroup, List[PlacementGroup]]], num_gpus_per_actor: float):
         """Initialize Ray actors in the worker group.
 
         Args:

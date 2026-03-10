@@ -168,11 +168,8 @@ class ServerGroup:
             bundle_start: First bundle index (0-based within the PG).
             bundle_count: Number of contiguous bundles for this server.
 
-        Returns a comma-separated string of physical GPU IDs, or None if
-        only a single GPU is allocated (no override needed).
+        Returns a comma-separated string of physical GPU IDs.
         """
-        if bundle_count <= 1:
-            return None
         from skyrl.train.utils.utils import get_gpu_ids_for_pg_bundles
 
         bundle_indices = list(range(bundle_start, bundle_start + bundle_count))

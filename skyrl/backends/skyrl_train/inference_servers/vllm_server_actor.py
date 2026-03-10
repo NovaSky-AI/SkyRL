@@ -162,18 +162,15 @@ class VLLMServerActor(ServerActorProtocol):
     ) -> None:
         """Configure the vLLM distributed executor backend on cli_args.
 
-        For the ``"ray"`` backend, forces the Ray executor so that workers
-        inherit GPU allocation from the placement group.
+        Always uses ``"ray"`` so that workers inherit GPU allocation from the
+        placement group via ``VLLM_RAY_BUNDLE_INDICES``.  Server actors have
+        ``num_gpus=0`` in their Ray options, so the ``"uni"`` backend would
+        fail to target the correct GPU without bundle-index guidance.
 
-        For the ``"mp"`` backend, sets the multiprocessing executor so that
-        vLLM spawns workers as local processes using CUDA_VISIBLE_DEVICES.
-
-        For single-GPU (TP*PP == 1), always uses ``"uni"`` regardless of the
-        requested backend.
+        For the ``"mp"`` backend the multiprocessing executor is used so vLLM
+        spawns workers as local processes using CUDA_VISIBLE_DEVICES.
         """
-        if self._num_gpus_per_server == 1:
-            self._cli_args.distributed_executor_backend = "uni"
-        elif distributed_executor_backend == "mp":
+        if distributed_executor_backend == "mp":
             self._cli_args.distributed_executor_backend = "mp"
         else:
             self._cli_args.distributed_executor_backend = "ray"
