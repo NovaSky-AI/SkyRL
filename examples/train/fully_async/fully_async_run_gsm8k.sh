@@ -76,7 +76,4 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.resume_mode=none \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
   generator.inference_engine.enforce_eager=true \
-  trainer.flash_attn=false \
-  trainer.use_sample_packing=false \
-  +generator.inference_engine.engine_init_kwargs.attention_backend=FLEX_ATTENTION \
   $@

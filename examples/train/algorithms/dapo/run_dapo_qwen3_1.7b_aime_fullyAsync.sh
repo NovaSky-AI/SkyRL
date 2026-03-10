@@ -62,7 +62,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   +trainer.algorithm.overlong_buffer.len=$OVERLONG_BUFFER_LEN \
   +trainer.algorithm.overlong_buffer.penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
-  generator.enforce_eager=$ENFORCE_EAGER \
+  generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
@@ -76,8 +76,8 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   trainer.placement.policy_num_nodes=$NUM_NODES \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \
-  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
   trainer.epochs=1 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
@@ -96,16 +96,16 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   trainer.policy.optimizer_config.num_warmup_steps=160 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
-  generator.backend=vllm \
-  generator.run_engines_locally=true \
-  generator.weight_sync_backend=nccl \
-  generator.async_engine=true \
+  generator.inference_engine.backend=vllm \
+  generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.weight_sync_backend=nccl \
+  generator.inference_engine.async_engine=true \
   generator.batched=false \
   generator.use_conversation_multi_turn=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
-  generator.gpu_memory_utilization=0.7 \
+  generator.inference_engine.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="dapo-async" \
   trainer.run_name="$RUN_NAME" \
@@ -116,5 +116,5 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
   trainer.ckpt_path="$HOME/ckpts/$RUN_NAME" \
   trainer.flash_attn=true \
   trainer.use_sample_packing=true \
-  # +generator.engine_init_kwargs.attention_backend=FLEX_ATTENTION \
+  # +generator.inference_engine.engine_init_kwargs.attention_backend=FLEX_ATTENTION \
   $@

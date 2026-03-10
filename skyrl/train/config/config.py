@@ -843,11 +843,15 @@ def make_config(
     return dataclass(type("_CustomSkyRLTrainConfig", (SkyRLTrainConfig,), ns))
 
 
-def get_config_as_dict(cfg: Union[dict, BaseConfig]) -> dict:
+def get_config_as_dict(cfg: Union[dict, BaseConfig, DictConfig]) -> dict:
     if isinstance(cfg, dict):
         return cfg
+    if isinstance(cfg, DictConfig):
+        return OmegaConf.to_container(cfg, resolve=True)
     return asdict(cfg)
 
 
-def get_config_as_yaml_str(cfg: BaseConfig) -> str:
+def get_config_as_yaml_str(cfg: Union[BaseConfig, DictConfig]) -> str:
+    if isinstance(cfg, DictConfig):
+        return OmegaConf.to_yaml(cfg, resolve=True)
     return yaml.dump(asdict(cfg))
