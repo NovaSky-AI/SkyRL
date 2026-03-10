@@ -202,7 +202,9 @@ def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: i
     ],
     ids=["tp2_pp1_dp1_ray", "tp2_pp2_dp1_ray", "tp2_pp1_dp2_moe_ray", "tp2_pp1_dp2_moe_mp"],
 )
-def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str, distributed_executor_backend: str):
+def test_token_based_generation(
+    ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str, distributed_executor_backend: str
+):
     """Test generation using prompt_token_ids."""
 
     cfg = get_test_actor_config()
