@@ -128,7 +128,11 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         self._init_info = init_info
         self._inference_client = inference_client
 
-    async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
+    async def send_chunks(
+        self,
+        chunks: Iterable[WeightChunk],
+        weight_metadata: Optional[Dict[str, list]] = None,
+    ) -> None:
         """Send chunks via CUDA IPC with packed tensors.
 
         Each chunk can contain multiple parameters. All tensors in a chunk are
@@ -138,6 +142,8 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
+            weight_metadata: Pre-computed metadata (unused by CUDA IPC path,
+                accepted for interface compatibility).
         """
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()

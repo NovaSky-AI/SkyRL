@@ -191,8 +191,16 @@ class HFModelWrapper(nn.Module):
             # MoE - balancing loss
             model_config = self.model.config.to_dict()
             if "output_router_logits" in model_config:
-                logger.info("[MoE] set output_router_logits as True")
-                self.model.config.output_router_logits = True
+                # Skip for granitemoehybrid: its decoder layers don't return router
+                # logits, so enabling this flag causes an IndexError in
+                # load_balancing_loss_func when it tries to access empty gate_logits.
+                if model_config.get("model_type") == "granitemoehybrid":
+                    logger.info(
+                        "[MoE] granitemoehybrid detected, skipping output_router_logits (decoder layers don't return router logits)"
+                    )
+                else:
+                    logger.info("[MoE] set output_router_logits as True")
+                    self.model.config.output_router_logits = True
 
             # https://github.com/huggingface/transformers/issues/26877
             # Use `model.generate(use_cache=True)` instead.`
@@ -623,8 +631,13 @@ def get_llm_for_sequence_regression(
     # MoE - balancing loss
     model_config = model.config.to_dict()
     if "output_router_logits" in model_config:
-        logger.info("[MoE] set output_router_logits as True")
-        model.config.output_router_logits = True
+        if model_config.get("model_type") == "granitemoehybrid":
+            logger.info(
+                "[MoE] granitemoehybrid detected, skipping output_router_logits (decoder layers don't return router logits)"
+            )
+        else:
+            logger.info("[MoE] set output_router_logits as True")
+            model.config.output_router_logits = True
 
     # https://github.com/huggingface/transformers/issues/26877
     model.config.use_cache = False

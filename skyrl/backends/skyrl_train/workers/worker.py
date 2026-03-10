@@ -324,7 +324,7 @@ class Worker(DistributedTorchRayActor):
         # For legacy path, calculate from config
         inference_world_size = None
         if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
-            inference_world_size = await inference_engine_client.get_world_size()
+            inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(
