@@ -297,7 +297,7 @@ class RemoteInferenceClient:
         self,
         prompt_token_ids: List[int],
         num_samples: int,
-        sampling_params: Dict[str, Any],
+        sampling_params: Dict[str, Union[str, int, float, bool, List, Dict]],
         session_id: Optional[Union[str, int]] = None,
     ) -> InferenceEngineOutput:
         """
