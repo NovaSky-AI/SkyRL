@@ -243,29 +243,17 @@ def test_compute_gae_advantage_return_lam(advantage_test_data):
 
 
 def test_reduce_loss():
-    """Test the reduce_loss function with different reduction types."""
-    # Test data: 2x3 loss tensor with different valid token counts per sequence
+    """Test that reduce_loss computes the masked sum correctly."""
     loss = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]])  # seq0 has 3 tokens, seq1 has 1 token
+    loss_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 0.0, 0.0]])
 
-    # Test token_mean: sum all valid losses / count valid tokens
-    # Valid losses: [1.0, 2.0, 3.0, 4.0], mean = 10.0/4 = 2.5
-    result_token = reduce_loss(loss, loss_mask, "token_mean")
-    expected_token = torch.tensor(2.5)
-    assert torch.allclose(result_token, expected_token), f"Expected {expected_token}, got {result_token}"
+    # With mask: sum of valid losses = 1.0 + 2.0 + 3.0 + 4.0 = 10.0
+    result = reduce_loss(loss, loss_mask)
+    assert torch.allclose(result, torch.tensor(10.0))
 
-    # Test sequence_mean: mean of per-sequence means
-    # Seq 0: (1.0 + 2.0 + 3.0) / 3 = 2.0, Seq 1: 4.0 / 1 = 4.0, batch mean = (2.0 + 4.0) / 2 = 3.0
-    result_seq = reduce_loss(loss, loss_mask, "sequence_mean")
-    expected_seq = torch.tensor(3.0)
-    assert torch.allclose(result_seq, expected_seq), f"Expected {expected_seq}, got {result_seq}"
-
-    # Test seq_mean_token_sum_norm: sum per sequence / max_len, then batch mean
-    # Seq 0: (1.0 + 2.0 + 3.0) / 4 = 1.5, Seq 1: 4.0 / 4 = 1.0, batch mean = (1.5 + 1.0) / 2 = 1.25
-    max_seq_len = 4
-    result_max = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", max_seq_len)
-    expected_max = torch.tensor(1.25)
-    assert torch.allclose(result_max, expected_max), f"Expected {expected_max}, got {result_max}"
+    # Without mask: sum of all losses = 1+2+3+4+5+6 = 21.0
+    result_no_mask = reduce_loss(loss, None)
+    assert torch.allclose(result_no_mask, torch.tensor(21.0))
 
 
 def test_adaptive_kl_controller_update():

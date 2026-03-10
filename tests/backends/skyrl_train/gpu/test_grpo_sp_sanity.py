@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils import Timer
-from skyrl.backends.skyrl_train.utils.ppo_utils import normalize_advantages_dict
 
 
 import asyncio
@@ -117,9 +116,6 @@ class RayPPOTestTrainer(RayPPOTrainer):
                         data = self.compute_advantages_and_returns(data)
                         # remove some unwanted keys
                         data.pop(batch_keys=["rewards"])
-
-                        if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                            data = normalize_advantages_dict(data)
 
                     # 4. train policy/critic model
                     with Timer("train_critic_and_policy", self.all_timings):
