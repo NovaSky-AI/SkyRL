@@ -221,7 +221,7 @@ class TestMaxSeqLenValidation:
         cfg.trainer.algorithm.loss_reduction = "seq_mean_token_sum_norm"
         cfg.trainer.algorithm.max_seq_len = None
 
-        with pytest.raises(AssertionError, match=r"trainer\.algorithm\.max_seq_len"):
+        with pytest.raises(ValueError, match=r"trainer\.algorithm\.max_seq_len"):
             validate_cfg(cfg)
 
     @pytest.mark.parametrize("loss_reduction", ["token_mean", "sequence_mean"])
