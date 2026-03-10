@@ -437,6 +437,8 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             f"parallel size. "
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
+    
+    assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     pp_size = ie_cfg.pipeline_parallel_size
     inference_engine_size = dp_size * tp_size * pp_size
@@ -484,8 +486,8 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
         )
 
-    if cfg.generator.inference_engine.distributed_executor_backend == "mp":
-        raise ValueError("the mp backend for vLLM is not yet fully supported with the new inference backend.")
+    if cfg.generator.inference_engine.distributed_executor_backend == "mp" and is_colocated:
+        raise ValueError("the mp backend for vLLM is not yet fully supported with colocated mode for the new inference backend.")
 
 
 @ray.remote
