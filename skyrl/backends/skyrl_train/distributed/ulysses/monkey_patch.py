@@ -22,8 +22,8 @@ import sys
 from functools import lru_cache
 from typing import Optional
 
-from loguru import logger
 import torch
+from loguru import logger
 from packaging import version
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.modeling_utils import PreTrainedModel

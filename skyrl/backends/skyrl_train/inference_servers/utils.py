@@ -1,14 +1,15 @@
 from argparse import Namespace
+
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 
 
 # TODO: Add a test for validation
 def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm import AsyncEngineArgs
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.config import WeightTransferConfig
+    from vllm.entrypoints.openai.cli_args import FrontendArgs
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     # Create common CLI args namespace
     parser = FlexibleArgumentParser()

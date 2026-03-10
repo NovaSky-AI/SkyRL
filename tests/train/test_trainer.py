@@ -10,13 +10,12 @@ import torch
 from jaxtyping import Float, Integer
 from pytest import approx
 
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.trainer import RayPPOTrainer
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.train.utils.utils import validate_batch_sizes
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
-
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils.utils import validate_batch_sizes
 from tests.train.util import example_dummy_config
 
 

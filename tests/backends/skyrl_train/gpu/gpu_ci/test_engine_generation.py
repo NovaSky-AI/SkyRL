@@ -3,20 +3,23 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
 """
 
-import pytest
-
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import asyncio
+
+import pytest
+from transformers import AutoTokenizer
+
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
     are_responses_similar,
     get_test_prompts,
-    InferenceEngineState,
     init_remote_inference_servers,
 )
-from transformers import AutoTokenizer
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B"

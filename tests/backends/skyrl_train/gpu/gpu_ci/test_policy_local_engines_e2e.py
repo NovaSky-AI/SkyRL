@@ -3,20 +3,23 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
 """
 
-import pytest
 import asyncio
+
+import pytest
 import ray
 from transformers import AutoTokenizer
 
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    get_test_prompts,
     InferenceEngineState,
+    get_test_prompts,
+    init_worker_with_type,
     run_inference,
 )
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 

@@ -69,7 +69,9 @@ class ServerGroup:
             server_actor_cls: Server actor class implementing
                 ServerActorProtocol. Defaults to VLLMServerActor.
         """
-        from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import VLLMServerActor
+        from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
+            VLLMServerActor,
+        )
 
         self._server_actor_cls = server_actor_cls or VLLMServerActor
         self._cli_args = cli_args

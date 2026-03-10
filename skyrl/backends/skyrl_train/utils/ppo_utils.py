@@ -27,10 +27,12 @@ import torch
 from jaxtyping import Float
 from loguru import logger
 
-from skyrl.train.config import AlgorithmConfig
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import apply_off_policy_correction
+from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
+    apply_off_policy_correction,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
+from skyrl.train.config import AlgorithmConfig
 
 # Import cloudpickle for function serialization
 try:
@@ -608,7 +610,9 @@ def sapo_policy_loss(
         # The SAPO paper uses sequence_mean reduction; there's no reason
         # why a user couldn't use token_mean reduction, but
         # it's not clear whether it would be stable or not.
-        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
+        from loguru import (
+            logger as logger_,  # have to do lazy import to avoid pickling error
+        )
 
         logger_.warning(f"With SAPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
 
@@ -684,7 +688,9 @@ def gspo_policy_loss(
         # The GSPO paper uses sequence_mean reduction; there's no reason
         # why a user couldn't use token_mean reduction, but
         # it's not clear whether it would be stable or not.
-        from loguru import logger as logger_  # have to do lazy import to avoid pickling error
+        from loguru import (
+            logger as logger_,  # have to do lazy import to avoid pickling error
+        )
 
         logger_.warning(f"With GSPO it's recommended to use 'sequence_mean' loss reduction; got {loss_reduction}")
 

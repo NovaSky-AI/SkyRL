@@ -2,13 +2,17 @@
 uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu/test_main_generate.py
 """
 
-import json
 import asyncio
+import json
+
 import ray
 
 from skyrl.train.entrypoints.main_generate import EvalOnlyEntrypoint
 from skyrl.train.utils.utils import initialize_ray
-from tests.backends.skyrl_train.gpu.utils import get_test_actor_config, get_test_generator_input
+from tests.backends.skyrl_train.gpu.utils import (
+    get_test_actor_config,
+    get_test_generator_input,
+)
 
 
 def create_dataset(tmp_path, model_name: str):

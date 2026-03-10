@@ -1,9 +1,11 @@
-import pytest
-import torch
-from skyrl.backends.skyrl_train.training_batch import TensorBatch
 import pickle
-import ray
+
 import numpy as np
+import pytest
+import ray
+import torch
+
+from skyrl.backends.skyrl_train.training_batch import TensorBatch
 
 
 def test_train_batch_initialization():

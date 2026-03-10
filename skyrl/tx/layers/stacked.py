@@ -3,9 +3,9 @@
 import functools
 from typing import Callable
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from jax.sharding import NamedSharding, PartitionSpec
 
 from skyrl.tx.utils.generator import KVCache

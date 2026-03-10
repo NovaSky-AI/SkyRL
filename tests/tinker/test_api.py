@@ -9,14 +9,13 @@ from contextlib import contextmanager
 from urllib.parse import urlparse
 
 import pytest
-from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.api import _build_uv_run_cmd_engine
 import tinker
 from tinker import types
 from transformers import AutoTokenizer
 
+from skyrl.tinker.api import _build_uv_run_cmd_engine
+from skyrl.tinker.config import EngineConfig
 from tests.tinker.conftest import wait_for_condition
-
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 

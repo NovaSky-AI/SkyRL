@@ -16,30 +16,42 @@
 # limitations under the License.
 
 import functools
+from collections import OrderedDict
 from contextlib import nullcontext
 from typing import Union
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed import DeviceMesh
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp._runtime_utils import _lazy_init
-from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
-from transformers.trainer_pt_utils import get_module_class_from_name
-from torch.distributed.device_mesh import init_device_mesh
-from collections import OrderedDict
 from omegaconf import DictConfig
-
 from packaging import version
 from peft.utils.save_and_load import get_peft_model_state_dict
+from torch.distributed import DeviceMesh
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp._runtime_utils import _lazy_init
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    transformer_auto_wrap_policy,
+)
+from transformers.trainer_pt_utils import get_module_class_from_name
 
 from skyrl.train.config import FSDPConfig
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
-    from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
+    from torch.distributed.fsdp import (
+        CPUOffloadPolicy,
+        FSDPModule,
+        MixedPrecisionPolicy,
+        fully_shard,
+    )
 elif version.parse(torch.__version__) >= version.parse("2.4"):
-    from torch.distributed._composable.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
+    from torch.distributed._composable.fsdp import (
+        CPUOffloadPolicy,
+        FSDPModule,
+        MixedPrecisionPolicy,
+        fully_shard,
+    )
 else:
     fully_shard, MixedPrecisionPolicy, FSDPModule, CPUOffloadPolicy = None, None, None, None
 
@@ -340,7 +352,10 @@ def fsdp2_get_full_state_dict(model: torch.nn.Module, cpu_offload=True, rank0_on
     Returns:
         dict: The full state dict (only on rank 0 if rank0_only=True, empty dict on other ranks)
     """
-    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+    from torch.distributed.checkpoint.state_dict import (
+        StateDictOptions,
+        get_model_state_dict,
+    )
 
     # All ranks must participate in the collective operation
     options = StateDictOptions(

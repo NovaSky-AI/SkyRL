@@ -1,8 +1,8 @@
-from contextlib import contextmanager
-import io
 import gzip
-from pathlib import Path
+import io
 import tarfile
+from contextlib import contextmanager
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Generator, Optional
 

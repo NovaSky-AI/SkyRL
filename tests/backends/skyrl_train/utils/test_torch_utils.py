@@ -1,10 +1,12 @@
+import math
+
+import pytest
+import torch
+
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_cross_entropy_from_log_probs,
     chunked_entropy_from_logits,
 )
-import torch
-import pytest
-import math
 
 
 def test_chunked_cross_entropy_from_logprobs():

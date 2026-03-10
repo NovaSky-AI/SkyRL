@@ -12,20 +12,21 @@ For Megatron, run:
 uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_trainer_full_checkpointing.py -m "megatron"
 """
 
-import ray
-import pytest
-from omegaconf import OmegaConf
-import torch
 import os
 import shutil
 import tempfile
-from torch.utils.data import Dataset
 from unittest.mock import MagicMock
+
+import pytest
+import ray
+import torch
+from omegaconf import OmegaConf
+from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.tracking import Tracking
 from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils.tracking import Tracking
 from tests.backends.skyrl_train.gpu.utils import import_worker, ray_init_for_tests
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"

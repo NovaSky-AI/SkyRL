@@ -2,31 +2,34 @@
 Main entrypoint for training.
 """
 
-from ray.util.placement_group import placement_group, PlacementGroup
-
-from transformers import PreTrainedTokenizerBase
-from skyrl.train.dataset import PromptDataset
-from skyrl.train.utils import validate_cfg
-
-from skyrl.train.trainer import RayPPOTrainer
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
-from skyrl.train.generators.base import GeneratorInterface
-from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
-from pathlib import Path
-import ray
-import sys
-
-import os
-from loguru import logger
-from skyrl.train.utils.tracking import Tracking
-from skyrl.utils.tok import get_tokenizer
-import multiprocessing as mp
 import asyncio
+import multiprocessing as mp
+import os
+import sys
+from pathlib import Path
+
+import ray
+from loguru import logger
+from ray.util.placement_group import PlacementGroup, placement_group
+from transformers import PreTrainedTokenizerBase
+
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
+from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
+    create_remote_inference_engines,
+)
+from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.train.dataset import PromptDataset
+from skyrl.train.generators.base import GeneratorInterface
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils import validate_cfg
+from skyrl.train.utils.tracking import Tracking
+from skyrl.train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
+from skyrl.utils.tok import get_tokenizer
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -301,9 +304,13 @@ class BasePPOExp:
         Returns:
             RemoteInferenceClient: The new inference client.
         """
-        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            RemoteInferenceClient,
+        )
         from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
-        from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+        from skyrl.backends.skyrl_train.inference_servers.server_group import (
+            ServerGroup,
+        )
 
         ie_cfg = self.cfg.generator.inference_engine
         is_colocated = self.cfg.trainer.placement.colocate_all
@@ -378,11 +385,15 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
         if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
+            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                CriticWorker,
+                PolicyWorker,
+                RefWorker,
+            )
         elif self.cfg.trainer.strategy == "megatron":
             from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                PolicyWorker,
                 CriticWorker,
+                PolicyWorker,
                 RefWorker,
             )
         else:

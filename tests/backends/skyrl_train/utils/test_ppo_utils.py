@@ -3,25 +3,27 @@ Run with:
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/utils/test_ppo_utils.py
 """
 
-import torch
 import math
+
+import numpy as np
 import pytest
+import torch
+
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
-    reduce_loss,
+    AdaptiveKLController,
+    AdvantageEstimatorRegistry,
+    FixedKLController,
+    PolicyLossRegistry,
+    compute_advantages_and_returns,
     compute_approx_kl,
     compute_gae_advantage_return,
     compute_grpo_outcome_advantage,
-    compute_advantages_and_returns,
-    AdaptiveKLController,
-    FixedKLController,
-    AdvantageEstimatorRegistry,
-    register_advantage_estimator,
-    PolicyLossRegistry,
-    register_policy_loss,
     compute_reinforce_plus_plus_outcome_advantage,
     compute_rloo_outcome_advantage,
+    reduce_loss,
+    register_advantage_estimator,
+    register_policy_loss,
 )
-import numpy as np
 
 
 @pytest.fixture
@@ -406,6 +408,7 @@ def test_registry_cross_ray_process():
     """Test that registry works with Ray and that functions can be retrieved and called from different processes"""
     try:
         import ray
+
         from skyrl.train.config import AlgorithmConfig
 
         if not ray.is_initialized():
