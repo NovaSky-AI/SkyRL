@@ -122,7 +122,9 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
         tokenizer = get_tokenizer(MODEL)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=5), sampling_params, tokenizer=tokenizer))
+        outputs = asyncio.run(
+            run_inference(client, get_test_prompts(MODEL, num_samples=5), sampling_params, tokenizer=tokenizer)
+        )
 
         # Verify we got responses
         assert "responses" in outputs, "Inference should return responses"
@@ -188,5 +190,7 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
         tokenizer = get_tokenizer(MODEL)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params, tokenizer=tokenizer))
+        outputs = asyncio.run(
+            run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params, tokenizer=tokenizer)
+        )
         assert len(outputs["responses"]) == 2, "Should get 2 responses"
