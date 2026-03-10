@@ -1,7 +1,7 @@
 """
 GPU CI test for weight sync through the SkyRLTrainBackend API (new inference path).
 
-Uses colocated mode with 2 GPUs (TP=1, 2 engines, 2 FSDP2 workers):
+Uses the non-colocated setting (colocate_all=False) with 2 GPUs (TP=1, 2 engines, 2 FSDP2 workers):
     - Backend creates FSDP2 workers with real weights from HF
     - Inference servers start with dummy (random) weights via engine_init_kwargs
     - save_sampler_checkpoint() broadcasts real training weights via NCCL
@@ -88,11 +88,11 @@ def ray_env_with_new_inference():
 
 @pytest.mark.asyncio(loop_scope="class")
 class TestBackendWeightSync:
-    """Test weight sync through SkyRLTrainBackend with new inference path (colocated)."""
+    """Test weight sync through SkyRLTrainBackend with new inference path (non-colocated)."""
 
-    async def test_backend_weight_sync_colocated(self, ray_env_with_new_inference):
+    async def test_backend_weight_sync_non_colocated(self, ray_env_with_new_inference):
         """
-        End-to-end colocated weight sync test via SkyRLTrainBackend:
+        End-to-end non-colocated weight sync test via SkyRLTrainBackend:
 
         1. Create backend with 2 FSDP2 workers (real weights from HF)
         2. Start 2 inference servers with dummy (random) weights
@@ -152,7 +152,7 @@ class TestBackendWeightSync:
                 text_before = resp.json()["choices"][0]["text"]
                 assert "Paris" not in text_before, "Dummy weights unexpectedly produced correct answer"
 
-            # ===== Step 6: Sleep inference engines (required before colocated weight sync) =====
+            # ===== Step 6: Sleep inference engines (required before weight sync) =====
             await backend._inference_engine_client.sleep()
 
             # ===== Step 7: Sync weights via save_sampler_checkpoint =====
