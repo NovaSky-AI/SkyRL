@@ -441,7 +441,6 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     pp_size = ie_cfg.pipeline_parallel_size
-    pp_size = ie_cfg.pipeline_parallel_size
     tp_pp_size = tp_size * pp_size
     num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
     if tp_pp_size > num_gpus_per_node and ie_cfg.distributed_executor_backend == "mp":
