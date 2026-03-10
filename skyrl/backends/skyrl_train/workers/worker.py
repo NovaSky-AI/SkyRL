@@ -448,33 +448,35 @@ class PPORayActorGroup:
                 pg = SkyRLPlacementGroup(pg)
             if len(placement_group_table(pg.pg)["bundles"]) == world_size:
                 reordered_bundle_indices = pg.reordered_bundle_indices
-            pg = pg.pg
+            raw_pg = pg.pg
+        else:
+            raw_pg = pg
 
         if self.colocate_all:
             assert (
-                pg is not None
+                raw_pg is not None
             ), "if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
-            pg_data = placement_group_table(pg)
+            pg_data = placement_group_table(raw_pg)
             assert (
                 len(pg_data["bundles"]) == world_size
             ), "if colocate_all is True, the number of bundles in the shared placement group must match the world size"
 
-        if self._num_gpus_per_node > 1 and pg is None:
+        if self._num_gpus_per_node > 1 and raw_pg is None:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
                 resources_name = list(self._resources.keys())[0]
                 for i in range(len(bundles)):
                     bundles[i][resources_name] = self._num_resources_per_node
 
-            pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        if pg:
+            raw_pg = placement_group(bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        if raw_pg:
             master_actor = self.ray_actor_type.options(
                 num_cpus=num_gpus_per_actor,
                 num_gpus=num_gpus_per_actor,
                 resources=self._resources,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
+                    placement_group=raw_pg,
                     placement_group_bundle_index=reordered_bundle_indices[0] if reordered_bundle_indices else 0,
                 ),
             ).remote(
@@ -509,13 +511,13 @@ class PPORayActorGroup:
             for rank in range(1, world_size):
                 local_rank = rank % self._num_gpus_per_node
 
-                if pg:
+                if raw_pg:
                     worker_actor = self.ray_actor_type.options(
                         num_cpus=num_gpus_per_actor,
                         num_gpus=num_gpus_per_actor,
                         resources=self._resources,
                         scheduling_strategy=PlacementGroupSchedulingStrategy(
-                            placement_group=pg,
+                            placement_group=raw_pg,
                             placement_group_bundle_index=(
                                 reordered_bundle_indices[rank]
                                 if reordered_bundle_indices
