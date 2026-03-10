@@ -16,17 +16,18 @@ set -x
 
 : "${INFERENCE_BACKEND:=vllm}"
 
-uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
+
+_SKYRL_USE_NEW_INFERENCE=1 uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
-  trainer.placement.critic_num_gpus_per_node=$NUM_GPUS \
-  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.inference_engine.num_engines=2 \
+  trainer.placement.policy_num_gpus_per_node=2 \
+  trainer.placement.critic_num_gpus_per_node=2 \
+  trainer.placement.ref_num_gpus_per_node=2 \
+  generator.inference_engine.num_engines=1 \
   generator.inference_engine.tensor_parallel_size=2 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \

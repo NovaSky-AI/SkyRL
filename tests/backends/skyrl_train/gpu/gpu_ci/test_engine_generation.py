@@ -193,15 +193,16 @@ def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: i
 
 
 @pytest.mark.parametrize(
-    "tp_size,pp_size,dp_size,model",
+    "tp_size,pp_size,dp_size,model,distributed_executor_backend",
     [
-        pytest.param(2, 1, 1, MODEL),
-        pytest.param(2, 2, 1, MODEL),
-        pytest.param(2, 1, 2, MOE_MODEL),
+        pytest.param(2, 1, 1, MODEL, "ray"),
+        pytest.param(2, 2, 1, MODEL, "ray"),
+        pytest.param(2, 1, 2, MOE_MODEL, "ray"),
+        pytest.param(2, 1, 2, MOE_MODEL, "mp"),
     ],
-    ids=["tp2_pp1_dp1", "tp2_pp2_dp1", "tp2_pp1_dp2_moe"],
+    ids=["tp2_pp1_dp1_ray", "tp2_pp2_dp1_ray", "tp2_pp1_dp2_moe_ray", "tp2_pp1_dp2_moe_mp"],
 )
-def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str):
+def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str, distributed_executor_backend: str):
     """Test generation using prompt_token_ids."""
 
     cfg = get_test_actor_config()
@@ -216,6 +217,7 @@ def test_token_based_generation(ray_init_fixture, tp_size: int, pp_size: int, dp
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
     cfg.generator.inference_engine.pipeline_parallel_size = pp_size
     cfg.generator.inference_engine.data_parallel_size = dp_size
+    cfg.generator.inference_engine.distributed_executor_backend = distributed_executor_backend
 
     with InferenceEngineState.create(cfg, sleep_level=1) as engines:
         llm_client = engines.client

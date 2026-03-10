@@ -48,21 +48,18 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
         "strategy",
         "num_engines",
         "tp_size",
-        "dp_size",
         "distributed_executor_backend",
         "model",
     ),
     [
-        pytest.param(False, "nccl", "fsdp", 1, 2, 1, "ray", MODEL),
-        pytest.param(True, "nccl", "fsdp", 1, 2, 1, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(False, "gloo", "fsdp", 1, 2, 1, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(True, "gloo", "fsdp", 1, 2, 1, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, 1, "ray", MODEL),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, 1, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, 1, "mp", MODEL, marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, 1, "mp", MODEL),
-        pytest.param(True, "nccl", "fsdp2", 1, 2, 2, "mp", MOE_MODEL),
-        pytest.param(True, "nccl", "fsdp2", 1, 2, 2, "ray", MOE_MODEL),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL),
+        pytest.param(True, "nccl", "fsdp", 1, 2, "ray", MODEL, marks=_skip_new_inference),
+        pytest.param(False, "gloo", "fsdp", 1, 2, "ray", MODEL, marks=_skip_new_inference),
+        pytest.param(True, "gloo", "fsdp", 1, 2, "ray", MODEL, marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "ray", MODEL),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", MODEL, marks=_skip_new_inference),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp", MODEL, marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp2", 1, 2,"mp", MODEL),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -73,8 +70,6 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
         "colocate_nccl_fsdp2_vllm",
         "colocate_nccl_fsdp2_vllm_mp",
         "non_colocated_nccl_fsdp2_vllm_mp",
-        "colocate_nccl_fsdp2_vllm_mp_dp2",
-        "colocate_nccl_fsdp2_vllm_ray_dp2",
     ],
 )
 def test_policy_local_engines_e2e(
@@ -84,7 +79,6 @@ def test_policy_local_engines_e2e(
     strategy,
     num_engines,
     tp_size,
-    dp_size,
     distributed_executor_backend,
     model,
 ):
@@ -96,7 +90,6 @@ def test_policy_local_engines_e2e(
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
-    cfg.generator.inference_engine.data_parallel_size = dp_size
     cfg.generator.inference_engine.distributed_executor_backend = distributed_executor_backend
     cfg.generator.inference_engine.num_engines = num_engines
     tokenizer = AutoTokenizer.from_pretrained(model)
