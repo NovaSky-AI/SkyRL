@@ -114,7 +114,7 @@ class VLLMServerActor(ServerActorProtocol):
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
         # Configure the distributed executor backend
-        self._setup_executor_backend(distributed_executor_backend, mp_cuda_visible_devices)
+        self._cli_args.distributed_executor_backend = distributed_executor_backend
 
         # Update args with our assigned host/port
         self._cli_args.host = "0.0.0.0"
@@ -156,24 +156,6 @@ class VLLMServerActor(ServerActorProtocol):
         # Initialized lazily to not block the actor initialization.
         self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
-
-    def _setup_executor_backend(
-        self, distributed_executor_backend: str, mp_cuda_visible_devices: Optional[str]
-    ) -> None:
-        """Configure the vLLM distributed executor backend on cli_args.
-
-        Always uses ``"ray"`` so that workers inherit GPU allocation from the
-        placement group via ``VLLM_RAY_BUNDLE_INDICES``.  Server actors have
-        ``num_gpus=0`` in their Ray options, so the ``"uni"`` backend would
-        fail to target the correct GPU without bundle-index guidance.
-
-        For the ``"mp"`` backend the multiprocessing executor is used so vLLM
-        spawns workers as local processes using CUDA_VISIBLE_DEVICES.
-        """
-        if distributed_executor_backend == "mp":
-            self._cli_args.distributed_executor_backend = "mp"
-        else:
-            self._cli_args.distributed_executor_backend = "ray"
 
     def _setup_mp_gpu_visibility(self, mp_cuda_visible_devices: Optional[str]) -> None:
         """Set CUDA_VISIBLE_DEVICES for the mp backend.

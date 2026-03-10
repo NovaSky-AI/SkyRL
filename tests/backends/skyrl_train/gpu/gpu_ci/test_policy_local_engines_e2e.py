@@ -19,7 +19,6 @@ from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B"
 
 
 def get_test_actor_config(model: str) -> SkyRLTrainConfig:
@@ -49,17 +48,16 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
         "num_engines",
         "tp_size",
         "distributed_executor_backend",
-        "model",
     ),
     [
-        pytest.param(False, "nccl", "fsdp", 1, 2, "ray", MODEL),
-        pytest.param(True, "nccl", "fsdp", 1, 2, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(False, "gloo", "fsdp", 1, 2, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(True, "gloo", "fsdp", 1, 2, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "ray", MODEL),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", MODEL, marks=_skip_new_inference),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp", MODEL, marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp", MODEL),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "ray"),
+        pytest.param(True, "nccl", "fsdp", 1, 2, "ray", marks=_skip_new_inference),
+        pytest.param(False, "gloo", "fsdp", 1, 2, "ray", marks=_skip_new_inference),
+        pytest.param(True, "gloo", "fsdp", 1, 2, "ray", marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "ray"),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", marks=_skip_new_inference),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp", marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp"),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -80,23 +78,22 @@ def test_policy_local_engines_e2e(
     num_engines,
     tp_size,
     distributed_executor_backend,
-    model,
 ):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
-    cfg = get_test_actor_config(model)
+    cfg = get_test_actor_config(MODEL)
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
     cfg.generator.inference_engine.distributed_executor_backend = distributed_executor_backend
     cfg.generator.inference_engine.num_engines = num_engines
-    tokenizer = AutoTokenizer.from_pretrained(model)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
     with InferenceEngineState.create(
-        model=model,
+        model=MODEL,
         cfg=cfg,
         use_local=True,
         async_engine=cfg.generator.inference_engine.async_engine,
@@ -130,6 +127,6 @@ def test_policy_local_engines_e2e(
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        outputs = asyncio.run(run_inference(client, get_test_prompts(model), sampling_params, tokenizer=tokenizer))
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
 
         print(f"Example output after weight sync: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

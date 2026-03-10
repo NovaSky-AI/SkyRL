@@ -192,17 +192,16 @@ def create_ray_wrapped_inference_engines(
                     dp_bundle_indices = list(range(dp_bundle_start, dp_bundle_start + tp_pp_size))
                     engine_gpu_ids_map[(engine_idx, dp_rank)] = get_gpu_ids_for_pg_bundles(epg, dp_bundle_indices)
     else:
-        # ray/auto backend: single shared PG
-        if use_hybrid_engine:
-            assert len(shared_pgs) == 1, (
-                f"For ray/auto backend with colocate, expected a single shared placement group, "
-                f"got {len(shared_pgs)}"
-            )
-            shared_pg = shared_pgs[0]
-        else:
+        # ray backend: single shared PG
+        if not use_hybrid_engine:
             bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
             shared_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        else:
+            assert len(shared_pgs) == 1, (
+                f"For ray backend with colocate, expected a single shared placement group, " f"got {len(shared_pgs)}"
+            )
+            shared_pg = shared_pgs[0]
 
     for i in range(num_inference_engines):
         if use_mp_backend:

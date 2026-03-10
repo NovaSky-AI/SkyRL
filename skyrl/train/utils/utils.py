@@ -438,6 +438,12 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
 
+    pp_size = ie_cfg.pipeline_model_parallel_size
+    inference_engine_size = dp_size * tp_size * pp_size
+    num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+    if inference_engine_size > num_gpus_per_node and ie_cfg.distributed_executor_backend == "mp":
+        raise ValueError("Each inference engine must fit within a single node with the vLLM mp backend.")
+
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
 
@@ -729,43 +735,11 @@ class InfoActor:
         return ray.get_gpu_ids()[0]
 
 
-def get_reordered_bundle_indices(pg: PlacementGroup):
-    pg_data = placement_group_table(pg)
-    num_bundles = len(pg_data["bundles"])
-    bundle_to_node_ids = pg_data["bundles_to_node_id"]
-    # use info actor to get the GPU id
-    info_actors = []
-    for i in range(num_bundles):
-        info_actors.append(
-            InfoActor.options(
-                # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
-                num_cpus=0.01,
-                num_gpus=0.01,
-                resources=None,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=i,
-                ),
-            ).remote()
-        )
-
-    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in info_actors])
-    for actor in info_actors:
-        ray.kill(actor)
-
-    # original index, node_id, gpu_id
-    bundle_infos = [(i, bundle_to_node_ids[i], gpu_ids[i]) for i in range(num_bundles)]
-    pg_reordered_bundle_indices = [
-        bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
-    ]  # sort by node_id, then gpu_id
-    return pg_reordered_bundle_indices
-
-
-def get_reordered_bundle_indices_multi_pg(pgs):
-    """Get globally reordered (pg, bundle_index) assignments across multiple placement groups.
+def get_reordered_bundle_indices(pgs: list):
+    """Get globally reordered (pg, bundle_index) assignments across placement groups.
 
     Probes every bundle across all PGs, sorts by (node_id, gpu_id), and returns
-    a list of (PlacementGroup, bundle_index) tuples — one per global rank.
+    a list of ``(PlacementGroup, bundle_index)`` tuples — one per global rank.
     """
     all_info_actors = []
     pg_bundle_refs = []
@@ -790,7 +764,6 @@ def get_reordered_bundle_indices_multi_pg(pgs):
     for actor in all_info_actors:
         ray.kill(actor)
 
-    # (pg, bundle_index, node_id, gpu_id)
     bundle_infos = [
         (pg_bundle_refs[j][0], pg_bundle_refs[j][1], pg_bundle_refs[j][2], gpu_ids[j])
         for j in range(len(pg_bundle_refs))

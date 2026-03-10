@@ -16,10 +16,10 @@ import torch.nn as nn
 from loguru import logger
 from ray import ObjectRef
 from ray.util.placement_group import (
+    PlacementGroup,
     PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
-    PlacementGroup,
 )
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
@@ -48,7 +48,6 @@ from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, Traini
 from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
     get_reordered_bundle_indices,
-    get_reordered_bundle_indices_multi_pg,
     ray_noset_visible_devices,
 )
 from skyrl.backends.skyrl_train.utils.io import io
@@ -470,18 +469,11 @@ class PPORayActorGroup:
         # one per rank, sorted by (node_id, gpu_id) for deterministic ordering.
         rank_pg_assignments = []
         if pgs is not None:
-            if len(pgs) > 1:
-                total_bundles = sum(len(placement_group_table(p)["bundles"]) for p in pgs)
-                if total_bundles == world_size:
-                    rank_pg_assignments = get_reordered_bundle_indices_multi_pg(pgs)
-            elif len(pgs) == 1:
-                single_pg = pgs[0]
-                pg_data = placement_group_table(single_pg)
-                if len(pg_data["bundles"]) == world_size:
-                    indices = get_reordered_bundle_indices(single_pg)
-                    rank_pg_assignments = [(single_pg, idx) for idx in indices]
+            total_bundles = sum(len(placement_group_table(p)["bundles"]) for p in pgs)
+            if total_bundles == world_size:
+                rank_pg_assignments = get_reordered_bundle_indices(pgs)
 
-        # If no PGs provided, create one internally (legacy multi-node case)
+        # If no PGs provided, create one internally
         if pgs is None and self._num_gpus_per_node > 1:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
@@ -494,17 +486,19 @@ class PPORayActorGroup:
             pgs = [internal_pg]
 
         def _scheduling_strategy_for_rank(rank):
-            if rank_pg_assignments:
+            if rank_pg_assignments:  # set if pgs is provided (colocated case)
                 pg_for_rank, bundle_idx = rank_pg_assignments[rank]
                 return PlacementGroupSchedulingStrategy(
                     placement_group=pg_for_rank,
                     placement_group_bundle_index=bundle_idx,
                 )
-            elif pgs:
+            elif pgs:  # set if pgs is created internally (non-colocated case)
                 return PlacementGroupSchedulingStrategy(
                     placement_group=pgs[0],
                     placement_group_bundle_index=rank // self._num_gpus_per_node,
                 )
+            # else we are in the single gpu case per node case in which case we don't need to set
+            # bundle indices
             return None
 
         sched = _scheduling_strategy_for_rank(0)
