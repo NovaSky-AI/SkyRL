@@ -85,6 +85,31 @@ class FSDPWeightExtractor(WeightExtractor):
             ):
                 yield chunk
 
+    def get_weight_metadata(self, dtype: torch.dtype) -> dict:
+        """Return weight metadata without materializing full tensors.
+
+        Uses state_dict() to get clean parameter names (FSDP strips the
+        _fsdp_wrapped_module prefix), matching extract_weights behavior.
+        The sharded tensors returned by state_dict() are not gathered;
+        we only read their shape.
+        """
+        if fsdp_version(self.model) == 1:
+            FSDP.set_state_dict_type(
+                self.model,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(),
+            )
+
+        names = []
+        dtype_names = []
+        shapes = []
+        dtype_name = str(dtype).split(".")[-1]
+        for name, param in self.model.state_dict().items():
+            names.append(name)
+            dtype_names.append(dtype_name)
+            shapes.append(list(param.shape))
+        return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
+
     def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:
         """Gather sharded tensor into full tensor."""
         device = torch.cuda.current_device()
@@ -226,7 +251,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             return
 
         # Extract and send weights using the sender created at init time
-        await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
+        weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
+        weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+        await self._weight_transfer_sender.send_chunks(
+            weight_iterator,
+            weight_metadata=weight_metadata,
+        )
 
         if cache_reset_task is not None:
             await cache_reset_task

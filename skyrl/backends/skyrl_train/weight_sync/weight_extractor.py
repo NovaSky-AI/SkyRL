@@ -1,7 +1,7 @@
 """Weight extractor interface for extracting weights from training backends."""
 
 from abc import ABC, abstractmethod
-from typing import Iterator
+from typing import Dict, Iterator, List
 
 import torch
 
@@ -30,5 +30,17 @@ class WeightExtractor(ABC):
 
         Yields:
             WeightChunk objects containing model parameters ready for transfer
+        """
+        ...
+
+    @abstractmethod
+    def get_weight_metadata(self, dtype: torch.dtype) -> Dict[str, List]:
+        """Return weight metadata without materializing tensors.
+
+        Args:
+            dtype: Target dtype for inference (used for dtype name).
+
+        Returns:
+            Dict with keys "names", "dtype_names", "shapes".
         """
         ...

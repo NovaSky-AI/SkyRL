@@ -27,7 +27,9 @@ from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_
 from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 
+_skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
@@ -111,8 +113,11 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 @pytest.mark.parametrize(
     ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
-    [(True, 4, 2, 2, 1, None, False), (False, 2, 2, 1, 1, None, False), (True, 4, 2, 2, 1, None, True)],
-    ids=["colocate_all", "non_colocated", "colocate_all_lora"],
+    [
+        pytest.param(True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
+        pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
+        pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
+    ],
 )
 @pytest.mark.megatron
 def test_megatron_policy_weight_sync(
@@ -177,7 +182,12 @@ def test_megatron_policy_weight_sync(
             sampling_params = get_sampling_params_for_backend(
                 cfg.generator.inference_engine.backend, cfg.generator.sampling_params
             )
-            outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
+            tokenizer = (
+                AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True) if _SKYRL_USE_NEW_INFERENCE else None
+            )
+            outputs = asyncio.run(
+                run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
+            )
 
             print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
