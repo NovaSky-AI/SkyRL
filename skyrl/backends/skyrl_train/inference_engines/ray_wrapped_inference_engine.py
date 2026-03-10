@@ -180,13 +180,17 @@ def create_ray_wrapped_inference_engines(
             )
             engine_pgs = shared_pgs
 
-        # Pre-compute GPU IDs per engine so we can set CUDA_VISIBLE_DEVICES for the
-        # mp-spawned workers to see the correct GPUs (not all GPUs on the node).
+        # Pre-compute GPU IDs per (engine, dp_rank) so we can set
+        # CUDA_VISIBLE_DEVICES for the mp-spawned workers to see only the
+        # TP*PP GPUs allocated to that DP rank (not the full engine PG).
         engine_gpu_ids_map = {}
-        if per_engine_gpu_count > 1:
+        tp_pp_size = tensor_parallel_size * pipeline_parallel_size
+        if tp_pp_size > 1:
             for engine_idx, epg in enumerate(engine_pgs):
-                bundle_indices = list(range(per_engine_gpu_count))
-                engine_gpu_ids_map[engine_idx] = get_gpu_ids_for_pg_bundles(epg, bundle_indices)
+                for dp_rank in range(data_parallel_size):
+                    dp_bundle_start = dp_rank * tp_pp_size
+                    dp_bundle_indices = list(range(dp_bundle_start, dp_bundle_start + tp_pp_size))
+                    engine_gpu_ids_map[(engine_idx, dp_rank)] = get_gpu_ids_for_pg_bundles(epg, dp_bundle_indices)
     else:
         # ray/auto backend: single shared PG
         if use_hybrid_engine:
@@ -253,7 +257,7 @@ def create_ray_wrapped_inference_engines(
 
                 if use_mp_backend:
                     dp_rank_bundles = None
-                    mp_gpu_ids = engine_gpu_ids_map.get(i)
+                    mp_gpu_ids = engine_gpu_ids_map.get((i, dp_rank))
                     mp_gpu_ids_str = ",".join(str(g) for g in mp_gpu_ids) if mp_gpu_ids is not None else None
                 else:
                     dp_rank_bundles = (

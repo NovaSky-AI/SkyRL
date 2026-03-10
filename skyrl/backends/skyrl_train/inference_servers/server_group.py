@@ -160,19 +160,48 @@ class ServerGroup:
             ),
         )
 
-    def _get_cuda_visible_devices(self, pg: PlacementGroup) -> Optional[str]:
-        """Pre-compute CUDA_VISIBLE_DEVICES for a per-server PG (mp backend only).
+    def _get_cuda_visible_devices(self, pg: PlacementGroup, bundle_start: int, bundle_count: int) -> Optional[str]:
+        """Pre-compute CUDA_VISIBLE_DEVICES for a slice of bundles in a PG.
+
+        Args:
+            pg: Placement group to probe.
+            bundle_start: First bundle index (0-based within the PG).
+            bundle_count: Number of contiguous bundles for this server.
 
         Returns a comma-separated string of physical GPU IDs, or None if
         only a single GPU is allocated (no override needed).
         """
-        if self._num_gpus_per_server <= 1:
+        if bundle_count <= 1:
             return None
         from skyrl.train.utils.utils import get_gpu_ids_for_pg_bundles
 
-        bundle_indices = list(range(self._num_gpus_per_server))
+        bundle_indices = list(range(bundle_start, bundle_start + bundle_count))
         gpu_ids = get_gpu_ids_for_pg_bundles(pg, bundle_indices)
         return ",".join(str(g) for g in gpu_ids)
+
+    def _mp_server_placement(self, server_idx: int, pgs: List[PlacementGroup]):
+        """Resolve (pg, start_bundle_idx) for a server under the mp backend.
+
+        When ``len(pgs) == num_servers`` each server has its own PG
+        (no DP or PGs pre-split). When ``len(pgs) < num_servers``
+        multiple servers (DP ranks) share a per-engine PG, each at a
+        different bundle offset of ``gpus_per_server`` width.
+
+        Returns:
+            Tuple of (placement_group, start_bundle_index).
+        """
+        if len(pgs) == self._num_servers:
+            return pgs[server_idx], 0
+
+        servers_per_pg = self._num_servers // len(pgs)
+        assert self._num_servers == len(pgs) * servers_per_pg, (
+            f"mp backend: num_servers ({self._num_servers}) must be divisible "
+            f"by the number of placement groups ({len(pgs)})"
+        )
+        pg_idx = server_idx // servers_per_pg
+        rank_in_pg = server_idx % servers_per_pg
+        start_bundle_idx = rank_in_pg * self._num_gpus_per_server
+        return pgs[pg_idx], start_bundle_idx
 
     def _create_actors(self) -> List[Any]:
         """Create server actors with GPU resources."""
@@ -184,16 +213,18 @@ class ServerGroup:
         # Pre-compute CUDA_VISIBLE_DEVICES per server for mp backend
         mp_cuda_visible_devices_map: dict[int, Optional[str]] = {}
         if self._use_mp_backend:
-            assert len(pgs) == self._num_servers, (
-                f"mp backend requires one PG per server, got {len(pgs)} PGs " f"for {self._num_servers} servers"
+            assert len(pgs) <= self._num_servers, (
+                f"mp backend: got {len(pgs)} PGs for {self._num_servers} servers " f"(expected <= num_servers)"
             )
-            for server_idx, server_pg in enumerate(pgs):
-                mp_cuda_visible_devices_map[server_idx] = self._get_cuda_visible_devices(server_pg)
+            for server_idx in range(self._num_servers):
+                server_pg, bundle_start = self._mp_server_placement(server_idx, pgs)
+                mp_cuda_visible_devices_map[server_idx] = self._get_cuda_visible_devices(
+                    server_pg, bundle_start, self._num_gpus_per_server
+                )
 
         for server_idx in range(self._num_servers):
             if self._use_mp_backend:
-                server_pg = pgs[server_idx]
-                start_bundle_idx = 0
+                server_pg, start_bundle_idx = self._mp_server_placement(server_idx, pgs)
             else:
                 server_pg = pgs[0]
                 start_bundle_idx = self._bundle_offset + server_idx * self._num_gpus_per_server
