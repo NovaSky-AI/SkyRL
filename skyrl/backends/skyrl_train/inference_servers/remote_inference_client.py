@@ -299,6 +299,7 @@ class RemoteInferenceClient:
         num_samples: int,
         sampling_params: Dict[str, Union[str, int, float, bool, List, Dict]],
         session_id: Optional[Union[str, int]] = None,
+        lora_id: Optional[int] = None,
     ) -> InferenceEngineOutput:
         """
         Generate multiple independent samples for the same prompt.
