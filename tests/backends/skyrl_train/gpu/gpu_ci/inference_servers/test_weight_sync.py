@@ -23,6 +23,7 @@ import argparse
 import pytest_asyncio
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
+from skyrl.train.utils.utils import SkyRLPlacementGroup
 from transformers import AutoModelForCausalLM
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip, get_open_port
@@ -177,15 +178,16 @@ async def weight_update_env(ray_init_fixture):
     start_port = get_open_port()
 
     # 4 bundles: trainer on 0-1, server on 2-3
-    pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(4)])
-    ray.get(pg.ready())
+    raw_pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(4)])
+    ray.get(raw_pg.ready())
+    skyrl_pg = SkyRLPlacementGroup(raw_pg)
 
     # Trainer on bundle 0 (uses GPU 0-1 with TP=2 via the model itself)
     trainer = Trainer.options(
         num_gpus=1.0,
         scheduling_strategy=PlacementGroupSchedulingStrategy(
-            placement_group=pg,
-            placement_group_bundle_index=0,
+            placement_group=raw_pg,
+            placement_group_bundle_index=skyrl_pg.reordered_bundle_indices[0],
         ),
     ).remote(MODEL)
 
@@ -196,7 +198,7 @@ async def weight_update_env(ray_init_fixture):
         cli_args=cli_args,
         num_servers=1,
         start_port=start_port,
-        placement_group=pg,
+        placement_group=skyrl_pg,
         placement_group_bundle_offset=2,
     )
     server_infos = group.start()

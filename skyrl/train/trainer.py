@@ -5,7 +5,7 @@ import shutil
 from collections import defaultdict
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import ray
@@ -13,7 +13,7 @@ import torch
 from jaxtyping import Float
 from loguru import logger
 from ray import ObjectRef
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -73,6 +73,9 @@ from skyrl.train.utils.utils import configure_ray_worker_logging
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
+
+if TYPE_CHECKING:
+    from skyrl.train.utils.utils import SkyRLPlacementGroup
 
 
 class RayPPOTrainer:

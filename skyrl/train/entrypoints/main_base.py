@@ -2,7 +2,7 @@
 Main entrypoint for training.
 """
 
-from ray.util.placement_group import placement_group, PlacementGroup
+from ray.util.placement_group import placement_group
 
 from transformers import PreTrainedTokenizerBase
 from skyrl.train.dataset import PromptDataset
@@ -347,7 +347,7 @@ class BasePPOExp:
             self._server_group = ServerGroup(
                 cli_args=cli_args,
                 num_servers=ie_cfg.num_engines,
-                placement_group=self.colocate_pg.pg if is_colocated else None,
+                placement_group=self.colocate_pg if is_colocated else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
             )
             server_infos = self._server_group.start()

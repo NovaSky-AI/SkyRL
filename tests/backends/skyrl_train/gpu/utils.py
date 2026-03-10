@@ -23,7 +23,7 @@ from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInput
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
 from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 from skyrl.train.generators.base import GeneratorInput, ConversationType, TrajectoryID
-from skyrl.train.utils.utils import peer_access_supported, print_mem, initialize_ray
+from skyrl.train.utils.utils import peer_access_supported, print_mem, initialize_ray, SkyRLPlacementGroup
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
@@ -448,7 +448,7 @@ class InferenceEngineState:
         if not ray.is_initialized():
             initialize_ray(cfg)
         if cfg.trainer.placement.colocate_all:
-            pg = placement_group(
+            raw_pg = placement_group(
                 [{"GPU": 1, "CPU": 1}]
                 * ie_cfg.tensor_parallel_size
                 * ie_cfg.pipeline_parallel_size
@@ -456,7 +456,8 @@ class InferenceEngineState:
                 * ie_cfg.num_engines,
                 strategy="PACK",
             )
-            get_ray_pg_ready_with_timeout(pg, timeout=30)
+            get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+            pg = SkyRLPlacementGroup(raw_pg)
             sleep = True
         else:
             pg, sleep = None, False
