@@ -375,7 +375,7 @@ class RemoteInferenceClient:
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         session_id: Optional[Union[str, int]] = None,
-    ) -> Dict[str, Any]:
+    ) -> List[Any]:
         """
         Render chat messages into a tokenized prompt via /v1/chat/completions/render.
 
