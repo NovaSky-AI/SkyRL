@@ -441,11 +441,12 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     pp_size = ie_cfg.pipeline_parallel_size
-    inference_engine_size = dp_size * tp_size * pp_size
+    pp_size = ie_cfg.pipeline_parallel_size
+    tp_pp_size = tp_size * pp_size
     num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
-    if inference_engine_size > num_gpus_per_node and ie_cfg.distributed_executor_backend == "mp":
+    if tp_pp_size > num_gpus_per_node and ie_cfg.distributed_executor_backend == "mp":
         raise ValueError(
-            "Each inference engine must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
+            "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
         )
 
     # Validate new inference config options
