@@ -77,11 +77,11 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         sleep_level=1,  # since we explicitly sync weights
         enable_lora=True,  # Enable LoRA for this test
     ) as engines:
-        client, pg = engines.client, engines.pg
+        client, pgs = engines.client, engines.pgs
 
         policy = init_worker_with_type(
             "policy",
-            shared_pg=pg,
+            shared_pgs=pgs,
             colocate_all=cfg.trainer.placement.colocate_all,
             num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
             cfg=cfg,

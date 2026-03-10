@@ -237,7 +237,7 @@ class SkyRLTrainBackend(AbstractBackend):
         """Create placement group(s) for colocated training + inference.
 
         For the ``"mp"`` distributed executor backend, returns a list of per-engine
-        placement groups.  For ``"ray"``/``"auto"``, returns a single-element list
+        placement groups.  For ``"ray"``, returns a single-element list
         containing one large placement group.
         """
         ie_cfg = self._cfg.generator.inference_engine

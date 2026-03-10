@@ -184,7 +184,7 @@ class BasePPOExp:
 
         For the ``"mp"`` distributed executor backend, one placement group per
         inference engine is created (single-node packing per engine).  For
-        ``"ray"``/``"auto"``, a single placement group that packs all inference
+        ``"ray"``, a single placement group that packs all inference
         engines together is created (wrapped in a list for a uniform interface).
 
         Args:
@@ -359,19 +359,16 @@ class BasePPOExp:
             # Case: Neither - build servers and router internally
             cli_args = build_vllm_cli_args(self.cfg)
 
-            colocate_pg_for_server = None
+            colocate_pgs_for_server = None
             if is_colocated and self.colocate_pg is not None:
-                assert len(self.colocate_pg) == 1, (
-                    "ServerGroup (new inference path) currently requires a single shared placement group. "
-                    "Use the legacy inference path for mp distributed_executor_backend with multiple PGs."
-                )
-                colocate_pg_for_server = self.colocate_pg[0]
+                colocate_pgs_for_server = self.colocate_pg
 
             self._server_group = ServerGroup(
                 cli_args=cli_args,
                 num_servers=ie_cfg.num_engines,
-                placement_group=colocate_pg_for_server,
+                placement_group=colocate_pgs_for_server,
                 enable_dp=ie_cfg.data_parallel_size > 1,
+                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]

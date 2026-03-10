@@ -108,7 +108,7 @@ def create_ray_wrapped_inference_engines(
     rope_theta: float | None = None,
     enable_ray_prometheus_stats: bool = False,
     served_model_name: str | None = None,
-    distributed_executor_backend: str = "auto",
+    distributed_executor_backend: str = "ray",
 ) -> List[InferenceEngineInterface]:
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
@@ -116,11 +116,11 @@ def create_ray_wrapped_inference_engines(
 
     Args:
         shared_pgs: A list of placement groups for colocated training, or None.
-            For the "ray"/"auto" distributed executor backend, this is typically a
+            For the "ray" distributed executor backend, this is typically a
             single-element list containing one large PG.
             For the "mp" backend, this is a list of per-engine PGs (one per engine).
         distributed_executor_backend: vLLM distributed executor backend.
-            "auto" selects "uni" for single-GPU and "ray" for multi-GPU.
+            For either "ray" or "mp", "uni" is used for single-GPU.
             "mp" uses multiprocessing (single-node only) with per-engine placement groups.
     """
     from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -148,34 +148,18 @@ def create_ray_wrapped_inference_engines(
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
 
+    resolved_executor_backend = (
+        "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else distributed_executor_backend
+    )
     use_mp_backend = distributed_executor_backend == "mp"
-    if distributed_executor_backend == "auto":
-        resolved_executor_backend = "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else "ray"
-    else:
-        resolved_executor_backend = distributed_executor_backend
 
     data_parallel_backend = "mp"
     use_hybrid_engine = shared_pgs is not None
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
 
-    if use_mp_backend:
-        # For mp backend, the Ray actor is a lightweight head process.
-        # GPU resources are managed by the placement group; vLLM's mp workers
-        # discover GPUs via CUDA_VISIBLE_DEVICES set from pre-computed PG GPU IDs.
-        if use_hybrid_engine:
-            if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
-                num_gpus_per_actor = 0.2
-            else:
-                num_gpus_per_actor = 0
-        else:
-            if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
-                num_gpus_per_actor = 1
-            else:
-                num_gpus_per_actor = 0
-    else:
-        num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
-        if use_hybrid_engine and tensor_parallel_size == 1 and pipeline_parallel_size == 1:
-            num_gpus_per_actor = 0.2
+    num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
+    if use_hybrid_engine and tensor_parallel_size == 1 and pipeline_parallel_size == 1:
+        num_gpus_per_actor = 0.2
 
     if use_mp_backend:
         if not use_hybrid_engine:

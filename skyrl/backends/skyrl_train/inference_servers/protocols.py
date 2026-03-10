@@ -58,6 +58,8 @@ class ServerActorProtocol(Protocol):
         enable_pd: bool,
         nixl_side_channel_base: int,
         colocated_training: bool,
+        distributed_executor_backend: str = "ray",
+        mp_cuda_visible_devices: Optional[str] = None,
     ) -> None:
         """
         Initialize the server actor.
@@ -73,6 +75,11 @@ class ServerActorProtocol(Protocol):
             enable_pd: Enable prefill-decode disaggregation.
             nixl_side_channel_base: Base port for NIXL side channels.
             colocated_training: Whether the server is colocated with training workers.
+            distributed_executor_backend: vLLM distributed executor backend
+                (``"ray"`` or ``"mp"``).
+            mp_cuda_visible_devices: Comma-separated GPU IDs for the ``"mp"``
+                backend. Only used when ``distributed_executor_backend="mp"``
+                and TP*PP > 1.
         """
         ...
 

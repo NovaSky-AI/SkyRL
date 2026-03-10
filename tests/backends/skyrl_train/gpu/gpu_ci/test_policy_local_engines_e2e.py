@@ -41,14 +41,26 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
+    (
+        "colocate_all",
+        "weight_sync_backend",
+        "strategy",
+        "num_engines",
+        "tp_size",
+        "dp_size",
+        "distributed_executor_backend",
+    ),
     [
-        pytest.param(False, "nccl", "fsdp", 2),
-        pytest.param(True, "nccl", "fsdp", 2, marks=_skip_new_inference),
-        pytest.param(False, "gloo", "fsdp", 2, marks=_skip_new_inference),
-        pytest.param(True, "gloo", "fsdp", 2, marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 2),
-        pytest.param(True, "nccl", "fsdp2", 2, marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp", 1, 2, 1, "ray"),
+        pytest.param(True, "nccl", "fsdp", 1, 2, 1, "ray", marks=_skip_new_inference),
+        pytest.param(False, "gloo", "fsdp", 1, 2, 1, "ray", marks=_skip_new_inference),
+        pytest.param(True, "gloo", "fsdp", 1, 2, 1, "ray", marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, 1, "ray"),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, 1, "ray", marks=_skip_new_inference),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, 1, "mp", marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, 1, "mp"),
+        pytest.param(True, "nccl", "fsdp2", 1, 2, 2, "mp"),
+        pytest.param(True, "nccl", "fsdp2", 1, 2, 2, "ray"),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -57,9 +69,22 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
         "colocate_gloo_fsdp_vllm",
         "no_colocate_nccl_fsdp2_vllm",
         "colocate_nccl_fsdp2_vllm",
+        "colocate_nccl_fsdp2_vllm_mp",
+        "non_colocated_nccl_fsdp2_vllm_mp",
+        "colocate_nccl_fsdp2_vllm_mp_dp2",
+        "colocate_nccl_fsdp2_vllm_ray_dp2",
     ],
 )
-def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
+def test_policy_local_engines_e2e(
+    ray_init_fixture,
+    colocate_all,
+    weight_sync_backend,
+    strategy,
+    num_engines,
+    tp_size,
+    dp_size,
+    distributed_executor_backend,
+):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
@@ -68,7 +93,9 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
-
+    cfg.generator.inference_engine.data_parallel_size = dp_size
+    cfg.generator.inference_engine.distributed_executor_backend = distributed_executor_backend
+    cfg.generator.inference_engine.num_engines = num_engines
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
@@ -81,12 +108,14 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=2,  # since we explicitly sync weights
     ) as engines:
-        client, pg = engines.client, engines.pg
+        client, pgs = engines.client, engines.pgs
         policy = init_worker_with_type(
             "policy",
-            shared_pg=pg,
+            shared_pgs=pgs,
             colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size
+            * cfg.generator.inference_engine.num_engines
+            * cfg.generator.inference_engine.data_parallel_size,
             cfg=cfg,
         )
 

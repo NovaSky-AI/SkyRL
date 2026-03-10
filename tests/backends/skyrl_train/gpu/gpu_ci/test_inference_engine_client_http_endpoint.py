@@ -307,7 +307,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             model=MODEL_QWEN2_5,
             sleep_level=2,  # since we explicitly sync weights
         )
-        client, pg = engines.client, engines.pg
+        client, pgs = engines.client, engines.pgs
         tokenizer = AutoTokenizer.from_pretrained(MODEL_QWEN2_5)
 
         server_thread, server_port = set_up_http_server(client)
@@ -316,7 +316,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
         # Weight sync
         policy = init_worker_with_type(
             "policy",
-            shared_pg=pg,
+            shared_pgs=pgs,
             colocate_all=cfg.trainer.placement.colocate_all,
             num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
             cfg=cfg,

@@ -9,7 +9,6 @@ import asyncio
 import pytest
 import ray
 from typing import Optional
-from ray.util.placement_group import PlacementGroup
 from transformers import AutoTokenizer
 
 from tests.backends.skyrl_train.gpu.utils import (
@@ -87,7 +86,7 @@ async def _run_single_generation(client: InferenceEngineClient, prompts, samplin
 
 
 def init_ray_inference_engines(
-    backend: str, tp_size: int, shared_pg: Optional[PlacementGroup], config: SkyRLTrainConfig
+    backend: str, tp_size: int, shared_pgs: Optional[list], config: SkyRLTrainConfig
 ) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -101,7 +100,7 @@ def init_ray_inference_engines(
         vllm_v1_disable_multiproc=True,
         enable_prefix_caching=True,
         enforce_eager=True,
-        shared_pgs=[shared_pg] if shared_pg is not None else None,
+        shared_pgs=shared_pgs,
         gpu_memory_utilization=0.8,
         inference_engine_enable_sleep=False,
         async_engine=True,
@@ -132,7 +131,7 @@ def test_ep_generation():
         client = init_ray_inference_engines(
             backend=cfg.generator.inference_engine.backend,
             tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            shared_pg=None,
+            shared_pgs=None,
             config=cfg,
         )
 
@@ -173,7 +172,7 @@ def test_ep_weight_sync():
         client = init_ray_inference_engines(
             backend=cfg.generator.inference_engine.backend,
             tp_size=cfg.generator.inference_engine.tensor_parallel_size,
-            shared_pg=pg,
+            shared_pgs=[pg],
             config=cfg,
         )
         asyncio.run(client.wake_up())
@@ -193,7 +192,7 @@ def test_ep_weight_sync():
         # Initialize policy worker
         policy = init_worker_with_type(
             "policy",
-            shared_pg=pg,
+            shared_pgs=[pg],
             colocate_all=True,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
