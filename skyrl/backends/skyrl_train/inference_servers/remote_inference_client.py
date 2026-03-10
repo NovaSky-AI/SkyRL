@@ -393,7 +393,7 @@ class RemoteInferenceClient:
         """
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
-        async with session.request(method, url, json=json) as resp:
+        async with session.request(method, url, json=json, params=params) as resp:
             body = await resp.json() if resp.content_length else None
             raise_for_status(resp, body)
             return server_url, {"status": resp.status, "body": body}
@@ -401,23 +401,25 @@ class RemoteInferenceClient:
     async def _call_all_servers(
         self,
         endpoint: str,
-        json: Dict[str, Any],
+        json: Optional[Dict[str, Any]] = None,
         method: str = "POST",
+        params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Call endpoint on all server_urls concurrently with the same payload.
+        Call endpoint on all server_urls concurrently.
 
-        async def call_server(server_url: str) -> tuple:
-            url = f"{server_url}{endpoint}"
-            async with session.request(method, url, json=json, params=params) as resp:
-                body = await resp.json() if resp.content_length else None
-                raise_for_status(resp, body)
-                return server_url, {"status": resp.status, "body": body}
+        Args:
+            endpoint: Endpoint path (e.g., "/pause").
+            json: JSON payload to send as request body.
+            method: HTTP method (default: POST).
+            params: URL query parameters (e.g., for FastAPI Query() params).
 
         Returns:
             Dict mapping server_url to response.
         """
-        results = await asyncio.gather(*[self._call_server(url, endpoint, json, method) for url in self.server_urls])
+        results = await asyncio.gather(
+            *[self._call_server(url, endpoint, json, method, params) for url in self.server_urls]
+        )
         return {url: resp for url, resp in results}
 
     async def pause(self, mode: Union[PauseMode, str] = PauseMode.KEEP) -> Dict[str, Any]:
