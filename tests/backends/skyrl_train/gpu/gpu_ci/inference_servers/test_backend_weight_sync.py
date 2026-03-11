@@ -12,27 +12,13 @@ Run:
         tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_backend_weight_sync.py -v -s
 """
 
-import os
 import time
 from unittest import mock
 
 import httpx
 import pytest
-import ray
-from functools import lru_cache
-from loguru import logger
-
-from skyrl.train.utils.utils import peer_access_supported
-from skyrl.env_vars import SKYRL_PYTHONPATH_EXPORT
-
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-
-
-@lru_cache(5)
-def log_once(msg):
-    logger.info(msg)
-    return None
 
 
 def wait_for_url(url: str, timeout: float = 180.0) -> bool:
@@ -48,49 +34,11 @@ def wait_for_url(url: str, timeout: float = 180.0) -> bool:
     return False
 
 
-@pytest.fixture(scope="class")
-def ray_env_with_new_inference():
-    """Ray init fixture with _SKYRL_USE_NEW_INFERENCE=1 in runtime env."""
-    if ray.is_initialized():
-        ray.shutdown()
-
-    env_vars = {
-        "VLLM_USE_V1": "1",
-        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
-        "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
-        "_SKYRL_USE_NEW_INFERENCE": "1",
-        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-        "NVTE_FUSED_ATTN": "0",
-    }
-
-    if not peer_access_supported(max_num_gpus_per_node=2):
-        log_once("Disabling NCCL P2P for CI environment")
-        env_vars.update(
-            {
-                "NCCL_P2P_DISABLE": "1",
-                "NCCL_SHM_DISABLE": "1",
-            }
-        )
-
-    if SKYRL_PYTHONPATH_EXPORT:
-        pythonpath = os.environ.get("PYTHONPATH")
-        if pythonpath is None:
-            raise RuntimeError("SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment")
-        env_vars["PYTHONPATH"] = pythonpath
-
-    logger.info(f"Initializing Ray with environment variables: {env_vars}")
-    ray.init(runtime_env={"env_vars": env_vars})
-
-    yield
-
-    ray.shutdown()
-
-
 @pytest.mark.asyncio(loop_scope="class")
 class TestBackendWeightSync:
     """Test weight sync through SkyRLTrainBackend with new inference path (non-colocated)."""
 
-    async def test_backend_weight_sync_non_colocated(self, ray_env_with_new_inference):
+    async def test_backend_weight_sync_non_colocated(self, ray_init_fixture):
         """
         End-to-end non-colocated weight sync test via SkyRLTrainBackend:
 
