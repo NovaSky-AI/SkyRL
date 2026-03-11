@@ -328,7 +328,7 @@ class RemoteInferenceClient:
             "seed": sampling_params.get("seed"),
             "top_k": sampling_params.get("top_k", -1),
             "top_p": sampling_params.get("top_p", 1.0),
-            "prompt_logprobs": topk_prompt_logprobs if prompt_logprobs else 0,
+            "prompt_logprobs": max(topk_prompt_logprobs, 1) if prompt_logprobs else 0,
             "logprobs": 0,  # response logprobs
         }
         if sampling_params.get("stop_strings"):
@@ -376,11 +376,39 @@ class RemoteInferenceClient:
                 }
             )
 
+        # Transform prompt_logprobs from vLLM format to Tinker SampleResponse format
+        transformed_prompt_logprobs = None
+        transformed_topk_prompt_logprobs = None
+        # raw_prompt_logprobs: VLLM type list[dict[int, Logprob]] | None
+        raw_prompt_logprobs = result.get("prompt_logprobs") if prompt_logprobs else None
+
+        if raw_prompt_logprobs is not None:
+            # prompt_logprobs: single float per token (logprob of the actual prompt token)
+            transformed_prompt_logprobs = []
+            for i, pos in enumerate(raw_prompt_logprobs):
+                if pos is None:
+                    transformed_prompt_logprobs.append(None)
+                else:
+                    token_key = str(prompt_token_ids[i])
+                    entry = pos.get(token_key)
+                    transformed_prompt_logprobs.append(entry["logprob"] if entry is not None else None)
+
+            # topk_prompt_logprobs: list of (token_id, logprob) tuples per position
+            if topk_prompt_logprobs > 0:
+                transformed_topk_prompt_logprobs = []
+                for pos in raw_prompt_logprobs:
+                    if pos is None:
+                        transformed_topk_prompt_logprobs.append(None)
+                    else:
+                        transformed_topk_prompt_logprobs.append(
+                            [(int(tid), info["logprob"]) for tid, info in pos.items()]
+                        )
+
         return {
             "type": "sample",
             "sequences": sequences,
-            "prompt_logprobs": None,
-            "topk_prompt_logprobs": None,
+            "prompt_logprobs": transformed_prompt_logprobs,
+            "topk_prompt_logprobs": transformed_topk_prompt_logprobs,
         }
 
     async def chat_completion(
