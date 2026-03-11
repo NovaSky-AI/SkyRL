@@ -43,7 +43,7 @@ num_nodes: 1
 
 workdir:
   url: https://github.com/fleet-ai/SkyRL.git
-  ref: feat/qwen3.5-9b-tool-use
+  ref: main
 
 envs:
   WANDB_API_KEY: ""
@@ -137,7 +137,7 @@ setup: |
   echo "export PATH=$CUDA_HOME/bin:\$PATH" >> "$HOME/.cuda_env"
   uv pip install wandb boto3 awscli
 
-  uv pip install "litellm>=1.75.5" "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet-logfire" fleet-python logfire "mcp>=1.0.0"
+  uv pip install "litellm>=1.75.5" "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python logfire "mcp>=1.0.0"
 
   mkdir -p /workspace/data/fleet
   TASKS_FILE="/workspace/data/fleet/tasks_${MODALITY}.json"
@@ -210,7 +210,7 @@ run: |
     generator.inference_engine_tensor_parallel_size=1 \
     trainer.epochs=${NUM_EPOCHS} \
     trainer.eval_batch_size=12 \
-    trainer.eval_before_train=false \
+    trainer.eval_before_train=true \
     trainer.eval_interval=20 \
     trainer.update_epochs_per_batch=1 \
     trainer.train_batch_size=24 \

@@ -96,8 +96,8 @@ MAX_ENV_TRAIN_RATIO = 0.20
 
 # Maximum total eval prompts across all environments (v0.3.2)
 # With eval_n_samples_per_prompt=3 and 30s per trajectory:
-# 60 prompts × 3 samples = 180 trajectories ≈ 90 minutes per eval
-MAX_EVAL_PROMPTS = 60
+# 96 prompts × 3 samples = 288 trajectories (~8 tasks/env × 12 envs)
+MAX_EVAL_PROMPTS = 96
 
 
 def load_tasks_from_json(json_path: str) -> List[Dict[str, Any]]:
@@ -372,8 +372,8 @@ def prepare_fleet_dataset(
         for record in eval_records:
             eval_by_env[record.get("data_source", "unknown")].append(record)
 
-        # Take min(4, available) from each env, then distribute remaining quota proportionally
-        min_per_env = 4
+        # Take min(8, available) from each env, then distribute remaining quota proportionally
+        min_per_env = 8
         capped_eval_records = []
 
         for env_key, records in eval_by_env.items():
