@@ -8,19 +8,22 @@ uv run --isolated --extra dev pytest tests/backends/skyrl_train/inference_engine
 
 import asyncio
 import random
-from copy import deepcopy
 from http import HTTPStatus
 from unittest.mock import patch
 
-from skyrl.backends.skyrl_train.inference_engines.utils import (
-    postprocess_completion_request,
-    route_prompts_to_engines,
-    hash_with_sha256,
+import pytest
+
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    hash_with_sha256,
+    postprocess_completion_request,
+    route_prompts_to_engines,
+)
 from skyrl.train.config import (
     GeneratorConfig,
     InferenceEngineConfig,
@@ -29,9 +32,6 @@ from skyrl.train.config import (
     SkyRLTrainConfig,
     TrainerConfig,
 )
-import asyncio
-import pytest
-import random
 
 # -------------------------------------------
 # tests for postprocess_completion_request
