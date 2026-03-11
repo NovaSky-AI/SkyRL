@@ -9735,7 +9735,7 @@ requires-dist = [
     { name = "skyrl", extras = ["skyrl-train"], marker = "extra == 'fsdp'" },
     { name = "skyrl", extras = ["skyrl-train"], marker = "extra == 'megatron'" },
     { name = "skyrl", extras = ["skyrl-train"], marker = "extra == 'miniswe'" },
-    { name = "skyrl-gym", marker = "extra == 'skyrl-train'", editable = "skyrl-gym" },
+    { name = "skyrl-gym", marker = "extra == 'skyrl-train'", specifier = "==0.2.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'tinker'" },
     { name = "sqlmodel", marker = "extra == 'tinker'" },
     { name = "tensorboard", marker = "extra == 'skyrl-train'" },
@@ -9767,24 +9767,18 @@ provides-extras = ["gpu", "tpu", "tinker", "aws", "gcp", "azure", "jax", "skyrl-
 
 [[package]]
 name = "skyrl-gym"
-version = "0.1.1"
-source = { editable = "skyrl-gym" }
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "func-timeout" },
     { name = "omegaconf" },
     { name = "pandas" },
     { name = "requests" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "func-timeout" },
-    { name = "omegaconf" },
-    { name = "pandas" },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "requests" },
+sdist = { url = "https://files.pythonhosted.org/packages/86/7f/e972274029b6296e683e6a457eeb93450f9335243237e965ab23d8c5d6be/skyrl_gym-0.2.0.tar.gz", hash = "sha256:4fe42af90b8736fc53855d7d4c6191c7e98ad75369fbe25b477b747987d151e9", size = 36416, upload-time = "2026-03-11T00:33:52.311Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3c/1e/eb4ff79d7d32f89faf81cc8d8886f665697f28bb9425fb36a309f5d52172/skyrl_gym-0.2.0-py3-none-any.whl", hash = "sha256:fd0be4777234b660e527a5740c267c7fe24a5793873d4e8486831b1f34a9258e", size = 38033, upload-time = "2026-03-11T00:33:53.497Z" },
 ]
-provides-extras = ["dev"]
 
 [[package]]
 name = "smmap"
