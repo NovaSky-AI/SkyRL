@@ -9,7 +9,6 @@ uv run --isolated --extra dev pytest tests/backends/skyrl_train/inference_engine
 from http import HTTPStatus
 from unittest.mock import patch
 
-from transformers import AutoTokenizer
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     postprocess_completion_request,
     route_prompts_to_engines,
@@ -19,7 +18,6 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_e
     ErrorResponse,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
 from skyrl.train.config import (
     SkyRLTrainConfig,
     GeneratorConfig,
