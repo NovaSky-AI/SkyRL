@@ -713,7 +713,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg: PlacementGroup | None, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainConfig, colocate_pg: SkyRLPlacementGroup | None, tokenizer: PreTrainedTokenizerBase
 ):
     engine_kwargs = {
         "num_inference_engines": cfg.generator.inference_engine.num_engines,
