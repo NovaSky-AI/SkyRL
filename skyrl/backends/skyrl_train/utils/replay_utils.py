@@ -130,12 +130,12 @@ def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
     from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
     from megatron.core.transformer.transformer_block import get_num_layers_to_build
 
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
 
     if get_num_layers_to_build is not None:
         return get_transformer_layer_offset(model_config), get_num_layers_to_build(model_config, pp_rank=pp_rank)
 
     pp_size = mpu.get_pipeline_model_parallel_world_size()
-    pp_rank = mpu.get_pipeline_model_parallel_rank()
 
     total_layers = model_config.num_layers
     first_stage_layers = getattr(model_config, "num_layers_in_first_pipeline_stage", None)
@@ -222,6 +222,7 @@ def setup_per_microbatch_replay_forward(
     global_num_layers_in_data = len(per_layer_data)
     instances = RouterReplay.global_router_replay_instances
     num_instances = len(instances)
+
     local_layer_offset, local_num_layers = _get_current_pp_stage_layer_range(model_config)
 
     if local_num_layers == num_instances:
@@ -231,12 +232,12 @@ def setup_per_microbatch_replay_forward(
         # Dense-layer mismatch: map each MoE router to its global layer index.
         # Prefer the patched layer_number; fall back to offset-based mapping
         # (assumes dense layers precede MoE layers).
-        for i, router_instance in enumerate(instances):
+        for local_router_idx, router_instance in enumerate(instances):
             layer_number = getattr(router_instance, "layer_number", None)
             if layer_number is not None:
                 layer_idx = layer_number - 1  # layer_number is 1-based
             else:
-                layer_idx = local_layer_offset + i
+                layer_idx = local_layer_offset + local_router_idx
             if layer_idx < 0 or layer_idx >= global_num_layers_in_data:
                 raise ValueError(
                     f"Router replay layer index {layer_idx} out of range "
