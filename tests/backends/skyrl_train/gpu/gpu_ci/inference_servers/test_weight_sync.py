@@ -15,17 +15,12 @@ Run:
 
 import base64
 import pickle
-import argparse
-import time
 
 import httpx
 import pytest
 import pytest_asyncio
 import ray
 import torch
-
-import pytest_asyncio
-from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
@@ -33,15 +28,9 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     get_node_ip,
     get_open_port,
 )
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-    RemoteInferenceClient,
-)
-from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
-from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcInitInfo
 from skyrl.train.config import SkyRLTrainConfig
-
+from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 

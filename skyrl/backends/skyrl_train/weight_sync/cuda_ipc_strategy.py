@@ -7,8 +7,18 @@ from training workers to inference engines using CUDA IPC handles.
 import base64
 import copy
 import pickle
-from dataclasses import dataclass, asdict
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+from dataclasses import asdict, dataclass
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+)
 
 if TYPE_CHECKING:
     from skyrl.train.config import InferenceEngineConfig
@@ -16,9 +26,9 @@ if TYPE_CHECKING:
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
 
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.train.utils.utils import get_physical_gpu_id, str_to_torch_dtype
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
@@ -26,6 +36,7 @@ from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightTransferSender,
     WeightTransferStrategy,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.utils.utils import get_physical_gpu_id, str_to_torch_dtype
 
 # IPC handle type: (rebuild_func, args) returned by reduce_tensor

@@ -1,7 +1,7 @@
 from argparse import Namespace
 
-from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 
 
 # TODO: Add a test for validation
