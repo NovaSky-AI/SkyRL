@@ -12,7 +12,7 @@ import tempfile
 import ray
 import torch
 from pydantic import BaseModel
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.backend import AbstractBackend
@@ -28,7 +28,11 @@ from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
-from skyrl.train.utils.utils import SkyRLPlacementGroup, get_ray_pg_ready_with_timeout, initialize_ray
+from skyrl.train.utils.utils import (
+    SkyRLPlacementGroup,
+    get_ray_pg_ready_with_timeout,
+    initialize_ray,
+)
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 

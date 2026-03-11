@@ -12,7 +12,11 @@ from ray.util.placement_group import placement_group
 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.utils import SkyRLPlacementGroup, get_ray_pg_ready_with_timeout, validate_cfg
+from skyrl.train.utils.utils import (
+    SkyRLPlacementGroup,
+    get_ray_pg_ready_with_timeout,
+    validate_cfg,
+)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 

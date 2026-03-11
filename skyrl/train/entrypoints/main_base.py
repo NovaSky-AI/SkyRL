@@ -11,7 +11,7 @@ from typing import Optional
 
 import ray
 from loguru import logger
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
 from transformers import PreTrainedTokenizerBase
 
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
@@ -29,7 +29,11 @@ from skyrl.train.generators.base import GeneratorInterface
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.tracking import Tracking
-from skyrl.train.utils.utils import SkyRLPlacementGroup, get_ray_pg_ready_with_timeout, initialize_ray
+from skyrl.train.utils.utils import (
+    SkyRLPlacementGroup,
+    get_ray_pg_ready_with_timeout,
+    initialize_ray,
+)
 from skyrl.utils.tok import get_tokenizer
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.

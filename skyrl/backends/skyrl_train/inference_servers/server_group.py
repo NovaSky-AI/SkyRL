@@ -161,8 +161,11 @@ class ServerGroup:
             ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
 
             server_kwargs = self._server_actor_cls.prepare_server_kwargs(
-                pg, start_bundle_idx, self._num_gpus_per_server,
-                _bundle_indices=bundle_indices, **self._server_actor_kwargs
+                pg,
+                start_bundle_idx,
+                self._num_gpus_per_server,
+                _bundle_indices=bundle_indices,
+                **self._server_actor_kwargs,
             )
 
             actor = ServerActorClass.remote(

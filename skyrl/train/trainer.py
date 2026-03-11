@@ -76,9 +76,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
-from skyrl.train.utils.utils import configure_ray_worker_logging
-
-from skyrl.train.utils.utils import SkyRLPlacementGroup
+from skyrl.train.utils.utils import SkyRLPlacementGroup, configure_ray_worker_logging
 
 
 class RayPPOTrainer:

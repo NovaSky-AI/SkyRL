@@ -22,7 +22,6 @@ import ray
 import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from skyrl.train.utils.utils import SkyRLPlacementGroup
 from transformers import AutoModelForCausalLM
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
@@ -35,6 +34,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo
+from skyrl.train.utils.utils import SkyRLPlacementGroup
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
