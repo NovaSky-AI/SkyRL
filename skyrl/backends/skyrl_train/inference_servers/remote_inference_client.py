@@ -452,9 +452,9 @@ class RemoteInferenceClient:
         """Resume generation on all backends."""
         return await self._call_all_servers("/resume")
 
-    async def pause_generation(self) -> Dict[str, Any]:
+    async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
         """Pause using keep mode - compatibility with InferenceEngineClient interface."""
-        return await self.pause(mode=PauseMode.KEEP)
+        return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
 
     async def resume_generation(self) -> Dict[str, Any]:
         """Resume after pause - compatibility with InferenceEngineClient interface."""
