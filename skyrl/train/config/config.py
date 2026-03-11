@@ -464,6 +464,10 @@ class InferenceEngineConfig(BaseConfig):
     served_model_name: Optional[str] = None
     """Model name for HTTP endpoint validation. If set, must be used in the ``model`` field of
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""
+    distributed_executor_backend: str = "ray"
+    """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
+    or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 
+    placement groups are created when ``"mp"`` is used."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     override_existing_update_group: str = "auto"
