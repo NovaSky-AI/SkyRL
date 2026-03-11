@@ -159,8 +159,9 @@ async def test_gpu_state_tracking_accuracy(ray_init_fixture):
     cfg = get_test_config()
 
     try:
-        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = SkyRLPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
         ref_group = init_colocated_actor_group(RefWorker, pg, cfg)
@@ -218,8 +219,9 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
     cfg = get_test_config()
 
     try:
-        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = SkyRLPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
         critic_group = init_colocated_actor_group(CriticWorker, pg, cfg)
@@ -306,8 +308,9 @@ async def test_dispatch_set_lr(ray_init_fixture, strategy):
 
     try:
         # Create placement group and policy actor
-        pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = SkyRLPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(import_worker(strategy, "policy"), pg, cfg)
         ray.get(policy_group.async_init_model(MODEL_NAME))
