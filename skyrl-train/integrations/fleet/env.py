@@ -71,6 +71,29 @@ def load_tasks_from_json(tasks_file: str) -> Dict[str, Any]:
     return _TASK_CACHE[tasks_file]
 
 
+def _try_parse_json(raw: str) -> Optional[Dict[str, Any]]:
+    """Try to parse JSON, repairing missing trailing braces if needed."""
+    raw = raw.strip()
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Repair: models often drop trailing closing braces on nested JSON.
+    # Try appending up to 3 closing braces.
+    for extra in range(1, 4):
+        try:
+            parsed = json.loads(raw + "}" * extra)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    return None
+
+
 def parse_tool_call(action: str) -> Optional[Dict[str, Any]]:
     """
     Parse tool call from LLM response.
@@ -93,20 +116,14 @@ def parse_tool_call(action: str) -> Optional[Dict[str, Any]]:
             # Match from opening tag to end of string or next special token
             match = re.search(rf"<{tag}>(.*?)(?:<\||\Z)", action, re.DOTALL)
         if match:
-            try:
-                parsed = json.loads(match.group(1).strip())
-                # json.loads can return any JSON type, we need a dict
-                if not isinstance(parsed, dict):
-                    continue
-                # Normalize keys
-                name = parsed.get("name") or parsed.get("tool")
-                args = parsed.get("arguments") or parsed.get("params", {})
-                if name:
-                    return {"name": name, "arguments": args}
-            except (json.JSONDecodeError, ValueError):
-                # ValueError catches Python's integer string conversion limit
-                # (e.g., model generates 8000+ digit numbers)
-                pass
+            parsed = _try_parse_json(match.group(1))
+            if parsed is None:
+                continue
+            # Normalize keys
+            name = parsed.get("name") or parsed.get("tool")
+            args = parsed.get("arguments") or parsed.get("params", {})
+            if name:
+                return {"name": name, "arguments": args}
 
     return None
 
@@ -176,6 +193,9 @@ class FleetTaskEnv(BaseTextEnv):
         # TTL for Fleet environment instances
         self.ttl_seconds = env_config.get("ttl_seconds", None)  # None = auto (CUA: 1800s, tool_use: 600s)
 
+        # Partial reward: use verifier accumulator counts instead of binary 0/1
+        self.partial_reward = env_config.get("partial_reward", False)
+
         # Environment state (initialized on init())
         self.openenv_task_env: Optional[OpenEnvFleetTaskEnv] = None
         self.chat_history: ConversationType = []
@@ -228,6 +248,7 @@ class FleetTaskEnv(BaseTextEnv):
                 api_key=self.api_key,
                 ttl_seconds=self.ttl_seconds,
                 max_steps=self.max_turns,
+                partial_reward=self.partial_reward,
             )
         except Exception as e:
             raise RuntimeError(f"Failed to create OpenEnv FleetTaskEnv: {e}") from e

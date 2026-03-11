@@ -20,3 +20,4 @@ fleet_task:
   api_key: null  # Fleet API key (defaults to FLEET_API_KEY env var)
   ttl_seconds: 900  # TTL for Fleet environment instances (15 min headroom for retries)
   enable_context_tools: false  # Enable context management tools (check_context, manage_context, etc.)
+  partial_reward: false  # Compute partial scores from verifier accumulators instead of binary 0/1
