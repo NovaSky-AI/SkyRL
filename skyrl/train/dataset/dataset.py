@@ -61,7 +61,7 @@ class PromptDataset:
         self.dataframe = self.dataframe.filter(
             lambda doc: len(
                 tokenizer.apply_chat_template(
-                    doc[prompt_key], add_generation_prompt=True, return_dict=False, tokenize=True
+                    doc[prompt_key], add_generation_prompt=True, return_dict=False, return_dict=False, tokenize=True
                 )
             )
             <= self.max_prompt_length,
