@@ -353,7 +353,7 @@ class RemoteInferenceClient:
             result = await resp.json()
             raise_for_status(resp, result)
 
-        # Transform response choices -> SampleResponse dict
+        # Transform response choices -> tinker type SampleResponse dict
         sequences = []
         for choice in result["choices"]:
             raw_stop = choice.get("finish_reason", "length")
@@ -367,7 +367,7 @@ class RemoteInferenceClient:
                 logprobs_content = lp.get("content", [])
                 if logprobs_content:
                     logprobs = [info["logprob"] if info["logprob"] is not None else 0.0 for info in logprobs_content]
-
+            # Convert to tinker type SampledSequence dict
             sequences.append(
                 {
                     "stop_reason": stop_reason,
