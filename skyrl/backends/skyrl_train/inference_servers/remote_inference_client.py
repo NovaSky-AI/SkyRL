@@ -422,7 +422,7 @@ class RemoteInferenceClient:
         )
         return {url: resp for url, resp in results}
 
-    async def pause(self, mode: Union[PauseMode, str] = PauseMode.KEEP) -> Dict[str, Any]:
+    async def pause(self, mode: Union[PauseMode, str] = PauseMode.KEEP, clear_cache: bool = False) -> Dict[str, Any]:
         """
         Pause generation on all backends.
 
@@ -436,6 +436,7 @@ class RemoteInferenceClient:
                     receive partial tokens and must retry with accumulated context.
                 - WAIT / "wait": Wait for in-flight requests to complete before
                     pausing. New requests are blocked. No retry needed.
+            clear_cache: Whether to clear the KV cache on pause. Defaults to False.
 
         Returns:
             Dict mapping server_url to response.
@@ -443,9 +444,7 @@ class RemoteInferenceClient:
         if isinstance(mode, str):
             mode = PauseMode(mode.lower())
 
-        params: Dict[str, Any] = {"mode": mode.value}
-        if mode == PauseMode.KEEP:
-            params["clear_cache"] = "false"
+        params: Dict[str, Any] = {"mode": mode.value, "clear_cache": clear_cache}
 
         return await self._call_all_servers("/pause", params=params)
 

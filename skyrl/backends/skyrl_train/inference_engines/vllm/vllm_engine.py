@@ -612,10 +612,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
 
-    async def pause_generation(self) -> None:
+    async def pause_generation(self, clear_cache: bool = False) -> None:
         """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
         engine = self._get_engine()
-        await engine.pause_generation(mode="keep", clear_cache=False)
+        await engine.pause_generation(mode="keep", clear_cache=clear_cache)
         logger.info("pause_generation(mode='keep') finished")
 
     async def resume_generation(self) -> None:

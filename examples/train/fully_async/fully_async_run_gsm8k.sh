@@ -16,8 +16,8 @@ set -x
 # You can override the default values with e.g.: `NUM_GPUS=1 bash examples/train/fully_async/fully_async_run_gsm8k.sh`.
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
-: "${NUM_INFERENCE_GPUS:=4}"
-: "${NUM_POLICY_GPUS:=4}"
+: "${NUM_INFERENCE_GPUS:=2}"
+: "${NUM_POLICY_GPUS:=2}"
 : "${LOGGER:=wandb}" # change to "console" to print to stdout / or use wandb
 
 : "${INFERENCE_BACKEND:=vllm}"
@@ -69,11 +69,11 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   generator.batched=false \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.inference_engine.gpu_memory_utilization=0.6 \
+  generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k-async" \
   trainer.run_name=${RUN_NAME} \
-  trainer.resume_mode=none \
+  trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/ckpts/${RUN_NAME}" \
   generator.inference_engine.enforce_eager=true \
   $@
