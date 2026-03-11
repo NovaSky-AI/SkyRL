@@ -3,11 +3,11 @@ set -x
 # Colocated DAPO training+generation for Qwen3-30B-A3B-Base on DAPO with Megatron.
 # Should run on 2 node of 8xH100s
 
-# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/train/algorithms/dapo/run_dapo_qwen3_30b_a3b_megatron_aime.sh
+# bash examples/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/algorithms/dapo/run_dapo_qwen3_30b_a3b_megatron_aime.sh
 
 MODEL_NAME="Qwen/Qwen3-30B-A3B-Base"
-DATA_DIR="/mnt/cluster_storage/data/dapo"
+DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_NODES=2
@@ -45,7 +45,7 @@ LR=1e-6
 
 # megatron config
 MEGATRON_TP=4
-MEGATRON_PP=2
+MEGATRON_PP=1
 MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
@@ -55,10 +55,7 @@ MEGATRON_ETP=1
 TIS_IMP_RATIO_CAP=2.0
 USE_TIS=true
 
-SKYRL_LD_LIBRARY_PATH_EXPORT=1
-LD_LIBRARY_PATH=/opt/amazon/efa/lib:$LD_LIBRARY_PATH
-
-SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
+uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -117,11 +114,11 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron -m examples.tra
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="router_replay" \
-  trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_baseline_train_02-27" \
-  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_02-27" \
+  trainer.project_name="dapo_aime" \
+  trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
+  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_02-27" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   $@
