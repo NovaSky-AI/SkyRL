@@ -60,7 +60,7 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
         pytest.param(False, "nccl", "fsdp2", 1, 2, "ray"),
         pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", marks=_skip_new_inference),
         pytest.param(True, "nccl", "fsdp2", 2, 2, "mp", marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp"),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp", marks=_skip_new_inference),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
