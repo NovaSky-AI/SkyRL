@@ -293,49 +293,95 @@ class RemoteInferenceClient:
             "response_logprobs": response_logprobs if len(response_logprobs) > 0 else None,
         }
 
-    async def sample(
-        self,
-        prompt_token_ids: List[int],
-        num_samples: int,
-        sampling_params: Dict[str, Union[str, int, float, bool, List, Dict]],
-        session_id: Optional[Union[str, int]] = None,
-        lora_id: Optional[int] = None,
-    ) -> InferenceEngineOutput:
-        """
-        Generate multiple independent samples for the same prompt.
+    async def sample(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Sample completions via /inference/v1/generate.
 
-        Fires num_samples parallel calls to _generate_single with the same
-        prompt_token_ids and sampling_params, then aggregates into a single
-        InferenceEngineOutput.
+        Single request with n in sampling_params. No retry-on-abort.
 
         Args:
-            prompt_token_ids: Token IDs for the prompt.
-            num_samples: Number of independent samples to generate.
-            sampling_params: Sampling parameters for generation.
-            session_id: Optional session ID for consistent routing via X-Session-ID header.
+            request_payload: {"json": {...}, "headers": {...}}
+                json body matches Tinker SamplingClient.sample() args:
+                prompt (ModelInput), num_samples, sampling_params (SamplingParams),
+                include_prompt_logprobs, topk_prompt_logprobs.
+                session_id is optional for routing.
 
         Returns:
-            InferenceEngineOutput with num_samples responses.
+            Dict matching Tinker SampleResponse schema.
         """
-        get_logprobs = sampling_params.get("logprobs") is not None
+        body = request_payload.get("json", {})
+        session_id = body.pop("session_id", None)
 
-        tasks = [
-            self._generate_single(
-                prompt_token_ids=prompt_token_ids,
-                sampling_params=sampling_params,
-                session_id=session_id,
+        # Tinker input fields
+        prompt = body.get("prompt", {})  # ModelInput dict: {"chunks": [{"tokens": [...]}]}
+        num_samples = body.get("num_samples", 1)
+        sampling_params = body.get("sampling_params", {})
+        prompt_logprobs = body.get("prompt_logprobs", False)
+        topk_prompt_logprobs = body.get("topk_prompt_logprobs", 0)
+
+        prompt_token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]
+
+        # Tinker types.py SamplingParams -> vLLM /inference/v1/generate sampling_params
+        vllm_sampling_params = {
+            "n": num_samples,
+            "temperature": sampling_params.get("temperature"),
+            "max_tokens": sampling_params.get("max_tokens"),
+            "seed": sampling_params.get("seed"),
+            "top_k": sampling_params.get("top_k", -1),
+            "top_p": sampling_params.get("top_p", 1.0),
+            "prompt_logprobs": topk_prompt_logprobs if prompt_logprobs else 0,
+            "logprobs": 0,  # response logprobs
+        }
+        if sampling_params.get("stop_strings"):
+            vllm_sampling_params["stop"] = sampling_params["stop_strings"]
+        if sampling_params.get("stop_tokens"):
+            vllm_sampling_params["stop_token_ids"] = sampling_params["stop_tokens"]
+
+        payload = {
+            "sampling_params": vllm_sampling_params,
+            "model": self.model_name,
+            "token_ids": prompt_token_ids,
+        }
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        session = await self._get_session()
+        url = f"{self.proxy_url}/inference/v1/generate"
+
+        async with session.post(url, json=payload, headers=headers) as resp:
+            result = await resp.json()
+            raise_for_status(resp, result)
+
+        # Transform response choices -> SampleResponse dict
+        sequences = []
+        for choice in result["choices"]:
+            raw_stop = choice.get("finish_reason", "length")
+            stop_reason = "stop" if raw_stop in ("stop", "stop_token") else "length"
+
+            token_ids = choice.get("token_ids", [])
+
+            logprobs = None
+            lp = choice.get("logprobs")
+            if lp is not None:
+                logprobs_content = lp.get("content", [])
+                if logprobs_content:
+                    logprobs = [info["logprob"] if info["logprob"] is not None else 0.0 for info in logprobs_content]
+
+            sequences.append(
+                {
+                    "stop_reason": stop_reason,
+                    "tokens": token_ids,
+                    "logprobs": logprobs,
+                }
             )
-            for _ in range(num_samples)
-        ]
 
-        results = await asyncio.gather(*tasks)
-
-        return InferenceEngineOutput(
-            responses=[r["response"] for r in results],
-            stop_reasons=[r["stop_reason"] for r in results],
-            response_ids=[r["response_ids"] for r in results],
-            response_logprobs=[r["response_logprobs"] for r in results] if get_logprobs else None,
-        )
+        return {
+            "type": "sample",
+            "sequences": sequences,
+            "prompt_logprobs": None,
+            "topk_prompt_logprobs": None,
+        }
 
     async def chat_completion(
         self,

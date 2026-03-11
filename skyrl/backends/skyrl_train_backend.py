@@ -604,28 +604,43 @@ class SkyRLTrainBackend(AbstractBackend):
                 prompt = prepared_batch.all_prompts[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
-                # Pass through common fields; only stop needs name translation
-                # (Tinker uses stop_strings/stop_tokens, vLLM uses stop/stop_token_ids)
-                params_dict = {
-                    "temperature": sampling_params.temperature,
-                    "max_tokens": sampling_params.max_tokens,
-                    "seed": sampling_params.seed,
-                    "top_k": sampling_params.top_k,
-                    "top_p": sampling_params.top_p,
-                    "logprobs": 0,
-                }
-                if sampling_params.stop_strings:
-                    params_dict["stop"] = sampling_params.stop_strings
-                if sampling_params.stop_tokens:
-                    params_dict["stop_token_ids"] = sampling_params.stop_tokens
+                if _SKYRL_USE_NEW_INFERENCE:
+                    # Right now, prompt is list[int] (token IDs), so we wrap in ModelInput format
+                    json_body = {
+                        "prompt": {"chunks": [{"tokens": prompt}]},
+                        "num_samples": 1,  # Tinker batches multiple samples separately
+                        "sampling_params": {
+                            "temperature": sampling_params.temperature,
+                            "max_tokens": sampling_params.max_tokens,
+                            "seed": sampling_params.seed,
+                            "top_k": sampling_params.top_k,
+                            "top_p": sampling_params.top_p,
+                            "stop_tokens": sampling_params.stop_tokens,
+                            "stop_strings": sampling_params.stop_strings,
+                        },
+                    }
+                    tasks.append(self._inference_engine_client.sample({"json": json_body, "headers": {}}))
+                else:
+                    params_dict = {
+                        "temperature": sampling_params.temperature,
+                        "max_tokens": sampling_params.max_tokens,
+                        "seed": sampling_params.seed,
+                        "top_k": sampling_params.top_k,
+                        "top_p": sampling_params.top_p,
+                        "logprobs": 0,
+                    }
+                    if sampling_params.stop_strings:
+                        params_dict["stop"] = sampling_params.stop_strings
+                    if sampling_params.stop_tokens:
+                        params_dict["stop_token_ids"] = sampling_params.stop_tokens
 
-                tasks.append(
-                    self._inference_engine_client.sample(
-                        prompt_token_ids=prompt,
-                        num_samples=1,  # Tinker batches multiple samples separately
-                        sampling_params=params_dict,
+                    tasks.append(
+                        self._inference_engine_client.sample(
+                            prompt_token_ids=prompt,
+                            num_samples=1,  # Tinker batches multiple samples separately
+                            sampling_params=params_dict,
+                        )
                     )
-                )
 
             return await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -636,14 +651,25 @@ class SkyRLTrainBackend(AbstractBackend):
         # We preserve these to include error messages in responses
 
         # 4. Aggregate results by request
-        return self._aggregate_sample_results(prepared_batch, sample_outputs)
+        return self._aggregate_sample_results(
+            prepared_batch, sample_outputs, use_new_inference=_SKYRL_USE_NEW_INFERENCE
+        )
 
     def _aggregate_sample_results(
         self,
         prepared_batch: types.PreparedSampleBatch,
         sample_outputs: list,
+        use_new_inference: bool = False,
     ) -> dict[str, types.SampleOutput | types.ErrorResponse]:
-        """Convert InferenceEngineClient outputs to Tinker format."""
+        """Convert inference outputs to Tinker format.
+
+        Args:
+            prepared_batch: The prepared sample batch.
+            sample_outputs: List of outputs from inference client.
+            use_new_inference: If True, outputs are SampleResponse dicts from
+                RemoteInferenceClient. If False, outputs are InferenceEngineOutput
+                dicts from InferenceEngineClient.
+        """
         results = {}
 
         for request_id, model_id, start_idx, end_idx, needs_prompt_logprobs in prepared_batch.request_batch_slices:
@@ -666,13 +692,18 @@ class SkyRLTrainBackend(AbstractBackend):
                     logger.error(error_msg)
                     break
 
-                # Extract tokens and logprobs
-                response_tokens = output["response_ids"][0]
-                response_logprobs = (output.get("response_logprobs") or [[]])[0]
-                stop_reason_raw = output["stop_reasons"][0]
-
-                # Map vLLM stop reason to Tinker format
-                stop_reason = "stop" if stop_reason_raw in ["stop", "stop_token"] else "length"
+                if use_new_inference:
+                    # New path: SampleResponse dict from RemoteInferenceClient
+                    seq = output["sequences"][0]
+                    response_tokens = seq["tokens"]
+                    response_logprobs = seq.get("logprobs") or []
+                    stop_reason = seq["stop_reason"]
+                else:
+                    # Old path: InferenceEngineOutput from InferenceEngineClient
+                    response_tokens = output["response_ids"][0]
+                    response_logprobs = (output.get("response_logprobs") or [[]])[0]
+                    stop_reason_raw = output["stop_reasons"][0]
+                    stop_reason = "stop" if stop_reason_raw in ["stop", "stop_token"] else "length"
 
                 # Ensure logprobs exist (critical for RL)
                 if response_logprobs is None or len(response_logprobs) == 0:
