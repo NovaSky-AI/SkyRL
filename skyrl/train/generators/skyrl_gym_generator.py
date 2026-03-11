@@ -650,6 +650,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.apply_overlong_filtering:
+            # set loss mask to 0 if the stop reason is not "stop"
             loss_masks = apply_overlong_filtering(loss_masks, stop_reasons)
 
         generator_output: GeneratorOutput = {

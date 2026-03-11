@@ -294,7 +294,9 @@ def apply_overlong_filtering(
         The loss masks with tokens zeroed out for truncated responses.
     """
     assert len(loss_masks) == len(stop_reasons), "loss_masks and stop_reasons must have the same length"
-    return [[0] * len(mask) if stop_reason != "stop" else mask for mask, stop_reason in zip(loss_masks, stop_reasons)]
+    return [
+        [0] * len(mask) if stop_reason != "stop" else mask[:] for mask, stop_reason in zip(loss_masks, stop_reasons)
+    ]
 
 
 def get_rollout_metrics(
