@@ -19,7 +19,7 @@ from skyrl.utils.log import logger
 from skyrl.train.config import SkyRLTrainConfig
 
 import ray
-from ray.util.placement_group import placement_group, PlacementGroup
+from ray.util.placement_group import placement_group
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch

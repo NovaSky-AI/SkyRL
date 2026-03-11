@@ -16,7 +16,6 @@ import torch.nn as nn
 from loguru import logger
 from ray import ObjectRef
 from ray.util.placement_group import (
-    PlacementGroup,
     PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
@@ -444,9 +443,7 @@ class PPORayActorGroup:
         # don't need reordering since each bundle already represents a full node.
         reordered_bundle_indices = []
         if pg is not None:
-            assert isinstance(pg, SkyRLPlacementGroup), (
-                f"pg must be a `SkyRLPlacementGroup` got {type(pg)}."
-            )
+            assert isinstance(pg, SkyRLPlacementGroup), f"pg must be a `SkyRLPlacementGroup` got {type(pg)}."
             if len(placement_group_table(pg.pg)["bundles"]) == world_size:
                 reordered_bundle_indices = pg.reordered_bundle_indices
             raw_pg = pg.pg

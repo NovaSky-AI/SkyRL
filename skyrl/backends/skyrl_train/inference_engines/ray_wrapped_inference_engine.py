@@ -158,9 +158,9 @@ def create_ray_wrapped_inference_engines(
         get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         shared_pg = SkyRLPlacementGroup(raw_pg)
 
-    assert isinstance(shared_pg, SkyRLPlacementGroup), (
-        f"shared_pg must be a `SkyRLPlacementGroup` got {type(shared_pg)}."
-    )
+    assert isinstance(
+        shared_pg, SkyRLPlacementGroup
+    ), f"shared_pg must be a `SkyRLPlacementGroup` got {type(shared_pg)}."
 
     # Use reordered bundle indices to ensure GPU-aware ordering.
     # Ray placement groups don't guarantee bundle order, so bundles on the same node

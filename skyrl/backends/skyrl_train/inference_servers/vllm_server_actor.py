@@ -139,9 +139,9 @@ class VLLMServerActor(ServerActorProtocol):
         # NOTE: This assumes single-GPU-per-bundle placement groups.
         if bundle_indices is None:
             bundle_indices = list(range(self._num_gpus_per_server))
-        assert len(bundle_indices) == self._num_gpus_per_server, (
-            f"Expected {self._num_gpus_per_server} bundle indices (one per GPU), got {len(bundle_indices)}"
-        )
+        assert (
+            len(bundle_indices) == self._num_gpus_per_server
+        ), f"Expected {self._num_gpus_per_server} bundle indices (one per GPU), got {len(bundle_indices)}"
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
 
