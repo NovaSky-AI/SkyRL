@@ -233,7 +233,7 @@ def create_ray_wrapped_inference_engines(
 
                 dp_rank_sched = PlacementGroupSchedulingStrategy(
                     placement_group=shared_pg,
-                    placement_group_capture_child_tasks=not use_mp_backend,
+                    placement_group_capture_child_tasks=True,
                     placement_group_bundle_index=base_dp_pg_index,
                 )
 

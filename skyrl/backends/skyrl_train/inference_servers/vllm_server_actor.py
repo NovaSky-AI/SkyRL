@@ -2,12 +2,16 @@
 vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
 import time
 from argparse import Namespace
 from typing import Optional, Tuple
+
+from ray.util.placement_group import PlacementGroup
 
 import httpx
 import uvicorn
@@ -58,6 +62,21 @@ class VLLMServerActor(ServerActorProtocol):
         vllm-specific utility for it and keep the logic inside the engine.
         """
         return vllm_cli_args.tensor_parallel_size * vllm_cli_args.pipeline_parallel_size
+
+    @staticmethod
+    def prepare_server_kwargs(
+        pg: PlacementGroup,
+        start_bundle_idx: int,
+        num_gpus_per_server: int,
+        **kwargs,
+    ) -> dict:
+        if kwargs.get("distributed_executor_backend") == "mp":
+            from skyrl.train.utils.utils import get_gpu_ids_for_pg_bundles
+
+            bundle_indices = list(range(start_bundle_idx, start_bundle_idx + num_gpus_per_server))
+            gpu_ids = get_gpu_ids_for_pg_bundles(pg, bundle_indices)
+            kwargs["mp_cuda_visible_devices"] = ",".join(str(g) for g in gpu_ids)
+        return kwargs
 
     def __init__(
         self,

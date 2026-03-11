@@ -494,7 +494,7 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
 
     if cfg.generator.inference_engine.distributed_executor_backend == "mp" and is_colocated:
         raise ValueError(
-            "the mp backend for vLLM is not yet fully supported with colocated mode for the new inference backend."
+            "the mp backend for vLLM is not yet fully supported for the new inference backend."
         )
 
 

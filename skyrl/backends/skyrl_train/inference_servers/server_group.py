@@ -35,7 +35,6 @@ class ServerGroup:
     - Colocation mode: Uses external placement group (shared with training)
     - Data Parallel: Multiple DP-enabled servers
     - PD Disaggregation: Prefill-decode disaggregation with NIXL
-    - mp backend: CUDA_VISIBLE_DEVICES targeting within a shared PG
     """
 
     def __init__(
@@ -49,7 +48,7 @@ class ServerGroup:
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
         server_actor_cls: Optional[Type[ServerActorProtocol]] = None,
-        distributed_executor_backend: str = "ray",
+        **server_actor_kwargs: Any,
     ):
         """
         Initialize the server group.
@@ -70,10 +69,7 @@ class ServerGroup:
                 server_idx.
             server_actor_cls: Server actor class implementing
                 ServerActorProtocol. Defaults to VLLMServerActor.
-            distributed_executor_backend: vLLM distributed executor backend.
-                ``"ray"`` (default) spawns TP/PP workers as Ray tasks.
-                ``"mp"`` spawns workers as local processes and sets
-                CUDA_VISIBLE_DEVICES per server.
+            **server_actor_kwargs: Additional keyword arguments to pass to the server actor class.
         """
         from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import VLLMServerActor
 
@@ -87,8 +83,7 @@ class ServerGroup:
         self._nixl_side_channel_base = nixl_side_channel_base
         self._pool: Optional[ServerActorPool] = None
         self._internal_pg: Optional[PlacementGroup] = None
-        self._distributed_executor_backend = distributed_executor_backend
-        self._use_mp_backend = distributed_executor_backend == "mp"
+        self._server_actor_kwargs = server_actor_kwargs
         self._external_pg = placement_group
 
         # Query the actor class for GPU requirements
@@ -99,7 +94,6 @@ class ServerGroup:
             f"num_servers={num_servers}, "
             f"gpus_per_server={self._num_gpus_per_server}, "
             f"enable_dp={enable_dp}, enable_pd={enable_pd}, "
-            f"distributed_executor_backend={distributed_executor_backend}, "
             f"external_pg={'yes' if self._external_pg else 'no'}"
         )
 
@@ -122,32 +116,15 @@ class ServerGroup:
 
     def _create_actor_class(self, pg: PlacementGroup, start_bundle_idx: int) -> Any:
         """Create actor class with scheduling constraints for a specific bundle."""
-        capture_child_tasks = not self._use_mp_backend
         return ray.remote(self._server_actor_cls).options(
             num_gpus=0,  # GPU allocation managed by placement group
             num_cpus=COLOCATED_ACTOR_CPU_FRACTION,
             scheduling_strategy=PlacementGroupSchedulingStrategy(
                 placement_group=pg,
-                placement_group_capture_child_tasks=capture_child_tasks,
+                placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=start_bundle_idx,
             ),
         )
-
-    def _get_cuda_visible_devices(self, pg: PlacementGroup, bundle_start: int, bundle_count: int) -> Optional[str]:
-        """Pre-compute CUDA_VISIBLE_DEVICES for a slice of bundles in a PG.
-
-        Args:
-            pg: Placement group to probe.
-            bundle_start: First bundle index (0-based within the PG).
-            bundle_count: Number of contiguous bundles for this server.
-
-        Returns a comma-separated string of physical GPU IDs.
-        """
-        from skyrl.train.utils.utils import get_gpu_ids_for_pg_bundles
-
-        bundle_indices = list(range(bundle_start, bundle_start + bundle_count))
-        gpu_ids = get_gpu_ids_for_pg_bundles(pg, bundle_indices)
-        return ",".join(str(g) for g in gpu_ids)
 
     def _create_actors(self) -> List[Any]:
         """Create server actors with GPU resources."""
@@ -156,19 +133,14 @@ class ServerGroup:
         actors = []
         dp_address, dp_rpc_port = None, None
 
-        # Pre-compute CUDA_VISIBLE_DEVICES per server for mp backend
-        mp_cuda_visible_devices_map: dict[int, Optional[str]] = {}
-        if self._use_mp_backend:
-            for server_idx in range(self._num_servers):
-                start = self._bundle_offset + server_idx * self._num_gpus_per_server
-                mp_cuda_visible_devices_map[server_idx] = self._get_cuda_visible_devices(
-                    pg, start, self._num_gpus_per_server
-                )
-
         for server_idx in range(self._num_servers):
             start_bundle_idx = self._bundle_offset + server_idx * self._num_gpus_per_server
 
             ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
+
+            server_kwargs = self._server_actor_cls.prepare_server_kwargs(
+                pg, start_bundle_idx, self._num_gpus_per_server, **self._server_actor_kwargs
+            )
 
             actor = ServerActorClass.remote(
                 self._cli_args,
@@ -181,8 +153,7 @@ class ServerGroup:
                 enable_pd=self._enable_pd,
                 nixl_side_channel_base=self._nixl_side_channel_base,
                 colocated_training=self._external_pg is not None,
-                distributed_executor_backend=self._distributed_executor_backend,
-                mp_cuda_visible_devices=mp_cuda_visible_devices_map.get(server_idx),
+                **server_kwargs,
             )
 
             # Get DP info from server 0 which is where DP0 will be
