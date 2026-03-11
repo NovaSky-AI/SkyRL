@@ -2,19 +2,18 @@
 uv run --isolated --extra dev pytest -s tests/train/test_config.py
 """
 
-import pytest
 import typing
-from typing import List
 from dataclasses import dataclass, field
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
 
-from omegaconf import OmegaConf, DictConfig
+import pytest
+from omegaconf import DictConfig, OmegaConf
 
 from skyrl.train.config.config import (
     BaseConfig,
     SkyRLTrainConfig,
-    build_nested_dataclass,
     _resolve_dataclass_type,
+    build_nested_dataclass,
 )
 from skyrl.train.config.utils import get_legacy_config
 

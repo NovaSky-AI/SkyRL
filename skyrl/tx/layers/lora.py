@@ -1,12 +1,12 @@
-from flax import nnx
 import jax
+from flax import nnx
 from jax import numpy as jnp
 
+from skyrl.tinker.types import LoraConfig
 from skyrl.tx.layers.connectors import LoRAConnector, is_connector_path
-from skyrl.tx.utils.models import filter_lora, get_adapter_idx
 from skyrl.tx.layers.util import Param, prepare_routing, ragged_dot
 from skyrl.tx.models.types import ModelForCausalLM
-from skyrl.tinker.types import LoraConfig
+from skyrl.tx.utils.models import filter_lora, get_adapter_idx
 
 
 class LoRAMixin:

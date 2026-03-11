@@ -1,31 +1,31 @@
 import ipaddress
-import os
-import time
-import sys
 import logging
 import math
+import os
 import socket
+import sys
+import time
 from datetime import datetime
+from pathlib import Path
 
 import ray
 import torch
 from loguru import logger
 from ray.util.placement_group import (
-    placement_group,
-    PlacementGroupSchedulingStrategy,
     PlacementGroup,
+    PlacementGroupSchedulingStrategy,
+    placement_group,
     placement_group_table,
 )
 
-from skyrl.train.config.config import SkyRLTrainConfig
 from skyrl.env_vars import (
-    SKYRL_LD_LIBRARY_PATH_EXPORT,
+    _SKYRL_USE_NEW_INFERENCE,
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
+    SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
-    _SKYRL_USE_NEW_INFERENCE,
 )
-from pathlib import Path
+from skyrl.train.config.config import SkyRLTrainConfig
 
 
 class Timer:
@@ -438,6 +438,20 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
             f"Got dp_size={dp_size}, tp_size={tp_size}, ep_size={ep_size}"
         )
 
+    assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
+
+    pp_size = ie_cfg.pipeline_parallel_size
+    tp_pp_size = tp_size * pp_size
+    num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
+    if (
+        cfg.trainer.placement.colocate_all
+        and tp_pp_size > num_gpus_per_node
+        and ie_cfg.distributed_executor_backend == "mp"
+    ):
+        raise ValueError(
+            "Each inference engine DP rank (TP*PP workers) must fit within a single node with the vLLM mp backend. Use the ray backend for per engine multi-node serving instead."
+        )
+
     # Validate new inference config options
     _validate_new_inference_cfg(cfg)
 
@@ -476,6 +490,11 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "between trainer and inference workers. Please either:\n"
             "  1. Set colocate_all=false to use external inference servers, or\n"
             "  2. Remove external_proxy_url and external_server_urls to build servers internally."
+        )
+
+    if cfg.generator.inference_engine.distributed_executor_backend == "mp":
+        raise ValueError(
+            "the mp backend for vLLM is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/1309. Use the ray backend instead."
         )
 
 
@@ -732,16 +751,20 @@ class InfoActor:
         return ray.get_gpu_ids()[0]
 
 
-def get_reordered_bundle_indices(pg: PlacementGroup):
+def get_reordered_bundle_indices(pg):
+    """Get reordered bundle indices for a placement group.
+
+    Probes every bundle in the PG, sorts by (node_id, gpu_id), and returns
+    a list of bundle indices in deterministic order.
+    """
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
     bundle_to_node_ids = pg_data["bundles_to_node_id"]
-    # use info actor to get the GPU id
+
     info_actors = []
     for i in range(num_bundles):
         info_actors.append(
             InfoActor.options(
-                # set both num_cpus and num_gpus to be small values to enable assignment in colocated case
                 num_cpus=0.01,
                 num_gpus=0.01,
                 resources=None,
@@ -756,12 +779,29 @@ def get_reordered_bundle_indices(pg: PlacementGroup):
     for actor in info_actors:
         ray.kill(actor)
 
-    # original index, node_id, gpu_id
     bundle_infos = [(i, bundle_to_node_ids[i], gpu_ids[i]) for i in range(num_bundles)]
-    pg_reordered_bundle_indices = [
-        bundle_info[0] for bundle_info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))
-    ]  # sort by node_id, then gpu_id
-    return pg_reordered_bundle_indices
+    return [info[0] for info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))]
+
+
+def get_gpu_ids_for_pg_bundles(pg, bundle_indices):
+    """Get the physical GPU IDs for specific bundles in a placement group."""
+    info_actors = []
+    for idx in bundle_indices:
+        info_actors.append(
+            InfoActor.options(
+                num_cpus=0.01,
+                num_gpus=0.01,
+                resources=None,
+                scheduling_strategy=PlacementGroupSchedulingStrategy(
+                    placement_group=pg,
+                    placement_group_bundle_index=idx,
+                ),
+            ).remote()
+        )
+    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in info_actors])
+    for actor in info_actors:
+        ray.kill(actor)
+    return gpu_ids
 
 
 def torch_dtype_to_str(dtype: torch.dtype) -> str:

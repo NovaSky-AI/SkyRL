@@ -9,27 +9,27 @@ import os
 import tarfile
 import tempfile
 
+import ray
 import torch
 from pydantic import BaseModel
+from ray.util.placement_group import PlacementGroup, placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from skyrl.tinker import types
 from skyrl.backends.backend import AbstractBackend
-from skyrl.utils.log import logger
-from skyrl.train.config import SkyRLTrainConfig
-
-import ray
-from ray.util.placement_group import placement_group, PlacementGroup
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl.train.config import get_config_as_yaml_str
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.tinker import types
+from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
+from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
 
@@ -222,7 +222,9 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._cfg.trainer.strategy in ("fsdp", "fsdp2"):
             from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
         elif self._cfg.trainer.strategy == "megatron":
-            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import PolicyWorker
+            from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                PolicyWorker,
+            )
         else:
             raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
 
@@ -234,13 +236,11 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Created model {model_id} using RayPPOTrainer")
 
     def _create_colocate_pg(self):
-        """Create placement group for colocated training + inference (following main_base.py pattern)."""
-        total_gpu_slots = (
-            self._cfg.generator.inference_engine.num_engines
-            * self._cfg.generator.inference_engine.tensor_parallel_size
-            * self._cfg.generator.inference_engine.pipeline_parallel_size
-            * self._cfg.generator.inference_engine.data_parallel_size
-        )
+        """Create a placement group for colocated training + inference."""
+        ie_cfg = self._cfg.generator.inference_engine
+        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+        total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+
         logger.info(f"Creating placement group with {total_gpu_slots} GPU slots for colocated training+inference")
         pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
 
@@ -737,6 +737,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "backend": cfg.generator.inference_engine.backend,
         "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
         "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
+        "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled

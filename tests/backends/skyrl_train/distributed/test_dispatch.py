@@ -2,20 +2,22 @@
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/distributed/test_dispatch.py
 """
 
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.distributed.dispatch import (
-    MeshDispatch,
-    PassThroughDispatch,
-    MeshRank,
-    ActorInfo,
-    DispatchRegistry,
-    Dispatch,
-)
+from typing import List, Optional, Union
+
+import pytest
 import ray
 import torch
-from typing import List, Optional, Union
 from ray import ObjectRef
-import pytest
+
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    ActorInfo,
+    Dispatch,
+    DispatchRegistry,
+    MeshDispatch,
+    MeshRank,
+    PassThroughDispatch,
+)
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
 
 @ray.remote

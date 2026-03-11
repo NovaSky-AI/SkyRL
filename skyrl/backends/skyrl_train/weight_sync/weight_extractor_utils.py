@@ -1,7 +1,8 @@
 """Utility functions for weight extraction."""
 
 from collections import defaultdict
-from typing import Dict, List, Callable, Iterator, Any
+from typing import Any, Callable, Dict, Iterator, List
+
 import torch
 
 from skyrl.backends.skyrl_train.weight_sync import WeightChunk

@@ -1,5 +1,6 @@
-from flax import nnx
 from functools import partial
+
+from flax import nnx
 
 
 class Mnist(nnx.Module):

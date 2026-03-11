@@ -3,32 +3,32 @@ uv run --isolated --extra dev pytest tests/train/test_trainer_utils.py
 """
 
 import copy
-
-from skyrl.train.utils.trainer_utils import (
-    run_on_each_node,
-    cleanup_old_checkpoints,
-    validate_consistency_for_latest_checkpoint,
-    sanitize_data_source,
-    calculate_per_dataset_metrics,
-    dump_per_dataset_eval_results,
-    handle_dynamic_sampling,
-    handle_replace_sampling,
-    handle_filter_sampling,
-    filter_generator_output,
-    zero_variance_filter,
-    validate_generator_output,
-    build_dataloader,
-)
-from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
-from typing import Union
-import ray
-import os
-import tempfile
-import pytest
-import re
-
-from unittest.mock import Mock, patch, mock_open
 import json
+import os
+import re
+import tempfile
+from typing import Union
+from unittest.mock import Mock, mock_open, patch
+
+import pytest
+import ray
+
+from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl.train.utils.trainer_utils import (
+    build_dataloader,
+    calculate_per_dataset_metrics,
+    cleanup_old_checkpoints,
+    dump_per_dataset_eval_results,
+    filter_generator_output,
+    handle_dynamic_sampling,
+    handle_filter_sampling,
+    handle_replace_sampling,
+    run_on_each_node,
+    sanitize_data_source,
+    validate_consistency_for_latest_checkpoint,
+    validate_generator_output,
+    zero_variance_filter,
+)
 from tests.train.util import example_dummy_config
 
 BasicType = Union[int, float, str, bool, type(None)]

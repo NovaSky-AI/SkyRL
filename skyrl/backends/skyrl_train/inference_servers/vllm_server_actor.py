@@ -13,6 +13,7 @@ import httpx
 import uvicorn
 import vllm.envs as envs
 from fastapi import Request
+from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.api_server import (
@@ -23,12 +24,16 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import set_ulimit
 
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    ServerInfo,
+    get_node_ip,
+    get_open_port,
+)
+from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.env_vars import (
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
-from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_open_port
-from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +64,21 @@ class VLLMServerActor(ServerActorProtocol):
         """
         return vllm_cli_args.tensor_parallel_size * vllm_cli_args.pipeline_parallel_size
 
+    @staticmethod
+    def prepare_server_kwargs(
+        pg: PlacementGroup,
+        start_bundle_idx: int,
+        num_gpus_per_server: int,
+        **kwargs,
+    ) -> dict:
+        if kwargs.get("distributed_executor_backend") == "mp":
+            from skyrl.train.utils.utils import get_gpu_ids_for_pg_bundles
+
+            bundle_indices = list(range(start_bundle_idx, start_bundle_idx + num_gpus_per_server))
+            gpu_ids = get_gpu_ids_for_pg_bundles(pg, bundle_indices)
+            kwargs["mp_cuda_visible_devices"] = ",".join(str(g) for g in gpu_ids)
+        return kwargs
+
     def __init__(
         self,
         vllm_cli_args: Namespace,
@@ -72,6 +92,8 @@ class VLLMServerActor(ServerActorProtocol):
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
         colocated_training: bool = False,
+        distributed_executor_backend: str = "ray",
+        mp_cuda_visible_devices: Optional[str] = None,
     ):
         """
         Initialize the vLLM server actor.
@@ -89,12 +111,21 @@ class VLLMServerActor(ServerActorProtocol):
             enable_pd: Enable prefill-decode disaggregation
             nixl_side_channel_base: Base port for NIXL side channel
             colocated_training: Whether the server is colocated with training workers
+            distributed_executor_backend: vLLM distributed executor backend.
+                ``"ray"`` spawns TP/PP workers as Ray tasks (default).
+                ``"mp"`` spawns workers as local processes using
+                CUDA_VISIBLE_DEVICES.
+            mp_cuda_visible_devices: Comma-separated physical GPU IDs for the
+                ``"mp"`` backend. Pre-computed by ServerGroup from the
+                per-server placement group. Only used when
+                ``distributed_executor_backend="mp"`` and TP*PP > 1.
         """
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
         self._port = get_open_port(start_port)
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
+        self._use_mp_backend = distributed_executor_backend == "mp"
 
         # Ensure vLLM sleep endpoints are enabled by using dev mode
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
@@ -102,8 +133,8 @@ class VLLMServerActor(ServerActorProtocol):
         # TODO (aaron): once native ipc stops needing this, remove
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-        # Ensure Ray executor is used (required for GPU inheritance in placement groups)
-        self._ensure_ray_executor()
+        # Configure the distributed executor backend
+        self._cli_args.distributed_executor_backend = distributed_executor_backend
 
         # Update args with our assigned host/port
         self._cli_args.host = "0.0.0.0"
@@ -134,28 +165,37 @@ class VLLMServerActor(ServerActorProtocol):
                 f"dp_master_address={dp_master_address}, dp_rpc_port={dp_rpc_port}"
             )
 
-        # Set bundle indices for this server's TP/PP workers in the placement group
-        bundle_indices = list(range(start_bundle_idx, start_bundle_idx + self._num_gpus_per_server))
-        os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
-        logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
+        # Configure GPU visibility for this server's TP/PP workers
+        if self._use_mp_backend:
+            self._setup_mp_gpu_visibility(mp_cuda_visible_devices)
+        else:
+            bundle_indices = list(range(start_bundle_idx, start_bundle_idx + self._num_gpus_per_server))
+            os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
+            logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
 
         # Initialized lazily to not block the actor initialization.
         self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
 
-    def _ensure_ray_executor(self) -> None:
-        """
-        Ensure Ray is used as the distributed executor backend.
+    def _setup_mp_gpu_visibility(self, mp_cuda_visible_devices: Optional[str]) -> None:
+        """Set CUDA_VISIBLE_DEVICES for the mp backend.
 
-        When running inside a Ray actor, we must use the Ray executor so that
-        workers are spawned and properly inherit GPU allocation from the
-        placement group.
+        When using the mp backend, vLLM spawns workers as local processes.
+        They discover GPUs via CUDA_VISIBLE_DEVICES rather than inheriting
+        from a placement group.
         """
-        if (
-            not hasattr(self._cli_args, "distributed_executor_backend")
-            or self._cli_args.distributed_executor_backend != "ray"
-        ):
-            self._cli_args.distributed_executor_backend = "ray"
+        if mp_cuda_visible_devices is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
+            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+            logger.info(f"Server {self._server_idx}: mp backend, " f"CUDA_VISIBLE_DEVICES={mp_cuda_visible_devices}")
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+            logger.info(
+                f"Server {self._server_idx}: mp backend, " f"cleared CUDA_VISIBLE_DEVICES (single-GPU or auto-detect)"
+            )
 
     def _setup_nixl_side_channel(self, base_port: int) -> None:
         """

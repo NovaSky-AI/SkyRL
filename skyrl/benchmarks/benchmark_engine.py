@@ -5,9 +5,9 @@ import time
 
 import jax
 
-from skyrl.tinker.engine import TinkerEngine
-from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker import types
+from skyrl.tinker.config import EngineConfig, add_model
+from skyrl.tinker.engine import TinkerEngine
 
 
 def make_fwd_bwd_input(token_lists: list[list[int]]) -> types.ForwardBackwardInput:

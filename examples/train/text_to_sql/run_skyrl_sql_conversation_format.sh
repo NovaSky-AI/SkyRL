@@ -68,6 +68,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.stop='["</sql>", "</solution>"]' \
   generator.append_eos_token_after_stop_str_in_multi_turn=true \
   generator.eval_sampling_params.stop='["</sql>", "</solution>"]' \
+  generator.eval_sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
   environment.skyrl_gym.text2sql.db_path=$DB_PATH \
   trainer.logger="wandb" \
   trainer.project_name="skyrlsql" \

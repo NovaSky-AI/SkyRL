@@ -15,9 +15,12 @@ from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
-    from skyrl.train.config import SkyRLTrainConfig
-    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+
+    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+        InferenceEngineClient,
+    )
     from skyrl.backends.skyrl_train.weight_sync.base import WeightUpdateRequest
+    from skyrl.train.config import SkyRLTrainConfig
 
 
 @dataclass

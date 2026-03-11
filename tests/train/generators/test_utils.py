@@ -3,15 +3,16 @@ uv run --extra dev --isolated pytest tests/train/generators/test_utils.py
 """
 
 import os
+
 import pytest
+from transformers import AutoTokenizer
+
 from skyrl.train.generators.utils import (
     apply_overlong_filtering,
     encode_messages_subset,
-    get_response_ids_and_loss_mask_from_messages,
     get_generation_prompt_ids,
+    get_response_ids_and_loss_mask_from_messages,
 )
-from transformers import AutoTokenizer
-
 
 # Path to the custom Qwen3 chat template that doesn't add empty thinking blocks
 QWEN3_ACC_THINKING_TEMPLATE_PATH = os.path.join(

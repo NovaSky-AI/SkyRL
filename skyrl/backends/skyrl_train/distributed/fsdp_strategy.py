@@ -1,53 +1,61 @@
-import os
 import copy
+import gc
+import json
+import os
 import random
 from collections import defaultdict
 from datetime import timedelta
-from typing import List, Union, Optional
-from jaxtyping import Float
-import gc
-import json
-from loguru import logger
+from typing import List, Optional, Union
+
 import numpy as np
 import torch
 import torch.nn as nn
-from torch import optim
+from jaxtyping import Float
+from loguru import logger
+from packaging import version
 from torch import distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch import optim
 from torch.distributed.fsdp import CPUOffload, MixedPrecision
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from transformers.trainer import get_scheduler
 
-from skyrl.train.config import FSDPConfig, OptimizerConfig, ModelConfig
-from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
-from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
-from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
-    init_fn,
-    get_fsdp_wrap_policy,
     PrecisionType,
+    apply_fsdp2,
     create_device_mesh,
     fsdp2_clip_grad_norm_,
     fsdp2_get_full_state_dict,
-    apply_fsdp2,
-    get_sharding_strategy,
-    offload_fsdp_model_to_cpu,
-    load_fsdp_model_to_gpu,
-    offload_fsdp_optimizer,
-    load_fsdp_optimizer,
-    get_fsdp_state_ctx,
-    fsdp_version,
     fsdp2_load_full_state_dict,
+    fsdp_version,
+    get_fsdp_state_ctx,
+    get_fsdp_wrap_policy,
+    get_sharding_strategy,
+    init_fn,
+    load_fsdp_model_to_gpu,
+    load_fsdp_optimizer,
+    offload_fsdp_model_to_cpu,
+    offload_fsdp_optimizer,
 )
-from transformers.trainer import get_scheduler
-
-from packaging import version
+from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
+from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
+from skyrl.train.config import FSDPConfig, ModelConfig, OptimizerConfig
 
 if version.parse(torch.__version__) >= version.parse("2.6"):
-    from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy
+    from torch.distributed.fsdp import (
+        CPUOffloadPolicy,
+        FSDPModule,
+        MixedPrecisionPolicy,
+    )
 elif version.parse(torch.__version__) >= version.parse("2.4"):
-    from torch.distributed._composable.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy
+    from torch.distributed._composable.fsdp import (
+        CPUOffloadPolicy,
+        FSDPModule,
+        MixedPrecisionPolicy,
+    )
 else:
     CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy = None, None, None
 
@@ -366,8 +374,12 @@ class FSDPStrategy(DistributedStrategy):
     def _save_lora_adapters(self, model, ckpt_dir):
         """Save LoRA adapters in HuggingFace PEFT format"""
         from dataclasses import asdict
+
         from safetensors.torch import save_file
-        from skyrl.backends.skyrl_train.distributed.fsdp_utils import layered_summon_lora_params
+
+        from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+            layered_summon_lora_params,
+        )
 
         lora_save_path = os.path.join(ckpt_dir, "lora_adapter")
         peft_config = {}
@@ -404,7 +416,12 @@ class FSDPStrategy(DistributedStrategy):
     ):
         """Save model checkpoint for FSDP"""
         import warnings
-        from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig, StateDictType
+
+        from torch.distributed.fsdp import (
+            ShardedOptimStateDictConfig,
+            ShardedStateDictConfig,
+            StateDictType,
+        )
 
         if node_local_rank == 0:
             io.makedirs(ckpt_dir, exist_ok=True)
@@ -508,7 +525,12 @@ class FSDPStrategy(DistributedStrategy):
     ):
         """Load model checkpoint for FSDP"""
         import warnings
-        from torch.distributed.fsdp import ShardedStateDictConfig, ShardedOptimStateDictConfig, StateDictType
+
+        from torch.distributed.fsdp import (
+            ShardedOptimStateDictConfig,
+            ShardedStateDictConfig,
+            StateDictType,
+        )
 
         if ckpt_dir is None:
             raise ValueError("ckpt_dir cannot be None")
@@ -625,7 +647,10 @@ class FSDPStrategy(DistributedStrategy):
             # Use FSDP2 API - collects on rank 0 only
             output_state_dict = fsdp2_get_full_state_dict(fsdp_model, cpu_offload=True, rank0_only=True)
         elif fsdp_ver == 1:
-            from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+            from torch.distributed.checkpoint.state_dict import (
+                StateDictOptions,
+                get_model_state_dict,
+            )
 
             options = StateDictOptions(full_state_dict=True, cpu_offload=True, broadcast_from_rank0=False)
             output_state_dict = get_model_state_dict(fsdp_model, options=options)

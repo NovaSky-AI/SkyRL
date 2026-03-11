@@ -1,12 +1,14 @@
 """Generator mixin for autoregressive text generation with KV caching."""
 
 from __future__ import annotations
-from dataclasses import dataclass
+
 import functools
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 from tokenizers.decoders import DecodeStream
+
 import skyrl.tx.utils.models
 from skyrl.tinker import types
 
