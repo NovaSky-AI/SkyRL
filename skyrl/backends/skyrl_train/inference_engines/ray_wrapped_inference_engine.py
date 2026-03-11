@@ -148,7 +148,7 @@ def create_ray_wrapped_inference_engines(
     resolved_executor_backend = (
         "uni" if (tensor_parallel_size == 1 and pipeline_parallel_size == 1) else distributed_executor_backend
     )
-    use_mp_backend = distributed_executor_backend == "mp"
+    use_mp_backend = resolved_executor_backend == "mp"
 
     data_parallel_backend = "mp"
     use_hybrid_engine = shared_pg is not None

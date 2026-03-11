@@ -395,7 +395,7 @@ class PPORayActorGroup:
         num_nodes (int): Number of nodes for this actor group.
         num_gpus_per_node (int): Number of gpus for this actor group.
         ray_actor_type (Type[Worker]): PPO model type that this actor group serve on.
-        pg (PlacementGroup, optional): Placement group or list of placement groups to schedule actor on.
+        pg (Optional[PlacementGroup]): Placement group to schedule actor on.
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
             If < 1.0, multiple models can share same gpu. Defaults to 1.
@@ -455,14 +455,13 @@ class PPORayActorGroup:
                 f"must match world_size. Got {len(pg_data['bundles'])} bundles but world_size={world_size}"
             )
 
-        # Build rank → (pg, bundle_index) assignments.
-        # rank_pg_assignments is a list of (PlacementGroup, bundle_idx) tuples,
-        # one per rank, sorted by (node_id, gpu_id) for deterministic ordering.
-        rank_pg_assignments = []
+        # Build rank → bundle_index assignments sorted by (node_id, gpu_id)
+        # for deterministic ordering.
+        reordered_bundle_indices = []
         if pg is not None:
             pg_data = placement_group_table(pg)
             if len(pg_data["bundles"]) == world_size:
-                rank_pg_assignments = get_reordered_bundle_indices([pg])
+                reordered_bundle_indices = get_reordered_bundle_indices(pg)
 
         # If no PG provided, create one internally
         if pg is None and self._num_gpus_per_node > 1:
@@ -477,11 +476,10 @@ class PPORayActorGroup:
             pg = internal_pg
 
         def _scheduling_strategy_for_rank(rank):
-            if rank_pg_assignments:
-                pg_for_rank, bundle_idx = rank_pg_assignments[rank]
+            if reordered_bundle_indices:
                 return PlacementGroupSchedulingStrategy(
-                    placement_group=pg_for_rank,
-                    placement_group_bundle_index=bundle_idx,
+                    placement_group=pg,
+                    placement_group_bundle_index=reordered_bundle_indices[rank],
                 )
             elif pg is not None:
                 return PlacementGroupSchedulingStrategy(

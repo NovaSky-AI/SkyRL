@@ -9,6 +9,7 @@ import asyncio
 import pytest
 import ray
 from typing import Optional
+from ray.util.placement_group import PlacementGroup
 from transformers import AutoTokenizer
 
 from tests.backends.skyrl_train.gpu.utils import (
@@ -86,7 +87,7 @@ async def _run_single_generation(client: InferenceEngineClient, prompts, samplin
 
 
 def init_ray_inference_engines(
-    backend: str, tp_size: int, shared_pg, config: SkyRLTrainConfig
+    backend: str, tp_size: int, shared_pg: Optional[PlacementGroup], config: SkyRLTrainConfig
 ) -> InferenceEngineClient:
     """Initialize ray-wrapped inference engines for the specified backend"""
     tokenizer = AutoTokenizer.from_pretrained(MODEL)

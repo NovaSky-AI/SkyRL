@@ -36,7 +36,6 @@ def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: SkyRLTrainConf
     from .flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
 
     ie_cfg = cfg.generator.inference_engine
-    shared_pg = colocate_pg
     return create_ray_wrapped_inference_engines_flashrl(
         num_inference_engines=ie_cfg.num_engines,
         tensor_parallel_size=ie_cfg.tensor_parallel_size,
@@ -46,7 +45,7 @@ def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: SkyRLTrainConf
         vllm_v1_disable_multiproc=ie_cfg.vllm_v1_disable_multiproc,
         enable_prefix_caching=ie_cfg.enable_prefix_caching,
         enforce_eager=ie_cfg.enforce_eager,
-        shared_pg=shared_pg,
+        shared_pg=colocate_pg,
         gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
         inference_engine_enable_sleep=cfg.trainer.placement.colocate_all,
         async_engine=ie_cfg.async_engine,

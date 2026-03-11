@@ -44,7 +44,7 @@ def init_colocated_actor_group(
     shared_pg,
     cfg: SkyRLTrainConfig,
 ) -> PPORayActorGroup:
-    """Initialize an actor group that shares placement groups with others."""
+    """Initialize an actor group that shares a placement group with others."""
     return PPORayActorGroup(
         cfg.trainer,
         num_nodes=1,

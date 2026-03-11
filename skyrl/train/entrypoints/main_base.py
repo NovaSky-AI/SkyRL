@@ -2,7 +2,7 @@
 Main entrypoint for training.
 """
 
-from typing import List, Optional
+from typing import Optional
 from ray.util.placement_group import placement_group, PlacementGroup
 
 from transformers import PreTrainedTokenizerBase
@@ -183,8 +183,7 @@ class BasePPOExp:
         """Initializes a placement group for colocated training.
 
         Creates a single placement group with per-GPU bundles for all inference
-        engines.  Both ``"ray"`` and ``"mp"`` backends share the same PG layout;
-        the ``"mp"`` backend relies on ``CUDA_VISIBLE_DEVICES`` for GPU targeting.
+        engines.
 
         Args:
             timeout (int): The timeout for the placement group to be ready.
