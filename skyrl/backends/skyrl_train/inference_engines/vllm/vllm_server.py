@@ -1,23 +1,24 @@
 import os
 import signal
+
 import uvloop
+import vllm.envs as envs
+from fastapi import Request
 from vllm import AsyncLLMEngine
-from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.system_utils import set_ulimit
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.openai.api_server import (
+    build_app,
+    create_server_socket,
+    init_app_state,
+)
 from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
-from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.openai.api_server import (
-    create_server_socket,
-    build_app,
-    init_app_state,
-)
-import vllm.envs as envs
-from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.usage.usage_lib import UsageContext
-from fastapi import Request
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.system_utils import set_ulimit
 
 
 # TODO(tgriggs): Handle errors and use best practices for vLLM server
@@ -53,6 +54,7 @@ class VllmServer:
         @app.post("/init_weight_update_communicator")
         async def _init_weight_update_communicator(request: Request):
             import pickle
+
             from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo
 
             data = await request.json()
@@ -96,7 +98,10 @@ class VllmServer:
         @app.post("/update_weights_skyrl")
         async def _update_weights(request: Request):
             import pickle
-            from skyrl.backends.skyrl_train.weight_sync import BroadcastWeightUpdateRequest
+
+            from skyrl.backends.skyrl_train.weight_sync import (
+                BroadcastWeightUpdateRequest,
+            )
 
             # Convert the HTTP request to a BroadcastWeightUpdateRequest
             # TODO(haochen): only the broadcast strategy is currently supported

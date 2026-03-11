@@ -1,7 +1,8 @@
-import wandb
 import argparse
 import operator
 import sys
+
+import wandb
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--run_name", type=str, required=True)

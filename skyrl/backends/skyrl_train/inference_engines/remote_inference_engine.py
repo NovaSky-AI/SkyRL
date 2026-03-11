@@ -1,15 +1,24 @@
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
 import aiohttp
+
 from skyrl.backends.skyrl_train.inference_engines.base import (
-    InferenceEngineInterface,
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
 )
-from skyrl.backends.skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest, BroadcastWeightUpdateRequest
-from typing import List, Optional, Any, Dict, TYPE_CHECKING
+from skyrl.backends.skyrl_train.weight_sync import (
+    BroadcastWeightUpdateRequest,
+    WeightLoader,
+    WeightUpdateRequest,
+)
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
 import json
+
 from transformers import PreTrainedTokenizerBase
 
 

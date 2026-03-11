@@ -6,19 +6,19 @@ uv run --isolated --extra dev -- pytest tests/train/algorithms/test_losses.py
 
 import pytest
 import torch
-from skyrl.train.config import (
-    AlgorithmConfig,
-    SAPOConfig,
-    CISPOConfig,
-    ClipCovConfig,
-    KLCovConfig,
-    OffPolicyCorrectionConfig,
-)
 
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.train.config import (
+    AlgorithmConfig,
+    CISPOConfig,
+    ClipCovConfig,
+    KLCovConfig,
+    OffPolicyCorrectionConfig,
+    SAPOConfig,
+)
 
 NULL_OFF_POLICY_CORR = OffPolicyCorrectionConfig(
     tis_ratio_type=None,

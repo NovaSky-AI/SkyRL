@@ -15,20 +15,33 @@ Run:
 
 import base64
 import pickle
+import argparse
+import time
 
 import httpx
 import pytest
+import pytest_asyncio
 import ray
 import torch
 
 import pytest_asyncio
+from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
-from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip, get_open_port
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    get_node_ip,
+    get_open_port,
+)
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
+from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
 from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcInitInfo
 from skyrl.train.config import SkyRLTrainConfig
-from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
+
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -57,7 +70,9 @@ class Trainer:
 
     def init_weight_sync(self, master_address: str, master_port: int, world_size: int, group_name: str):
         """Initialize the weight sync process group as rank 0 (trainer)."""
-        from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
 
         self.pg = NCCLWeightTransferEngine.trainer_init(
             dict(
@@ -92,7 +107,9 @@ class Trainer:
 
         This is a blocking operation - server must call receive concurrently.
         """
-        from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
 
         params = list(self.model.named_parameters())
         print(

@@ -5,15 +5,14 @@ NOTE: Placement group bundle ordering across nodes only typically has race condi
 so this test is best run with >16 GPUs to actually see that ordering is correct
 """
 
-import ray
 import pytest
+import ray
 from ray.util.placement_group import placement_group
 
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.utils import get_ray_pg_ready_with_timeout
 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils.utils import get_ray_pg_ready_with_timeout
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 

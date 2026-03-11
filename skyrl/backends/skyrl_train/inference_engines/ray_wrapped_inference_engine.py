@@ -5,7 +5,9 @@ from packaging import version
 from ray.actor import ActorHandle
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl.backends.skyrl_train.inference_engines.base import (

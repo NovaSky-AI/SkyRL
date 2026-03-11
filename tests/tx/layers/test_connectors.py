@@ -5,9 +5,9 @@ import pytest
 import safetensors.numpy
 from flax import nnx
 
+from skyrl.tinker.types import LoraConfig
 from skyrl.tx.layers.connectors import is_connector_path
 from skyrl.tx.models.types import ModelForCausalLM
-from skyrl.tinker.types import LoraConfig
 from skyrl.tx.utils.models import (
     extract_adapter_state,
     insert_adapter_state,
@@ -89,7 +89,9 @@ def test_connector_identity_initialization(mesh, expansion_rate: int):
 
 def test_deepseek_connector_identity_expansion_rate():
     """Initial connector behavior should keep logits unchanged across expansion rates."""
-    from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
+    from transformers.models.deepseek_v3.configuration_deepseek_v3 import (
+        DeepseekV3Config as HFDeepseekV3Config,
+    )
 
     from skyrl.tx.models.configs import DeepseekV3Config
     from skyrl.tx.models.deepseekv3 import DeepseekV3ForCausalLM

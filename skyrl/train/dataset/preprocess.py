@@ -1,7 +1,8 @@
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
+
 import torch
-from transformers import AutoTokenizer
 from jaxtyping import Float
+from transformers import AutoTokenizer
 
 
 def _verify_inputs(

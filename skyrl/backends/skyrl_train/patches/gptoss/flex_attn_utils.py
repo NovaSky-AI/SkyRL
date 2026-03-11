@@ -33,20 +33,28 @@ __all__ = [
     "generate_decoding_sliding_window_mask_with_padding",
 ]
 
-import torch
 import functools
+
+import torch
 
 FLEX_ATTENTION_KV_INCREMENT = 512
 
 try:
-    from torch.nn.attention.flex_attention import _DEFAULT_SPARSE_BLOCK_SIZE as FLEX_ATTENTION_BLOCK_SIZE
+    from torch.nn.attention.flex_attention import (
+        _DEFAULT_SPARSE_BLOCK_SIZE as FLEX_ATTENTION_BLOCK_SIZE,
+    )
+    from torch.nn.attention.flex_attention import (
+        create_block_mask as _create_block_mask,
+    )
     from torch.nn.attention.flex_attention import (
         flex_attention as _flex_attention,
-        create_block_mask as _create_block_mask,
     )
 
     HAS_FLEX_ATTENTION = True
-    from torch.nn.attention.flex_attention import _score_mod_signature, _mask_mod_signature
+    from torch.nn.attention.flex_attention import (
+        _mask_mod_signature,
+        _score_mod_signature,
+    )
 
     try:
         # Determine kernel_options since low memory GPUs will go out of memory

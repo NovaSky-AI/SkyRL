@@ -1,4 +1,4 @@
-from typing import Dict, Any
+from typing import Any, Dict
 
 from skyrl.train.generators.utils import get_custom_chat_template
 

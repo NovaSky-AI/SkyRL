@@ -8,18 +8,25 @@ These tests validate that WorkerDispatch correctly manages GPU memory when
 multiple models share the same GPU (colocate_all=True or colocate_policy_ref=True).
 """
 
-import ray
 import pytest
+import ray
 from ray.util.placement_group import placement_group
 
-from tests.backends.skyrl_train.gpu.utils import make_dummy_training_batch, get_rank_0_memory
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.utils import validate_cfg
-from skyrl.train.utils import get_ray_pg_ready_with_timeout
-from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch, GPUState
-from tests.backends.skyrl_train.gpu.utils import import_worker
-from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, RefWorker, CriticWorker
+from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+    CriticWorker,
+    PolicyWorker,
+    RefWorker,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker_dispatch import GPUState, WorkerDispatch
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.utils import validate_cfg
+from tests.backends.skyrl_train.gpu.utils import (
+    get_rank_0_memory,
+    import_worker,
+    make_dummy_training_batch,
+)
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 

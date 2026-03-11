@@ -13,7 +13,6 @@ from skyrl.tx.models.qwen3_5 import (
     chunk_gated_delta_rule,
     recurrent_gated_delta_rule,
 )
-
 from tests.tx.models.conftest import load_model
 
 

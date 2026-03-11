@@ -5,18 +5,22 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 """
 
 import asyncio
-from tests.backends.skyrl_train.gpu.gpu_ci.test_inference_engine_client_http_endpoint import get_test_actor_config
-from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from transformers import AutoTokenizer
+import threading
 from typing import List
+
+import requests
+from transformers import AutoTokenizer
+
+from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     serve,
-    wait_for_server_ready,
     shutdown_server,
+    wait_for_server_ready,
 )
-import threading
-import requests
+from tests.backends.skyrl_train.gpu.gpu_ci.test_inference_engine_client_http_endpoint import (
+    get_test_actor_config,
+)
+from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 TP_SIZE = 2
