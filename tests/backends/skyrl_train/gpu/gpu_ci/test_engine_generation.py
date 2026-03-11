@@ -286,6 +286,7 @@ def test_token_based_generation_consistency(ray_init_fixture, tp_size: int, pp_s
                 )
 
 
+@pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Old sample API not used with new inference path")
 @pytest.mark.parametrize(
     "tp_size,dp_size",
     [
@@ -337,3 +338,64 @@ def test_sample_api(ray_init_fixture, tp_size: int, dp_size: int):
         print(f"Generated {len(unique_responses)} unique responses from {num_samples} samples")
         for i, resp in enumerate(output["responses"]):
             print(f"Sample {i}: {resp[:100]}..." if len(resp) > 100 else f"Sample {i}: {resp}")
+
+
+@pytest.mark.parametrize(
+    "tp_size,dp_size",
+    [
+        pytest.param(2, 1),
+    ],
+    ids=["tp2"],
+)
+def test_sample_api_remote(ray_init_fixture, tp_size: int, dp_size: int):
+    """Test the sample() API via RemoteInferenceClient (new inference path)."""
+    cfg = get_test_actor_config()
+    cfg.generator.sampling_params.temperature = 0.7
+
+    prompts = get_test_prompts(MODEL, 1)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompt_token_ids = tokenizer.apply_chat_template(
+        prompts, add_generation_prompt=True, tokenize=True, return_dict=True
+    )["input_ids"][0]
+
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
+
+    num_samples = 3
+
+    with InferenceEngineState.create(cfg, sleep_level=1, use_new_inference_servers=True) as engines:
+        llm_client = engines.client
+
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": prompt_token_ids}]},
+                "num_samples": num_samples,
+                "sampling_params": {
+                    "temperature": cfg.generator.sampling_params.temperature,
+                    "max_tokens": cfg.generator.sampling_params.max_generate_length,
+                    "top_k": cfg.generator.sampling_params.top_k,
+                    "top_p": cfg.generator.sampling_params.top_p,
+                },
+            },
+            "headers": {},
+        }
+
+        async def run_sample():
+            return await llm_client.sample(request_payload)
+
+        output = asyncio.run(run_sample())
+
+        assert output["type"] == "sample"
+        assert len(output["sequences"]) == num_samples
+
+        for i, seq in enumerate(output["sequences"]):
+            assert seq["stop_reason"] in ("stop", "length"), f"Unexpected stop_reason: {seq['stop_reason']}"
+            assert isinstance(seq["tokens"], list), f"tokens should be a list, got {type(seq['tokens'])}"
+            assert len(seq["tokens"]) > 0, f"Sequence {i} has no tokens"
+            assert all(isinstance(t, int) for t in seq["tokens"])
+            if seq.get("logprobs") is not None:
+                assert isinstance(seq["logprobs"], list)
+
+        print(f"Generated {num_samples} samples via RemoteInferenceClient")
+        for i, seq in enumerate(output["sequences"]):
+            print(f"Sample {i}: {len(seq['tokens'])} tokens, stop_reason={seq['stop_reason']}")

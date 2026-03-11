@@ -693,16 +693,18 @@ class SkyRLTrainBackend(AbstractBackend):
                     break
 
                 if use_new_inference:
-                    # New path: SampleResponse dict from RemoteInferenceClient
+                    # New inference server: SampleResponse dict
                     seq = output["sequences"][0]
                     response_tokens = seq["tokens"]
                     response_logprobs = seq.get("logprobs") or []
                     stop_reason = seq["stop_reason"]
                 else:
-                    # Old path: InferenceEngineOutput from InferenceEngineClient
+                    # Old inference engine: InferenceEngineOutput
+                    # Extract tokens and logprobs
                     response_tokens = output["response_ids"][0]
                     response_logprobs = (output.get("response_logprobs") or [[]])[0]
                     stop_reason_raw = output["stop_reasons"][0]
+                    # Map vLLM stop reason to Tinker format
                     stop_reason = "stop" if stop_reason_raw in ["stop", "stop_token"] else "length"
 
                 # Ensure logprobs exist (critical for RL)
