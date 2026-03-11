@@ -594,7 +594,13 @@ def test_client_render_chat_completion(vllm_server: InferenceEngineState):
     """Test render_chat_completion via RemoteInferenceClient against real vLLM."""
     client = vllm_server.client
     messages = [{"role": "user", "content": "Hello world!"}]
-    result = asyncio.run(client.render_chat_completion(messages=messages))
+    request_payload = {
+        "json": {
+            "messages": messages,
+        },
+        "headers": {},
+    }
+    result = asyncio.run(client.render_chat_completion(request_payload))
     # vLLM returns [conversation, engine_prompts]
     assert isinstance(result, list)
     assert len(result) == 2

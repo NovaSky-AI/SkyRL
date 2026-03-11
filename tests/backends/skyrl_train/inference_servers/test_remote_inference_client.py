@@ -263,7 +263,14 @@ class TestDataPlane:
     async def test_render_chat_completion(self, client):
         """Test render_chat_completion method."""
         messages = [{"role": "user", "content": "Hello"}]
-        result = await client.render_chat_completion(messages=messages)
+        request_payload = {
+            "json": {
+                "model": "test",
+                "messages": messages,
+            },
+            "headers": {},
+        }
+        result = await client.render_chat_completion(request_payload)
         assert isinstance(result, list)
         assert len(result) == 2
         conversation, engine_prompts = result
