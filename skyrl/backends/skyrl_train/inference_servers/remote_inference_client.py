@@ -444,7 +444,7 @@ class RemoteInferenceClient:
         if isinstance(mode, str):
             mode = PauseMode(mode.lower())
 
-        params: Dict[str, Any] = {"mode": mode.value, "clear_cache": clear_cache}
+        params: Dict[str, Any] = {"mode": mode.value, "clear_cache": str(clear_cache).lower()}
 
         return await self._call_all_servers("/pause", params=params)
 
