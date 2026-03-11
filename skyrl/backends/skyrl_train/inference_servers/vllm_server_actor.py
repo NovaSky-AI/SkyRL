@@ -2,8 +2,6 @@
 vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os
