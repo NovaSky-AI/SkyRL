@@ -464,6 +464,7 @@ class PolicyLossType(StrEnum):
     DUAL_CLIP = "dual_clip"
     GSPO = "gspo"
     CISPO = "cispo"
+    ROLLOUT_IS = "rollout_is"
     CLIP_COV = "clip_cov"
     KL_COV = "kl_cov"
     SAPO = "sapo"
@@ -500,6 +501,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "sapo": [PolicyLossType.SAPO, sapo_policy_loss],
             "cross_entropy": [PolicyLossType.CROSS_ENTROPY, cross_entropy_loss],
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
+            "rollout_is": [PolicyLossType.ROLLOUT_IS, rollout_is_policy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -757,6 +759,55 @@ def compute_policy_loss_cispo(
     loss_metrics.update(off_policy_metrics)
 
     loss = reduce_loss(loss, loss_mask, config.loss_reduction, config.max_seq_len)
+    return loss, loss_metrics
+
+
+@register_policy_loss(PolicyLossType.ROLLOUT_IS)
+def rollout_is_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """Calibrated importance-weighted policy gradient using rollout log-probs.
+
+    L(θ) = E_t[ stop_grad(f(r_t(θ), ε_l, ε_h)) · Â_t · log π_θ(a_t|s_t) ]
+
+    where r_t(θ) = exp(log π_θ(a_t|s_t) - log π_rollout(a_t|s_t)) and the
+    calibration function f zeroes out values outside (1 - ε_l, 1 + ε_h).
+
+    This loss is the same as cispo, but uses the rollout log-probs instead of
+    the old log-probs. This is important for async trainings where actual
+    old_log_probs are not available.
+    It further uses hard zero instead of clamping, but that does not change
+    the gradient only the loss value.
+    """
+    assert rollout_logprobs is not None, "rollout_logprobs are required for rollout_is"
+
+    loss_reduction = config.loss_reduction
+    assert loss_reduction in [
+        "token_mean",
+        "sequence_mean",
+        "seq_mean_token_sum_norm",
+    ], "loss_reduction must be either 'token_mean', 'sequence_mean', or 'seq_mean_token_sum_norm'"
+
+    ratio = safe_exp_delta(log_probs - rollout_logprobs, clip=20.0, out_dtype=log_probs.dtype)
+
+    in_range = (ratio > 1 - config.eps_clip_low) & (ratio < 1 + config.eps_clip_high)
+    calibrated_ratio = torch.where(in_range, ratio, torch.zeros_like(ratio))
+
+    loss = -(calibrated_ratio.detach() * advantages * log_probs)
+    clip_ratio = masked_mean((~in_range).float(), loss_mask).mean().detach().item()
+
+    loss_metrics: dict[str, float] = {"clip_ratio": clip_ratio}
+    loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
     return loss, loss_metrics
 
 
