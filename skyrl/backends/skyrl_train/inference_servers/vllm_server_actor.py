@@ -11,12 +11,11 @@ import time
 from argparse import Namespace
 from typing import Optional, Tuple
 
-from ray.util.placement_group import PlacementGroup
-
 import httpx
 import uvicorn
 import vllm.envs as envs
 from fastapi import Request
+from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.api_server import (
