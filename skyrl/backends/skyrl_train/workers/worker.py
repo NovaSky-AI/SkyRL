@@ -417,10 +417,8 @@ class PPORayActorGroup:
     ) -> None:
         """
         Args:
-            pg: Placement group(s) for the worker group. Accepts a single
-                PlacementGroup, a list of PlacementGroups (for multi-PG
-                colocate_all with mp backend), or None. Note that if colocate_all is True,
-                the total number of bundles across all placement groups must match world_size.
+            pg: Placement group for the worker group. Accepts a single PlacementGroup, or None.
+                Note that if colocate_all is True, the number of bundles in the placement group must match world_size.
         """
         self.cfg = cfg
         self._num_nodes = num_nodes
