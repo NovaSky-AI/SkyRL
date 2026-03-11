@@ -586,12 +586,14 @@ All frameworks that do step-wise decomposition face the same question: the effec
 ### Architecture
 
 ```
-Harbor Trial (async)
-    ↓ results.agent_result.rollout_details (per-turn token IDs + logprobs)
-HarborGenerator._build_step_wise_output()
-    ↓ HarborStepWiseOutput (list of per-step HarborAgentOutput)
-HarborGenerator._build_step_wise_generator_output()
-    ↓ Flatten to GeneratorOutput with is_last_step, trajectory_ids, rollout_logprobs
+harbor_agent_loop() (async, per-trajectory)
+    ├─ Success → _build_step_wise_output() → HarborStepWiseOutput
+    └─ Failure → HarborAgentOutput (same as non-step-wise failures)
+           ↓
+_build_step_wise_generator_output() (batch-level)
+    ├─ _identify_masked_instances() (shared with non-step-wise path)
+    └─ Flatten to GeneratorOutput with is_last_step, trajectory_ids, rollout_logprobs
+           ↓
 SkyRL Trainer (unchanged)
     ↓ Advantage broadcast, TIS correction, PPO update
 ```
@@ -647,7 +649,7 @@ When `step_wise_trajectories=False` (default), behavior is identical to the orig
 
 ## Caveats and Design Decisions
 
-### 1. Prompt Left-Truncation for Padding OOM Prevention
+### 1. Padding OOM (Pending Fix in `convert_prompts_responses_to_batch_tensors`)
 
 **Problem**: In step-wise mode, different steps have very different prompt/response length ratios. Early turns have short prompts (~100 tokens) but potentially long completions (~20K tokens with thinking). Late turns have long prompts (~30K tokens of chat history) but short completions (~200 tokens). The padding function (`convert_prompts_responses_to_batch_tensors`) pads ALL samples to `max(all_prompts) + max(all_responses)`, creating padded sequences far exceeding `max_seq_len`:
 
@@ -657,33 +659,9 @@ Step 5: prompt=30000, response=200  → actual total = 30200
 Padded: every sample = 30000 + 20000 = 50000 tokens  ← OOM!
 ```
 
-**Solution**: After flattening all steps, compute `max_prompt_budget = max_seq_len - max(all_response_lengths)` and truncate all prompts from the LEFT to fit within this budget. Left-truncation preserves the most recent context (which is most relevant for the model's generation).
+**Status**: This is a known issue. The fix should be in `convert_prompts_responses_to_batch_tensors` (in `skyrl/train/dataset/preprocess.py`) — each sequence should be capped at `max_seq_len` total length rather than taking `max(all_prompts) + max(all_responses)`. `HarborGenerator` intentionally does NOT truncate/pad prompts or responses itself; that responsibility belongs to the downstream batch tensor construction.
 
-```python
-# In _build_step_wise_generator_output():
-max_response_len = max(len(r) for r in responses)
-max_prompt_budget = max(0, self.max_seq_len - max_response_len)
-for i in range(len(prompt_token_ids)):
-    if len(prompt_token_ids[i]) > max_prompt_budget:
-        excess = len(prompt_token_ids[i]) - max_prompt_budget
-        prompt_token_ids[i] = prompt_token_ids[i][excess:]  # Truncate from left
-```
-
-**Trade-off**: Truncated prompts mean the model trains on slightly different context than what it saw during generation. This could affect TIS ratios for the truncated steps. In practice, truncation primarily affects later turns (which have long prompts from accumulated chat history), and the truncated portion is early context that has diminishing influence.
-
-### 2. Per-Step Response Truncation
-
-Each step's completion is independently truncated to fit within `max_seq_len - len(prompt_ids)`:
-
-```python
-max_response_for_step = max(0, self.max_seq_len - len(turn_prompt_ids))
-if len(completion_ids) > max_response_for_step:
-    completion_ids = completion_ids[:max_response_for_step]
-```
-
-This mirrors the non-step-wise path's truncation behavior.
-
-### 3. Summarization Not Supported
+### 2. Summarization Not Supported
 
 When `step_wise_trajectories=True`, context summarization (`enable_summarize=True`) is not supported. Summarization causes Harbor to split rollout_details into multiple segments (main + subagent), making per-turn alignment ambiguous. An assertion enforces this:
 
@@ -694,7 +672,7 @@ if len(rollout_details_list) > 1:
 
 The default Harbor config already has `enable_summarize: false`.
 
-### 4. `collect_rollout_details` Must Be Enabled
+### 3. `collect_rollout_details` Must Be Enabled
 
 Step-wise training requires Harbor's `collect_rollout_details=True` in the agent kwargs. This tells Terminus 2 to request `logprobs=True` and `return_token_ids=True` from vLLM via LiteLLM's `extra_body`. The generator auto-enables this if not set:
 
@@ -704,26 +682,23 @@ if self.step_wise:
         self._harbor_trial_config_template["agent"]["kwargs"]["collect_rollout_details"] = True
 ```
 
-### 5. Loss Mask: All Completion Tokens Are Trainable
+### 4. Loss Mask: All Completion Tokens Are Trainable
 
 In step-wise mode, each step's `loss_mask = [1] * len(completion_ids)`. This is because the response consists ONLY of the model's completion tokens (no interleaved observation/user tokens). The prompt already contains the full chat history including previous observations.
 
 This differs from the non-step-wise path where `get_response_ids_and_loss_mask_from_messages()` interleaves assistant and user/observation tokens in a single response, with loss_mask=0 for non-assistant tokens.
 
-### 6. Failed Trajectories in Step-Wise Mode
+### 5. Failed Trajectories in Step-Wise Mode
 
-Failed trajectories (timeout, error, missing rollout_details) are emitted as a single zeroed-out step:
+Failed trajectories (timeout, error, missing rollout_details) return a plain `HarborAgentOutput` with zeroed fields (same as non-step-wise failures):
 
 ```python
-HarborStepWiseOutput(
-    step_outputs=[HarborAgentOutput(response_ids=[0], reward=[0.0], loss_mask=[0], ...)],
-    trajectory_id=trajectory_id,
-)
+HarborAgentOutput(response_ids=[0], reward=0, stop_reason="error", loss_mask=[0], prompt_ids=[0], ...)
 ```
 
-Instance-level masking still applies: if any trajectory for a prompt fails, all trajectories for that prompt are zeroed out.
+The batch-level `_build_step_wise_generator_output()` identifies these via `_identify_masked_instances()` (shared with the non-step-wise path) and emits a single zeroed-out step for each masked instance. Instance-level masking still applies: if any trajectory for a prompt fails, all trajectories for that prompt are zeroed out.
 
-### 7. Feature Compatibility
+### 6. Feature Compatibility
 
 Step-wise training changes the batch structure: N trajectories become N×M step-samples. Several trainer features assume 1:1 correspondence between batch indices and trajectories.
 
@@ -826,7 +801,7 @@ uv run --isolated --extra harbor python examples/train_integrations/harbor/kill_
 |------|--------|
 | `pyproject.toml` (line 253) | Harbor dependency → local path `/home/ray/default/harbor` |
 | `harbor_trial_config/default.yaml` | Added `collect_rollout_details: true` |
-| `harbor_generator.py` | Main implementation: `HarborStepWiseOutput`, `_build_step_wise_output()`, `_build_step_wise_generator_output()`, prompt normalization |
+| `harbor_generator.py` | Main implementation: `HarborStepWiseOutput`, `_build_step_wise_output()`, `_build_step_wise_generator_output()`, `_identify_masked_instances()` (shared masking logic) |
 | `run_codecontest_stepwise_dev.sh` | Dev run script (batch=4, n_samples=2) |
 | `run_codecontest_comparison.sh` | Parameterized production script (baseline/stepwise/stepwise-tis) |
 | `run_all_comparison.sh` | Chains all three comparison runs |
@@ -884,7 +859,7 @@ Peak GPU memory is determined by `micro_batch_size × (max_prompt + max_response
 
 ### Padding: Full Batch, Not Per Mini-Batch
 
-`convert_prompts_responses_to_batch_tensors()` (`preprocess.py:28`) pads ALL samples to the global max prompt and max response lengths across the ENTIRE batch. This happens once before training, not per mini-batch. Consequence for step-wise: if one step-sample has a 64K prompt (last turn), ALL step-samples are padded to 64K prompt length, including early turns with tiny prompts. This is a major source of memory waste.
+`convert_prompts_responses_to_batch_tensors()` (`preprocess.py:28`) pads ALL samples to the global max prompt and max response lengths across the ENTIRE batch. This happens once before training, not per mini-batch. Consequence for step-wise: if one step-sample has a 64K prompt (last turn), ALL step-samples are padded to 64K prompt length, including early turns with tiny prompts. This is a major source of memory waste and can cause OOM. **Pending fix**: each sequence should be capped at `max_seq_len` total length in `convert_prompts_responses_to_batch_tensors` rather than using `max(all_prompts) + max(all_responses)`.
 
 ### Three Masks
 
@@ -927,7 +902,7 @@ For GRPO: reward token position doesn't matter — `sum()` collapses it. Only GA
 | Full training batch (padded tensors) | `len(data) × (max_prompt + max_response)` | CPU (Ray object store) |
 | Per-worker mini-batch slice | `(mini_batch_size / dp_size) × seq_len` | CPU → GPU |
 
-Step-wise multiplies `len(data)` by avg turns (M), increasing CPU memory M×. GPU peak memory is unchanged (same micro_batch_size, same padded seq_len with truncation fix).
+Step-wise multiplies `len(data)` by avg turns (M), increasing CPU memory M×. GPU peak memory depends on the padded seq_len — currently `max(all_prompts) + max(all_responses)` which can cause OOM (see caveat #1). Once `convert_prompts_responses_to_batch_tensors` is fixed to cap at `max_seq_len`, GPU peak memory will be bounded.
 
 ### SkyRLGymGenerator vs Harbor Step-Wise: Structural Difference
 
