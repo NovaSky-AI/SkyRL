@@ -49,13 +49,18 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
     @app.post("/inference/v1/generate")
     async def generate(request: Request):
-        body = await request.json()  # Consume body
-        num_prompts = len(body.get("token_ids", []))
+        body = await request.json()
+        n = body.get("sampling_params", {}).get("n", 1)
 
         return {
             "choices": [
-                {"request_id": "dummy", "token_ids": [i, i + 1, i + 2], "finish_reason": "stop"}
-                for i in range(num_prompts)
+                {
+                    "request_id": "dummy",
+                    "token_ids": [i, i + 1, i + 2],
+                    "finish_reason": "stop",
+                    "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}, {"logprob": -0.3}]},
+                }
+                for i in range(n)
             ]
         }
 
@@ -511,3 +516,87 @@ class TestRetryOnAbort:
             assert len(result["response_ids"][0]) > 0
         finally:
             await client.teardown()
+
+
+class TestSample:
+    """Test sample() with request_payload / SampleResponse dict interface."""
+
+    @pytest.mark.asyncio
+    async def test_sample(self, client):
+        """Test sample with n=1: verify SampleResponse dict contents."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 1,
+                "sampling_params": {
+                    "temperature": 0.8,
+                    "max_tokens": 512,
+                    "seed": 42,
+                },
+            },
+            "headers": {},
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert result["prompt_logprobs"] is None
+        assert result["topk_prompt_logprobs"] is None
+        assert len(result["sequences"]) == 1
+
+        # Mock returns token_ids=[0, 1, 2] for choice i=0, logprobs=[-0.1, -0.2, -0.3]
+        seq = result["sequences"][0]
+        assert seq["tokens"] == [0, 1, 2]
+        assert seq["logprobs"] == [-0.1, -0.2, -0.3]
+        assert seq["stop_reason"] == "stop"
+
+    @pytest.mark.asyncio
+    async def test_sample_n2(self, client):
+        """Test sample with n=2: verify both sequences match mock output."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [10, 20, 30]}]},
+                "num_samples": 2,
+                "sampling_params": {
+                    "temperature": 0.8,
+                    "max_tokens": 512,
+                    "seed": 42,
+                },
+            },
+            "headers": {},
+        }
+        result = await client.sample(request_payload)
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 2
+
+        # Mock returns token_ids=[i, i+1, i+2] for choice i
+        assert result["sequences"][0]["tokens"] == [0, 1, 2]
+        assert result["sequences"][0]["logprobs"] == [-0.1, -0.2, -0.3]
+        assert result["sequences"][0]["stop_reason"] == "stop"
+
+        assert result["sequences"][1]["tokens"] == [1, 2, 3]
+        assert result["sequences"][1]["logprobs"] == [-0.1, -0.2, -0.3]
+        assert result["sequences"][1]["stop_reason"] == "stop"
+
+    @pytest.mark.asyncio
+    async def test_sample_with_session_id(self, client):
+        """Test that session_id is popped from body and used for routing."""
+        request_payload = {
+            "json": {
+                "prompt": {"chunks": [{"tokens": [1, 2]}]},
+                "num_samples": 1,
+                "sampling_params": {"temperature": 1.0, "max_tokens": 10},
+                "session_id": "test-routing-session",
+            },
+            "headers": {},
+        }
+        result = await client.sample(request_payload)
+
+        # session_id should be consumed (popped) from body
+        assert "session_id" not in request_payload["json"]
+
+        assert result["type"] == "sample"
+        assert len(result["sequences"]) == 1
+        assert result["sequences"][0]["tokens"] == [0, 1, 2]
+        assert result["sequences"][0]["logprobs"] == [-0.1, -0.2, -0.3]
+        assert result["sequences"][0]["stop_reason"] == "stop"
