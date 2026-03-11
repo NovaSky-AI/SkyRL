@@ -164,7 +164,7 @@ class HarborGenerator(GeneratorInterface):
             progress.close()
 
         if self.step_wise:
-            return self._build_step_wise_generator_output(all_outputs, trajectory_ids)
+            return self._build_step_wise_generator_output(all_outputs)
         else:
             all_outputs, rollout_metrics = self._mask_failed_instances_and_compute_metrics(all_outputs)
             generator_output: GeneratorOutput = {
@@ -178,44 +178,54 @@ class HarborGenerator(GeneratorInterface):
             }
             return generator_output
 
+    @staticmethod
+    def _identify_masked_instances(
+        all_outputs: List[Union[HarborAgentOutput, HarborStepWiseOutput]],
+    ) -> tuple[set[str], int, int, set[str]]:
+        """Identify instances that should be masked (zeroed out) due to failures.
+
+        For a group of trajectories (n_samples_per_prompt for the same prompt),
+        if one trajectory fails we skip training the entire group.
+
+        Returns:
+            (masked_instance_ids, num_timeout_trajectories, num_error_trajectories, all_instance_ids)
+        """
+        timeout_instance_ids: set[str] = set()
+        error_instance_ids: set[str] = set()
+        all_instance_ids: set[str] = set()
+        num_timeout = 0
+        num_error = 0
+
+        for output in all_outputs:
+            instance_id = output.trajectory_id.instance_id
+            all_instance_ids.add(instance_id)
+
+            # For HarborStepWiseOutput, check the last step's stop reason
+            if isinstance(output, HarborStepWiseOutput):
+                stop = output.step_outputs[-1].stop_reason if output.step_outputs else "error"
+            else:
+                stop = output.stop_reason
+
+            if stop == "agent_timeout":
+                num_timeout += 1
+                timeout_instance_ids.add(instance_id)
+            elif stop == "error":
+                num_error += 1
+                error_instance_ids.add(instance_id)
+
+        return timeout_instance_ids | error_instance_ids, num_timeout, num_error, all_instance_ids
+
     def _build_step_wise_generator_output(
         self,
         all_outputs: List[Union[HarborAgentOutput, HarborStepWiseOutput]],
-        trajectory_ids: List[TrajectoryID],
     ) -> GeneratorOutput:
         """Flatten step-wise outputs into the GeneratorOutput format.
 
         Each multi-turn trajectory becomes N separate (prompt, response) samples,
         with `is_last_step` marking the final step of each trajectory.
         """
-        # First, identify failed instances (same logic as non-step-wise)
-        timeout_instance_ids = set()
-        error_instance_ids = set()
-        all_instance_ids = set()
-        num_timeout_trajectories = 0
-        num_error_trajectories = 0
+        masked_ids, num_timeout, num_error, all_ids = self._identify_masked_instances(all_outputs)
 
-        for output in all_outputs:
-            if isinstance(output, HarborStepWiseOutput):
-                tid = output.trajectory_id
-                # Check if any step indicates failure
-                stop_reasons = [s.stop_reason for s in output.step_outputs] if output.step_outputs else ["error"]
-                last_stop = stop_reasons[-1] if stop_reasons else "error"
-            else:
-                tid = output.trajectory_id
-                last_stop = output.stop_reason
-
-            all_instance_ids.add(tid.instance_id)
-            if last_stop == "agent_timeout":
-                num_timeout_trajectories += 1
-                timeout_instance_ids.add(tid.instance_id)
-            elif last_stop == "error":
-                num_error_trajectories += 1
-                error_instance_ids.add(tid.instance_id)
-
-        masked_instance_ids = timeout_instance_ids | error_instance_ids
-
-        # Flatten step-wise outputs
         responses = []
         rewards = []
         stop_reasons = []
@@ -224,79 +234,62 @@ class HarborGenerator(GeneratorInterface):
         is_last_step_list = []
         out_trajectory_ids = []
         rollout_logprobs_list = []
-        successful_outputs_for_metrics = []
+        successful_last_step_outputs = []
 
         for output in all_outputs:
-            if isinstance(output, HarborStepWiseOutput):
-                tid = output.trajectory_id
-            else:
-                tid = output.trajectory_id
+            tid = output.trajectory_id
 
-            is_masked = tid.instance_id in masked_instance_ids
-
-            if is_masked:
+            if tid.instance_id in masked_ids:
                 # Emit a single zeroed-out step for masked instances
+                prompt_token_ids.append([0])
                 responses.append([0])
                 rewards.append([0.0])
                 stop_reasons.append("error")
                 loss_masks.append([0])
-                prompt_token_ids.append([0])
                 is_last_step_list.append(True)
                 out_trajectory_ids.append(tid)
                 rollout_logprobs_list.append([0.0])
                 continue
 
-            if isinstance(output, HarborStepWiseOutput):
-                for j, step in enumerate(output.step_outputs):
-                    is_last = j == len(output.step_outputs) - 1
-                    responses.append(step.response_ids)
-                    rewards.append(step.reward)
-                    stop_reasons.append(step.stop_reason)
-                    loss_masks.append(step.loss_mask)
-                    prompt_token_ids.append(step.prompt_ids)
-                    is_last_step_list.append(is_last)
-                    out_trajectory_ids.append(tid)
-                    rollout_logprobs_list.append(step.rollout_logprobs)
-
-                    if is_last:
-                        successful_outputs_for_metrics.append(step)
-            else:
-                # Non-step-wise fallback (e.g., failed trial returned HarborAgentOutput)
-                responses.append(output.response_ids)
-                rewards.append(output.reward if isinstance(output.reward, list) else [float(output.reward)])
-                stop_reasons.append(output.stop_reason)
-                loss_masks.append(output.loss_mask)
-                prompt_token_ids.append(output.prompt_ids)
-                is_last_step_list.append(True)
+            # Non-masked outputs in step-wise mode are always HarborStepWiseOutput
+            # (failures return HarborAgentOutput which gets masked above)
+            assert isinstance(output, HarborStepWiseOutput), (
+                f"Expected HarborStepWiseOutput for non-masked trajectory {tid}, got {type(output).__name__}"
+            )
+            for j, step in enumerate(output.step_outputs):
+                is_last = j == len(output.step_outputs) - 1
+                prompt_token_ids.append(step.prompt_ids)
+                responses.append(step.response_ids)
+                rewards.append(step.reward)
+                stop_reasons.append(step.stop_reason)
+                loss_masks.append(step.loss_mask)
+                is_last_step_list.append(is_last)
                 out_trajectory_ids.append(tid)
-                rollout_logprobs_list.append(output.rollout_logprobs if output.rollout_logprobs is not None else [0.0] * len(output.response_ids))
-                successful_outputs_for_metrics.append(output)
+                rollout_logprobs_list.append(step.rollout_logprobs)
+                if is_last:
+                    successful_last_step_outputs.append(step)
 
         # Compute rollout metrics from successful last-step outputs
-        if successful_outputs_for_metrics:
-            # For metrics, use only last-step rewards (scalar form)
-            metric_response_ids = [o.response_ids for o in successful_outputs_for_metrics]
+        if successful_last_step_outputs:
             metric_rewards = []
-            for o in successful_outputs_for_metrics:
-                if isinstance(o.reward, list):
-                    metric_rewards.append(sum(o.reward))
-                else:
-                    metric_rewards.append(o.reward)
-            rollout_metrics = get_rollout_metrics(metric_response_ids, metric_rewards)
-
-            # Add Harbor-specific metrics from original step-wise outputs
+            for o in successful_last_step_outputs:
+                metric_rewards.append(sum(o.reward) if isinstance(o.reward, list) else o.reward)
+            rollout_metrics = get_rollout_metrics(
+                [o.response_ids for o in successful_last_step_outputs],
+                metric_rewards,
+            )
+            # Harbor-specific metrics from trajectory-level outputs
             summarization_counts = []
             num_turns_list = []
             context_exceeded = 0
             for output in all_outputs:
-                if isinstance(output, HarborStepWiseOutput) and output.trajectory_id.instance_id not in masked_instance_ids:
+                if isinstance(output, HarborStepWiseOutput) and output.trajectory_id.instance_id not in masked_ids:
                     if output.summarization_count is not None:
                         summarization_counts.append(output.summarization_count)
                     if output.num_turns is not None:
                         num_turns_list.append(output.num_turns)
                     if output.step_outputs and output.step_outputs[-1].stop_reason == "context_length":
                         context_exceeded += 1
-
             rollout_metrics["generate/trajectories_summarized"] = sum(1 for c in summarization_counts if c > 0)
             rollout_metrics["generate/trajectories_context_length_exceeded"] = context_exceeded
             if num_turns_list:
@@ -304,40 +297,19 @@ class HarborGenerator(GeneratorInterface):
         else:
             rollout_metrics = {}
 
-        rollout_metrics["generate/num_timeout_trajectories"] = num_timeout_trajectories
-        rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
-        rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
+        rollout_metrics["generate/num_timeout_trajectories"] = num_timeout
+        rollout_metrics["generate/num_error_trajectories"] = num_error
+        rollout_metrics["generate/num_masked_instances"] = len(masked_ids)
 
         logger.info(
-            f"\n# of masked instances: {len(masked_instance_ids)} / {len(all_instance_ids)}\n"
-            f"# of timeout trajectories: {num_timeout_trajectories}\n"
-            f"# of error trajectories: {num_error_trajectories}\n"
+            f"\n# of masked instances: {len(masked_ids)} / {len(all_ids)}\n"
+            f"# of timeout trajectories: {num_timeout}\n"
+            f"# of error trajectories: {num_error}\n"
             f"# of flattened step-samples: {len(responses)}"
         )
 
-        # --- Normalize prompt/response lengths to prevent padding OOM ---
-        # The padding function pads all prompts to max(all_prompts) and responses to max(all_responses).
-        # In step-wise mode, different steps have different prompt/response ratios (early turns have
-        # short prompts, late turns have long prompts). Without normalization, the padded sequence
-        # = max_prompt + max_response can far exceed max_seq_len, causing OOM.
-        # Fix: truncate prompts from the LEFT so that max_prompt + max_response ≤ max_seq_len.
-        max_response_len = max(len(r) for r in responses) if responses else 0
-        max_prompt_budget = max(0, self.max_seq_len - max_response_len)
-        num_prompts_truncated = 0
-        for i in range(len(prompt_token_ids)):
-            if len(prompt_token_ids[i]) > max_prompt_budget:
-                excess = len(prompt_token_ids[i]) - max_prompt_budget
-                prompt_token_ids[i] = prompt_token_ids[i][excess:]  # Truncate from left
-                num_prompts_truncated += 1
-        if num_prompts_truncated > 0:
-            logger.info(
-                f"Truncated {num_prompts_truncated} prompts from left to fit "
-                f"max_prompt_budget={max_prompt_budget} (max_response={max_response_len}, max_seq_len={self.max_seq_len})"
-            )
-
         # Check if any rollout_logprobs are available (non-zero-length lists)
         has_logprobs = any(lp is not None and len(lp) > 0 for lp in rollout_logprobs_list)
-
         if has_logprobs:
             # Ensure all entries are lists (replace None with zero-filled lists matching response length)
             for i, lp in enumerate(rollout_logprobs_list):
@@ -371,28 +343,12 @@ class HarborGenerator(GeneratorInterface):
             all_outputs: The same list, with failed-instance outputs zeroed out.
             rollout_metrics: Dict of rollout metrics for logging.
         """
-        # Count failures by type before grouping overwrites stop_reason.
-        num_timeout_trajectories = 0
-        num_error_trajectories = 0
-        timeout_instance_ids = set()
-        error_instance_ids = set()
-        all_instance_ids = set()
-        for output in all_outputs:
-            cur_instance_id = output.trajectory_id.instance_id
-            all_instance_ids.add(cur_instance_id)
-            if output.stop_reason == "agent_timeout":
-                num_timeout_trajectories += 1
-                timeout_instance_ids.add(cur_instance_id)
-            elif output.stop_reason == "error":
-                num_error_trajectories += 1
-                error_instance_ids.add(cur_instance_id)
-
-        masked_instance_ids = timeout_instance_ids | error_instance_ids
+        masked_ids, num_timeout, num_error, all_ids = HarborGenerator._identify_masked_instances(all_outputs)
 
         # Zero-out all outputs belonging to any timeout or error instance so we skip training on them.
         successful_outputs: List[HarborAgentOutput] = []
         for output in all_outputs:
-            if output.trajectory_id.instance_id in masked_instance_ids:
+            if output.trajectory_id.instance_id in masked_ids:
                 output.response_ids = [0]
                 output.stop_reason = "error"
                 output.loss_mask = [0]
@@ -420,14 +376,14 @@ class HarborGenerator(GeneratorInterface):
             rollout_metrics = {}
 
         # Failure metrics: timeout vs unknown error trajectories, and masked instances.
-        rollout_metrics["generate/num_timeout_trajectories"] = num_timeout_trajectories
-        rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
-        rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
+        rollout_metrics["generate/num_timeout_trajectories"] = num_timeout
+        rollout_metrics["generate/num_error_trajectories"] = num_error
+        rollout_metrics["generate/num_masked_instances"] = len(masked_ids)
 
         logger.info(
-            f"\n# of masked instances: {len(masked_instance_ids)} / {len(all_instance_ids)}\n"
-            f"# of timeout trajectories: {num_timeout_trajectories}\n"
-            f"# of error trajectories: {num_error_trajectories}"
+            f"\n# of masked instances: {len(masked_ids)} / {len(all_ids)}\n"
+            f"# of timeout trajectories: {num_timeout}\n"
+            f"# of error trajectories: {num_error}"
         )
 
         return all_outputs, rollout_metrics
@@ -524,19 +480,6 @@ class HarborGenerator(GeneratorInterface):
             if stop_reason == "error":
                 error_message += f" Results: {results}"
             logger.warning(error_message)
-            if self.step_wise:
-                failed_step = HarborAgentOutput(
-                    response_ids=[0],
-                    reward=[0.0],
-                    stop_reason=stop_reason,
-                    loss_mask=[0],
-                    prompt_ids=[0],
-                    trajectory_id=trajectory_id,
-                )
-                return HarborStepWiseOutput(
-                    step_outputs=[failed_step],
-                    trajectory_id=trajectory_id,
-                )
             return HarborAgentOutput(
                 response_ids=[0],
                 reward=0,
