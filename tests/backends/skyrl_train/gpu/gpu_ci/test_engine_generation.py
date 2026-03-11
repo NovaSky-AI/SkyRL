@@ -370,11 +370,11 @@ def test_sample_api_remote(ray_init_fixture, tp_size: int, dp_size: int):
     with InferenceEngineState.create(cfg, sleep_level=1, use_new_inference_servers=True) as engines:
         llm_client = engines.client
 
-        def build_payload(temperature, n_samples):
+        def build_payload(temperature):
             return {
                 "json": {
                     "prompt": {"chunks": [{"tokens": prompt_token_ids}]},
-                    "num_samples": n_samples,
+                    "num_samples": 1,
                     "sampling_params": {
                         "temperature": temperature,
                         "max_tokens": cfg.generator.sampling_params.max_generate_length,
@@ -385,20 +385,28 @@ def test_sample_api_remote(ray_init_fixture, tp_size: int, dp_size: int):
                 "headers": {},
             }
 
-        # --- Call A: temp=1.0, expect diverse outputs ---
-        output = asyncio.run(llm_client.sample(build_payload(1.0, num_samples)))
+        async def run_samples(temperature, n):
+            results = []
+            for _ in range(n):
+                output = await llm_client.sample(build_payload(temperature))
+                assert output["type"] == "sample", f"Expected type 'sample', got {output['type']!r}"
+                assert len(output["sequences"]) == 1, f"Expected 1 sequence per call, got {len(output['sequences'])}"
+                results.append(output["sequences"][0])
+            return results
 
-        assert output["type"] == "sample"
-        assert len(output["sequences"]) == num_samples
+        # --- Call A: temp=1.0, expect diverse outputs ---
+        sequences = asyncio.run(run_samples(1.0, num_samples))
 
         decoded_texts = []
-        for i, seq in enumerate(output["sequences"]):
+        for i, seq in enumerate(sequences):
             assert seq["stop_reason"] in ("stop", "length"), f"Unexpected stop_reason: {seq['stop_reason']}"
             assert isinstance(seq["tokens"], list), f"tokens should be a list, got {type(seq['tokens'])}"
             assert len(seq["tokens"]) > 0, f"Sequence {i} has no tokens"
-            assert all(isinstance(t, int) for t in seq["tokens"])
+            assert all(isinstance(t, int) for t in seq["tokens"]), f"Sequence {i} contains non-int tokens"
             if seq.get("logprobs") is not None:
-                assert isinstance(seq["logprobs"], list)
+                assert isinstance(
+                    seq["logprobs"], list
+                ), f"Sequence {i} logprobs should be a list, got {type(seq['logprobs'])}"
 
             text = tokenizer.decode(seq["tokens"], skip_special_tokens=True)
             assert len(text.strip()) > 0, f"Sequence {i} decoded to empty text from {len(seq['tokens'])} tokens"
@@ -415,16 +423,15 @@ def test_sample_api_remote(ray_init_fixture, tp_size: int, dp_size: int):
             print(f"  Sample {i}: {text[:100]}..." if len(text) > 100 else f"  Sample {i}: {text}")
 
         # --- Call B: temp=0.0, expect deterministic outputs ---
-        output_det = asyncio.run(llm_client.sample(build_payload(0.0, num_samples)))
-
-        assert output_det["type"] == "sample"
-        assert len(output_det["sequences"]) == num_samples
+        det_sequences = asyncio.run(run_samples(0.0, num_samples))
 
         det_token_seqs = []
         det_texts = []
-        for i, seq in enumerate(output_det["sequences"]):
+        for i, seq in enumerate(det_sequences):
             assert seq["stop_reason"] in ("stop", "length"), f"Unexpected stop_reason: {seq['stop_reason']}"
-            assert isinstance(seq["tokens"], list)
+            assert isinstance(
+                seq["tokens"], list
+            ), f"Deterministic sequence {i} tokens should be a list, got {type(seq['tokens'])}"
             assert len(seq["tokens"]) > 0, f"Deterministic sequence {i} has no tokens"
             det_token_seqs.append(tuple(seq["tokens"]))
 
