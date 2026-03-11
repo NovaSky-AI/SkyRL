@@ -2,27 +2,27 @@
 
 from __future__ import annotations
 
-from enum import Enum
 import os
+from enum import Enum
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
-from cloudpathlib import CloudPath
-from flax import nnx
-from huggingface_hub import snapshot_download
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import safetensors.numpy
-from transformers import PretrainedConfig
 import peft
+import safetensors.numpy
+from cloudpathlib import CloudPath
+from flax import nnx
+from huggingface_hub import snapshot_download
+from transformers import PretrainedConfig
 
+from skyrl.tinker.types import LoraConfig
 from skyrl.tx.layers.connectors import is_connector_path
 from skyrl.tx.models.configs import ModelConfig
 from skyrl.utils.log import logger
 from skyrl.utils.storage import download_and_unpack, pack_and_upload
-from skyrl.tinker.types import LoraConfig
 
 if TYPE_CHECKING:
     import torch
@@ -64,10 +64,10 @@ def get_dtype(dtype: str | torch.dtype) -> jnp.dtype:
 
 def get_model_class(config: PretrainedConfig) -> Callable[..., nnx.Module]:
     "Get the correct model class based on the config."
+    import skyrl.tx.models.deepseekv3
     import skyrl.tx.models.llama3
     import skyrl.tx.models.qwen3
     import skyrl.tx.models.qwen3_5
-    import skyrl.tx.models.deepseekv3
 
     for architecture in config.architectures or []:
         if hasattr(skyrl.tx.models.llama3, architecture):

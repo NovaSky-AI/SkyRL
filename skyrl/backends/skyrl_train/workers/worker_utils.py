@@ -1,8 +1,9 @@
 import math
-from skyrl.train.dataset.replay_buffer import Experience
-from typing import List, Dict
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from typing import Dict, List
+
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.train.dataset.replay_buffer import Experience
 
 
 def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:

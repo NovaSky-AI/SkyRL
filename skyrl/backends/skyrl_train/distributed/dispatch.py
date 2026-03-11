@@ -1,13 +1,18 @@
 """Defines dispatch and collect logic for distributed training"""
 
-from dataclasses import dataclass
-from ray.actor import ActorHandle
-from typing import List, Tuple, Optional, Dict, Type, Any
 import asyncio
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Type
+
 import ray
 from ray import ObjectRef
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from ray.actor import ActorHandle
+
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
 
 
 @dataclass

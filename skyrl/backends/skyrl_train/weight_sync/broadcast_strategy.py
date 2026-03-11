@@ -7,7 +7,7 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
@@ -16,16 +16,18 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.distributed.utils import init_custom_process_group
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.train.utils.utils import get_tcp_url
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
-    WeightTransferStrategy,
-    WeightTransferSender,
     WeightTransferReceiver,
+    WeightTransferSender,
+    WeightTransferStrategy,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.utils.utils import get_tcp_url
 
 
 @dataclass
@@ -172,7 +174,9 @@ class BroadcastWeightTransferSender(WeightTransferSender):
                 yield from zip(chunk.names, chunk.tensors)
 
         if torch.distributed.get_rank() == 0:
-            from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+            from vllm.distributed.weight_transfer.nccl_engine import (
+                NCCLWeightTransferEngine,
+            )
 
             update_info = {**weight_metadata, "packed": True}
             update_task = asyncio.create_task(self._inference_client.update_named_weights(update_info))
@@ -357,7 +361,9 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
 
         if rank == 0:
             if _SKYRL_USE_NEW_INFERENCE:
-                from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+                from vllm.distributed.weight_transfer.nccl_engine import (
+                    NCCLWeightTransferEngine,
+                )
 
                 model_update_group = NCCLWeightTransferEngine.trainer_init(
                     dict(

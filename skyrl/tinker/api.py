@@ -1,39 +1,41 @@
-import fastapi
-from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.responses import StreamingResponse, RedirectResponse
-from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, ClassVar
-from datetime import datetime, timedelta, timezone
-from uuid import uuid4
-from contextlib import asynccontextmanager, suppress
-from sqlmodel import SQLModel, select, func
-from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.exc import IntegrityError, TimeoutError as SATimeoutError
 import asyncio
 import os
-import psutil
-import signal
 import random
+import signal
 import threading
 import time
+from contextlib import asynccontextmanager, suppress
+from datetime import datetime, timedelta, timezone
+from typing import Any, AsyncGenerator, ClassVar, Literal
+from uuid import uuid4
+
+import fastapi
+import psutil
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import RedirectResponse, StreamingResponse
+from pydantic import BaseModel, Field, model_validator
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlmodel import SQLModel, func, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig, add_model, config_to_argv
 from skyrl.tinker.db_models import (
     CheckpointDB,
-    ModelDB,
-    FutureDB,
-    RequestStatus,
     CheckpointStatus,
-    SessionDB,
+    FutureDB,
+    ModelDB,
+    RequestStatus,
     SamplingSessionDB,
-    get_async_database_url,
+    SessionDB,
     enable_sqlite_wal,
+    get_async_database_url,
 )
 from skyrl.tinker.extra import ExternalInferenceClient
+from skyrl.utils.log import get_uvicorn_log_config, logger
 from skyrl.utils.storage import download_file
-from skyrl.utils.log import logger, get_uvicorn_log_config
 
 # Validation patterns for train_run_ids, model_ids and checkpoint_ids
 ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
@@ -1240,6 +1242,7 @@ async def root():
 
 if __name__ == "__main__":
     import argparse
+
     import uvicorn
 
     # Parse command-line arguments

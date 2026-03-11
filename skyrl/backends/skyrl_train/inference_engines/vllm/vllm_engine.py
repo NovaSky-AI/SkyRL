@@ -1,40 +1,51 @@
 import os
-from typing import List, Any, Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
+import asyncio
+import time
 from dataclasses import dataclass
 from http import HTTPStatus
-import ray
-import asyncio
-import vllm
 from types import SimpleNamespace
+from uuid import uuid4
+
+import ray
+import vllm
+from loguru import logger
+from packaging import version
 from vllm import SamplingParams
-from vllm.inputs import TokensPrompt
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
-from uuid import uuid4
+
 from skyrl.backends.skyrl_train.inference_engines.base import (
-    InferenceEngineInterface,
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
 )
-from skyrl.backends.skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 from skyrl.backends.skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
-from loguru import logger
-import time
-from packaging import version
+
+# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
+# This alias preserves the old import path for existing scripts/configs.
+# TODO (Kourosh): Remove this alias once all references are updated.
+from skyrl.backends.skyrl_train.inference_servers.vllm_worker import (
+    WorkerWrap,  # noqa: F401, E402
+)
+from skyrl.backends.skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 
 
 @dataclass
@@ -73,12 +84,6 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         logger.info(f"creating LLM with bundle_indices={bundle_indices}")
-
-
-# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
-# This alias preserves the old import path for existing scripts/configs.
-# TODO (Kourosh): Remove this alias once all references are updated.
-from skyrl.backends.skyrl_train.inference_servers.vllm_worker import WorkerWrap  # noqa: F401, E402
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):

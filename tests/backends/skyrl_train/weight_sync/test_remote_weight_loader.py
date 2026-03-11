@@ -1,7 +1,14 @@
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import RemoteWeightLoader
-from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, BroadcastWeightUpdateRequest
+
+import pytest
+
+from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
+    RemoteWeightLoader,
+)
+from skyrl.backends.skyrl_train.weight_sync import (
+    BroadcastInitInfo,
+    BroadcastWeightUpdateRequest,
+)
 
 
 class AsyncContextManagerMock:

@@ -2,13 +2,14 @@
 uv run --isolated --extra dev pytest tests/train/dataset/test_preprocess.py
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 import torch
+
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-
-from unittest.mock import MagicMock
 
 
 # NOTE (sumanthrh): the tests in this file are hardcoded to use the below character-level tokenizer

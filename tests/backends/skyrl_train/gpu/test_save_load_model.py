@@ -8,23 +8,24 @@ For Megatron, run with:
 uv run --isolated --extra dev --extra mcore -- pytest tests/backends/skyrl_train/gpu/test_save_load_model.py -m "megatron"
 """
 
-import ray
-import pytest
-import torch
+import json
 import os
 import shutil
 import tempfile
-import json
+
+import pytest
+import ray
+import torch
 from transformers import AutoTokenizer
 
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
+    get_model_logits_from_actor,
     init_worker_with_type,
     make_dummy_training_batch,
-    get_model_logits_from_actor,
     ray_init_for_tests,
 )
-from skyrl.train.utils.utils import validate_cfg
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MODEL_ARCH = "Qwen3ForCausalLM"
@@ -93,7 +94,9 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
         # Prepare training input and run one training step
         dp_size = actor_group_1.actor_infos[0].rank.dp_size
         if "megatron" in strategy:
-            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import get_test_training_batch
+            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import (
+                get_test_training_batch,
+            )
 
             train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)
             run_one_training_step(

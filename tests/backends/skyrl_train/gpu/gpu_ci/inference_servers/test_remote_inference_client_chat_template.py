@@ -7,14 +7,15 @@ NOTE: This test is separate from `test_new_inference_generation.py` because we u
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_remote_inference_client_chat_template.py -m vllm -v
 """
 
-import pytest
 import asyncio
 from pathlib import Path
+
+import pytest
+from transformers import AutoTokenizer
 
 import skyrl
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState
-from transformers import AutoTokenizer
 
 MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
 TP_SIZE = 1
