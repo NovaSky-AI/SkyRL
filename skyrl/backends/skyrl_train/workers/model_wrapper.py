@@ -10,11 +10,35 @@ from loguru import logger
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
 import transformers
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText, BitsAndBytesConfig
 import numpy as np
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
 from skyrl.backends.skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
-from flash_attn.bert_padding import pad_input, unpad_input
+# from flash_attn.bert_padding import pad_input, unpad_input
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input
+except ImportError:
+    import torch.nn.functional as _F
+
+    def unpad_input(hidden_states, attention_mask, unused_mask=None):
+        all_masks = (attention_mask + unused_mask) if unused_mask is not None else attention_mask
+        seqlens_in_batch = all_masks.sum(dim=-1, dtype=torch.int32)
+        used_seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+        indices = torch.nonzero(all_masks.flatten(), as_tuple=False).flatten()
+        max_seqlen_in_batch = seqlens_in_batch.max().item()
+        cu_seqlens = _F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+        b, s = hidden_states.shape[:2]
+        flat = hidden_states.reshape(b * s, *hidden_states.shape[2:])
+        return flat[indices], indices, cu_seqlens, max_seqlen_in_batch, used_seqlens_in_batch
+
+    def pad_input(hidden_states, indices, batch, seqlen):
+        output = torch.zeros(
+            (batch * seqlen, *hidden_states.shape[1:]),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        output[indices] = hidden_states
+        return output.reshape(batch, seqlen, *hidden_states.shape[1:])
 from packaging.version import Version
 
 
@@ -88,14 +112,17 @@ class HFModelWrapper(nn.Module):
             else:
                 nf4_config = None
 
-            if use_liger_kernel:
+            model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
+
+            is_vlm = getattr(model_config, "model_type", "") in ("qwen3_vl", "qwen2_vl")
+            if is_vlm:
+                model_class = AutoModelForImageTextToText
+            elif use_liger_kernel:
                 from liger_kernel.transformers import AutoLigerKernelForCausalLM
 
                 model_class = AutoLigerKernelForCausalLM
             else:
                 model_class = AutoModelForCausalLM
-
-            model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
 
             rope_scaling_kwargs = {}
             if rope_scaling:
@@ -275,8 +302,12 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
+        **kwargs,
     ) -> torch.Tensor:
         """Returns action log probs"""
+        if kwargs and self.use_sample_packing:
+            raise NotImplementedError("VLM image inputs + sample packing not yet supported")
+
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
@@ -314,9 +345,11 @@ class HFModelWrapper(nn.Module):
         if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
-            output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+            output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd, **kwargs)
         else:
-            output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+            output = self.model(
+                sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd, **kwargs
+            )
 
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)
@@ -547,6 +580,10 @@ def get_llm_for_sequence_regression(
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True, **model_config_kwargs)
     config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+
+    is_vlm = getattr(config, "model_type", "") in ("qwen3_vl", "qwen2_vl")
+    if is_vlm and not hasattr(config, "hidden_size") and hasattr(config, "text_config"):
+        config.hidden_size = config.text_config.hidden_size
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__

@@ -71,6 +71,11 @@ class BatchIterator:
     def batch_to_experience(batch: TrainingInputBatch):
         # TODO (sumanthrh): other keys are not permitted right now, can go into info
         # TODO: this conversion is hidden right now, might need to be surfaced in worker explicitly.
+        info = {}
+        for key in ("pixel_values", "image_grid_thw"):
+            if key in batch:
+                info[key] = batch[key]  # list[Tensor], already chunked by TensorBatch
+
         exp = Experience(
             sequences=batch["sequences"],
             action_log_probs=batch.get("action_log_probs"),
@@ -85,7 +90,7 @@ class BatchIterator:
             rollout_logprobs=batch.get("rollout_logprobs"),
             # additional info
             # can be used to log metrics etc for micro-batches in the worker
-            info={},
+            info=info,
             # propagate metadata as is
             metadata=batch.metadata,
         )

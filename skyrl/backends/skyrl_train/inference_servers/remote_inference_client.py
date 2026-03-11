@@ -293,6 +293,57 @@ class RemoteInferenceClient:
             "response_logprobs": response_logprobs if len(response_logprobs) > 0 else None,
         }
 
+    async def sample(
+        self,
+        chunks: List[Dict[str, Any]],
+        sampling_params: Dict[str, Any],
+        session_id: Optional[Any] = None,
+        prompt_token_ids: Optional[List[int]] = None,  # ignored; used by InferenceEngineClient
+        num_samples: Optional[int] = None,  # ignored; used by InferenceEngineClient
+    ) -> Dict[str, Any]:
+        """Token-in-token-out sampling supporting multimodal ModelInput chunks.
+
+        Calls the /sample endpoint on the VllmServer, which handles the
+        render→splice→generate pipeline server-side.
+
+        Args:
+            chunks: Serialized ModelInput chunks (ModelInput.model_dump()["chunks"]).
+                Supports EncodedTextChunk, ImageChunk, and ImageAssetPointerChunk.
+            sampling_params: Sampling parameters dict (e.g. max_tokens, temperature).
+            session_id: Optional session ID for consistent routing.
+
+        Returns:
+            Dict matching InferenceEngineOutput shape:
+                response_ids: list of token ID lists (one per sample)
+                responses: list of decoded strings (empty; caller may detokenize)
+                stop_reasons: list of finish reason strings
+                response_logprobs: list of logprob lists, or None
+        """
+        session = await self._get_session()
+        url = f"{self.proxy_url}/sample"
+
+        payload = {
+            "chunks": chunks,
+            "sampling_params": sampling_params,
+            "model": self.model_name,
+        }
+        headers = {"Content-Type": "application/json"}
+        if session_id is not None:
+            headers["X-Session-ID"] = str(session_id)
+
+        async with session.post(url, json=payload, headers=headers) as resp:
+            response = await resp.json()
+            raise_for_status(resp, response)
+
+        choice = response["choices"][0]
+        logprobs = choice.get("logprobs")
+        return {
+            "response_ids": [choice["token_ids"]],
+            "responses": [""],
+            "stop_reasons": [choice["finish_reason"]],
+            "response_logprobs": [logprobs] if logprobs is not None else None,
+        }
+
     async def chat_completion(
         self,
         request_payload: Dict[str, Any],

@@ -1,8 +1,11 @@
+import argparse
+import base64
+
 import fastapi
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse, RedirectResponse
-from pydantic import BaseModel, Field, model_validator
-from typing import Literal, Any, AsyncGenerator, ClassVar
+from pydantic import BaseModel, Discriminator, Field, field_validator, model_validator
+from typing import Annotated, Literal, Any, AsyncGenerator, ClassVar
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 from contextlib import asynccontextmanager, suppress
@@ -293,11 +296,62 @@ class TrainingRun(BaseModel):
     user_metadata: dict[str, str] | None = None
 
 
-class ModelInputChunk(BaseModel):
+class EncodedTextChunk(BaseModel):
+    type: Literal["encoded_text"] = "encoded_text"
     tokens: list[int]
 
-    def to_types(self) -> types.ModelInputChunk:
-        return types.ModelInputChunk(tokens=self.tokens)
+    def to_types(self) -> types.EncodedTextChunk:
+        return types.EncodedTextChunk(tokens=self.tokens)
+
+
+class ImageChunk(BaseModel):
+    type: Literal["image"] = "image"
+    data: str  # base64-encoded on the wire
+    format: Literal["png", "jpeg"]
+    expected_tokens: int | None = None
+
+    @field_validator("data")
+    @classmethod
+    def validate_base64(cls, v: str) -> str:
+        try:
+            base64.b64decode(v, validate=True)
+        except Exception:
+            raise ValueError("data must be valid base64")
+        return v
+
+    def to_types(self) -> types.ImageChunk:
+        return types.ImageChunk(
+            data=base64.b64decode(self.data),
+            format=self.format,
+            expected_tokens=self.expected_tokens,
+        )
+
+
+class ImageAssetPointerChunk(BaseModel):
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+    format: Literal["png", "jpeg"]
+    location: str
+    expected_tokens: int | None = None
+
+    @field_validator("location")
+    @classmethod
+    def validate_location(cls, v: str) -> str:
+        if not v:
+            raise ValueError("location must not be empty")
+        return v
+
+    def to_types(self) -> types.ImageAssetPointerChunk:
+        return types.ImageAssetPointerChunk(
+            format=self.format,
+            location=self.location,
+            expected_tokens=self.expected_tokens,
+        )
+
+
+ModelInputChunk = Annotated[
+    EncodedTextChunk | ImageAssetPointerChunk | ImageChunk,
+    Discriminator("type"),
+]
 
 
 class ModelInput(BaseModel):

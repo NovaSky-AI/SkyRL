@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Discriminator
 
 
 class RequestType(str, Enum):
@@ -92,12 +92,41 @@ class UnloadModelOutput(BaseModel):
     type: str = "unload_model"
 
 
-class ModelInputChunk(BaseModel):
+class EncodedTextChunk(BaseModel):
+    type: Literal["encoded_text"] = "encoded_text"
     tokens: list[int]
+
+
+class ImageChunk(BaseModel):
+    type: Literal["image"] = "image"
+    data: bytes
+    format: Literal["png", "jpeg"]
+    expected_tokens: int | None = None
+
+
+class ImageAssetPointerChunk(BaseModel):
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+    format: Literal["png", "jpeg"]
+    location: str
+    expected_tokens: int | None = None
+
+
+ModelInputChunk = Annotated[
+    EncodedTextChunk | ImageAssetPointerChunk | ImageChunk,
+    Discriminator("type"),
+]
 
 
 class ModelInput(BaseModel):
     chunks: list[ModelInputChunk]
+
+    def to_token_list(self) -> list[int]:
+        """Extract tokens from text chunks; returns [] for multimodal inputs."""
+        tokens = []
+        for chunk in self.chunks:
+            if isinstance(chunk, EncodedTextChunk):
+                tokens.extend(chunk.tokens)
+        return tokens
 
 
 class TensorData(BaseModel):
@@ -236,6 +265,9 @@ class PreparedModelPassBatch(BaseModel):
     all_loss_fns: list[str]
     all_loss_fn_configs: list[dict[str, float] | None]
 
+    # Per-example raw model inputs (includes image chunks for multimodal)
+    all_model_inputs: list[ModelInput]
+
     # Mapping from examples back to requests: (request_id, model_id, start_idx, end_idx)
     request_batch_slices: list[tuple[str, str, int, int]]
 
@@ -252,6 +284,9 @@ class PreparedSampleBatch(BaseModel):
     all_model_ids: list[str]
     all_checkpoint_ids: list[str]
     all_checkpoint_paths: list[str]
+
+    # Per-sample raw prompt inputs (includes image chunks for multimodal)
+    all_prompt_inputs: list[ModelInput]
 
     # Whether any request needs prompt logprobs
     needs_prompt_logprobs: bool

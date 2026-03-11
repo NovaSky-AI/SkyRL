@@ -6,7 +6,7 @@ from skyrl.tinker import api
 
 def _make_datum() -> api.Datum:
     return api.Datum(
-        model_input=api.ModelInput(chunks=[api.ModelInputChunk(tokens=[1, 2, 3])]),
+        model_input=api.ModelInput(chunks=[api.EncodedTextChunk(tokens=[1, 2, 3])]),
         loss_fn_inputs={
             "target_tokens": api.TensorData(data=[2, 3, 4]),
             "weights": api.TensorData(data=[1.0, 1.0, 1.0]),
