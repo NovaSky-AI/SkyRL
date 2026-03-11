@@ -39,6 +39,18 @@ SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S = int(
 Timeout for waiting until the inference server is healthy.
 """
 
+SKYRL_HTTP_CONNECTION_LIMIT = int(os.environ.get("SKYRL_HTTP_CONNECTION_LIMIT", 50_000))
+"""
+Maximum number of concurrent HTTP connections for the inference client, router,
+and server. During generation, concurrent requests can reach
+batch_size * n_samples_per_prompt (typically under 10K on 8xH100 clusters).
+
+This controls:
+- aiohttp TCPConnector limit in `RemoteInferenceClient`
+- httpx connection pool limits in the `InferenceRouter`
+- uvicorn TCP backlog in the router and vLLM server
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Runtime Environment Exports
 # ─────────────────────────────────────────────────────────────────────────────

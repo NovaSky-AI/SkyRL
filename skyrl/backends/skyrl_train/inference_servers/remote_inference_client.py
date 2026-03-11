@@ -75,6 +75,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import aiohttp
 
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
+from skyrl.env_vars import SKYRL_HTTP_CONNECTION_LIMIT
+
+_DATA_PLANE_RETRIES = 3
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
@@ -147,9 +150,45 @@ class RemoteInferenceClient:
         # Note that we also create a new session object if the event loop has changed, since
         # aiohttp.ClientSession is tied to the event loop.
         current_loop = asyncio.get_running_loop()
-        if self._session is None or self._session.closed or self._session.loop != current_loop:
-            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
+        if self._session is not None and not self._session.closed and self._session.loop != current_loop:
+            # Event loop changed - the old session is unusable (bound to a dead loop).
+            # Force-close the connector to tear down TCP connections synchronously.
+            if self._session.connector is not None:
+                self._session.connector.close()
+            self._session = None
+        if self._session is None or self._session.closed:
+            # keepalive_timeout must be shorter than the server's timeout_keep_alive
+            # (uvicorn default: 5s). Otherwise aiohttp reuses connections the server
+            # has already closed, causing ECONNRESET under high concurrency.
+            connector = aiohttp.TCPConnector(
+                limit=SKYRL_HTTP_CONNECTION_LIMIT,
+                keepalive_timeout=2,
+                enable_cleanup_closed=True,
+            )
+            self._session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
         return self._session
+
+    async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
+        """POST with retry on transient connection errors (keep-alive race).
+
+        Under high concurrency the server may close an idle keep-alive
+        connection at the same moment aiohttp tries to reuse it, resulting
+        in ``ConnectionResetError`` / ``ServerDisconnectedError``.  A simple
+        retry lets the connection pool open a fresh socket and recover.
+        """
+        session = await self._get_session()
+        last_exc: Optional[Exception] = None
+        for attempt in range(_DATA_PLANE_RETRIES):
+            try:
+                async with session.post(url, json=json, headers=headers) as resp:
+                    body = await resp.json()
+                    resp.raise_for_status()
+                    return body
+            except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
+                last_exc = e
+                logger.warning("Data-plane retry %d/%d for %s: %s", attempt + 1, _DATA_PLANE_RETRIES, url, e)
+                continue
+        raise last_exc  # type: ignore[misc]
 
     # ---------------------------
     # Data Plane
@@ -227,7 +266,6 @@ class RemoteInferenceClient:
         Returns:
             Dict with keys: response, stop_reason, response_ids
         """
-        session = await self._get_session()
         url = f"{self.proxy_url}/inference/v1/generate"
 
         # Determine max_tokens key and original value
@@ -269,9 +307,7 @@ class RemoteInferenceClient:
             if session_id:
                 headers["X-Session-ID"] = str(session_id)
 
-            async with session.post(url, json=payload, headers=headers) as resp:
-                response = await resp.json()
-                raise_for_status(resp, response)
+            response = await self._post(url, json=payload, headers=headers)
 
             choice = response["choices"][0]
             new_token_ids = choice["token_ids"]
@@ -317,13 +353,8 @@ class RemoteInferenceClient:
         if session_id:
             headers["X-Session-ID"] = str(session_id)
 
-        session = await self._get_session()
         url = f"{self.proxy_url}/v1/chat/completions"
-
-        async with session.post(url, json=body, headers=headers) as resp:
-            response = await resp.json()
-            raise_for_status(resp, response)
-            return response
+        return await self._post(url, json=body, headers=headers)
 
     async def completion(
         self,
@@ -349,13 +380,8 @@ class RemoteInferenceClient:
         if session_id:
             headers["X-Session-ID"] = str(session_id)
 
-        session = await self._get_session()
         url = f"{self.proxy_url}/v1/completions"
-
-        async with session.post(url, json=body, headers=headers) as resp:
-            response = await resp.json()
-            raise_for_status(resp, response)
-            return response
+        return await self._post(url, json=body, headers=headers)
 
     async def tokenize(
         self,
@@ -372,7 +398,6 @@ class RemoteInferenceClient:
         Returns:
             List of token ID lists.
         """
-        session = await self._get_session()
         url = f"{self.proxy_url}/tokenize"
 
         # vLLM /tokenize expects individual requests, batch them
@@ -383,10 +408,8 @@ class RemoteInferenceClient:
                 "prompt": text,
                 "add_special_tokens": add_special_tokens,
             }
-            async with session.post(url, json=payload) as resp:
-                result = await resp.json()
-                raise_for_status(resp, result)
-                results.append(result.get("tokens", []))
+            result = await self._post(url, json=payload)
+            results.append(result.get("tokens", []))
 
         return results
 
@@ -403,7 +426,6 @@ class RemoteInferenceClient:
         Returns:
             List of decoded texts.
         """
-        session = await self._get_session()
         url = f"{self.proxy_url}/detokenize"
 
         # vLLM /detokenize expects individual requests, batch them
@@ -413,10 +435,8 @@ class RemoteInferenceClient:
                 "model": self.model_name,
                 "tokens": ids,
             }
-            async with session.post(url, json=payload) as resp:
-                result = await resp.json()
-                raise_for_status(resp, result)
-                results.append(result.get("prompt", ""))
+            result = await self._post(url, json=payload)
+            results.append(result.get("prompt", ""))
 
         return results
 

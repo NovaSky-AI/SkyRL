@@ -24,6 +24,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import set_ulimit
 
 from skyrl.env_vars import (
+    SKYRL_HTTP_CONNECTION_LIMIT,
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
@@ -263,6 +264,7 @@ class VLLMServerActor(ServerActorProtocol):
             port=self._cli_args.port,
             log_level=self._cli_args.uvicorn_log_level,
             timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+            backlog=SKYRL_HTTP_CONNECTION_LIMIT,
             ssl_keyfile=self._cli_args.ssl_keyfile,
             ssl_certfile=self._cli_args.ssl_certfile,
             ssl_ca_certs=self._cli_args.ssl_ca_certs,
