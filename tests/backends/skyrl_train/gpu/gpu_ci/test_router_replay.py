@@ -23,7 +23,8 @@ from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_para
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
-MOE_MODEL_NAME = "/home/ray/moonlight16b"
+MOE_MODEL_NAME = "arcee-ai/Trinity-Nano-Preview"
+# MOE_MODEL_NAME = "/home/ray/moonlight16b"
 # MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 REPLAY_NUM_LAYERS = 2
 NUM_PROMPTS = 10
@@ -112,6 +113,81 @@ def build_training_input_from_text_samples(
     return training_input
 
 
+def test_generate_with_router_replay(ray_init_fixture):
+    """
+    Check that generate with router replay produces the correct rollout inference indices.
+    """
+    try:
+        cfg = get_test_actor_config(model_name=MOE_MODEL_NAME)
+        cfg.trainer.strategy = "megatron"
+        cfg.generator.inference_engine.enable_return_routed_experts = True
+        cfg.generator.inference_engine.tensor_parallel_size = 8
+        cfg.generator.sampling_params = SamplingParams(
+            max_generate_length=MAX_GENERATE_LENGTH,
+            logprobs=1,
+            temperature=1.0,
+        )
+        cfg.generator.batched = False
+        cfg.generator.max_turns = 2
+        cfg.generator.use_conversation_multi_turn = True
+        env_class = "gsm8k_multi_turn"
+
+        tokenizer = AutoTokenizer.from_pretrained(MOE_MODEL_NAME, trust_remote_code=True)
+
+        with InferenceEngineState.create(
+            cfg=cfg,
+            model=MOE_MODEL_NAME,
+            use_local=True,
+            colocate_all=True,
+            backend="vllm",
+            sleep_level=1,
+            gpu_memory_utilization=0.9,
+        ) as engines:
+            client = engines.client
+            asyncio.run(client.wake_up())
+
+            generator = SkyRLGymGenerator(
+                generator_cfg=cfg.generator,
+                skyrl_gym_cfg=cfg.environment.skyrl_gym,
+                inference_engine_client=client,
+                tokenizer=tokenizer,
+            )
+
+            input_batch: GeneratorInput = get_test_generator_input(
+                model=MOE_MODEL_NAME,
+                num_prompts=NUM_PROMPTS,
+                n_samples_per_prompt=N_SAMPLES_PER_PROMPT,
+                max_prompt_length=512,
+                env_class=env_class,
+            )
+            input_batch["sampling_params"] = get_sampling_params_for_backend(
+                "vllm",
+                SamplingParams(
+                    temperature=1.0,
+                    top_p=1.0,
+                    top_k=-1,
+                    max_generate_length=MAX_GENERATE_LENGTH,
+                    min_p=0.0,
+                    logprobs=1,
+                ),
+            )
+
+            with Timer("generate_with_router_replay"):
+                generator_output = asyncio.run(generator.generate(input_batch))
+
+            indices = generator_output["rollout_expert_indices"]
+            responses = generator_output["response_ids"]
+            assert (
+                indices is not None
+            ), "rollout_expert_indices should not be None when enable_return_routed_experts=True"
+            assert len(indices) == len(
+                responses
+            ), f"Batch size mismatch: {len(indices)} indices vs {len(responses)} responses"
+            asyncio.run(client.sleep())
+    finally:
+        ray.shutdown()
+
+
 @pytest.mark.megatron
 def test_logprobs(ray_init_fixture):
     """
@@ -173,11 +249,11 @@ def test_logprobs(ray_init_fixture):
             with Timer("generate_with_router_replay"):
                 generator_output = asyncio.run(generator.generate(input_batch))
 
-            indices = generator_output["rollout_inference_indices"]
+            indices = generator_output["rollout_expert_indices"]
             responses = generator_output["response_ids"]
             assert (
                 indices is not None
-            ), "rollout_inference_indices should not be None when enable_return_routed_experts=True"
+            ), "rollout_expert_indices should not be None when enable_return_routed_experts=True"
             assert len(indices) == len(
                 responses
             ), f"Batch size mismatch: {len(indices)} indices vs {len(responses)} responses"
@@ -194,7 +270,7 @@ def test_logprobs(ray_init_fixture):
                 rewards=rewards,
                 loss_masks=generator_output["loss_masks"],
                 logprobs=generator_output.get("rollout_logprobs"),
-                rollout_inference_indices=indices,
+                rollout_expert_indices=indices,
             )
         )
 
@@ -213,7 +289,7 @@ def test_logprobs(ray_init_fixture):
                     if logprobs_t is not None
                     else torch.zeros((batch_size, num_actions), dtype=torch.float32)
                 ),
-                "rollout_inference_indices": rii_tensor,
+                "rollout_expert_indices": rii_tensor,
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),
@@ -333,11 +409,11 @@ def test_forward_backward(ray_init_fixture):
             with Timer("generate_with_router_replay"):
                 generator_output = asyncio.run(generator.generate(input_batch))
 
-            indices = generator_output["rollout_inference_indices"]
+            indices = generator_output["rollout_expert_indices"]
             responses = generator_output["response_ids"]
             assert (
                 indices is not None
-            ), "rollout_inference_indices should not be None when enable_return_routed_experts=True"
+            ), "rollout_expert_indices should not be None when enable_return_routed_experts=True"
             assert len(indices) == len(
                 responses
             ), f"Batch size mismatch: {len(indices)} indices vs {len(responses)} responses"
@@ -354,7 +430,7 @@ def test_forward_backward(ray_init_fixture):
                 rewards=rewards,
                 loss_masks=generator_output["loss_masks"],
                 logprobs=generator_output.get("rollout_logprobs"),
-                rollout_inference_indices=indices,
+                rollout_expert_indices=indices,
             )
         )
 
@@ -373,7 +449,7 @@ def test_forward_backward(ray_init_fixture):
                     if logprobs_t is not None
                     else torch.zeros((batch_size, num_actions), dtype=torch.float32)
                 ),
-                "rollout_inference_indices": rii_tensor,
+                "rollout_expert_indices": rii_tensor,
                 "action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "base_action_log_probs": torch.zeros((batch_size, num_actions), dtype=torch.float32),
                 "advantages": torch.zeros((batch_size, num_actions), dtype=torch.float32),

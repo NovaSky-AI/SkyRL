@@ -29,6 +29,7 @@ def get_test_config(
     is_step_wise,
     temperature,
     get_logprobs,
+    enable_return_routed_experts,
 ):
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
@@ -49,7 +50,7 @@ def get_test_config(
     cfg.generator.inference_engine.http_endpoint_host = "127.0.0.1"
     cfg.generator.inference_engine.http_endpoint_port = 8000
     cfg.generator.step_wise_trajectories = is_step_wise
-
+    cfg.generator.inference_engine.enable_return_routed_experts = enable_return_routed_experts
     cfg.environment.skyrl_gym.search.log_requests = True
     cfg.environment.skyrl_gym.search.search_url = "http://127.0.0.1:8000/retrieve"
     cfg.environment.skyrl_gym.max_env_workers = max_env_workers
@@ -108,6 +109,7 @@ async def run_generator_end_to_end(
     is_step_wise: bool = False,
     temperature=1.0,
     get_logprobs: bool = False,
+    enable_return_routed_experts: bool = False,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
@@ -125,6 +127,7 @@ async def run_generator_end_to_end(
         is_step_wise,
         temperature,
         get_logprobs,
+        enable_return_routed_experts,
     )
 
     # Use InferenceEngineState to support both legacy and new inference backends
@@ -185,6 +188,11 @@ async def run_generator_end_to_end(
                 "loss_mask": generator_output["loss_masks"][i],
                 "rollout_logprobs": (
                     generator_output["rollout_logprobs"][i] if generator_output["rollout_logprobs"] else None
+                ),
+                "rollout_expert_indices": (
+                    generator_output["rollout_expert_indices"][i]
+                    if generator_output["rollout_expert_indices"]
+                    else None
                 ),
             }
             for i in range(len(generator_output["response_ids"]))
@@ -445,6 +453,36 @@ async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
         max_env_workers=0,
         is_step_wise=True,
         temperature=0,
+    )
+
+    assert isinstance(generator_output["is_last_step"], list) and isinstance(generator_output["is_last_step"][0], bool)
+    # Expect atleast one response with more than one turn
+    assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
+
+
+async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
+    """
+    Test the generator with the multi-turn GSM8K environment for router replay
+    """
+    generator_output: GeneratorOutput = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=5,
+        num_inference_engines=2,
+        tensor_parallel_size=2,
+        model="arcee-ai/Trinity-Nano-Preview",
+        max_prompt_length=2048,
+        max_input_length=4096,
+        max_generate_length=1000,
+        data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
+        env_class="gsm8k_multi_turn",
+        num_prompts=2,
+        max_turns=2,
+        use_conversation_multi_turn=True,
+        max_env_workers=0,
+        is_step_wise=True,
+        temperature=0,
+        enable_return_routed_experts=True,
     )
 
     assert isinstance(generator_output["is_last_step"], list) and isinstance(generator_output["is_last_step"][0], bool)

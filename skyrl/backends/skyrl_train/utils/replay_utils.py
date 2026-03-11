@@ -73,24 +73,24 @@ def _patch_alltoall_dispatcher_for_replay():
     MoEAlltoAllTokenDispatcher._preprocess_patched = True
 
 
-def _split_replay_indices(rollout_inference_indices: torch.Tensor) -> List[torch.Tensor]:
-    if rollout_inference_indices is None:
+def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> List[torch.Tensor]:
+    if rollout_expert_indices is None:
         return None
-    if rollout_inference_indices.dim() != 4:
-        raise ValueError(f"Expected 4D replay indices, got shape {rollout_inference_indices.shape}")
-    per_layer = rollout_inference_indices.permute(2, 0, 1, 3).contiguous()
+    if rollout_expert_indices.dim() != 4:
+        raise ValueError(f"Expected 4D replay indices, got shape {rollout_expert_indices.shape}")
+    per_layer = rollout_expert_indices.permute(2, 0, 1, 3).contiguous()
     # flatten [batch, seq, topk] to [batch * seq, topk] for each layer
     return [per_layer[i].reshape(-1, per_layer.shape[-1]) for i in range(per_layer.shape[0])]
 
 
 def _remove_left_padding_from_indices(
-    rollout_inference_indices: torch.Tensor,
+    rollout_expert_indices: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
     """Apply the same left-padding removal as remove_left_padding to routing indices.
 
     Args:
-        rollout_inference_indices: [batch, padded_seq_len, layers, topk]
+        rollout_expert_indices: [batch, padded_seq_len, layers, topk]
         attention_mask: [batch, padded_seq_len] (int or bool)
 
     Returns:
@@ -105,23 +105,23 @@ def _remove_left_padding_from_indices(
         pad_size = (sp_world_size - effective_seq_len % sp_world_size) % sp_world_size
         effective_seq_len += pad_size
 
-    batch_size = rollout_inference_indices.shape[0]
+    batch_size = rollout_expert_indices.shape[0]
     new_rii = torch.zeros(
         batch_size,
         effective_seq_len,
-        rollout_inference_indices.shape[2],
-        rollout_inference_indices.shape[3],
-        dtype=rollout_inference_indices.dtype,
-        device=rollout_inference_indices.device,
+        rollout_expert_indices.shape[2],
+        rollout_expert_indices.shape[3],
+        dtype=rollout_expert_indices.dtype,
+        device=rollout_expert_indices.device,
     )
     for i in range(batch_size):
         mask = attention_mask[i].bool()
-        new_rii[i, : seq_lens[i]] = rollout_inference_indices[i, mask]
+        new_rii[i, : seq_lens[i]] = rollout_expert_indices[i, mask]
     return new_rii
 
 
-def setup_per_microbatch_replay(
-    rollout_inference_indices: torch.Tensor,
+def setup_per_microbatch_replay_forward(
+    rollout_expert_indices: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> None:
     """Set up RouterReplay for a single micro-batch, aligning indices
@@ -141,8 +141,10 @@ def setup_per_microbatch_replay(
 
     _patch_alltoall_dispatcher_for_replay()
 
-    aligned = _remove_left_padding_from_indices(rollout_inference_indices, attention_mask)
+    aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)
 
+    # handles megatron sequence parallelism across the tensor model parallel region
+    # since we automatically enable sequence parallelism when TP > 1
     tp_size = mpu.get_tensor_model_parallel_world_size()
     if tp_size > 1:
         tp_rank = mpu.get_tensor_model_parallel_rank()

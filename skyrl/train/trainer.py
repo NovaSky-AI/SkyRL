@@ -604,8 +604,8 @@ class RayPPOTrainer:
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
-        rollout_inference_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
-            "rollout_inference_indices", None
+        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
+            "rollout_expert_indices", None
         )
 
         (
@@ -615,7 +615,7 @@ class RayPPOTrainer:
             rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
-            rollout_inference_indices_tensor,
+            rollout_expert_indices_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
@@ -623,7 +623,7 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
-            rollout_inference_indices,
+            rollout_expert_indices,
         )
 
         # sanity check for off_policy_correction
@@ -644,7 +644,7 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
-                "rollout_inference_indices": rollout_inference_indices_tensor,
+                "rollout_expert_indices": rollout_expert_indices_tensor,
                 "is_last_step": (
                     torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
                     if generator_output.get("is_last_step", None) is not None

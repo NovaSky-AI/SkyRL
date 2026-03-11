@@ -24,7 +24,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     remove_left_padding,
     recover_left_padding,
 )
-from skyrl.backends.skyrl_train.utils.replay_utils import setup_per_microbatch_replay
+from skyrl.backends.skyrl_train.utils.replay_utils import setup_per_microbatch_replay_forward
 
 
 class MegatronModelWrapper:
@@ -105,9 +105,9 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
-            rollout_inference_indices = batch.pop("rollout_inference_indices", None)
-            if rollout_inference_indices is not None:
-                setup_per_microbatch_replay(rollout_inference_indices, batch["attention_mask"])
+            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_forward(rollout_expert_indices, batch["attention_mask"])
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
@@ -361,9 +361,9 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
-            rollout_inference_indices = batch.pop("rollout_inference_indices", None)
-            if rollout_inference_indices is not None:
-                setup_per_microbatch_replay(rollout_inference_indices, batch["attention_mask"])
+            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_forward(rollout_expert_indices, batch["attention_mask"])
 
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
