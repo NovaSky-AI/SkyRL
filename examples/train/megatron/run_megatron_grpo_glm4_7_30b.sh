@@ -20,7 +20,8 @@ set -x
 #        bash examples/train/megatron/run_megatron_grpo_glm4_7_30b.sh
 
 MODEL_NAME="zai-org/GLM-4.7-Flash"
-DATA_DIR="$HOME/data/gsm8k"
+DATA_DIR=${DATA_DIR:-"$HOME/data/gsm8k"}
+CKPT_DIR=${CKPT_DIR:-"$HOME/ckpts/glm4_7_30b_a3b_grpo_megatron"}
 LOGGER="wandb"  # change to "console" to print to stdout
 
 INFERENCE_BACKEND="vllm"
@@ -112,5 +113,5 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.project_name="glm4_7_30b_grpo" \
   trainer.run_name="glm4_7_30b_a3b_grpo_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/glm4_7_30b_a3b_grpo_megatron" \
+  trainer.ckpt_path="$CKPT_DIR" \
   $@
