@@ -4,7 +4,7 @@ Server Group - manages server actors with placement groups.
 
 import logging
 from argparse import Namespace
-from typing import Any, List, Optional, Type, Union
+from typing import Any, List, Optional, Type
 
 import ray
 from ray.util.placement_group import PlacementGroup, placement_group
@@ -35,7 +35,7 @@ class ServerGroup:
     - Colocation mode: Uses external placement group (shared with training)
     - Data Parallel: Multiple DP-enabled servers
     - PD Disaggregation: Prefill-decode disaggregation with NIXL
-    - mp backend: Per-server placement groups with CUDA_VISIBLE_DEVICES
+    - mp backend: CUDA_VISIBLE_DEVICES targeting within a shared PG
     """
 
     def __init__(
@@ -43,7 +43,7 @@ class ServerGroup:
         cli_args: Namespace,
         num_servers: int,
         start_port: int = 8000,
-        placement_group: Optional[Union[PlacementGroup, List[PlacementGroup]]] = None,
+        placement_group: Optional[PlacementGroup] = None,
         placement_group_bundle_offset: int = 0,
         enable_dp: bool = False,
         enable_pd: bool = False,
@@ -58,13 +58,11 @@ class ServerGroup:
             cli_args: CLI arguments for the server (engine-specific).
             num_servers: Number of server instances to create.
             start_port: Base port for server ports.
-            placement_group: External placement group(s) for colocation mode.
-                For the ``"ray"`` backend, pass a single PlacementGroup.
-                For the ``"mp"`` backend, pass a list of PlacementGroups
-                (one per server). If None, creates internal placement group(s).
+            placement_group: External placement group for colocation mode.
+                If None, creates an internal placement group.
             placement_group_bundle_offset: Offset for bundle indices when using
                 external placement group (e.g., if training uses first N
-                bundles). Only used with the ``"ray"`` backend.
+                bundles).
             enable_dp: Enable data parallelism across servers.
             enable_pd: Enable prefill-decode disaggregation.
             nixl_side_channel_base: Base port for NIXL side channels. Each
@@ -88,17 +86,10 @@ class ServerGroup:
         self._enable_pd = enable_pd
         self._nixl_side_channel_base = nixl_side_channel_base
         self._pool: Optional[ServerActorPool] = None
-        self._internal_pgs: Optional[List[PlacementGroup]] = None
+        self._internal_pg: Optional[PlacementGroup] = None
         self._distributed_executor_backend = distributed_executor_backend
         self._use_mp_backend = distributed_executor_backend == "mp"
-
-        # Normalise external PGs into a list (or None)
-        if placement_group is None:
-            self._external_pgs: Optional[List[PlacementGroup]] = None
-        elif isinstance(placement_group, list):
-            self._external_pgs = placement_group
-        else:
-            self._external_pgs = [placement_group]
+        self._external_pg = placement_group
 
         # Query the actor class for GPU requirements
         self._num_gpus_per_server = self._server_actor_cls.compute_num_gpus_per_server(cli_args)
@@ -109,43 +100,25 @@ class ServerGroup:
             f"gpus_per_server={self._num_gpus_per_server}, "
             f"enable_dp={enable_dp}, enable_pd={enable_pd}, "
             f"distributed_executor_backend={distributed_executor_backend}, "
-            f"external_pg={'yes' if self._external_pgs else 'no'}"
+            f"external_pg={'yes' if self._external_pg else 'no'}"
         )
 
-    def _create_placement_groups(self) -> List[PlacementGroup]:
-        """Create internal placement group(s).
-
-        For the ``"mp"`` backend one PG per server is created.
-        Otherwise a single monolithic PG for all servers is created.
-        """
-        if self._use_mp_backend:
-            pgs = []
-            for _ in range(self._num_servers):
-                pg = placement_group(
-                    [{"CPU": 1, "GPU": 1} for _ in range(self._num_gpus_per_server)],
-                )
-                ray.get(pg.ready())
-                pgs.append(pg)
-            logger.info(
-                f"Created {len(pgs)} per-server placement groups "
-                f"({self._num_gpus_per_server} bundles each) for mp backend"
-            )
-            return pgs
-
+    def _create_placement_group(self) -> PlacementGroup:
+        """Create an internal placement group with per-GPU bundles."""
         total_bundles = self._num_servers * self._num_gpus_per_server
         logger.info(f"Creating placement group with {total_bundles} bundles...")
         pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(total_bundles)])
         ray.get(pg.ready())
         logger.info("Placement group ready")
-        return [pg]
+        return pg
 
-    def _get_placement_groups(self) -> List[PlacementGroup]:
-        """Get the placement group list (external or internal)."""
-        if self._external_pgs is not None:
-            return self._external_pgs
-        if self._internal_pgs is None:
-            self._internal_pgs = self._create_placement_groups()
-        return self._internal_pgs
+    def _get_placement_group(self) -> PlacementGroup:
+        """Get the placement group (external or internal)."""
+        if self._external_pg is not None:
+            return self._external_pg
+        if self._internal_pg is None:
+            self._internal_pg = self._create_placement_group()
+        return self._internal_pg
 
     def _create_actor_class(self, pg: PlacementGroup, start_bundle_idx: int) -> Any:
         """Create actor class with scheduling constraints for a specific bundle."""
@@ -176,33 +149,9 @@ class ServerGroup:
         gpu_ids = get_gpu_ids_for_pg_bundles(pg, bundle_indices)
         return ",".join(str(g) for g in gpu_ids)
 
-    def _mp_server_placement(self, server_idx: int, pgs: List[PlacementGroup]):
-        """Resolve (pg, start_bundle_idx) for a server under the mp backend.
-
-        When ``len(pgs) == num_servers`` each server has its own PG
-        (no DP or PGs pre-split). When ``len(pgs) < num_servers``
-        multiple servers (DP ranks) share a per-engine PG, each at a
-        different bundle offset of ``gpus_per_server`` width.
-
-        Returns:
-            Tuple of (placement_group, start_bundle_index).
-        """
-        if len(pgs) == self._num_servers:
-            return pgs[server_idx], 0
-
-        servers_per_pg = self._num_servers // len(pgs)
-        assert self._num_servers == len(pgs) * servers_per_pg, (
-            f"mp backend: num_servers ({self._num_servers}) must be divisible "
-            f"by the number of placement groups ({len(pgs)})"
-        )
-        pg_idx = server_idx // servers_per_pg
-        rank_in_pg = server_idx % servers_per_pg
-        start_bundle_idx = rank_in_pg * self._num_gpus_per_server
-        return pgs[pg_idx], start_bundle_idx
-
     def _create_actors(self) -> List[Any]:
         """Create server actors with GPU resources."""
-        pgs = self._get_placement_groups()
+        pg = self._get_placement_group()
 
         actors = []
         dp_address, dp_rpc_port = None, None
@@ -210,23 +159,16 @@ class ServerGroup:
         # Pre-compute CUDA_VISIBLE_DEVICES per server for mp backend
         mp_cuda_visible_devices_map: dict[int, Optional[str]] = {}
         if self._use_mp_backend:
-            assert len(pgs) <= self._num_servers, (
-                f"mp backend: got {len(pgs)} PGs for {self._num_servers} servers " f"(expected <= num_servers)"
-            )
             for server_idx in range(self._num_servers):
-                server_pg, bundle_start = self._mp_server_placement(server_idx, pgs)
+                start = self._bundle_offset + server_idx * self._num_gpus_per_server
                 mp_cuda_visible_devices_map[server_idx] = self._get_cuda_visible_devices(
-                    server_pg, bundle_start, self._num_gpus_per_server
+                    pg, start, self._num_gpus_per_server
                 )
 
         for server_idx in range(self._num_servers):
-            if self._use_mp_backend:
-                server_pg, start_bundle_idx = self._mp_server_placement(server_idx, pgs)
-            else:
-                server_pg = pgs[0]
-                start_bundle_idx = self._bundle_offset + server_idx * self._num_gpus_per_server
+            start_bundle_idx = self._bundle_offset + server_idx * self._num_gpus_per_server
 
-            ServerActorClass = self._create_actor_class(server_pg, start_bundle_idx)
+            ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
 
             actor = ServerActorClass.remote(
                 self._cli_args,
@@ -238,7 +180,7 @@ class ServerGroup:
                 dp_rpc_port=dp_rpc_port,
                 enable_pd=self._enable_pd,
                 nixl_side_channel_base=self._nixl_side_channel_base,
-                colocated_training=self._external_pgs is not None,
+                colocated_training=self._external_pg is not None,
                 distributed_executor_backend=self._distributed_executor_backend,
                 mp_cuda_visible_devices=mp_cuda_visible_devices_map.get(server_idx),
             )

@@ -32,12 +32,11 @@ class DAPOAlgorithmConfig(AlgorithmConfig):
 DAPOFlashRLConfig = make_config(algorithm_cls=DAPOAlgorithmConfig)
 
 
-def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: SkyRLTrainConfig, colocate_pgs, tokenizer):
+def create_ray_wrapped_inference_engines_from_config_flashrl(cfg: SkyRLTrainConfig, colocate_pg, tokenizer):
     from .flash_rl_engine import create_ray_wrapped_inference_engines_flashrl
 
     ie_cfg = cfg.generator.inference_engine
-    # FlashRL engine expects a single PG (does not support mp multi-PG mode)
-    shared_pg = colocate_pgs[0] if colocate_pgs is not None else None
+    shared_pg = colocate_pg
     return create_ray_wrapped_inference_engines_flashrl(
         num_inference_engines=ie_cfg.num_engines,
         tensor_parallel_size=ie_cfg.tensor_parallel_size,

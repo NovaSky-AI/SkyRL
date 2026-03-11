@@ -101,10 +101,10 @@ def test_policy_local_engines_e2e(
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=2,  # since we explicitly sync weights
     ) as engines:
-        client, pgs = engines.client, engines.pgs
+        client, pg = engines.client, engines.pg
         policy = init_worker_with_type(
             "policy",
-            shared_pgs=pgs,
+            shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
             num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size
             * cfg.generator.inference_engine.num_engines

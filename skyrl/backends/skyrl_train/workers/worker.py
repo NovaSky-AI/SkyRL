@@ -407,7 +407,7 @@ class PPORayActorGroup:
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[Worker],
-        pg: Optional[Union[PlacementGroup, List[PlacementGroup]]] = None,
+        pg: Optional[PlacementGroup] = None,
         num_gpus_per_actor: float = 1.0,
         resources: Optional[Dict[str, float]] = None,
         num_resources_per_node: Optional[int] = None,
@@ -436,45 +436,36 @@ class PPORayActorGroup:
         self.record_memory = record_memory
         self._initiate_actors(pg, num_gpus_per_actor)
 
-    def _initiate_actors(self, pg: Optional[Union[PlacementGroup, List[PlacementGroup]]], num_gpus_per_actor: float):
+    def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
         """Initialize Ray actors in the worker group.
 
         Args:
-            pg: Placement group(s) for the worker group. Can be a single
-                PlacementGroup, a list of PlacementGroups, or None.
+            pg: A single placement group for the worker group, or None.
             num_gpus_per_actor: The number of gpus to allocate per actor.
         """
         world_size = self._num_nodes * self._num_gpus_per_node
 
-        # Normalize pg input: support both single PG and list of PGs
-        if isinstance(pg, list):
-            pgs = pg
-        elif pg is not None:
-            pgs = [pg]
-        else:
-            pgs = None
-
         if self.colocate_all:
             assert (
-                pgs is not None
-            ), "if colocate_all is True, the shared placement group(s) must be provided to PPORayActorGroup"
-            total_bundles = sum(len(placement_group_table(p)["bundles"]) for p in pgs)
-            assert total_bundles == world_size, (
-                f"if colocate_all is True, the total number of bundles across all placement groups "
-                f"must match world_size. Got {total_bundles} bundles but world_size={world_size}"
+                pg is not None
+            ), "if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
+            pg_data = placement_group_table(pg)
+            assert len(pg_data["bundles"]) == world_size, (
+                f"if colocate_all is True, the number of bundles in the placement group "
+                f"must match world_size. Got {len(pg_data['bundles'])} bundles but world_size={world_size}"
             )
 
         # Build rank → (pg, bundle_index) assignments.
         # rank_pg_assignments is a list of (PlacementGroup, bundle_idx) tuples,
         # one per rank, sorted by (node_id, gpu_id) for deterministic ordering.
         rank_pg_assignments = []
-        if pgs is not None:
-            total_bundles = sum(len(placement_group_table(p)["bundles"]) for p in pgs)
-            if total_bundles == world_size:
-                rank_pg_assignments = get_reordered_bundle_indices(pgs)
+        if pg is not None:
+            pg_data = placement_group_table(pg)
+            if len(pg_data["bundles"]) == world_size:
+                rank_pg_assignments = get_reordered_bundle_indices([pg])
 
-        # If no PGs provided, create one internally
-        if pgs is None and self._num_gpus_per_node > 1:
+        # If no PG provided, create one internally
+        if pg is None and self._num_gpus_per_node > 1:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
                 resources_name = list(self._resources.keys())[0]
@@ -483,18 +474,18 @@ class PPORayActorGroup:
 
             internal_pg = placement_group(bundles, strategy="PACK")
             get_ray_pg_ready_with_timeout(internal_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-            pgs = [internal_pg]
+            pg = internal_pg
 
         def _scheduling_strategy_for_rank(rank):
-            if rank_pg_assignments:  # set if pgs is provided (colocated case)
+            if rank_pg_assignments:
                 pg_for_rank, bundle_idx = rank_pg_assignments[rank]
                 return PlacementGroupSchedulingStrategy(
                     placement_group=pg_for_rank,
                     placement_group_bundle_index=bundle_idx,
                 )
-            elif pgs:  # set if pgs is created internally (non-colocated case)
+            elif pg is not None:
                 return PlacementGroupSchedulingStrategy(
-                    placement_group=pgs[0],
+                    placement_group=pg,
                     placement_group_bundle_index=rank // self._num_gpus_per_node,
                 )
             # else we are in the single gpu case per node case in which case we don't need to set

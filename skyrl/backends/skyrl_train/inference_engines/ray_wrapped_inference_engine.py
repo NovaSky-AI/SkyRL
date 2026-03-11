@@ -90,7 +90,7 @@ def create_ray_wrapped_inference_engines(
     expert_parallel_size: int = 1,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
-    shared_pgs=None,
+    shared_pg=None,
     gpu_memory_utilization=None,
     inference_engine_enable_sleep=False,
     async_engine=False,
@@ -115,13 +115,10 @@ def create_ray_wrapped_inference_engines(
     instances.
 
     Args:
-        shared_pgs: A list of placement groups for colocated training, or None.
-            For the "ray" distributed executor backend, this is typically a
-            single-element list containing one large PG.
-            For the "mp" backend, this is a list of per-engine PGs (one per engine).
+        shared_pg: A single placement group for colocated training, or None.
         distributed_executor_backend: vLLM distributed executor backend.
-            For either "ray" or "mp", "uni" is used for single-GPU.
-            "mp" uses multiprocessing (single-node only) with per-engine placement groups.
+            "ray" spawns TP/PP workers as Ray tasks.
+            "mp" spawns workers as local processes with CUDA_VISIBLE_DEVICES.
     """
     from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
     from skyrl.train.utils.utils import (
@@ -154,64 +151,34 @@ def create_ray_wrapped_inference_engines(
     use_mp_backend = distributed_executor_backend == "mp"
 
     data_parallel_backend = "mp"
-    use_hybrid_engine = shared_pgs is not None
+    use_hybrid_engine = shared_pg is not None
     per_engine_gpu_count = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
 
     num_gpus_per_actor = int(tensor_parallel_size == 1 and pipeline_parallel_size == 1)
     if use_hybrid_engine and tensor_parallel_size == 1 and pipeline_parallel_size == 1:
         num_gpus_per_actor = 0.2
 
-    if use_mp_backend:
-        if not use_hybrid_engine:
-            # Non-colocate: create one PG per engine with individual GPU bundles
-            engine_pgs = []
-            for _ in range(num_inference_engines):
-                pg = placement_group(
-                    [{"GPU": 1, "CPU": 1}] * per_engine_gpu_count,
-                    strategy="PACK",
-                )
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-                engine_pgs.append(pg)
-        else:
-            # Colocate: shared_pgs is a list of per-engine PGs (one per engine)
-            assert len(shared_pgs) == num_inference_engines, (
-                f"For mp backend with colocate, expected {num_inference_engines} placement groups "
-                f"(one per engine), got {len(shared_pgs)}"
-            )
-            engine_pgs = shared_pgs
+    # Both mp and ray backends use a single shared PG with per-GPU bundles.
+    if not use_hybrid_engine:
+        bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
+        shared_pg = placement_group(bundles, strategy="PACK")
+        get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
-        # Pre-compute GPU IDs per (engine, dp_rank) so we can set
-        # CUDA_VISIBLE_DEVICES for the mp-spawned workers to see only the
-        # TP*PP GPUs allocated to that DP rank (not the full engine PG).
-        engine_gpu_ids_map = {}
+    # Pre-compute GPU IDs per (engine, dp_rank) so we can set
+    # CUDA_VISIBLE_DEVICES for the mp-spawned workers to see only the
+    # TP*PP GPUs allocated to that DP rank.
+    engine_gpu_ids_map = {}
+    if use_mp_backend:
         tp_pp_size = tensor_parallel_size * pipeline_parallel_size
-        if tp_pp_size > 1:
-            for engine_idx, epg in enumerate(engine_pgs):
-                for dp_rank in range(data_parallel_size):
-                    dp_bundle_start = dp_rank * tp_pp_size
-                    dp_bundle_indices = list(range(dp_bundle_start, dp_bundle_start + tp_pp_size))
-                    engine_gpu_ids_map[(engine_idx, dp_rank)] = get_gpu_ids_for_pg_bundles(epg, dp_bundle_indices)
-    else:
-        # ray backend: single shared PG
-        if not use_hybrid_engine:
-            bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
-            shared_pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        else:
-            assert len(shared_pgs) == 1, (
-                f"For ray backend with colocate, expected a single shared placement group, " f"got {len(shared_pgs)}"
-            )
-            shared_pg = shared_pgs[0]
+        for engine_idx in range(num_inference_engines):
+            for dp_rank in range(data_parallel_size):
+                base = engine_idx * per_engine_gpu_count + dp_rank * tp_pp_size
+                bundle_indices = list(range(base, base + tp_pp_size))
+                engine_gpu_ids_map[(engine_idx, dp_rank)] = get_gpu_ids_for_pg_bundles(shared_pg, bundle_indices)
 
     for i in range(num_inference_engines):
-        if use_mp_backend:
-            engine_pg = engine_pgs[i]
-            base_pg_index = 0  # each engine has its own PG
-            data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(engine_pg, 0)
-        else:
-            engine_pg = shared_pg
-            base_pg_index = i * per_engine_gpu_count
-            data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, base_pg_index)
+        base_pg_index = i * per_engine_gpu_count
+        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, base_pg_index)
 
         if backend == "vllm":
             if async_engine:
@@ -265,7 +232,7 @@ def create_ray_wrapped_inference_engines(
                     mp_gpu_ids_str = None
 
                 dp_rank_sched = PlacementGroupSchedulingStrategy(
-                    placement_group=engine_pg,
+                    placement_group=shared_pg,
                     placement_group_capture_child_tasks=not use_mp_backend,
                     placement_group_bundle_index=base_dp_pg_index,
                 )

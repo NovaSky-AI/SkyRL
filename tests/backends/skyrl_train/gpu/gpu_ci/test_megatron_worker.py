@@ -150,12 +150,12 @@ def test_megatron_policy_weight_sync(
             backend="vllm",
             sleep_level=2,  # since we explicitly sync weights
         ) as engines:
-            client, pgs = engines.client, engines.pgs
+            client, pg = engines.client, engines.pg
             asyncio.run(client.sleep())
 
             policy = init_worker_with_type(
                 "policy",
-                shared_pgs=pgs,
+                shared_pg=pg,
                 colocate_all=cfg.trainer.placement.colocate_all,
                 num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
                 cfg=cfg,
@@ -248,7 +248,7 @@ async def test_megatron_forward(
 
     actor_group = init_worker_with_type(
         worker_type,
-        shared_pgs=None,
+        shared_pg=None,
         colocate_all=False,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg,
@@ -365,7 +365,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     actor_group = init_worker_with_type(
         "policy",
-        shared_pgs=None,
+        shared_pg=None,
         colocate_all=False,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg,
@@ -401,7 +401,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
 
     actor_group = init_worker_with_type(
         "policy",
-        shared_pgs=None,
+        shared_pg=None,
         colocate_all=False,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg,
@@ -490,7 +490,7 @@ async def test_megatron_train(
 
     actor_group = init_worker_with_type(
         "policy",
-        shared_pgs=None,
+        shared_pg=None,
         colocate_all=False,
         num_nodes=cfg.trainer.placement.policy_num_nodes,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
@@ -537,7 +537,7 @@ async def test_megatron_train(
         cfg.trainer.policy.model_config_kwargs["num_hidden_layers"] = 2
     actor_group = init_worker_with_type(
         "policy",
-        shared_pgs=None,
+        shared_pg=None,
         colocate_all=False,
         num_nodes=cfg.trainer.placement.policy_num_nodes,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
@@ -618,7 +618,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
 
     actor_group = init_worker_with_type(
         "policy",
-        shared_pgs=None,
+        shared_pg=None,
         colocate_all=False,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg,
@@ -667,7 +667,7 @@ async def test_megatron_dp(ray_init_fixture, worker_type, tp, pp, gpus_per_node)
 
     actor_group = init_worker_with_type(
         "policy",
-        shared_pgs=None,
+        shared_pg=None,
         colocate_all=False,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg,
@@ -736,7 +736,7 @@ async def test_megatron_offload_memory_and_correctness(ray_init_fixture, worker_
     cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
     actor_group = init_worker_with_type(
         worker_type,
-        shared_pgs=None,
+        shared_pg=None,
         colocate_all=False,
         num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
         cfg=cfg,

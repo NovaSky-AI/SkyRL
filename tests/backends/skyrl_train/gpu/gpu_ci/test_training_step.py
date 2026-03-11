@@ -56,7 +56,7 @@ async def test_policy_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
     try:
         actor_group = init_worker_with_type(
             "policy",
-            shared_pgs=None,
+            shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
@@ -111,7 +111,7 @@ async def test_policy_loss_fn_outputs_variable_lengths(ray_init_fixture, cfg):
     try:
         actor_group = init_worker_with_type(
             "policy",
-            shared_pgs=None,
+            shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
@@ -162,7 +162,7 @@ async def test_critic_forward_backward_and_optim_step(ray_init_fixture, cfg, pac
     try:
         actor_group = init_worker_with_type(
             "critic",
-            shared_pgs=None,
+            shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
@@ -198,7 +198,7 @@ async def test_set_lr_updates_optimizer(ray_init_fixture, cfg):
     try:
         actor_group = init_worker_with_type(
             "policy",
-            shared_pgs=None,
+            shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
@@ -245,7 +245,7 @@ async def test_sft_forward_backward_with_cross_entropy(ray_init_fixture, cfg, st
     try:
         actor_group = init_worker_with_type(
             "policy",
-            shared_pgs=None,
+            shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,

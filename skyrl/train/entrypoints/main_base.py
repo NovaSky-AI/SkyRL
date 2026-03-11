@@ -41,7 +41,7 @@ __all__ = ["BasePPOExp", "config_dir"]
 
 def create_ray_wrapped_inference_engines_from_config(
     cfg: SkyRLTrainConfig,
-    colocate_pgs: Optional[List[PlacementGroup]],
+    colocate_pg: Optional[PlacementGroup],
     tokenizer: PreTrainedTokenizerBase,
 ):
     from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
@@ -61,7 +61,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "enforce_eager": ie_cfg.enforce_eager,
         "expert_parallel_size": ie_cfg.expert_parallel_size,
         "data_parallel_size": ie_cfg.data_parallel_size,
-        "shared_pgs": colocate_pgs,
+        "shared_pg": colocate_pg,
         "gpu_memory_utilization": ie_cfg.gpu_memory_utilization,
         "inference_engine_enable_sleep": cfg.trainer.placement.colocate_all,
         "async_engine": ie_cfg.async_engine,
@@ -179,43 +179,32 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[List[PlacementGroup]]:
-        """Initializes placement group(s) for colocated training.
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[PlacementGroup]:
+        """Initializes a placement group for colocated training.
 
-        For the ``"mp"`` distributed executor backend, one placement group per
-        inference engine is created (single-node packing per engine).  For
-        ``"ray"``, a single placement group that packs all inference
-        engines together is created (wrapped in a list for a uniform interface).
+        Creates a single placement group with per-GPU bundles for all inference
+        engines.  Both ``"ray"`` and ``"mp"`` backends share the same PG layout;
+        the ``"mp"`` backend relies on ``CUDA_VISIBLE_DEVICES`` for GPU targeting.
 
         Args:
-            timeout (int): The timeout for each placement group to be ready.
+            timeout (int): The timeout for the placement group to be ready.
 
         Returns:
-            A list of PlacementGroup(s) when colocate_all is True, else None.
+            A PlacementGroup when colocate_all is True, else None.
         """
         if not self.cfg.trainer.placement.colocate_all:
             return None
 
         ie_cfg = self.cfg.generator.inference_engine
         per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+        total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
 
-        if ie_cfg.distributed_executor_backend == "mp":
-            pgs = []
-            for _ in range(ie_cfg.num_engines):
-                pg = placement_group(
-                    [{"GPU": 1, "CPU": 1}] * per_engine_gpu_count,
-                    strategy="PACK",
-                )
-                get_ray_pg_ready_with_timeout(pg, timeout=timeout)
-                pgs.append(pg)
-            return pgs
-        else:
-            pg = placement_group(
-                [{"GPU": 1, "CPU": 1}] * ie_cfg.num_engines * per_engine_gpu_count,
-                strategy="PACK",
-            )
-            get_ray_pg_ready_with_timeout(pg, timeout=timeout)
-            return [pg]
+        pg = placement_group(
+            [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
+            strategy="PACK",
+        )
+        get_ray_pg_ready_with_timeout(pg, timeout=timeout)
+        return pg
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         """Initializes the generator.
@@ -359,14 +348,10 @@ class BasePPOExp:
             # Case: Neither - build servers and router internally
             cli_args = build_vllm_cli_args(self.cfg)
 
-            colocate_pgs_for_server = None
-            if is_colocated and self.colocate_pg is not None:
-                colocate_pgs_for_server = self.colocate_pg
-
             self._server_group = ServerGroup(
                 cli_args=cli_args,
                 num_servers=ie_cfg.num_engines,
-                placement_group=colocate_pgs_for_server,
+                placement_group=self.colocate_pg if is_colocated else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )

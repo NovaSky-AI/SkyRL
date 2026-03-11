@@ -84,7 +84,7 @@ class RayPPOTrainer:
         train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
         generator: GeneratorInterface,
-        colocate_pg: Optional[List[PlacementGroup]] = None,
+        colocate_pg: Optional[PlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
     ):
         self.cfg = cfg

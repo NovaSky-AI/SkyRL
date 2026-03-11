@@ -94,7 +94,7 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
     try:
         actor_group = init_worker_with_type(
             "policy",
-            shared_pgs=None,
+            shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,

@@ -41,7 +41,7 @@ def get_test_config() -> SkyRLTrainConfig:
 
 def init_colocated_actor_group(
     worker_cls,
-    shared_pgs,
+    shared_pg,
     cfg: SkyRLTrainConfig,
 ) -> PPORayActorGroup:
     """Initialize an actor group that shares placement groups with others."""
@@ -50,7 +50,7 @@ def init_colocated_actor_group(
         num_nodes=1,
         num_gpus_per_node=1,
         ray_actor_type=worker_cls,
-        pg=shared_pgs,
+        pg=shared_pg,
         num_gpus_per_actor=0.4,  # Share GPU
         colocate_all=True,
         sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
@@ -77,8 +77,8 @@ async def test_colocate_all_only_one_model_on_gpu(ray_init_fixture):
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
         # Initialize both actor groups on shared GPU
-        policy_group = init_colocated_actor_group(PolicyWorker, [pg], cfg)
-        ref_group = init_colocated_actor_group(RefWorker, [pg], cfg)
+        policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
+        ref_group = init_colocated_actor_group(RefWorker, pg, cfg)
 
         # Init models - after init, models are on GPU
         ray.get(policy_group.async_init_model(cfg.trainer.policy.model.path))
@@ -161,8 +161,8 @@ async def test_gpu_state_tracking_accuracy(ray_init_fixture):
         pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
-        policy_group = init_colocated_actor_group(PolicyWorker, [pg], cfg)
-        ref_group = init_colocated_actor_group(RefWorker, [pg], cfg)
+        policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
+        ref_group = init_colocated_actor_group(RefWorker, pg, cfg)
 
         ray.get(policy_group.async_init_model(cfg.trainer.policy.model.path))
         ray.get(ref_group.async_init_model(cfg.trainer.policy.model.path))
@@ -220,8 +220,8 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
         pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
-        policy_group = init_colocated_actor_group(PolicyWorker, [pg], cfg)
-        critic_group = init_colocated_actor_group(CriticWorker, [pg], cfg)
+        policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
+        critic_group = init_colocated_actor_group(CriticWorker, pg, cfg)
 
         ray.get(policy_group.async_init_model(cfg.trainer.policy.model.path))
         ray.get(critic_group.async_init_model(cfg.trainer.policy.model.path))
@@ -308,7 +308,7 @@ async def test_dispatch_set_lr(ray_init_fixture, strategy):
         pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
 
-        policy_group = init_colocated_actor_group(import_worker(strategy, "policy"), [pg], cfg)
+        policy_group = init_colocated_actor_group(import_worker(strategy, "policy"), pg, cfg)
         ray.get(policy_group.async_init_model(MODEL_NAME))
 
         dispatch = WorkerDispatch(cfg, policy_actor_group=policy_group)

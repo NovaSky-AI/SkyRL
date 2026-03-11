@@ -137,13 +137,13 @@ def import_worker(strategy: str, worker_type: str):
 
 
 def init_worker_with_type(
-    worker_type: str, shared_pgs=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
+    worker_type: str, shared_pg=None, colocate_all=False, num_gpus_per_node=1, num_nodes=1, cfg=None
 ) -> PPORayActorGroup:
     if cfg is None:
         cfg = get_test_actor_config()
 
-    if shared_pgs is not None:
-        pg = shared_pgs
+    if shared_pg is not None:
+        pg = shared_pg
         num_gpus_per_actor = 0.2
     else:
         bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
@@ -377,7 +377,7 @@ class InferenceEngineState:
     """Manages inference engine lifecycle with clean resource cleanup."""
 
     client: Union[InferenceEngineClient, RemoteInferenceClient]
-    pgs: Optional[List[Any]]  # placement groups
+    pg: Optional[Any]  # placement group
     router: Optional[InferenceRouter]
     server_group: Optional[ServerGroup]
 
@@ -454,25 +454,15 @@ class InferenceEngineState:
             per_engine_gpu_count = (
                 ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
             )
-            if ie_cfg.distributed_executor_backend == "mp":
-                pgs = []
-                for _ in range(ie_cfg.num_engines):
-                    pg = placement_group(
-                        [{"GPU": 1, "CPU": 1}] * per_engine_gpu_count,
-                        strategy="PACK",
-                    )
-                    get_ray_pg_ready_with_timeout(pg, timeout=60)
-                    pgs.append(pg)
-            else:
-                pg = placement_group(
-                    [{"GPU": 1, "CPU": 1}] * ie_cfg.num_engines * per_engine_gpu_count,
-                    strategy="PACK",
-                )
-                get_ray_pg_ready_with_timeout(pg, timeout=60)
-                pgs = [pg]
+            total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+            shared_pg = placement_group(
+                [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
+                strategy="PACK",
+            )
+            get_ray_pg_ready_with_timeout(shared_pg, timeout=60)
             sleep = True
         else:
-            pgs, sleep = None, False
+            shared_pg, sleep = None, False
 
         # Extract served_model_name from config if set
         served_model_name = ie_cfg.served_model_name
@@ -488,14 +478,10 @@ class InferenceEngineState:
                 raise ValueError("LoRA is not supported with new inference backend")
             # NOTE: In the case of the new inference backend, server is up by default, so we don't need
             # any special handling for sleep
-            colocate_pgs_for_server = None
-            if cfg.trainer.placement.colocate_all and pgs is not None:
-                colocate_pgs_for_server = pgs
-
             server_group = ServerGroup(
                 cli_args=build_vllm_cli_args(cfg),
                 num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,
-                placement_group=colocate_pgs_for_server,
+                placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
                 distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
@@ -524,7 +510,7 @@ class InferenceEngineState:
                 data_parallel_size=ie_cfg.data_parallel_size,
                 enable_prefix_caching=ie_cfg.enable_prefix_caching,
                 enforce_eager=ie_cfg.enforce_eager,
-                shared_pgs=pgs,
+                shared_pg=shared_pg,
                 gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
                 inference_engine_enable_sleep=sleep,
                 async_engine=ie_cfg.async_engine,
@@ -543,7 +529,7 @@ class InferenceEngineState:
             )
             if sleep:
                 asyncio.run(client.wake_up())
-        return cls(client=client, pgs=pgs, router=router, server_group=server_group)
+        return cls(client=client, pg=shared_pg, router=router, server_group=server_group)
 
 
 def init_remote_inference_servers(

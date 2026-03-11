@@ -84,7 +84,7 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
         # ============= PHASE 1: Train and Save =============
         actor_group_1 = init_worker_with_type(
             "policy",
-            shared_pgs=None,
+            shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
@@ -150,7 +150,7 @@ def test_save_load_hf_model(ray_init_fixture, strategy):
 
         actor_group_2 = init_worker_with_type(
             "policy",
-            shared_pgs=None,
+            shared_pg=None,
             colocate_all=False,
             num_gpus_per_node=cfg_fresh.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg_fresh,

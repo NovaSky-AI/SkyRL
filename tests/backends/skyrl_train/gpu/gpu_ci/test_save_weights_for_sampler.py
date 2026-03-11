@@ -77,11 +77,11 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=2,  # Full sleep since we explicitly sync weights
     ) as engines:
-        client, pgs = engines.client, engines.pgs
+        client, pg = engines.client, engines.pg
         # Initialize policy worker
         policy_group = init_worker_with_type(
             "policy",
-            shared_pgs=pgs,
+            shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
@@ -147,12 +147,12 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
         use_local=True,
         sleep_level=2,
     ) as engines:
-        client, pgs = engines.client, engines.pgs
+        client, pg = engines.client, engines.pg
 
         # Initialize policy worker (uses 1 GPU)
         policy_group = init_worker_with_type(
             "policy",
-            shared_pgs=pgs,
+            shared_pg=pg,
             colocate_all=False,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             cfg=cfg,
