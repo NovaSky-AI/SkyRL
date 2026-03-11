@@ -30,7 +30,6 @@ from .rdt_strategy import (
     RdtTransferStrategy,
     RdtWeightTransferSender,
     RdtWeightTransferReceiver,
-    RdtWeightUpdateRequest,
 )
 
 
@@ -68,7 +67,6 @@ __all__ = [
     "LoraLoadRequest",
     "BroadcastWeightUpdateRequest",
     "CudaIpcWeightUpdateRequest",
-    "RdtWeightUpdateRequest",
     "WeightTransferStrategy",
     "WeightTransferSender",
     "WeightTransferReceiver",

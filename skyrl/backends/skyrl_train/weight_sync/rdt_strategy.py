@@ -1,16 +1,18 @@
 """Ray Direct Transport (RDT) weight transfer strategy.
 
 This module implements the RDT transfer strategy for synchronizing model weights
-from training workers to inference engines using Ray's built-in tensor transport.
+from training workers to inference engines using Ray's NCCL tensor transport.
 
-RDT uses ``@ray.method(tensor_transport="nccl")`` decorated actor methods
-to transfer GPU tensors between Ray actors via ObjectRef passing, without
-requiring explicit ``torch.distributed`` process group setup.
+RDT transfers GPU tensors between Ray actors via NCCL without requiring explicit
+``torch.distributed`` process group setup. The sender packs weights into a
+contiguous GPU buffer and passes it to inference engine actors using
+``actor.method.options(tensor_transport="nccl").remote(tensor)``, which triggers
+a GPU-to-GPU NCCL transfer managed entirely by Ray.
 
 Key architectural differences from broadcast/IPC strategies:
-- Transfer is actor-level (ObjectRef), not process-level (torch.distributed)
-- Orchestration happens outside actors (coordinator passes ObjectRef)
-- No custom process group setup needed
+- No ``torch.distributed`` process group needed -- Ray manages NCCL internally
+- Actors must be created with ``enable_tensor_transport=True``
+- Both sender and receiver actors must be in the same Ray collective group
 
 Constraints for initial integration:
 - Only supports Ray actor inference path (not HTTP server path)
@@ -19,14 +21,13 @@ Constraints for initial integration:
 """
 
 import asyncio
-import pickle
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
 
 import torch
 from loguru import logger
 
-from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
+from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
     WeightTransferStrategy,
@@ -54,45 +55,13 @@ class RdtInitInfo(WeightSyncInitInfo):
         return RdtTransferStrategy
 
 
-@dataclass
-class RdtWeightUpdateRequest(WeightUpdateRequest):
-    """Request for RDT-based weight transfer.
-
-    Contains metadata for unpacking the packed tensor received via RDT,
-    plus the serialized packed tensor data.
-    """
-
-    sizes: List[int]  # Size in elements per parameter (for unpacking)
-    packed_tensor_bytes: bytes  # Serialized packed tensor data
-
-    def to_json_dict(self) -> Dict[str, Any]:
-        """Serialize the request to JSON."""
-        import base64
-
-        data = {
-            "names": self.names,
-            "dtypes": self.dtypes,
-            "shapes": self.shapes,
-            "sizes": self.sizes,
-            "packed_tensor_bytes": base64.b64encode(self.packed_tensor_bytes).decode("utf-8"),
-        }
-        return data
-
-    @classmethod
-    def from_json_dict(cls, data: Dict[str, Any]) -> "RdtWeightUpdateRequest":
-        """Deserialize the request from JSON."""
-        import base64
-
-        data = data.copy()
-        data["packed_tensor_bytes"] = base64.b64decode(data["packed_tensor_bytes"])
-        return cls(**data)
-
-
 class RdtWeightTransferSender(WeightTransferSender):
-    """Sends weights via Ray Direct Transport.
+    """Sends weights via Ray Direct Transport (NCCL tensor transport).
 
-    Packs all tensors in each chunk into a contiguous buffer, serializes it,
-    and sends via the inference client. The receiver unpacks the buffer.
+    Packs all tensors in each chunk into a contiguous GPU buffer and sends
+    the buffer plus metadata to inference engines via the inference client's
+    ``update_weights_rdt`` method. The tensor is transferred GPU-to-GPU via
+    Ray's NCCL tensor transport -- no CPU roundtrip or pickling.
 
     Only rank 0 sends requests to inference engines. Other training ranks
     participate in weight extraction (FSDP collective) but don't send.
@@ -109,8 +78,8 @@ class RdtWeightTransferSender(WeightTransferSender):
     async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
         """Send chunks via RDT.
 
-        Packs tensors into a contiguous buffer, serializes to bytes, and
-        sends to inference engines via the inference client.
+        Packs tensors into a contiguous GPU buffer and sends the buffer plus
+        metadata dict to inference engines via the inference client.
 
         All training ranks iterate through chunks (weight extraction may
         involve collective ops), but only rank 0 sends to inference engines.
@@ -154,20 +123,17 @@ class RdtWeightTransferSender(WeightTransferSender):
 
             # Only rank 0 sends to inference engines
             if rank == 0:
-                # Serialize the packed tensor to bytes for transport
-                packed_tensor_bytes = pickle.dumps(packed_tensor.cpu())
-
-                request = RdtWeightUpdateRequest(
-                    names=names,
-                    dtypes=dtypes,
-                    shapes=shapes,
-                    sizes=sizes,
-                    packed_tensor_bytes=packed_tensor_bytes,
+                metadata = {
+                    "names": names,
+                    "dtypes": dtypes,
+                    "shapes": shapes,
+                    "sizes": sizes,
+                }
+                await self._inference_client.update_weights_rdt(
+                    packed_tensor=packed_tensor, metadata=metadata
                 )
-                await self._inference_client.update_named_weights(request)
 
             torch.distributed.barrier()
-            torch.cuda.synchronize()
 
     def teardown(self) -> None:
         """No-op for RDT sender (no custom process group to clean up)."""
@@ -177,39 +143,40 @@ class RdtWeightTransferSender(WeightTransferSender):
 class RdtWeightTransferReceiver(WeightTransferReceiver):
     """Receives weights via Ray Direct Transport.
 
-    Deserializes the packed tensor from bytes and unpacks individual
-    parameter tensors.
+    The packed tensor arrives already on GPU (transferred via NCCL).
+    This receiver simply slices the packed tensor and yields
+    ``(name, view)`` pairs.
     """
 
     def __init__(self, model_dtype: torch.dtype) -> None:
         self._model_dtype = model_dtype
 
-    def receive_weights(self, request: RdtWeightUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
+    def receive_weights(self, packed_tensor: torch.Tensor, metadata: dict) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights from RDT transport.
 
-        Deserializes the packed tensor from bytes, moves to GPU, and
-        unpacks individual parameter tensors.
+        The packed tensor is already on GPU (transferred via NCCL by Ray).
+        This method slices it into individual parameter tensors.
 
         Args:
-            request: RDT weight update request with packed tensor bytes.
+            packed_tensor: Contiguous GPU tensor containing all packed weights.
+            metadata: Dict with keys ``names``, ``dtypes``, ``shapes``, ``sizes``.
 
         Yields:
             Tuples of (parameter_name, tensor) for each weight.
         """
         from skyrl.train.utils.utils import str_to_torch_dtype
 
-        assert len(set(request.dtypes)) == 1, "packed weight update should have all tensors with the same dtype"
-        assert (
-            str_to_torch_dtype(request.dtypes[0]) == self._model_dtype
-        ), f"mismatch dtype: src {request.dtypes[0]}, dst {self._model_dtype}"
-        assert len(request.sizes) == len(request), "sizes must be provided for packed weight update"
-
-        # Deserialize packed tensor and move to GPU
-        packed_tensor_cpu = pickle.loads(request.packed_tensor_bytes)
-        packed_tensor = packed_tensor_cpu.to(device=f"cuda:{torch.cuda.current_device()}", dtype=self._model_dtype)
+        if len(set(metadata["dtypes"])) != 1:
+            raise ValueError("packed weight update should have all tensors with the same dtype")
+        if str_to_torch_dtype(metadata["dtypes"][0]) != self._model_dtype:
+            raise ValueError(
+                f"mismatch dtype: src {metadata['dtypes'][0]}, dst {self._model_dtype}"
+            )
+        if len(metadata["sizes"]) != len(metadata["names"]):
+            raise ValueError("sizes must have the same length as names")
 
         offset = 0
-        for name, shape, size in zip(request.names, request.shapes, request.sizes):
+        for name, shape, size in zip(metadata["names"], metadata["shapes"], metadata["sizes"]):
             yield name, packed_tensor[offset : offset + size].view(*shape)
             offset += size
 
@@ -221,10 +188,9 @@ class RdtWeightTransferReceiver(WeightTransferReceiver):
 class RdtTransferStrategy(WeightTransferStrategy):
     """Factory for RDT-based weight transfer.
 
-    This strategy uses Ray's tensor transport to transfer weights from
-    training workers to inference engines. It packs tensors and sends
-    them as serialized bytes through the existing inference client
-    update_named_weights path.
+    This strategy uses Ray's NCCL tensor transport to transfer weights from
+    training workers to inference engines. Tensors stay on GPU throughout --
+    no pickling or CPU copies.
 
     Constraints:
     - Only supports Ray actor inference path (not HTTP server path)

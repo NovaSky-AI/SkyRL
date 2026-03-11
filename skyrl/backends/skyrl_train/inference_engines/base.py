@@ -133,6 +133,17 @@ class InferenceEngineInterface(ABC):
     async def update_named_weights(self, request: "WeightUpdateRequest"):
         raise NotImplementedError()
 
+    async def update_weights_rdt(self, packed_tensor, metadata):
+        """Apply weights received via RDT (Ray Direct Transport).
+
+        Only used by the RDT weight sync strategy. Default raises NotImplementedError.
+
+        Args:
+            packed_tensor: Contiguous GPU tensor containing packed weights.
+            metadata: Dict with names, dtypes, shapes, sizes.
+        """
+        raise NotImplementedError("RDT weight sync not supported by this engine")
+
     @abstractmethod
     async def teardown(self):
         raise NotImplementedError

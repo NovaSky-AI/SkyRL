@@ -1,5 +1,3 @@
-import pickle
-
 import pytest
 import torch
 
@@ -14,7 +12,6 @@ from skyrl.backends.skyrl_train.weight_sync import (
     RdtInitInfo,
     BroadcastWeightUpdateRequest,
     CudaIpcWeightUpdateRequest,
-    RdtWeightUpdateRequest,
     LoraLoadRequest,
 )
 
@@ -254,72 +251,6 @@ class TestRdtCreateInitInfo:
         ie_cfg = self._make_ie_cfg()
         init_info = RdtTransferStrategy.create_init_info(ie_cfg)
         assert init_info.strategy_type() is RdtTransferStrategy
-
-
-class TestRdtWeightUpdateRequest:
-    """Tests for RdtWeightUpdateRequest."""
-
-    def test_len(self):
-        """__len__ should return number of weights."""
-        request = RdtWeightUpdateRequest(
-            names=["layer1.weight", "layer2.weight"],
-            dtypes=["bfloat16", "bfloat16"],
-            shapes=[[4096, 4096], [1024]],
-            sizes=[4096 * 4096, 1024],
-            packed_tensor_bytes=b"dummy",
-        )
-        assert len(request) == 2
-
-    def test_mismatched_lengths_raises(self):
-        """Mismatched lengths should raise ValueError."""
-        with pytest.raises(ValueError, match="must have the same length"):
-            RdtWeightUpdateRequest(
-                names=["layer1.weight", "layer2.weight"],
-                dtypes=["bfloat16"],
-                shapes=[[4096, 4096]],
-                sizes=[4096 * 4096],
-                packed_tensor_bytes=b"dummy",
-            )
-
-    def test_json_roundtrip(self):
-        """to_json_dict/from_json_dict roundtrip preserves data."""
-        packed_data = pickle.dumps(torch.zeros(10))
-        request = RdtWeightUpdateRequest(
-            names=["model.layer.weight"],
-            dtypes=["bfloat16"],
-            shapes=[[4096, 4096]],
-            sizes=[4096 * 4096],
-            packed_tensor_bytes=packed_data,
-        )
-
-        json_data = request.to_json_dict()
-        result = RdtWeightUpdateRequest.from_json_dict(json_data)
-
-        assert result.names == request.names
-        assert result.dtypes == request.dtypes
-        assert result.shapes == request.shapes
-        assert result.sizes == request.sizes
-        assert result.packed_tensor_bytes == request.packed_tensor_bytes
-
-    def test_json_roundtrip_multiple_weights(self):
-        """Roundtrip with multiple weights."""
-        packed_data = pickle.dumps(torch.zeros(100))
-        request = RdtWeightUpdateRequest(
-            names=["layer1.weight", "layer2.weight", "layer3.bias"],
-            dtypes=["bfloat16", "bfloat16", "bfloat16"],
-            shapes=[[4096, 4096], [4096, 1024], [1024]],
-            sizes=[4096 * 4096, 4096 * 1024, 1024],
-            packed_tensor_bytes=packed_data,
-        )
-
-        json_data = request.to_json_dict()
-        result = RdtWeightUpdateRequest.from_json_dict(json_data)
-
-        assert result.names == request.names
-        assert result.dtypes == request.dtypes
-        assert result.shapes == request.shapes
-        assert result.sizes == request.sizes
-        assert result.packed_tensor_bytes == request.packed_tensor_bytes
 
 
 class TestLoraLoadRequest:

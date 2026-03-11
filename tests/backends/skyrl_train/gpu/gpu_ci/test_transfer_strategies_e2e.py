@@ -95,19 +95,29 @@ class SenderActor:
             return strategy_cls.create_init_info(cfg)
         return None
 
-    def create_sender(self, strategy_cls, init_info, receiver_handles):
-        """Create sender (must be called concurrently with receiver init for broadcast strategy)."""
+    def create_sender(self, strategy_cls, init_info, receiver_handles_or_client):
+        """Create sender (must be called concurrently with receiver init for broadcast strategy).
 
-        class MockInferenceClient:
-            def __init__(self, receiver_handles):
-                self.receiver_handles = receiver_handles
+        Args:
+            strategy_cls: Transfer strategy class.
+            init_info: WeightSyncInitInfo for the strategy.
+            receiver_handles_or_client: Either a list of receiver actor handles (for broadcast/IPC)
+                or a pre-built mock inference client (for RDT).
+        """
+        if isinstance(receiver_handles_or_client, list):
+            class MockInferenceClient:
+                def __init__(self, receiver_handles):
+                    self.receiver_handles = receiver_handles
 
-            async def update_named_weights(self, request):
-                # Start receive_weights on all receivers and await completion
-                # Ray ObjectRefs are awaitable, and the broadcast collective coordinates the communication
-                await asyncio.gather(*[r.receive_weights.remote(request) for r in self.receiver_handles])
+                async def update_named_weights(self, request):
+                    # Start receive_weights on all receivers and await completion
+                    # Ray ObjectRefs are awaitable, and the broadcast collective coordinates the communication
+                    await asyncio.gather(*[r.receive_weights.remote(request) for r in self.receiver_handles])
 
-        mock_client = MockInferenceClient(receiver_handles)
+            mock_client = MockInferenceClient(receiver_handles_or_client)
+        else:
+            mock_client = receiver_handles_or_client
+
         self._sender = strategy_cls.create_sender(init_info, mock_client)
 
     async def send_weights(
@@ -389,11 +399,167 @@ class TestBroadcastTransferStrategy:
         )
 
 
+@ray.remote
+class RdtReceiverActor:
+    """RDT receiver actor using Ray's NCCL tensor transport.
+
+    Created with ``enable_tensor_transport=True`` and joined to a Ray
+    collective group with the sender. Receives GPU tensors directly
+    via NCCL -- no pickle, no CPU roundtrip.
+    """
+
+    def __init__(self, strategy_cls, init_info):
+        self.strategy_cls = strategy_cls
+        self.init_info = init_info
+        self.receiver = None
+        self.received_weights = []
+
+    def init_receiver(self):
+        self.receiver = self.strategy_cls.create_receiver(self.init_info)
+
+    def receive_weights_rdt(self, packed_tensor, metadata):
+        """Receive weights via RDT. Tensor is already on GPU (NCCL transferred)."""
+        assert self.receiver is not None, "Receiver not initialized. Call init_receiver() first."
+        received = list(self.receiver.receive_weights(packed_tensor, metadata))
+        self.received_weights.extend([(name, tensor.cpu()) for name, tensor in received])
+
+    def get_received_weights(self):
+        return self.received_weights
+
+    def teardown_receiver(self):
+        if self.receiver is not None:
+            self.receiver.teardown()
+
+
+def _run_rdt_weight_sync_e2e(cfg, num_training_ranks, num_inference_engines):
+    """Run end-to-end weight sync test for RDT strategy.
+
+    Uses Ray's NCCL tensor transport: actors are created with
+    ``enable_tensor_transport=True`` and joined to a Ray collective group.
+
+    Args:
+        cfg: Mock config object.
+        num_training_ranks: Number of training worker ranks.
+        num_inference_engines: Number of inference engines (each with 1 worker).
+    """
+    from ray.experimental.collective import create_collective_group
+
+    strategy_cls = RdtTransferStrategy
+    assert num_inference_engines == cfg.generator.inference_engine.num_engines
+
+    # Create sender actors with enable_tensor_transport
+    senders = []
+    for i in range(num_training_ranks):
+        sender = SenderActor.options(
+            num_gpus=1, enable_tensor_transport=True
+        ).remote(rank=i, world_size=num_training_ranks)
+        senders.append(sender)
+
+    # Get master_addr and master_port from rank 0
+    master_addr, training_master_port = ray.get(senders[0].get_master_addr_and_port.remote())
+
+    # Initialize process groups on all senders
+    ray.get([sender.init_process_group.remote(master_addr, training_master_port) for sender in senders])
+
+    # Only rank 0 creates init_info
+    init_info: WeightSyncInitInfo = ray.get(
+        senders[0].create_init_info.remote(strategy_cls, cfg.generator.inference_engine)
+    )
+
+    # Create receiver actors with enable_tensor_transport
+    receivers = []
+    for i in range(num_inference_engines):
+        receiver_init_info = init_info.for_engine(engine_index=i, tp_size=1, pp_size=1)
+        receiver = RdtReceiverActor.options(
+            num_gpus=1, enable_tensor_transport=True
+        ).remote(strategy_cls, receiver_init_info)
+        receivers.append(receiver)
+
+    # Initialize receivers
+    ray.get([receiver.init_receiver.remote() for receiver in receivers])
+
+    # Set up Ray collective group: rank-0 sender + all receivers
+    # This enables NCCL tensor transport between them
+    create_collective_group(
+        [senders[0]] + receivers,
+        backend="nccl",
+    )
+
+    # Create senders with a mock client that uses tensor_transport="nccl"
+    def _create_rdt_sender(sender, strategy_cls, init_info, receiver_handles):
+        """Create sender with RDT-aware mock client."""
+
+        class RdtMockInferenceClient:
+            def __init__(self, receiver_handles):
+                self.receiver_handles = receiver_handles
+
+            async def update_weights_rdt(self, packed_tensor, metadata):
+                await asyncio.gather(*[
+                    r.receive_weights_rdt.options(
+                        tensor_transport="nccl"
+                    ).remote(packed_tensor, metadata)
+                    for r in self.receiver_handles
+                ])
+
+        mock_client = RdtMockInferenceClient(receiver_handles)
+        return sender.create_sender.remote(strategy_cls, init_info, mock_client)
+
+    # Create senders -- only rank 0 gets the RDT mock client, others get a dummy
+    create_sender_tasks = []
+    for i, sender in enumerate(senders):
+        if i == 0:
+            create_sender_tasks.append(
+                _create_rdt_sender(sender, strategy_cls, init_info, receivers)
+            )
+        else:
+            # Non-rank-0 senders don't send, so pass empty receiver list
+            create_sender_tasks.append(
+                sender.create_sender.remote(strategy_cls, init_info, [])
+            )
+    ray.get(create_sender_tasks)
+
+    names = ["layer1.weight", "layer1.bias", "layer2.weight"]
+    shapes = [[32, 64], [64], [16, 16]]
+
+    # Send weights
+    results = ray.get(
+        [
+            sender.send_weights.remote(init_info, names, shapes, send_individually=False)
+            for sender in senders
+        ]
+    )
+
+    # Only rank 0 returns tensors
+    src_tensors = results[0]
+    assert src_tensors is not None
+    assert results[1] is None
+
+    # All receivers should have received the weights via NCCL
+    for receiver in receivers:
+        received = ray.get(receiver.get_received_weights.remote())
+
+        assert len(received) == len(names)
+        for i, (name, tensor) in enumerate(received):
+            assert name == names[i]
+            assert tensor.shape == tuple(shapes[i])
+            assert torch.allclose(tensor, src_tensors[i])
+
+    # Test teardown
+    teardown_tasks = []
+    for sender in senders:
+        teardown_tasks.append(sender.teardown_sender.remote())
+    for receiver in receivers:
+        teardown_tasks.append(receiver.teardown_receiver.remote())
+    ray.get(teardown_tasks)
+
+
 class TestRdtTransferStrategy:
     """Integration tests for RDT transfer strategy.
 
-    Tests weight synchronization using Ray Direct Transport with serialized tensor passing.
-    Requires 4 GPUs (2 training ranks + 2 inference engines, non-colocated).
+    Tests weight synchronization using Ray's NCCL tensor transport via
+    collective groups. Actors are created with ``enable_tensor_transport=True``
+    and joined to a Ray collective group for GPU-to-GPU NCCL transfer.
+    Requires 4 GPUs (2 training ranks + 2 inference engines).
     """
 
     def test_weight_sync_e2e(self, ray_init_fixture):
@@ -404,11 +570,8 @@ class TestRdtTransferStrategy:
             num_inference_engines=2,
             colocate_all=False,
         )
-        _run_weight_sync_e2e(
-            RdtTransferStrategy,
+        _run_rdt_weight_sync_e2e(
             cfg,
             num_training_ranks=2,
             num_inference_engines=2,
-            send_individually=False,
-            colocate=False,
         )
