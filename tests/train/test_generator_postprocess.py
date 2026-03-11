@@ -7,9 +7,9 @@ uv run --isolated --extra dev pytest tests/train/test_generator_postprocess.py
 
 from unittest.mock import MagicMock
 
-from skyrl.train.trainer import RayPPOTrainer
-from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.generators.base import GeneratorOutput
+from skyrl.train.trainer import RayPPOTrainer
 
 
 class DummyDataset:

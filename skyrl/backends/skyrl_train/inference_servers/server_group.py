@@ -49,6 +49,7 @@ class ServerGroup:
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
         server_actor_cls: Optional[Type[ServerActorProtocol]] = None,
+        **server_actor_kwargs: Any,
     ):
         """
         Initialize the server group.
@@ -58,7 +59,7 @@ class ServerGroup:
             num_servers: Number of server instances to create.
             start_port: Base port for server ports.
             placement_group: External placement group for colocation mode.
-                If None, creates internal placement group.
+                If None, creates an internal placement group.
             placement_group_bundle_offset: Offset for bundle indices when using
                 external placement group (e.g., if training uses first N
                 bundles).
@@ -69,8 +70,11 @@ class ServerGroup:
                 server_idx.
             server_actor_cls: Server actor class implementing
                 ServerActorProtocol. Defaults to VLLMServerActor.
+            **server_actor_kwargs: Additional keyword arguments to pass to the server actor class.
         """
-        from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import VLLMServerActor
+        from skyrl.backends.skyrl_train.inference_servers.vllm_server_actor import (
+            VLLMServerActor,
+        )
 
         self._server_actor_cls = server_actor_cls or VLLMServerActor
         self._cli_args = cli_args
@@ -82,6 +86,8 @@ class ServerGroup:
         self._nixl_side_channel_base = nixl_side_channel_base
         self._pool: Optional[ServerActorPool] = None
         self._internal_pg: Optional[PlacementGroup] = None
+        self._server_actor_kwargs = server_actor_kwargs
+        self._external_pg = placement_group
 
         # Extract the raw PG and reordered indices from SkyRLPlacementGroup.
         if placement_group is not None:
@@ -99,11 +105,11 @@ class ServerGroup:
             f"num_servers={num_servers}, "
             f"gpus_per_server={self._num_gpus_per_server}, "
             f"enable_dp={enable_dp}, enable_pd={enable_pd}, "
-            f"external_pg={'yes' if placement_group else 'no'}"
+            f"external_pg={'yes' if self._external_pg else 'no'}"
         )
 
     def _create_placement_group(self) -> PlacementGroup:
-        """Create internal placement group with bundles for all servers."""
+        """Create an internal placement group with per-GPU bundles."""
         total_bundles = self._num_servers * self._num_gpus_per_server
         logger.info(f"Creating placement group with {total_bundles} bundles...")
         pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(total_bundles)])
@@ -154,6 +160,11 @@ class ServerGroup:
 
             ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
 
+            server_kwargs = self._server_actor_cls.prepare_server_kwargs(
+                pg, start_bundle_idx, self._num_gpus_per_server,
+                _bundle_indices=bundle_indices, **self._server_actor_kwargs
+            )
+
             actor = ServerActorClass.remote(
                 self._cli_args,
                 self._start_port + server_idx,
@@ -165,6 +176,7 @@ class ServerGroup:
                 enable_pd=self._enable_pd,
                 nixl_side_channel_base=self._nixl_side_channel_base,
                 colocated_training=self._external_pg is not None,
+                **server_kwargs,
             )
 
             # Get DP info from server 0 which is where DP0 will be

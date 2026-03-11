@@ -10,14 +10,16 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 import asyncio
 
 import pytest
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.train.utils.utils import validate_cfg
-from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
-    get_test_prompts,
     InferenceEngineState,
+    get_test_prompts,
     init_worker_with_type,
     make_dummy_training_batch,
     run_inference,

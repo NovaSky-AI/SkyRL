@@ -302,6 +302,10 @@ exclude = [
 ]
 
 [tool.ruff.lint]
+extend-select = ["I"]
 ignore = [
     "F722" # Syntax error in annotation - ignored because this doesn't play well with jaxtyping
 ]
+
+[tool.ruff.lint.isort]
+known-first-party = ["skyrl", "skyrl_gym"]

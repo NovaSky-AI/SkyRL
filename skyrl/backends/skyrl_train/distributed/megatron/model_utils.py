@@ -18,9 +18,9 @@
 
 from typing import Any, Optional
 
+import megatron.core.parallel_state as mpu
 import torch
 import torch.distributed as dist
-import megatron.core.parallel_state as mpu
 
 
 @torch.no_grad()

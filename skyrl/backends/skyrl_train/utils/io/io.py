@@ -12,9 +12,11 @@ Uses fsspec for cloud storage abstraction.
 import os
 import tempfile
 from contextlib import contextmanager
+
 import fsspec
 from loguru import logger
-from .s3fs import get_s3_fs, s3_refresh_if_expiring, call_with_s3_retry, ClientError
+
+from .s3fs import ClientError, call_with_s3_retry, get_s3_fs, s3_refresh_if_expiring
 
 
 def is_cloud_path(path: str) -> bool:

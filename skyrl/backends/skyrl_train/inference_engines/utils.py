@@ -1,15 +1,17 @@
-from typing import Dict, Any, Optional, Union
-import random
 import hashlib
-
-from omegaconf import DictConfig, ListConfig
-from skyrl.train.config import SamplingParams
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import ErrorResponse, ErrorInfo
-from typing import List
+import random
 from http import HTTPStatus
-from typing import Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import ray
+from omegaconf import DictConfig, ListConfig
 from ray.util.placement_group import PlacementGroupSchedulingStrategy
+
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
+    ErrorInfo,
+    ErrorResponse,
+)
+from skyrl.train.config import SamplingParams
 
 
 def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:

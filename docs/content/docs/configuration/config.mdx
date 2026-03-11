@@ -631,6 +631,7 @@ generator:
     max_num_seqs: 1024
     vllm_v1_disable_multiproc: true
     remote_urls: []
+    distributed_executor_backend: "ray"  # "mp", "ray"
     engine_init_kwargs: {}
     override_existing_update_group: "auto" # "auto", "enable", "disable"
 
@@ -708,6 +709,7 @@ For more details on how different placement options work, please refer to the [p
 - `generator.inference_engine.max_num_batched_tokens`: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
 - `generator.inference_engine.enforce_eager`: Whether to disable CUDA graphs. Default is `true` for stability. Set to `false` for higher performance, but this may affect convergence for long-running or long-context training jobs.
 - `generator.inference_engine.enable_ray_prometheus_stats`: Whether to enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only). When enabled, uses `vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger`.
+- `generator.inference_engine.distributed_executor_backend`: The distributed executor backend to use for the vLLM engine. Options are either `mp` or `ray`.
 - `generator.inference_engine.engine_init_kwargs`: Inference engine arguments passed directly to the vLLM engine. If duplicate kwargs are passed or kwargs clash with existing inference engine arguments (e.g., `tensor_parallel_size`), an error is raised.
 
 ### Generation Parameters

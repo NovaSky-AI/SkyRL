@@ -12,24 +12,28 @@ Run:
     uv run pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
 """
 
+import argparse
 import time
 
 import httpx
 import pytest
+import pytest_asyncio
 import ray
 import torch
-import argparse
-
-import pytest_asyncio
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from skyrl.train.utils.utils import SkyRLPlacementGroup
 from transformers import AutoModelForCausalLM
 
-from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip, get_open_port
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    get_node_ip,
+    get_open_port,
+)
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -42,9 +46,9 @@ def make_vllm_cli_args(
     gpu_memory_utilization: float = 0.5,
 ) -> argparse.Namespace:
     """Create CLI args for vLLM server using official parser."""
+    from vllm.config import WeightTransferConfig
     from vllm.entrypoints.openai.cli_args import make_arg_parser
     from vllm.utils.argparse_utils import FlexibleArgumentParser
-    from vllm.config import WeightTransferConfig
 
     parser = FlexibleArgumentParser(description="vLLM server")
     parser = make_arg_parser(parser)
@@ -104,7 +108,9 @@ class Trainer:
 
     def init_weight_sync(self, master_address: str, master_port: int, world_size: int, group_name: str):
         """Initialize the weight sync process group as rank 0 (trainer)."""
-        from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
 
         self.pg = NCCLWeightTransferEngine.trainer_init(
             dict(
@@ -139,7 +145,9 @@ class Trainer:
 
         This is a blocking operation - server must call receive concurrently.
         """
-        from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
 
         params = list(self.model.named_parameters())
         print(

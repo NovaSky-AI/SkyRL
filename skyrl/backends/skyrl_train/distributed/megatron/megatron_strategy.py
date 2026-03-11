@@ -1,43 +1,44 @@
 import os
 import random
 from datetime import timedelta
-from typing import List, Union, Optional
-from jaxtyping import Float
+from typing import List, Optional, Union
 
+import megatron.core.parallel_state as mpu
 import numpy as np
 import torch
 import torch.nn as nn
-from torch import optim
-from torch import distributed as dist
-
-from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
-from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
-from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
-import megatron.core.parallel_state as mpu
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-    offload_megatron_model_to_cpu,
-    load_megatron_model_to_gpu,
-    offload_megatron_optimizer,
-    load_megatron_optimizer,
-    offload_megatron_grads_to_cpu,
-    load_megatron_grads_to_gpu,
-)
-
-from megatron.core.dist_checkpointing.strategies import base as ckpt_base
-from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
+from jaxtyping import Float
 from megatron.core import dist_checkpointing
 from megatron.core.dist_checkpointing.serialization import (
     get_default_load_sharded_strategy,
     get_default_save_sharded_strategy,
 )
+from megatron.core.dist_checkpointing.strategies import base as ckpt_base
+from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
-from transformers import PreTrainedTokenizer
 from megatron.core.optimizer import DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from torch import distributed as dist
+from torch import optim
+from transformers import PreTrainedTokenizer
+
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    load_megatron_grads_to_gpu,
+    load_megatron_model_to_gpu,
+    load_megatron_optimizer,
+    offload_megatron_grads_to_cpu,
+    offload_megatron_model_to_cpu,
+    offload_megatron_optimizer,
+)
+from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
+from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
+from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
+    MegatronModelWrapper,
+)
 
 # Seed offset per pipeline-parallel rank, matching Megatron's standard practice.
 _PP_SEED_OFFSET = 100

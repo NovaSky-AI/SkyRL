@@ -14,24 +14,28 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 
 # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): Remove the tests in Group B once we migrate all generation interactions to the router's HTTP API.
 
-import json
-import pytest
 import asyncio
-import aiohttp
-import requests
+import json
 from http import HTTPStatus
 from typing import Any, Dict, List, Literal
-from pydantic import BaseModel
 
-
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType, InferenceEngineInput
-from tests.backends.skyrl_train.gpu.utils import get_test_prompts, InferenceEngineState
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from transformers import AutoTokenizer
-
+import aiohttp
+import pytest
+import requests
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
+from pydantic import BaseModel
+from transformers import AutoTokenizer
+
+from skyrl.backends.skyrl_train.inference_engines.base import (
+    ConversationType,
+    InferenceEngineInput,
+)
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 SERVED_MODEL_NAME = "my_qwen"
@@ -98,7 +102,9 @@ def _check_chat_completions_outputs(
         if test_type == "litellm":
             response_data = response_data.model_dump()
         if test_type != "litellm" and backend == "vllm":
-            from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
+            from vllm.entrypoints.openai.chat_completion.protocol import (
+                ChatCompletionResponse,
+            )
 
             ChatCompletionResponse.model_validate(response_data)
         for key in ["id", "object", "created", "model", "choices"]:

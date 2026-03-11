@@ -2,17 +2,17 @@ import os
 import tempfile
 import time
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from flax import nnx
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 
+from skyrl.tinker import types
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
-from skyrl.tinker import types
 from skyrl.tx.utils.models import load_safetensors
 
 

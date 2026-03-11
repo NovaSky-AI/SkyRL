@@ -6,30 +6,32 @@ uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu
 """
 
 import asyncio
+from typing import Optional
+
 import pytest
 import ray
-from typing import Optional
-from ray.util.placement_group import PlacementGroup
+from ray.util.placement_group import PlacementGroup, placement_group
 from transformers import AutoTokenizer
 
-from tests.backends.skyrl_train.gpu.utils import (
-    get_available_gpus,
-    get_test_prompts,
-    init_worker_with_type,
-    are_responses_similar,
-    get_test_actor_config,
-)
-
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl.train.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
-from ray.util.placement_group import placement_group
-
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils import get_ray_pg_ready_with_timeout, initialize_ray
+from tests.backends.skyrl_train.gpu.utils import (
+    are_responses_similar,
+    get_available_gpus,
+    get_test_actor_config,
+    get_test_prompts,
+    init_worker_with_type,
+)
 
 MODEL = "Qwen/Qwen1.5-MoE-A2.7B-Chat"
 NUM_GPUS = 4  # Should be divisible by 2

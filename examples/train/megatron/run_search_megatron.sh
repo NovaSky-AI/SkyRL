@@ -92,6 +92,7 @@ uv run --isolated --frozen --extra megatron -m skyrl.train.entrypoints.main_base
   trainer.eval_before_train=false \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
+  generator.eval_sampling_params.max_generate_length=500 \
   trainer.export_path="$HOME/skyrl-search_4turns_maxgeneratelen_500_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_qwen30b/exports" \
   trainer.eval_interval=50 \
   $@

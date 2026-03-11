@@ -65,18 +65,6 @@ class SearchEnv(BaseTextEnv):
             return True
         return "<answer>" in action and "</answer>" in action
 
-    def _validate_action(self, action: str):
-        stop_tags = ["</search>", "</answer>"]
-        # TODO (sumanthrh): This assertion should really be that the *last token* generated contains <answer>.
-        # The last token generated can have additional punctuation characters like periods, etc.
-        action = action.rstrip("\n").rstrip(".")  # strip out any trailing newlines and periods
-        for tag in stop_tags:
-            if tag in action:
-                assert action.split(tag, 1)[1] == "", (
-                    f"{tag} detected in the response but it is not the last string generated. "
-                    f"Use {stop_tags} as stop strings in the configuration."
-                )
-
     def _execute_tool(self, tool_group_name: str, tool_name: str, tool_input: Any) -> str:
         tool_output = super()._execute_tool(tool_group_name, tool_name, tool_input)
 
@@ -84,7 +72,6 @@ class SearchEnv(BaseTextEnv):
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
-        self._validate_action(action)
         self.chat_history.append({"role": "assistant", "content": action})
 
         error = None
