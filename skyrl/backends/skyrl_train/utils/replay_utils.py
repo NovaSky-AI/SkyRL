@@ -120,9 +120,75 @@ def _remove_left_padding_from_indices(
     return new_rii
 
 
+def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
+    """Return the current PP rank's transformer-layer range.
+
+    Prefer Megatron's own helpers so replay indexing stays aligned with the
+    actual model partition, including embedding/loss pipeline accounting.
+    """
+    import megatron.core.parallel_state as mpu
+    from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
+    from megatron.core.transformer.transformer_block import get_num_layers_to_build
+
+
+    if get_num_layers_to_build is not None:
+        return get_transformer_layer_offset(model_config), get_num_layers_to_build(model_config, pp_rank=pp_rank)
+
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+
+    total_layers = model_config.num_layers
+    first_stage_layers = getattr(model_config, "num_layers_in_first_pipeline_stage", None)
+    last_stage_layers = getattr(model_config, "num_layers_in_last_pipeline_stage", None)
+
+    if pp_size <= 1:
+        return 0, total_layers
+
+    if first_stage_layers is None and last_stage_layers is None:
+        assert total_layers % pp_size == 0, (
+            "For even pipelineing, num_layers should be divisible by pipeline_model_parallel_size"
+        )
+        pp_layers = total_layers // pp_size
+        return pp_rank * pp_layers, pp_layers
+
+    next_n_pp_layers = total_layers
+    next_n_pp_stages = pp_size
+
+    if first_stage_layers is not None:
+        next_n_pp_layers -= first_stage_layers
+        next_n_pp_stages -= 1
+
+    if last_stage_layers is not None:
+        next_n_pp_layers -= last_stage_layers
+        next_n_pp_stages -= 1
+
+    if next_n_pp_stages > 0:
+        assert next_n_pp_layers % next_n_pp_stages == 0, (
+            "Uneven pipelineing, not divisible by remaining pipeline stages"
+        )
+        next_n_pp_layers = next_n_pp_layers // next_n_pp_stages
+    else:
+        next_n_pp_layers = 0
+
+    if pp_rank == 0 and first_stage_layers is not None:
+        return 0, first_stage_layers
+
+    if pp_rank == pp_size - 1 and last_stage_layers is not None:
+        if first_stage_layers is not None:
+            start = first_stage_layers + (next_n_pp_layers * (pp_size - 2))
+        else:
+            start = next_n_pp_layers * (pp_size - 1)
+        return start, last_stage_layers
+
+    if first_stage_layers is not None:
+        return first_stage_layers + (next_n_pp_layers * (pp_rank - 1)), next_n_pp_layers
+    return next_n_pp_layers * pp_rank, next_n_pp_layers
+
+
 def setup_per_microbatch_replay_forward(
     rollout_expert_indices: torch.Tensor,
     attention_mask: torch.Tensor,
+    model_config,
 ) -> None:
     """Set up RouterReplay for a single micro-batch, aligning indices
     with the left-padding-removed token layout that the MoE layer sees.
@@ -151,14 +217,16 @@ def setup_per_microbatch_replay_forward(
         seq_len = aligned.shape[1]
         chunk_size = seq_len // tp_size
         aligned = aligned[:, tp_rank * chunk_size : (tp_rank + 1) * chunk_size, :, :]
-
+   
     per_layer_data = _split_replay_indices(aligned)
-    num_layers_in_data = len(per_layer_data)
+    global_num_layers_in_data = len(per_layer_data)
     instances = RouterReplay.global_router_replay_instances
     num_instances = len(instances)
+    local_layer_offset, local_num_layers = _get_current_pp_stage_layer_range(model_config)
 
-    if num_layers_in_data == num_instances:
-        RouterReplay.set_replay_data(per_layer_data)
+    if local_num_layers == num_instances:
+        local_per_layer_data = per_layer_data[local_layer_offset : local_layer_offset + local_num_layers]
+        RouterReplay.set_replay_data(local_per_layer_data)
     else:
         # Dense-layer mismatch: map each MoE router to its global layer index.
         # Prefer the patched layer_number; fall back to offset-based mapping
@@ -168,11 +236,11 @@ def setup_per_microbatch_replay_forward(
             if layer_number is not None:
                 layer_idx = layer_number - 1  # layer_number is 1-based
             else:
-                layer_idx = i + (num_layers_in_data - num_instances)
-            if layer_idx < 0 or layer_idx >= num_layers_in_data:
+                layer_idx = local_layer_offset + i
+            if layer_idx < 0 or layer_idx >= global_num_layers_in_data:
                 raise ValueError(
                     f"Router replay layer index {layer_idx} out of range "
-                    f"for data with {num_layers_in_data} layers "
+                    f"for data with {global_num_layers_in_data} layers "
                     f"({num_instances} router instances)"
                 )
             router_instance.set_target_indices(per_layer_data[layer_idx])
