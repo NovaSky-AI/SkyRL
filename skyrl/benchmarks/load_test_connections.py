@@ -266,16 +266,14 @@ def main():
             print("Mode: e2e - RemoteInferenceClient.generate()")
             print("=" * 60)
 
-            # Run all levels in a single event loop. RemoteInferenceClient's
-            # aiohttp session is tied to one loop; switching loops between
-            # levels would leave zombie connections that cause ECONNRESET.
-            async def _run_e2e():
-                for n in levels:
+            for n in levels:
+
+                async def _run_e2e(n=n):
                     result = await fire_client_generate(client, tokenizer, n)
                     print_result(result)
                     await client.teardown()
 
-            asyncio.run(_run_e2e())
+                asyncio.run(_run_e2e())
             print()
 
     finally:

@@ -196,9 +196,7 @@ class InferenceRouter:
             max_connections=SKYRL_HTTP_CONNECTION_LIMIT,
             max_keepalive_connections=SKYRL_HTTP_CONNECTION_LIMIT,
         )
-        # retries=3 handles transient connection-level errors (e.g. keep-alive
-        # race: server closes an idle connection while httpx reuses it).
-        transport = httpx.AsyncHTTPTransport(retries=3, limits=limits)
+        transport = httpx.AsyncHTTPTransport(limits=limits)
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(None), transport=transport)
 
         # Build FastAPI app and uvicorn server

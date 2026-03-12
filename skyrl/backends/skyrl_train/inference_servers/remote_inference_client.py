@@ -75,7 +75,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 import aiohttp
 
 from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
-from skyrl.env_vars import SKYRL_HTTP_CONNECTION_LIMIT
+from skyrl.env_vars import SKYRL_GENERATE_CONCURRENCY_PER_ENGINE, SKYRL_HTTP_CONNECTION_LIMIT
 
 _DATA_PLANE_RETRIES = 3
 
@@ -163,18 +163,18 @@ class RemoteInferenceClient:
             connector = aiohttp.TCPConnector(
                 limit=SKYRL_HTTP_CONNECTION_LIMIT,
                 keepalive_timeout=2,
-                enable_cleanup_closed=True,
             )
             self._session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
         return self._session
 
     async def _post(self, url: str, json: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Any:
-        """POST with retry on transient connection errors (keep-alive race).
+        """POST with retry + backoff on transient connection errors.
 
-        Under high concurrency the server may close an idle keep-alive
-        connection at the same moment aiohttp tries to reuse it, resulting
-        in ``ConnectionResetError`` / ``ServerDisconnectedError``.  A simple
-        retry lets the connection pool open a fresh socket and recover.
+        Between generate bursts the pool's keep-alive connections go stale
+        (server closes them after ``timeout_keep_alive``).  An immediate
+        retry would grab another stale connection from the same pool, so we
+        sleep briefly to let the connector detect and purge dead sockets
+        before the next attempt.
         """
         session = await self._get_session()
         last_exc: Optional[Exception] = None
@@ -182,11 +182,14 @@ class RemoteInferenceClient:
             try:
                 async with session.post(url, json=json, headers=headers) as resp:
                     body = await resp.json()
-                    resp.raise_for_status()
+                    raise_for_status(resp, body)
                     return body
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
                 last_exc = e
-                logger.warning("Data-plane retry %d/%d for %s: %s", attempt + 1, _DATA_PLANE_RETRIES, url, e)
+                logger.warning(f"POST retry {attempt + 1}/{_DATA_PLANE_RETRIES} for {url=}: {e}")
+                # Back off so the connector can purge stale connections before
+                # the next attempt grabs another dead socket from the pool.
+                await asyncio.sleep(0.1 * 2**attempt)  # 0.1s, 0.2s, 0.4s
                 continue
         raise last_exc  # type: ignore[misc]
 
@@ -225,18 +228,34 @@ class RemoteInferenceClient:
         session_ids = input_batch.get("session_ids")
         get_logprobs = sampling_params.get("logprobs") is not None
 
-        # Create parallel tasks for all prompts
-        # Each task handles its own retry on abort
-        tasks = [
-            self._generate_single(
-                prompt_token_ids=prompt_token_ids[idx],
-                sampling_params=sampling_params,
-                session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
-            )
-            for idx in range(len(prompt_token_ids))
-        ]
+        # Semaphore limits concurrent in-flight tasks to avoid overwhelming
+        # the router and vLLM server with thousands of simultaneous requests.
+        # Each task includes both the generate and detokenize HTTP calls.
+        # Scales with number of engines so the limit fits the cluster size.
+        num_engines = len(self.server_urls)
+        concurrency = SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * num_engines
+        sem = asyncio.Semaphore(concurrency) if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0 else None
+        batch_size = len(prompt_token_ids)
+        logger.info(
+            f"generate: batch_size={batch_size}, concurrency_limit={concurrency} "
+            f"({SKYRL_GENERATE_CONCURRENCY_PER_ENGINE}/engine × {num_engines} engines)"
+        )
 
-        # Run all in parallel - retries happen within each task
+        async def _throttled(idx: int) -> Dict[str, Any]:
+            if sem is None:
+                return await self._generate_single(
+                    prompt_token_ids=prompt_token_ids[idx],
+                    sampling_params=sampling_params,
+                    session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
+                )
+            async with sem:
+                return await self._generate_single(
+                    prompt_token_ids=prompt_token_ids[idx],
+                    sampling_params=sampling_params,
+                    session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
+                )
+
+        tasks = [_throttled(idx) for idx in range(len(prompt_token_ids))]
         results = await asyncio.gather(*tasks)
 
         return InferenceEngineOutput(
