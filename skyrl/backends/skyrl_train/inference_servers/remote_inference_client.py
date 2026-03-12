@@ -319,7 +319,7 @@ class RemoteInferenceClient:
         prompt = body.get("prompt", {})  # ModelInput dict: {"chunks": [{"tokens": [...]}]}
         num_samples = body.get("num_samples", 1)
         sampling_params = body.get("sampling_params", {})
-        prompt_logprobs = body.get("prompt_logprobs", False)
+        prompt_logprobs = body.get("include_prompt_logprobs", False)
         topk_prompt_logprobs = body.get("topk_prompt_logprobs", 0)
 
         prompt_token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]

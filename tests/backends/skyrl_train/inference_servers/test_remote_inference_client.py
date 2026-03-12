@@ -13,11 +13,11 @@ import uvicorn
 from fastapi import FastAPI, Request
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     PauseMode,
     RemoteInferenceClient,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 
 
 def create_mock_vllm_server(server_id: int) -> FastAPI:

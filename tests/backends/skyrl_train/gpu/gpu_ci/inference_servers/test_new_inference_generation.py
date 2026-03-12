@@ -24,7 +24,6 @@ import pytest
 import requests
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
-
 from pydantic import BaseModel
 from transformers import AutoTokenizer
 
@@ -35,9 +34,9 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import InferenceEngineState, get_test_prompts
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 SERVED_MODEL_NAME = "my_qwen"

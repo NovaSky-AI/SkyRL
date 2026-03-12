@@ -17,9 +17,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
-from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.utils.tok import get_tokenizer
-
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_prompts,
