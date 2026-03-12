@@ -23,7 +23,7 @@ def redirect_actor_output_to_file():
     Note: Do NOT call this in skyrl_entrypoint() - training progress should
     go to stdout.
     """
-    from skyrl.train.env_vars import SKYRL_DUMP_INFRA_LOG_TO_STDOUT
+    from skyrl.env_vars import SKYRL_DUMP_INFRA_LOG_TO_STDOUT
 
     if SKYRL_DUMP_INFRA_LOG_TO_STDOUT:
         return

@@ -4,25 +4,36 @@ This module implements the CUDA IPC transfer strategy for synchronizing model we
 from training workers to inference engines using CUDA IPC handles.
 """
 
-from dataclasses import dataclass, asdict
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+from dataclasses import asdict, dataclass
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+)
 
 if TYPE_CHECKING:
     from skyrl.train.config import InferenceEngineConfig
 
 import torch
-
 from torch.multiprocessing.reductions import reduce_tensor
 
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.train.utils.utils import get_physical_gpu_id, str_to_torch_dtype
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
-    WeightTransferStrategy,
-    WeightTransferSender,
     WeightTransferReceiver,
+    WeightTransferSender,
+    WeightTransferStrategy,
 )
+from skyrl.train.utils.utils import get_physical_gpu_id, str_to_torch_dtype
 
 # IPC handle type: (rebuild_func, args) returned by reduce_tensor
 IpcHandle = Tuple[Callable[..., torch.Tensor], Tuple[Any, ...]]
@@ -56,8 +67,8 @@ class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
 
     def serialize(self) -> bytes:
         """Serialize the request to bytes."""
-        import pickle
         import base64
+        import pickle
 
         request_data = pickle.dumps(self)
         request_data_encoded = base64.b64encode(request_data)
@@ -73,8 +84,8 @@ class CudaIpcWeightUpdateRequest(WeightUpdateRequest):
     @classmethod
     def deserialize(cls, data: bytes) -> "CudaIpcWeightUpdateRequest":
         """Deserialize the request from bytes."""
-        import pickle
         import base64
+        import pickle
 
         end_index = data.find(_IPC_REQUEST_END_MARKER)
         if end_index == -1:
@@ -128,7 +139,11 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
         self._init_info = init_info
         self._inference_client = inference_client
 
-    async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
+    async def send_chunks(
+        self,
+        chunks: Iterable[WeightChunk],
+        weight_metadata: Optional[Dict[str, list]] = None,
+    ) -> None:
         """Send chunks via CUDA IPC with packed tensors.
 
         Each chunk can contain multiple parameters. All tensors in a chunk are
@@ -138,6 +153,8 @@ class CudaIpcWeightTransferSender(WeightTransferSender):
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
+            weight_metadata: Pre-computed metadata (unused by CUDA IPC path,
+                accepted for interface compatibility).
         """
         rank = torch.distributed.get_rank()
         world_size = torch.distributed.get_world_size()

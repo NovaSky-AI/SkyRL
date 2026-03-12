@@ -1,11 +1,12 @@
 """Defines interfaces for training data."""
 
-from typing import TypedDict, Dict, Any, List, Optional, Generic, TypeVar
+import io
+import pickle
+from typing import Any, Dict, Generic, List, Optional, TypedDict, TypeVar
+
+import numpy as np
 import torch
 from jaxtyping import Float, Integer
-import pickle
-import io
-import numpy as np
 
 DictType = TypeVar("DictType")
 

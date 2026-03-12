@@ -9,7 +9,7 @@ import ray
 import torch
 import torch.distributed as dist
 from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl.train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from ray.util.placement_group import placement_group
 from skyrl.train.config import SkyRLTrainConfig
 from loguru import logger

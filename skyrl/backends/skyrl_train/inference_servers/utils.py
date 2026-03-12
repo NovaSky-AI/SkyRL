@@ -1,12 +1,14 @@
 from argparse import Namespace
+
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_dict
 
 
 # TODO: Add a test for validation
 def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
     """Build CLI args for vLLM server from config."""
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm import AsyncEngineArgs
+    from vllm.config import WeightTransferConfig
+    from vllm.entrypoints.openai.cli_args import FrontendArgs
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     # Create common CLI args namespace
@@ -30,6 +32,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
         max_num_seqs=ie_cfg.max_num_seqs,
         enable_sleep_mode=cfg.trainer.placement.colocate_all,
+        weight_transfer_config=WeightTransferConfig(backend=ie_cfg.weight_sync_backend),
         # NOTE (sumanthrh): We set generation config to be vLLM so that the generation behaviour of the server is same as using the vLLM Engine APIs directly
         generation_config="vllm",
         # NOTE: vllm expects a list entry for served_model_name

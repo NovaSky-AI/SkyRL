@@ -16,7 +16,7 @@ This client is responsible for BOTH data plane and control plane operations:
 
 2. Control Plane (fan-out to all server_urls):
    - pause, resume, sleep, wake_up, reset_prefix_cache
-   - init_weight_transfer, update_weights_skyrl, finalize_weight_update
+   - init_weight_transfer, update_weights_skyrl
    - Fans out directly to all backend servers (bypassing router)
    - This allows using external routers that only handle data plane
 
@@ -28,7 +28,7 @@ Key features:
 - Two URL types:
   - proxy_url: Single URL for data plane operations (routed requests)
   - server_urls: List of backend URLs for control plane operations (fan-out)
-- Lazy world_size fetching from /get_server_info
+- Lazy world_size fetching from /get_world_size
 - Built-in retry on abort for in-flight weight updates (temporary)
 
 Usage:
@@ -69,16 +69,20 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union, TYPE_CHECKING
-from dataclasses import asdict
-
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import aiohttp
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
+from skyrl.backends.skyrl_train.inference_engines.base import (
+    InferenceEngineInput,
+    InferenceEngineOutput,
+)
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, WeightUpdateRequest
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +139,7 @@ class RemoteInferenceClient:
 
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
-    _world_size: Optional[int] = field(default=None, repr=False)
+    _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
 
     # ---------------------------
     # Session Management
@@ -424,6 +428,32 @@ class RemoteInferenceClient:
     # Control Plane (fan-out to all server_urls)
     # ---------------------------
 
+    async def _call_server(
+        self,
+        server_url: str,
+        endpoint: str,
+        json: Dict[str, Any],
+        method: str = "POST",
+    ) -> tuple:
+        """
+        Call endpoint on a single server.
+
+        Args:
+            server_url: Base URL of the server.
+            endpoint: Endpoint path (e.g., "/pause").
+            json: JSON payload to send.
+            method: HTTP method (default: POST).
+
+        Returns:
+            Tuple of (server_url, {"status": <int>, "body": <response>}).
+        """
+        session = await self._get_session()
+        url = f"{server_url}{endpoint}"
+        async with session.request(method, url, json=json) as resp:
+            body = await resp.json() if resp.content_length else None
+            raise_for_status(resp, body)
+            return server_url, {"status": resp.status, "body": body}
+
     async def _call_all_servers(
         self,
         endpoint: str,
@@ -431,26 +461,17 @@ class RemoteInferenceClient:
         method: str = "POST",
     ) -> Dict[str, Any]:
         """
-        Call endpoint on all server_urls concurrently.
+        Call endpoint on all server_urls concurrently with the same payload.
 
         Args:
             endpoint: Endpoint path (e.g., "/pause").
-            json: JSON payload to send.
+            json: JSON payload to broadcast to all servers.
             method: HTTP method (default: POST).
 
         Returns:
             Dict mapping server_url to response.
         """
-        session = await self._get_session()
-
-        async def call_server(server_url: str) -> tuple:
-            url = f"{server_url}{endpoint}"
-            async with session.request(method, url, json=json) as resp:
-                body = await resp.json() if resp.content_length else None
-                raise_for_status(resp, body)
-                return server_url, {"status": resp.status, "body": body}
-
-        results = await asyncio.gather(*[call_server(url) for url in self.server_urls])
+        results = await asyncio.gather(*[self._call_server(url, endpoint, json, method) for url in self.server_urls])
         return {url: resp for url, resp in results}
 
     async def pause(self, mode: Union[PauseMode, str] = PauseMode.ABORT) -> Dict[str, Any]:
@@ -545,77 +566,88 @@ class RemoteInferenceClient:
 
     async def init_weight_update_communicator(
         self,
-        init_info: "BroadcastInitInfo",
+        init_info: "WeightSyncInitInfo",
     ) -> Dict[str, Any]:
         """
-        Initialize weight sync process group on all backends.
+        Initialize weight sync via vLLM native /init_weight_transfer_engine.
+
+        Fetches per-server world sizes, expands init_info into per-server
+        payloads (with correct NCCL rank offsets), and fans out to all servers.
 
         Args:
-            init_info: BroadcastInitInfo containing all args for weight sync setup.
+            init_info: A WeightSyncInitInfo (e.g. BroadcastInitInfo) that supports
+                for_servers() and to_api_payload().
 
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/init_weight_transfer", asdict(init_info))
+        _, world_size_per_server = await self.get_world_size()
+        num_servers = len(self.server_urls)
+        server_infos = init_info.for_servers(world_size_per_server, num_servers)
+        payloads = [{"init_info": x.to_api_payload()} for x in server_infos]
+        results = await asyncio.gather(
+            *[
+                self._call_server(url, "/init_weight_transfer_engine", payload)
+                for url, payload in zip(self.server_urls, payloads)
+            ]
+        )
+        return {url: resp for url, resp in results}
 
     async def update_named_weights(
         self,
-        request: "WeightUpdateRequest",
+        update_info: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Update weights on all backends.
+        Update weights via vLLM native /update_weights.
 
         Args:
-            request: BroadcastWeightUpdateRequest containing weight metadata.
+            update_info: Dict with keys expected by vLLM (e.g. names, dtype_names,
+                shapes, packed for NCCL).
 
         Returns:
             Dict mapping server_url to response.
         """
-        return await self._call_all_servers("/update_weights_skyrl", request.to_json_dict())
-
-    async def finalize_weight_update(self) -> Dict[str, Any]:
-        """
-        Finalize weight update on all backends.
-
-        Called after all update_weights_skyrl() calls are complete.
-        Reserved for any post-processing steps that may be needed:
-        - Cache invalidation
-        - State synchronization
-        - Future vLLM requirements
-
-        Returns:
-            Dict mapping server_url to response.
-        """
-        return await self._call_all_servers("/finalize_weight_update", {})
+        return await self._call_all_servers(
+            "/update_weights",
+            {"update_info": update_info},
+        )
 
     # ---------------------------
     # Info
     # ---------------------------
 
-    async def get_world_size(self) -> int:
+    async def get_world_size(self) -> Tuple[int, int]:
         """
-        Get total world size across all inference workers.
+        Get total and per-server world size across all inference workers.
 
-        Fetches from /get_server_info on each server and sums the world_size values.
+        Fetches from vLLM's /get_world_size endpoint on each server.
+        All servers are expected to have the same world size.
         Result is cached after first call.
+
+        Returns:
+            Tuple of (total_world_size, world_size_per_server).
         """
         if self._world_size is not None:
             return self._world_size
 
-        results = await self._call_all_servers("/get_server_info", {}, method="GET")
+        results = await self._call_all_servers("/get_world_size", {}, method="GET")
 
-        total_world_size = 0
-        for server_url, resp in results.items():
-            if resp.get("status") != 200:
-                error = resp.get("error", resp.get("body"))
-                raise RuntimeError(f"Failed to fetch server info from {server_url}: {error}")
+        per_server = []
+        for server_url in self.server_urls:
+            resp = results.get(server_url)
+            if resp is None:
+                raise RuntimeError(f"No response for server {server_url}")
             body = resp.get("body", {})
             world_size = body.get("world_size")
             if world_size is None:
-                raise RuntimeError(f"Failed to fetch server info from {server_url}: world_size is missing")
-            total_world_size += world_size
+                raise RuntimeError(f"Missing world_size in response from {server_url}")
+            per_server.append(world_size)
 
-        self._world_size = total_world_size
+        assert all(
+            ws == per_server[0] for ws in per_server
+        ), f"All servers must have the same world_size, got {per_server}"
+
+        self._world_size = (per_server[0] * len(self.server_urls), per_server[0])
         return self._world_size
 
     # ---------------------------

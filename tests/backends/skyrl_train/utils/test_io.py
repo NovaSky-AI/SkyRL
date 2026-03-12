@@ -4,25 +4,25 @@ Unit tests for cloud storage I/O utilities.
 
 import os
 import tempfile
+from unittest.mock import Mock, patch
+
 import pytest
-from unittest.mock import patch, Mock
 import torch
 
-
 from skyrl.backends.skyrl_train.utils.io.io import (
-    is_cloud_path,
-    makedirs,
+    download_directory,
     exists,
+    is_cloud_path,
+    list_dir,
+    local_read_dir,
+    local_work_dir,
+    makedirs,
     open_file,
     upload_directory,
-    download_directory,
-    local_work_dir,
-    local_read_dir,
-    list_dir,
 )
 from skyrl.train.utils.trainer_utils import (
-    list_checkpoint_dirs,
     cleanup_old_checkpoints,
+    list_checkpoint_dirs,
 )
 
 

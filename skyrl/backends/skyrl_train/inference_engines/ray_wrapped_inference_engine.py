@@ -5,7 +5,9 @@ from packaging import version
 from ray.actor import ActorHandle
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
@@ -114,7 +116,7 @@ def create_ray_wrapped_inference_engines(
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface
     instances.
     """
-    from skyrl.backends.skyrl_train.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
+    from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
     from skyrl.train.utils.utils import (
         get_all_env_variables,
         get_ray_pg_ready_with_timeout,

@@ -12,24 +12,28 @@ Run:
     uv run pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_weight_sync.py -v -s
 """
 
+import argparse
 import time
 
 import httpx
 import pytest
+import pytest_asyncio
 import ray
 import torch
-import argparse
-
-import pytest_asyncio
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
-from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip, get_open_port
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    get_node_ip,
+    get_open_port,
+)
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
-from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, BroadcastWeightUpdateRequest
+from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -41,12 +45,13 @@ def make_vllm_cli_args(
     gpu_memory_utilization: float = 0.5,
 ) -> argparse.Namespace:
     """Create CLI args for vLLM server using official parser."""
+    from vllm.config import WeightTransferConfig
     from vllm.entrypoints.openai.cli_args import make_arg_parser
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     parser = FlexibleArgumentParser(description="vLLM server")
     parser = make_arg_parser(parser)
-    return parser.parse_args(
+    args = parser.parse_args(
         [
             "--model",
             model,
@@ -61,6 +66,8 @@ def make_vllm_cli_args(
             load_format,
         ]
     )
+    args.weight_transfer_config = WeightTransferConfig(backend="nccl")
+    return args
 
 
 def wait_for_url(url: str, timeout: float = 180.0) -> bool:
@@ -100,15 +107,16 @@ class Trainer:
 
     def init_weight_sync(self, master_address: str, master_port: int, world_size: int, group_name: str):
         """Initialize the weight sync process group as rank 0 (trainer)."""
-        from skyrl.backends.skyrl_train.distributed.utils import init_custom_process_group
-        from skyrl.train.utils import get_tcp_url
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
 
-        self.pg = init_custom_process_group(
-            backend="nccl",
-            init_method=get_tcp_url(master_address, master_port),
-            world_size=world_size,
-            rank=0,  # Trainer is always rank 0
-            group_name=group_name,
+        self.pg = NCCLWeightTransferEngine.trainer_init(
+            dict(
+                master_address=master_address,
+                master_port=master_port,
+                world_size=world_size,
+            )
         )
         return True
 
@@ -136,9 +144,25 @@ class Trainer:
 
         This is a blocking operation - server must call receive concurrently.
         """
-        for name, param in self.model.named_parameters():
-            torch.distributed.broadcast(param.data, src=0, group=self.pg)
-        torch.cuda.synchronize()
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
+
+        params = list(self.model.named_parameters())
+        print(
+            f"[Trainer.broadcast_weights] Starting send of {len(params)} params, pg={self.pg}, pg.rank={self.pg.rank}, pg.world_size={self.pg.world_size}"
+        )
+        try:
+            NCCLWeightTransferEngine.trainer_send_weights(
+                iterator=iter(params),
+                group=self.pg,
+                packed=True,
+            )
+            torch.cuda.synchronize()
+            print("[Trainer.broadcast_weights] Send complete")
+        except Exception as e:
+            print(f"[Trainer.broadcast_weights] ERROR: {e}")
+            raise
 
 
 @pytest_asyncio.fixture(scope="class")
@@ -257,7 +281,7 @@ class TestWeightUpdateFlow:
             master_port = get_open_port()
 
             # Query all servers for world_size via client (fans out to all backends)
-            inference_world_size = await client.get_world_size()
+            inference_world_size, _ = await client.get_world_size()
             world_size = 1 + inference_world_size  # 1 trainer + all inference workers
             group_name = f"weight_sync_test_{master_port}"
 
@@ -295,15 +319,22 @@ class TestWeightUpdateFlow:
             print(f"[Step 3] Weight info: {len(weight_info['names'])} parameters")
 
             # Start trainer broadcast (returns immediately, runs in Ray actor)
+            print("[Step 3] Launching trainer broadcast_weights.remote()...")
             trainer_broadcast_ref = trainer.broadcast_weights.remote()
 
             # Await server receive via client (fans out to all backends)
-            update_request = BroadcastWeightUpdateRequest(
-                names=weight_info["names"],
-                dtypes=weight_info["dtypes"],
-                shapes=weight_info["shapes"],
+            dtype_names = [(d.split(".")[-1] if "." in d else d) for d in weight_info["dtypes"]]
+            update_info = {
+                "names": weight_info["names"],
+                "dtype_names": dtype_names,
+                "shapes": weight_info["shapes"],
+                "packed": True,
+            }
+            print(
+                f"[Step 3] Calling update_named_weights with {len(update_info['names'])} names, packed={update_info['packed']}"
             )
-            result = await client.update_named_weights(update_request)
+            result = await client.update_named_weights(update_info)
+            print(f"[Step 3] update_named_weights returned: {list(result.keys())}")
             for server_url, resp in result.items():
                 assert resp["status"] == 200, f"Server {server_url} update weights failed: {resp}"
 
@@ -311,13 +342,7 @@ class TestWeightUpdateFlow:
             ray.get(trainer_broadcast_ref)
             print("[Step 3] Weight sync complete")
 
-            # ===== Step 4: Finalize weight update =====
-            result = await client.finalize_weight_update()
-            for server_url, resp in result.items():
-                assert resp["status"] == 200, f"Server {server_url} finalize failed: {resp}"
-            print("[Step 4] Weight update finalized")
-
-            # ===== Step 5: Query again - should produce correct output =====
+            # ===== Step 4: Query again - should produce correct output =====
             resp = await http_client.post(f"{router_url}/v1/completions", json=payload)
             assert resp.status_code == 200
 

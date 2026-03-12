@@ -8,17 +8,20 @@ import torch
 from cloudpathlib import CloudPath, implementation_registry
 from cloudpathlib.local import local_s3_implementation
 from flax import nnx
+from jax.tree_util import DictKey
 from peft import PeftModel
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from jax.tree_util import DictKey
-
+from skyrl.tinker.types import LoraConfig
 from skyrl.tx.layers.lora import init_lora_adapter
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
-from skyrl.tinker.types import LoraConfig
 from skyrl.tx.utils import models
-from skyrl.tx.utils.models import extract_adapter_state, insert_adapter_state, is_stacked_path
+from skyrl.tx.utils.models import (
+    extract_adapter_state,
+    insert_adapter_state,
+    is_stacked_path,
+)
 from skyrl.utils.storage import download_and_unpack
 
 
@@ -68,7 +71,7 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     expected_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :].T)
 
     # Save and verify checkpoint exists
-    models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path)
+    models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path, rank=0)
     assert output_path.exists()
 
     # Load with peft and verify

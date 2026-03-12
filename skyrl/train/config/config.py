@@ -5,15 +5,15 @@ These mirror the YAML configuration structure 1:1. The top-level SkyRLTrainConfi
 can be constructed from a Hydra DictConfig via SkyRLTrainConfig.from_dict_config().
 """
 
-import os
-from abc import ABC
-import dataclasses
-from dataclasses import dataclass, field, asdict
-import typing
-from typing import Any, Dict, List, Optional, Union, Type, TypeVar, Annotated
-import yaml
 import copy
+import dataclasses
+import os
+import typing
+from abc import ABC
+from dataclasses import asdict, dataclass, field
+from typing import Annotated, Any, Dict, List, Optional, Type, TypeVar, Union
 
+import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_gym.envs.search.env import SearchEnvConfig
@@ -310,9 +310,13 @@ class OffPolicyCorrectionConfig(BaseConfig):
     product_mask_low: float = 0.5
     """Used when ``sequence_mask_metric="product"``."""
     outlier_token_is_threshold_low: Optional[float] = None
-    """Mask sequences with any token IS ratio below this threshold. Suggested: 1e-4. ``None`` to disable."""
+    """Set to mask sequences with any token IS ratio below this threshold. Suggested: 1e-4. ``None`` to disable."""
     outlier_token_is_threshold_high: Optional[float] = None
-    """Mask sequences with any token IS ratio above this threshold. Suggested: 100. ``None`` to disable."""
+    """Set to mask sequences with any token IS ratio above this threshold. Suggested: 100. ``None`` to disable."""
+    token_mask_is_threshold_low: Optional[float] = None
+    """Set to mask per-token when IS ratio < `token_mask_is_threshold_low`. ``None`` to disable."""
+    token_mask_is_threshold_high: Optional[float] = None
+    """Set to mask per-token when IS ratio > `token_mask_is_threshold_high`. ``None`` to disable."""
 
 
 @dataclass

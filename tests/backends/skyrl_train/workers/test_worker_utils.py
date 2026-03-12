@@ -4,9 +4,14 @@ Tests for worker utility functions.
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/workers/test_worker_utils.py
 """
 
-import pytest
 from unittest.mock import MagicMock
-from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics, all_reduce_metrics
+
+import pytest
+
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    all_reduce_metrics,
+    reduce_metrics,
+)
 
 
 class TestReduceMetrics:

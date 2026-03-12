@@ -1,6 +1,6 @@
+import pytest
 import torch
 from flash_attn.bert_padding import pad_input, unpad_input
-import pytest
 
 
 @pytest.fixture

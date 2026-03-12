@@ -7,26 +7,36 @@ For details, see https://docs.skyrl.ai/docs/tutorials/skyrl_gym_generator
 
 import asyncio
 import copy
-from uuid import uuid4
-from dataclasses import asdict
-import skyrl_gym
-from typing import List, Dict, Any, Optional, Union, Tuple
 from concurrent.futures import ThreadPoolExecutor
-from tqdm.asyncio import tqdm
-from dataclasses import dataclass
-from loguru import logger
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
+from uuid import uuid4
 
+from loguru import logger
+from tqdm.asyncio import tqdm
+
+import skyrl_gym
+from skyrl.backends.skyrl_train.inference_engines.base import (
+    ConversationType,
+    InferenceEngineInput,
+)
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.train.config import GeneratorConfig, SkyRLGymConfig
-from skyrl.train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, ConversationType
-from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
+from skyrl.train.generators.base import (
+    GeneratorInput,
+    GeneratorInterface,
+    GeneratorOutput,
+    TrajectoryID,
+)
 from skyrl.train.generators.utils import (
+    apply_overlong_filtering,
     get_custom_chat_template,
     get_generation_prompt_ids,
-    apply_overlong_filtering,
     get_rollout_metrics,
 )
+from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
 
 @dataclass

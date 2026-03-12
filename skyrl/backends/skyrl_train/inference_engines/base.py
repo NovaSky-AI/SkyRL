@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, TypedDict, Any, Optional, Hashable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, TypedDict
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]

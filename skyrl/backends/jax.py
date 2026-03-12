@@ -25,36 +25,36 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, get_type_hints
 
-from cloudpathlib import AnyPath
-import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.experimental import multihost_utils
+import numpy as np
 import optax
+from cloudpathlib import AnyPath
 from flax import nnx
 from flax.training import checkpoints
+from jax.experimental import multihost_utils
 from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
-from skyrl.tx.layers.connectors import is_connector_path
-from skyrl.tx.models.configs import Qwen3Config
-from skyrl.tx.layers.lora import clear_lora_adapter, init_lora_adapter
-from skyrl.tinker import types
 from skyrl.backends.backend import AbstractBackend
 from skyrl.backends.utils import pad, pad_batch, pad_to_fsdp
+from skyrl.tinker import types
 from skyrl.tinker.loss_fns import LOSS_FUNCTIONS, LossFnConfig
 from skyrl.tinker.types import LOSS_TYPES
+from skyrl.tx.layers.connectors import is_connector_path
+from skyrl.tx.layers.lora import clear_lora_adapter, init_lora_adapter
+from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.utils.models import (
+    extract_adapter_state,
+    get_adapter_idx,
     get_dtype,
     get_model_class,
-    load_safetensors,
-    load_lora_checkpoint,
-    save_lora_checkpoint,
-    extract_adapter_state,
     insert_adapter_state,
-    round_up_seq_len,
+    load_lora_checkpoint,
+    load_safetensors,
     resolve_model_path,
-    get_adapter_idx,
+    round_up_seq_len,
+    save_lora_checkpoint,
 )
 from skyrl.utils.log import logger
 
@@ -192,10 +192,11 @@ class JaxBackendImpl(AbstractBackend):
     - Supports both FORWARD and FORWARD_BACKWARD request types
     """
 
-    def __init__(self, base_model: str, config: JaxBackendConfig):
+    def __init__(self, base_model: str, config: JaxBackendConfig, process_id: int):
         """Initialize JAX LoRA backend."""
         self.base_model = base_model
         self.config = config
+        self.process_id = process_id
         self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model with LoRA config
@@ -961,6 +962,7 @@ class JaxBackendImpl(AbstractBackend):
             lora_model.lora_config,
             lora_model.adapter_index,
             output_path,
+            self.process_id,
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
@@ -1035,13 +1037,15 @@ class RpcPayload(BaseModel):
 RpcPayloadAdapter: TypeAdapter[RpcPayload] = TypeAdapter(RpcPayload)
 
 
-def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
+def _broadcast_command(cmd: RpcPayload | None, process_id: int) -> RpcPayload:
     """Broadcast an RpcPayload from coordinator to all workers using JSON.
 
     On coordinator (process 0): serializes and broadcasts the payload.
     On workers: receives and deserializes the payload (pass None).
     """
-    if jax.process_index() == 0:
+    is_source = process_id == 0
+
+    if is_source:
         assert cmd is not None, "Coordinator must provide a command to broadcast."
         data = RpcPayloadAdapter.dump_json(cmd)
         size = np.array([len(data)], dtype=np.int64)
@@ -1049,15 +1053,15 @@ def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
         size = np.array([0], dtype=np.int64)
 
     # Broadcast size first
-    size = multihost_utils.broadcast_one_to_all(size)
+    size = multihost_utils.broadcast_one_to_all(size, is_source=is_source)
 
-    # Broadcast data
-    if jax.process_index() == 0:
+    if is_source:
         data_arr = np.frombuffer(data, dtype=np.uint8)
     else:
         data_arr = np.zeros(size[0], dtype=np.uint8)
 
-    data_arr = multihost_utils.broadcast_one_to_all(data_arr)
+    # Broadcast data
+    data_arr = multihost_utils.broadcast_one_to_all(data_arr, is_source=is_source)
 
     return RpcPayloadAdapter.validate_json(data_arr.tobytes())
 
@@ -1069,18 +1073,19 @@ class JaxBackend(JaxBackendImpl):
     """
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
+        self.process_id = 0  # Coordinator is always process 0
         if config.coordinator_address is not None:
             jax.distributed.initialize(
                 coordinator_address=config.coordinator_address,
                 num_processes=config.num_processes,
-                process_id=0,
+                process_id=self.process_id,
             )
             logger.info(
-                f"JAX distributed initialized: process_id={jax.process_index()} ({jax.process_count()} total), "
+                f"JAX distributed initialized: process_id={self.process_id} ({jax.process_count()} total), "
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
 
-        self._broadcast_and_call("__init__", base_model=base_model, config=config)
+        self._broadcast_and_call("__init__", base_model=base_model, config=config, process_id=self.process_id)
 
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
@@ -1093,7 +1098,10 @@ class JaxBackend(JaxBackendImpl):
                     return str(v)
                 return TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
 
-            _broadcast_command(RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}))
+            _broadcast_command(
+                RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}),
+                process_id=self.process_id,
+            )
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
@@ -1145,21 +1153,21 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         process_id=process_id,
     )
     logger.info(
-        f"Worker process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
+        f"Worker process_id={process_id} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
     )
 
     # Receive INIT payload with base_model and config from coordinator
-    init_payload = _broadcast_command(None)
+    init_payload = _broadcast_command(None, process_id=process_id)
     assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
     config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
     logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}")
 
-    backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
+    backend = JaxBackendImpl(init_payload.kwargs["base_model"], config, process_id)
 
-    logger.info(f"Worker process_id={jax.process_index()} entering command loop")
+    logger.info(f"Worker process_id={process_id} entering command loop")
 
     while True:
-        payload: RpcPayload = _broadcast_command(None)
+        payload: RpcPayload = _broadcast_command(None, process_id=process_id)
 
         if not hasattr(backend, payload.method):
             logger.error(f"Unknown method: {payload.method}")

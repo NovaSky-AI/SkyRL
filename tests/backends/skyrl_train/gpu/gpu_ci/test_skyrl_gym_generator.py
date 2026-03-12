@@ -3,17 +3,25 @@ uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu
 """
 
 import os
+from typing import Any, Dict
+
 import pytest
+from loguru import logger
 from transformers import AutoTokenizer
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
-from tests.backends.skyrl_train.gpu.utils import Timer, get_test_generator_input, InferenceEngineState
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from typing import Any, Dict
-from loguru import logger
-from skyrl.train.config import SkyRLTrainConfig, SamplingParams
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    Timer,
+    get_test_generator_input,
+)
 
 OBSERVATION_PROMPT = "give me another solution"
 

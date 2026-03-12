@@ -544,6 +544,8 @@ off_policy_correction:
   product_mask_low: 0.5
   outlier_token_is_threshold_low: null
   outlier_token_is_threshold_high: null
+  token_mask_is_threshold_low: null
+  token_mask_is_threshold_high: null
 ```
 
 - `algorithm.off_policy_correction.tis_ratio_type`: Type of importance sampling ratio to use for ppo loss correction. Options include: `null`, `token`, `sequence`.
@@ -554,8 +556,10 @@ off_policy_correction:
 - `algorithm.off_policy_correction.geo_mask_low`: Low threshold for `geometric` sequence_mask_metric.
 - `algorithm.off_policy_correction.product_mask_high`: High threshold for `product` sequence_mask_metric.
 - `algorithm.off_policy_correction.product_mask_low`: Low threshold for `product` sequence_mask_metric.
-- `algorithm.off_policy_correction.outlier_token_is_threshold_low`: Low threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to `null` to disable. Suggested values: `1e-4`.
-- `algorithm.off_policy_correction.outlier_token_is_threshold_high`: High threshold for outlier token mask - masks out sequences with any token having importance ratio far outside an acceptable range (low and high thresholds). Set to `null` to disable. Suggested values: `100`.
+- `algorithm.off_policy_correction.outlier_token_is_threshold_low`: Low threshold for outlier token mask — masks out entire sequences when any token has an IS ratio below this value. Set to `null` to disable. Suggested: `1e-4`.
+- `algorithm.off_policy_correction.outlier_token_is_threshold_high`: High threshold for outlier token mask — masks out entire sequences when any token has an IS ratio above this value. Set to `null` to disable. Suggested: `100`.
+- `algorithm.off_policy_correction.token_mask_is_threshold_low`: Low threshold for per-token masking — zeros individual tokens whose IS ratio falls below this value. Both low and high must be set to activate. Set to `null` to disable. Suggested: `0.5`.
+- `algorithm.off_policy_correction.token_mask_is_threshold_high`: High threshold for per-token masking — zeros individual tokens whose IS ratio exceeds this value. Both low and high must be set to activate. Set to `null` to disable. Suggested: `2.0`.
 
 
 ### Policy Loss Formulation

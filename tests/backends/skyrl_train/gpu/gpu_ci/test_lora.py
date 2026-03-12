@@ -3,18 +3,21 @@
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py
 """
 
-import pytest
 import asyncio
+
+import pytest
 import ray
 
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    get_test_prompts,
     InferenceEngineState,
+    get_test_prompts,
+    init_worker_with_type,
     run_inference,
 )
-from skyrl.train.config import SkyRLTrainConfig, SkyRLLoraConfig
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 

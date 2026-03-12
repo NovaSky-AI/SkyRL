@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 
-import skyrl.train.env_vars as env_vars_mod
+import skyrl.env_vars as env_vars_mod
 from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
 
 

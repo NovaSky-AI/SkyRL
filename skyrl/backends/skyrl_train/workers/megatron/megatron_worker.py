@@ -1,51 +1,63 @@
-import torch
-import torch.nn as nn
-import torch.distributed
-import ray
-from transformers import AutoConfig
-from huggingface_hub import snapshot_download
-
 import os
-from datetime import timedelta
-from typing import List, Dict, Any, Optional, Union, TYPE_CHECKING
 from collections import defaultdict
-from omegaconf import OmegaConf
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from megatron.bridge import AutoBridge
-from megatron.bridge.peft.lora import LoRA
-from megatron.bridge.peft.canonical_lora import CanonicalLoRA
 import megatron.core.parallel_state as mpu
-from megatron.core.optimizer import DistributedOptimizer, ChainedOptimizer
+import ray
+import torch
+import torch.distributed
+import torch.nn as nn
+from huggingface_hub import snapshot_download
+from megatron.bridge import AutoBridge
+from megatron.bridge.peft.canonical_lora import CanonicalLoRA
+from megatron.bridge.peft.lora import LoRA
+from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from omegaconf import OmegaConf
+from transformers import AutoConfig
 
-from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
+from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
+    MegatronStrategy,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    broadcast_object_across_pp_ranks,
+    print_model_size,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
-    init_megatron_optim_config,
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
+    init_megatron_optim_config,
 )
-from skyrl.backends.skyrl_train.distributed.dispatch import MeshRank
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import MegatronStrategy
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-    print_model_size,
-    broadcast_object_across_pp_ranks,
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
 )
-from skyrl.train.utils.utils import update_model_config, str_to_torch_dtype
-from skyrl.backends.skyrl_train.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
+from skyrl.backends.skyrl_train.utils.profiler import Profiler
+from skyrl.backends.skyrl_train.weight_sync import WeightChunk, WeightExtractor
+from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
+    MegatronModelWrapper,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
+    CriticWorkerBase,
     PolicyWorkerBase,
     RefWorkerBase,
-    CriticWorkerBase,
 )
-from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import MegatronModelWrapper
-from skyrl.backends.skyrl_train.utils.profiler import Profiler
-from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    BatchIterator,
+    all_reduce_metrics,
+    reduce_metrics,
+)
+from skyrl.env_vars import SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
+from skyrl.train.utils.utils import str_to_torch_dtype, update_model_config
 from skyrl.utils.tok import get_tokenizer
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
+    from skyrl.backends.skyrl_train.inference_engines.base import (
+        InferenceEngineInterface,
+    )
     from skyrl.train.config.config import InferenceEngineConfig
 
 # ---------------------------------------------------------------------------
@@ -56,7 +68,9 @@ if TYPE_CHECKING:
 try:
     from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
     from megatron.bridge.models.deepseek.common import get_common_configs
-    from megatron.bridge.models.deepseek.deepseek_provider import DeepSeekV3ModelProvider
+    from megatron.bridge.models.deepseek.deepseek_provider import (
+        DeepSeekV3ModelProvider,
+    )
     from megatron.bridge.models.deepseek.deepseek_v3_bridge import DeepSeekV3Bridge
     from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
     from megatron.core.models.gpt.gpt_model import GPTModel
@@ -188,6 +202,34 @@ class MegatronWeightExtractor(WeightExtractor):
                 curr_size = 0
             self.param_buckets[-1].append(task)
             curr_size += size
+
+    def get_weight_metadata(self, dtype: torch.dtype) -> dict:
+        """Return weight metadata without keeping tensors in memory.
+
+        On first call, runs export_hf_weights to discover HF names and shapes
+        (tensors are discarded immediately). Result is cached for subsequent calls.
+        TODO (aaron): find a better way to get all metadata without materializing tensors.
+        """
+        if hasattr(self, "_weight_metadata_cache"):
+            return self._weight_metadata_cache
+
+        names = []
+        dtype_names = []
+        shapes = []
+        dtype_name = str(dtype).split(".")[-1]
+        device = torch.cuda.current_device()
+        for name, tensor in self.bridge.export_hf_weights(
+            self.actor_module,
+            show_progress=False,
+            conversion_tasks=None,
+        ):
+            tensor = tensor.to(device=device, dtype=dtype, non_blocking=True)
+            names.append(name)
+            dtype_names.append(dtype_name)
+            shapes.append(list(tensor.shape))
+            del tensor
+        self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
+        return self._weight_metadata_cache
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from Megatron model.
@@ -372,7 +414,9 @@ class MegatronWorker:
         """
         Creates a megatron GPTModel (optionally DDP wrapped) using the bridge.
         """
-        from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
+        from megatron.core.distributed.distributed_data_parallel_config import (
+            DistributedDataParallelConfig,
+        )
 
         if lora_config is not None:
             self.configure_lora(lora_config, lora_type)
@@ -766,7 +810,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.cuda.empty_cache()
 
         # Extract and send weights using the sender created at init time
-        await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
+        weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+        await self._weight_transfer_sender.send_chunks(
+            self.weight_extractor.extract_weights(generator_dtype),
+            weight_metadata=weight_metadata,
+        )
 
         if cache_reset_task is not None:
             await cache_reset_task

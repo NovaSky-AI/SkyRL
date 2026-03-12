@@ -6,14 +6,14 @@ from collections import defaultdict
 from ctypes import CDLL, POINTER, Structure, c_char_p, c_int, c_ulong, c_void_p
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type, Union, TYPE_CHECKING
-from omegaconf import OmegaConf
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
 
 import ray
 import torch
 import torch.distributed
 import torch.nn as nn
 from loguru import logger
+from omegaconf import OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
     PlacementGroup,
@@ -25,8 +25,6 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from transformers import PreTrainedModel
 
-from skyrl.train.config import TrainerConfig
-from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     ActorInfo,
     Dispatch,
@@ -38,17 +36,12 @@ from skyrl.backends.skyrl_train.distributed.ulysses import (
     apply_monkey_patch,
     set_ulysses_sequence_parallel_group,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.train.utils.utils import (
-    get_ray_pg_ready_with_timeout,
-    get_reordered_bundle_indices,
-    ray_noset_visible_devices,
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
 )
-from skyrl.backends.skyrl_train.env_vars import (
-    SKYRL_RAY_PG_TIMEOUT_IN_S,
-    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -57,13 +50,31 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     ppo_critic_loss,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
-from skyrl.train.utils.utils import configure_ray_worker_logging
-from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator, reduce_metrics, all_reduce_metrics
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    BatchIterator,
+    all_reduce_metrics,
+    reduce_metrics,
+)
+from skyrl.env_vars import (
+    _SKYRL_USE_NEW_INFERENCE,
+    SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
+)
+from skyrl.train.config import TrainerConfig
+from skyrl.train.dataset.replay_buffer import Experience
+from skyrl.train.utils.utils import (
+    configure_ray_worker_logging,
+    get_ray_pg_ready_with_timeout,
+    get_reordered_bundle_indices,
+    ray_noset_visible_devices,
+)
 
 _SET_AFFINITY = False
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.inference_engines.remote_inference_client import RemoteInferenceClient
+    from skyrl.backends.skyrl_train.inference_engines.remote_inference_client import (
+        RemoteInferenceClient,
+    )
     from skyrl.train.config.config import InferenceEngineConfig
 
 
@@ -324,7 +335,7 @@ class Worker(DistributedTorchRayActor):
         # For legacy path, calculate from config
         inference_world_size = None
         if _SKYRL_USE_NEW_INFERENCE and hasattr(inference_engine_client, "get_world_size"):
-            inference_world_size = await inference_engine_client.get_world_size()
+            inference_world_size, _ = await inference_engine_client.get_world_size()
 
         # Create init info on all ranks (it's deterministic from cfg or fetched world_size)
         init_info = self._transfer_strategy_cls.create_init_info(

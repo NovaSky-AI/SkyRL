@@ -3,16 +3,14 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 import optax
+import pytest
 
 from skyrl.backends.jax import JaxBackend, JaxBackendConfig
+from skyrl.tinker import api, types
 from skyrl.tinker.engine import prepare_model_pass_batch, prepare_sample_batch
 from skyrl.tinker.types import LoraConfig, OptimStepInput
-from skyrl.tinker import api
-from skyrl.tinker import types
 from skyrl.tx.layers.lora import LoRALinear
-
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
 MAX_LORA_ADAPTERS = 4

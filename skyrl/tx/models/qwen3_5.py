@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import math
 
-from flax import nnx
 import jax
+from flax import nnx
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 
@@ -14,7 +14,7 @@ from skyrl.tx.layers.util import Param
 from skyrl.tx.models.configs import Qwen3_5Config
 from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from skyrl.tx.utils.generator import GeneratorMixin, KVCache
-from skyrl.tx.utils.logits_processor import LogitsProcessorMixin, LMHead
+from skyrl.tx.utils.logits_processor import LMHead, LogitsProcessorMixin
 
 
 def apply_partial_rope(
@@ -88,6 +88,157 @@ def recurrent_gated_delta_rule(
 
     final_state, outputs = jax.lax.scan(step_fn, initial_state, (query, key, value, g, beta))
     outputs = jnp.swapaxes(outputs, 0, 1).astype(dtype)
+    return outputs, final_state.astype(dtype)
+
+
+def chunk_gated_delta_rule(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    g: jax.Array,
+    beta: jax.Array,
+    chunk_size: int = 64,
+    initial_state: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Chunked implementation of gated delta rule.
+
+    Reference: https://arxiv.org/pdf/2412.06464
+
+    This computes the same result as recurrent_gated_delta_rule but processes
+    tokens in chunks, enabling better parallelization via the WY representation.
+
+    Paper notation (Section 3.3 "Hardware-efficient Chunkwise training"):
+        - Q, K, V: query, key, value
+        - β: update gate
+        - γ[r] = cumulative decay at position r within chunk
+        - γ^C = γ[L-1]: cumulative decay at chunk end
+        - Γ[i,j] = γ[i]/γ[j] if i >= j: decay-aware causal mask
+        - S: recurrent state [D_k, D_v]
+        - Arrows denote decay scaling: ←x = γx, →x = (γ^C/γ)x
+
+    Correction matrix (Eq 6 and 7 with decay):
+        Ũ = [I + strictLower(diag(β)(Γ ⊙ K K^T))]^{-1} diag(β) V
+
+    Chunk-wise parallel form (Eq 8 and 9 with decay):
+        S[t+1] = →S[t] + (Ũ - ←W S[t]^T)^T →K
+        O[t] = ←Q S[t]^T + (Q K^T ⊙ M)(Ũ - ←W S[t]^T)
+
+    Args:
+        query: [B, T, H, D_k] query tensor (Q)
+        key: [B, T, H, D_k] key tensor (K)
+        value: [B, T, H, D_v] value tensor (V)
+        g: [B, T, H] log decay gate (log α, typically negative)
+        beta: [B, T, H] update gate (β)
+        chunk_size: Number of tokens per chunk (L)
+        initial_state: Optional [B, H, D_k, D_v] initial recurrent state (S)
+
+    Returns:
+        output: [B, T, H, D_v] attention output (O)
+        final_state: [B, H, D_k, D_v] final recurrent state (S)
+    """
+    dtype = query.dtype
+    query = l2norm(query, axis=-1)
+    key = l2norm(key, axis=-1)
+
+    # [B, T, H, D] -> [B, H, T, D] for easier chunk processing
+    query = jnp.transpose(query, (0, 2, 1, 3))
+    key = jnp.transpose(key, (0, 2, 1, 3))
+    value = jnp.transpose(value, (0, 2, 1, 3))
+    beta = jnp.transpose(beta, (0, 2, 1))
+    g = jnp.transpose(g, (0, 2, 1))
+
+    batch_size, num_heads, seq_len, k_head_dim = key.shape
+    v_head_dim = value.shape[-1]
+    query = query * (1.0 / math.sqrt(k_head_dim))
+
+    # Pad sequence to be divisible by chunk_size
+    pad_size = (chunk_size - seq_len % chunk_size) % chunk_size
+    if pad_size > 0:
+        query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_size), (0, 0)))
+        key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_size), (0, 0)))
+        value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_size), (0, 0)))
+        beta = jnp.pad(beta, ((0, 0), (0, 0), (0, pad_size)))
+        g = jnp.pad(g, ((0, 0), (0, 0), (0, pad_size)))
+    total_seq_len = seq_len + pad_size
+    num_chunks = total_seq_len // chunk_size
+
+    # Reshape into chunks: [B, H, T, D] -> [B, H, C, L, D] where C=num_chunks, L=chunk_size
+    query = query.reshape(batch_size, num_heads, num_chunks, chunk_size, k_head_dim)
+    key = key.reshape(batch_size, num_heads, num_chunks, chunk_size, k_head_dim)
+    value = value.reshape(batch_size, num_heads, num_chunks, chunk_size, v_head_dim)
+    beta = beta.reshape(batch_size, num_heads, num_chunks, chunk_size)
+    g = g.reshape(batch_size, num_heads, num_chunks, chunk_size)
+
+    # Diag(β) K and Diag(β) V
+    k_beta = key * beta[..., None]
+    v_beta = value * beta[..., None]
+
+    # γ[j] = exp(cumsum(g)[j]): cumulative decay
+    g_cumsum = jnp.cumsum(g, axis=-1)
+    gamma = jnp.exp(g_cumsum).astype(dtype)
+
+    # Γ[i,j] = γ[i]/γ[j] = exp(g_cumsum[i] - g_cumsum[j]) for i >= j (decay-aware causal mask)
+    decay_mask = jnp.tril(jnp.exp(jnp.tril(g_cumsum[..., :, None] - g_cumsum[..., None, :]))).astype(dtype)
+
+    # L = strictLower(diag(β)(Γ ⊙ K K^T))
+    L = jnp.tril((k_beta @ jnp.swapaxes(key, -1, -2)) * decay_mask, k=-1)
+
+    # Solve (I + L) x = rhs for Ũ (corrected values) and ←W (corrected keys decayed to chunk start)
+    rhs = jnp.concatenate([v_beta, k_beta * gamma[..., None]], axis=-1)
+    solution = jax.lax.linalg.triangular_solve(L, rhs, left_side=True, lower=True, unit_diagonal=True)
+    U = solution[..., :v_head_dim]
+    W_decay = solution[..., v_head_dim:]
+
+    # Initialize recurrent state S
+    if initial_state is None:
+        state = jnp.zeros((batch_size, num_heads, k_head_dim, v_head_dim), dtype=dtype)
+    else:
+        state = initial_state.astype(dtype)
+
+    def chunk_step(
+        S: jax.Array,
+        inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+    ) -> tuple[jax.Array, jax.Array]:
+        Q_t, K_t, U_t, W_decay_t, gamma_t, Gamma_t = inputs
+
+        # (Q K^T ⊙ Γ): intra-chunk attention with decay mask (Γ is already lower triangular)
+        intra_attn = Q_t @ jnp.swapaxes(K_t, -1, -2) * Gamma_t
+
+        # Ũ - ←W S^T: corrected values minus state contribution
+        U_minus_W_decay_S = U_t - W_decay_t @ S
+
+        # ←Q S^T: inter-chunk attention (←Q = γQ)
+        inter_out = (Q_t * gamma_t[..., None]) @ S
+
+        # O[t] = ←Q S[t]^T + (Q K^T ⊙ M)(Ũ - ←W S[t]^T)
+        O_t = inter_out + intra_attn @ U_minus_W_decay_S
+
+        # S[t+1] = →S[t] + (Ũ - ←W S[t]^T)^T →K
+        # where →S = γ^C S, →K = (γ^C/γ) K
+        # Note: transposed from paper to match our state convention [D_k, D_v]
+        gamma_C = gamma_t[..., -1, None, None]  # γ^C = γ[L-1]
+        key_decay_t = Gamma_t[..., -1, :][..., None]  # γ^C/γ
+        S = gamma_C * S + jnp.swapaxes(K_t * key_decay_t, -1, -2) @ U_minus_W_decay_S
+
+        return S, O_t
+
+    # Transpose chunk dimension to first for scan: [B, H, C, ...] -> [C, B, H, ...]
+    scan_inputs = (
+        jnp.transpose(query, (2, 0, 1, 3, 4)),  # Q
+        jnp.transpose(key, (2, 0, 1, 3, 4)),  # K
+        jnp.transpose(U, (2, 0, 1, 3, 4)),  # Ũ
+        jnp.transpose(W_decay, (2, 0, 1, 3, 4)),  # ←W
+        jnp.transpose(gamma, (2, 0, 1, 3)),  # γ
+        jnp.transpose(decay_mask, (2, 0, 1, 3, 4)),  # Γ
+    )
+
+    final_state, outputs = jax.lax.scan(chunk_step, state, scan_inputs)
+
+    # Reshape outputs: [C, B, H, L, D_v] -> [B, T, H, D_v]
+    outputs = jnp.transpose(outputs, (1, 2, 0, 3, 4))
+    outputs = outputs.reshape(batch_size, num_heads, total_seq_len, v_head_dim)
+    outputs = jnp.transpose(outputs[:, :, :seq_len, :], (0, 2, 1, 3)).astype(dtype)
+
     return outputs, final_state.astype(dtype)
 
 
@@ -408,7 +559,13 @@ class Qwen3_5GatedDeltaNet(nnx.Module):
             query = jnp.repeat(query, repeats, axis=2)
             key = jnp.repeat(key, repeats, axis=2)
 
-        core_out, new_recurrent_state = recurrent_gated_delta_rule(query, key, value, g, beta, recurrent_state)
+        # Use chunked version for prefill (better parallelization), recurrent for decode
+        if seq_len > 1:
+            core_out, new_recurrent_state = chunk_gated_delta_rule(
+                query, key, value, g, beta, chunk_size=64, initial_state=recurrent_state
+            )
+        else:
+            core_out, new_recurrent_state = recurrent_gated_delta_rule(query, key, value, g, beta, recurrent_state)
         core_out = self.norm(core_out, z).reshape(batch_size, seq_len, -1)
         out = self.out_proj(core_out, adapter_indices=adapter_indices)
         return out, new_conv_state, new_recurrent_state

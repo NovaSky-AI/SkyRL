@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 from loguru import logger
 from transformers import PreTrainedTokenizerBase
 
-from skyrl.train.config import InferenceEngineConfig, SkyRLLoraConfig
 from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
@@ -25,10 +24,13 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
     postprocess_completion_request,
     route_prompts_to_engines,
 )
+from skyrl.train.config import InferenceEngineConfig, SkyRLLoraConfig
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
 
 ABORT_GENERATION_GRACE_PERIOD_SECONDS = 5
 
