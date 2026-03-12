@@ -697,8 +697,11 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        if not self.cfg.generator.step_wise_trajectories:
-            validate_generator_output(len(input_batch["prompts"]), generator_output)
+        validate_generator_output(
+            len(input_batch["prompts"]),
+            generator_output,
+            step_wise=self.cfg.generator.step_wise_trajectories,
+        )
 
         return generator_output
 
