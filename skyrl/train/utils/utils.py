@@ -637,6 +637,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
 
+    if _SKYRL_USE_NEW_INFERENCE:
+        env_vars["_SKYRL_USE_NEW_INFERENCE"] = "1"
+
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
         # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
