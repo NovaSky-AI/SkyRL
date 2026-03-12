@@ -106,6 +106,7 @@ def build_training_input_from_text_samples(
     training_input.metadata = {"response_length": num_actions}
     return training_input
 
+
 @pytest.mark.megatron
 def test_logprobs(ray_init_fixture):
     """
