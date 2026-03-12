@@ -544,10 +544,17 @@ class SkyRLGymGenerator(GeneratorInterface):
                 return StepWiseOutput(step_outputs=[timeout_output])
             return timeout_output
 
-        # Get environment-specific metrics after the episode is done
-        env_metrics = env.get_metrics()
-        # Close the environment
+        # Close the environment (runs verifier for orphaned rollouts like context overflow)
         await self._env_close(env)
+        # Get environment-specific metrics after close (includes final_reward from verifier)
+        env_metrics = env.get_metrics()
+
+        # If trajectory was stopped early (context overflow) but verifier found the task
+        # was completed, use the actual reward instead of the default 0.0
+        final_reward = env_metrics.get("final_reward")
+        if isinstance(final_reward, (int, float)) and per_step_rewards:
+            last_reward, last_idx = per_step_rewards[-1]
+            per_step_rewards[-1] = (final_reward, last_idx)
 
         # Guard: if prompt exceeded max_input_length before any generation happened,
         # response_end_idx is still None. Return a zero-reward trajectory.

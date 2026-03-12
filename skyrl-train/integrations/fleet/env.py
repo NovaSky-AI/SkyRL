@@ -202,6 +202,7 @@ class FleetTaskEnv(BaseTextEnv):
         self.turns = 0
         self.tool_calls = 0
         self.tool_errors = 0
+        self.last_reward: Optional[float] = None
         self.tools: List[Dict[str, Any]] = []
 
         # Context management (uses OpenEnv's ContextManager)
@@ -260,6 +261,7 @@ class FleetTaskEnv(BaseTextEnv):
         self.turns = 0
         self.tool_calls = 0
         self.tool_errors = 0
+        self.last_reward = None
 
         # Reset context manager if enabled
         if self.context_manager:
@@ -532,19 +534,39 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
         if self.openenv_task_env:
             try:
                 self.openenv_task_env.close()
+                if self.openenv_task_env.final_reward is not None:
+                    self.last_reward = self.openenv_task_env.final_reward
+            except Exception as e:
+                print(f"Warning: Failed to close Fleet environment: {e}")
+            self.openenv_task_env = None
+
+    async def close_async(self):
+        """Close the Fleet environment and cleanup resources (async version).
+
+        Runs verifier via OpenEnv's close_async() to get actual reward for
+        orphaned rollouts (context overflow, early termination by SkyRL).
+        """
+        if self.openenv_task_env:
+            try:
+                await self.openenv_task_env.close_async()
+                if self.openenv_task_env.final_reward is not None:
+                    self.last_reward = self.openenv_task_env.final_reward
             except Exception as e:
                 print(f"Warning: Failed to close Fleet environment: {e}")
             self.openenv_task_env = None
 
     def get_metrics(self) -> Dict[str, Any]:
         """Return environment metrics for this episode."""
-        return {
+        metrics = {
             "task_key": self.task_key,
             "env_key": self.task_config.get("env_key") or self.task_config.get("env_id"),
             "turns": self.turns,
             "tool_calls": self.tool_calls,
             "tool_errors": self.tool_errors,
         }
+        if self.last_reward is not None:
+            metrics["final_reward"] = self.last_reward
+        return metrics
 
     @staticmethod
     def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
