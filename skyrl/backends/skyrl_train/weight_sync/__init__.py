@@ -30,6 +30,7 @@ from .rdt_strategy import (
     RdtTransferStrategy,
     RdtWeightTransferSender,
     RdtWeightTransferReceiver,
+    RdtWeightStore,
 )
 
 
@@ -83,5 +84,6 @@ __all__ = [
     "RdtTransferStrategy",
     "RdtWeightTransferSender",
     "RdtWeightTransferReceiver",
+    "RdtWeightStore",
     "get_transfer_strategy_cls",
 ]

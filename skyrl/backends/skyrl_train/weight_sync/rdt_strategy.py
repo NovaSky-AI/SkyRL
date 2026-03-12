@@ -5,14 +5,17 @@ from training workers to inference engines using Ray's NCCL tensor transport.
 
 RDT transfers GPU tensors between Ray actors via NCCL without requiring explicit
 ``torch.distributed`` process group setup. The sender packs weights into a
-contiguous GPU buffer and passes it to inference engine actors using
-``actor.method.options(tensor_transport="nccl").remote(tensor)``, which triggers
-a GPU-to-GPU NCCL transfer managed entirely by Ray.
+contiguous GPU buffer, stores them in a lightweight ``RdtWeightStore`` Ray actor,
+and the inference client retrieves an RDT ``ObjectRef`` via a method decorated
+with ``@ray.method(tensor_transport="nccl")``. When this ObjectRef is passed to
+inference engine actors in the same Ray collective group, Ray transfers the GPU
+tensor GPU-to-GPU via NCCL -- no CPU roundtrip or pickling.
 
 Key architectural differences from broadcast/IPC strategies:
 - No ``torch.distributed`` process group needed -- Ray manages NCCL internally
 - Actors must be created with ``enable_tensor_transport=True``
-- Both sender and receiver actors must be in the same Ray collective group
+- A ``RdtWeightStore`` actor + inference engine actors must be in the same
+  Ray collective group (created via ``create_collective_group``)
 
 Constraints for initial integration:
 - Only supports Ray actor inference path (not HTTP server path)
@@ -20,12 +23,11 @@ Constraints for initial integration:
 - Opt-in via ``weight_sync_backend: "rdt"``
 """
 
-import asyncio
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+from typing import Iterable, Iterator, Optional, Tuple, TYPE_CHECKING
 
+import ray
 import torch
-from loguru import logger
 
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
@@ -38,6 +40,25 @@ from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
     from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+
+
+@ray.remote(num_gpus=1, enable_tensor_transport=True)
+class RdtWeightStore:
+    """Lightweight actor that holds packed weights and exposes them via RDT.
+
+    The training worker stores packed weights here, then the inference client
+    calls ``get_packed_weights()`` to obtain an RDT ObjectRef. When that
+    ObjectRef is passed to inference engine actors in the same collective group,
+    Ray transfers the tensor GPU-to-GPU via NCCL.
+    """
+
+    def store(self, packed_tensor, metadata):
+        self._packed_tensor = packed_tensor
+        self._metadata = metadata
+
+    @ray.method(tensor_transport="nccl")
+    def get_packed_weights(self):
+        return self._packed_tensor, self._metadata
 
 
 @dataclass
@@ -58,10 +79,9 @@ class RdtInitInfo(WeightSyncInitInfo):
 class RdtWeightTransferSender(WeightTransferSender):
     """Sends weights via Ray Direct Transport (NCCL tensor transport).
 
-    Packs all tensors in each chunk into a contiguous GPU buffer and sends
-    the buffer plus metadata to inference engines via the inference client's
-    ``update_weights_rdt`` method. The tensor is transferred GPU-to-GPU via
-    Ray's NCCL tensor transport -- no CPU roundtrip or pickling.
+    Packs all tensors in each chunk into a contiguous GPU buffer, stores
+    them in the ``RdtWeightStore`` actor, then tells the inference client
+    to fetch the RDT ObjectRef and fan it out to inference engines.
 
     Only rank 0 sends requests to inference engines. Other training ranks
     participate in weight extraction (FSDP collective) but don't send.
@@ -78,8 +98,10 @@ class RdtWeightTransferSender(WeightTransferSender):
     async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
         """Send chunks via RDT.
 
-        Packs tensors into a contiguous GPU buffer and sends the buffer plus
-        metadata dict to inference engines via the inference client.
+        Packs tensors into a contiguous GPU buffer, stores them in the
+        ``RdtWeightStore`` actor, then tells the inference client to
+        retrieve the RDT ObjectRef and pass it to inference engines.
+        Ray transfers the GPU tensor GPU-to-GPU via NCCL.
 
         All training ranks iterate through chunks (weight extraction may
         involve collective ops), but only rank 0 sends to inference engines.
@@ -129,9 +151,7 @@ class RdtWeightTransferSender(WeightTransferSender):
                     "shapes": shapes,
                     "sizes": sizes,
                 }
-                await self._inference_client.update_weights_rdt(
-                    packed_tensor=packed_tensor, metadata=metadata
-                )
+                await self._inference_client.update_weights_rdt(packed_tensor=packed_tensor, metadata=metadata)
 
             torch.distributed.barrier()
 
@@ -169,9 +189,7 @@ class RdtWeightTransferReceiver(WeightTransferReceiver):
         if len(set(metadata["dtypes"])) != 1:
             raise ValueError("packed weight update should have all tensors with the same dtype")
         if str_to_torch_dtype(metadata["dtypes"][0]) != self._model_dtype:
-            raise ValueError(
-                f"mismatch dtype: src {metadata['dtypes'][0]}, dst {self._model_dtype}"
-            )
+            raise ValueError(f"mismatch dtype: src {metadata['dtypes'][0]}, dst {self._model_dtype}")
         if len(metadata["sizes"]) != len(metadata["names"]):
             raise ValueError("sizes must have the same length as names")
 
@@ -200,9 +218,7 @@ class RdtTransferStrategy(WeightTransferStrategy):
     """
 
     @staticmethod
-    def create_init_info(
-        ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None
-    ) -> RdtInitInfo:
+    def create_init_info(ie_cfg: "InferenceEngineConfig", inference_world_size: Optional[int] = None) -> RdtInitInfo:
         """Create init info with all config-derived args."""
         if ie_cfg.tensor_parallel_size > 1 or ie_cfg.pipeline_parallel_size > 1:
             raise ValueError(

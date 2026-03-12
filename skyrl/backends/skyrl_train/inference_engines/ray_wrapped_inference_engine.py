@@ -62,10 +62,8 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def update_named_weights(self, request: WeightUpdateRequest):
         return await self.inference_engine_actor.update_named_weights.remote(request)
 
-    async def update_weights_rdt(self, packed_tensor, metadata):
-        return await self.inference_engine_actor.update_weights_rdt.options(
-            tensor_transport="nccl"
-        ).remote(packed_tensor, metadata)
+    async def update_weights_rdt(self, packed_weights):
+        return await self.inference_engine_actor.update_weights_rdt.remote(packed_weights)
 
     async def teardown(self):
         return await self.inference_engine_actor.teardown.remote()

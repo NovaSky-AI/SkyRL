@@ -295,13 +295,14 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Use the weight loader to coordinate weight transfer
         return await self._weight_loader.load_weights(request)
 
-    async def update_weights_rdt(self, packed_tensor, metadata):
+    async def update_weights_rdt(self, packed_weights):
         """Apply weights received via RDT. TP=PP=1 only (UniProcExecutor).
 
         Pass tensor directly through collective_rpc -- NO pre-pickling.
         UniProcExecutor's run_method is a direct in-process call so the
         GPU tensor passes through untouched.
         """
+        packed_tensor, metadata = packed_weights
         engine = self._get_engine()
         await asyncio.to_thread(
             engine.collective_rpc,
@@ -516,13 +517,14 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Use the weight loader to coordinate weight transfer
         return await self._weight_loader.load_weights(request)
 
-    async def update_weights_rdt(self, packed_tensor, metadata):
+    async def update_weights_rdt(self, packed_weights):
         """Apply weights received via RDT. TP=PP=1 only (UniProcExecutor).
 
         Pass tensor directly through collective_rpc -- NO pre-pickling.
         UniProcExecutor's run_method is a direct in-process call so the
         GPU tensor passes through untouched.
         """
+        packed_tensor, metadata = packed_weights
         engine = self._get_engine()
         await engine.collective_rpc(
             "load_weights_rdt",

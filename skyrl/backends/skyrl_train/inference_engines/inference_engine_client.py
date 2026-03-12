@@ -574,9 +574,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         return await self._run_on_all_engines("update_named_weights", request=request)
 
     async def update_weights_rdt(self, packed_tensor, metadata):
-        return await self._run_on_all_engines(
-            "update_weights_rdt", packed_tensor=packed_tensor, metadata=metadata
-        )
+        return await self._run_on_all_engines("update_weights_rdt", packed_weights=(packed_tensor, metadata))
 
     async def reset_prefix_cache(self):
         return await self._run_on_all_engines("reset_prefix_cache")
