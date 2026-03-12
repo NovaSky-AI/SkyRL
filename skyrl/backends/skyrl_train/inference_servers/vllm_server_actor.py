@@ -71,14 +71,9 @@ class VLLMServerActor(ServerActorProtocol):
         num_gpus_per_server: int,
         **kwargs,
     ) -> dict:
-        # Pop internal _bundle_indices (passed by ServerGroup with reordered indices)
-        bundle_indices = kwargs.pop("_bundle_indices", None)
-        if kwargs.get("distributed_executor_backend") == "mp":
-            from skyrl.train.utils.utils import get_gpu_ids_for_pg_bundles
-
-            if bundle_indices is None:
-                bundle_indices = list(range(start_bundle_idx, start_bundle_idx + num_gpus_per_server))
-            gpu_ids = get_gpu_ids_for_pg_bundles(pg, bundle_indices)
+        # _gpu_ids is passed by ServerGroup from the cached SkyRLPlacementGroup.bundle_gpu_ids.
+        gpu_ids = kwargs.pop("_gpu_ids", None)
+        if kwargs.get("distributed_executor_backend") == "mp" and gpu_ids is not None:
             kwargs["mp_cuda_visible_devices"] = ",".join(str(g) for g in gpu_ids)
         return kwargs
 

@@ -63,7 +63,7 @@ def test_multi_node_pg_invalid_pg(ray_init_fixture, cfg):
     pg = get_pg("whole_node_bundle", num_gpus_per_node, num_nodes)
     with pytest.raises(
         AssertionError,
-        match="if colocate_all is True, the number of bundles in the shared placement group must match the world size",
+        match="if colocate_all is True, the number of bundles in the placement group",
     ):
         PPORayActorGroup(
             cfg.trainer,

@@ -126,7 +126,6 @@ def create_ray_wrapped_inference_engines(
     from skyrl.train.utils.utils import (
         SkyRLPlacementGroup,
         get_all_env_variables,
-        get_gpu_ids_for_pg_bundles,
         get_ray_pg_ready_with_timeout,
         ray_noset_visible_devices,
     )
@@ -182,14 +181,16 @@ def create_ray_wrapped_inference_engines(
     # Pre-compute GPU IDs per (engine, dp_rank) so we can set
     # CUDA_VISIBLE_DEVICES for the mp-spawned workers to see only the
     # TP*PP GPUs allocated to that DP rank.
+    # Since reordered indices are sorted by (node_id, gpu_id), the physical
+    # GPU IDs are directly available from shared_pg.gpu_ids.
     engine_gpu_ids_map = {}
     if use_mp_backend:
+        all_gpu_ids = shared_pg.bundle_gpu_ids
         tp_pp_size = tensor_parallel_size * pipeline_parallel_size
         for engine_idx in range(num_inference_engines):
             for dp_rank in range(data_parallel_size):
                 logical_base = engine_idx * per_engine_gpu_count + dp_rank * tp_pp_size
-                physical_bundle_indices = [reordered[logical_base + k] for k in range(tp_pp_size)]
-                engine_gpu_ids_map[(engine_idx, dp_rank)] = get_gpu_ids_for_pg_bundles(raw_pg, physical_bundle_indices)
+                engine_gpu_ids_map[(engine_idx, dp_rank)] = [all_gpu_ids[logical_base + k] for k in range(tp_pp_size)]
 
     for i in range(num_inference_engines):
         logical_base = i * per_engine_gpu_count

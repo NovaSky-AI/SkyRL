@@ -749,11 +749,11 @@ class InfoActor:
         return ray.get_gpu_ids()[0]
 
 
-def get_reordered_bundle_indices(pg):
-    """Get reordered bundle indices for a placement group.
+def _probe_bundle_placement(pg):
+    """Probe every bundle in a placement group to get (bundle_idx, node_id, gpu_id) tuples.
 
-    Probes every bundle in the PG, sorts by (node_id, gpu_id), and returns
-    a list of bundle indices in deterministic order.
+    Spawns a lightweight InfoActor per bundle to discover physical GPU assignments,
+    then returns the tuples sorted by (node_id, gpu_id) for deterministic ordering.
     """
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
@@ -778,46 +778,56 @@ def get_reordered_bundle_indices(pg):
         ray.kill(actor)
 
     bundle_infos = [(i, bundle_to_node_ids[i], gpu_ids[i]) for i in range(num_bundles)]
-    return [info[0] for info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))]
-
-
-def get_gpu_ids_for_pg_bundles(pg, bundle_indices):
-    """Get the physical GPU IDs for specific bundles in a placement group."""
-    info_actors = []
-    for idx in bundle_indices:
-        info_actors.append(
-            InfoActor.options(
-                num_cpus=0.01,
-                num_gpus=0.01,
-                resources=None,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=idx,
-                ),
-            ).remote()
-        )
-    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in info_actors])
-    for actor in info_actors:
-        ray.kill(actor)
-    return gpu_ids
+    return sorted(bundle_infos, key=lambda x: (x[1], x[2]))
 
 
 class SkyRLPlacementGroup:
     """Wrapper around Ray PlacementGroup that computes and stores reordered bundle indices.
 
     Ray placement groups don't guarantee bundle ordering (bundles on the same node
-    may not have consecutive indices). This wrapper computes a GPU-aware ordering
-    on first access so that consumers can index bundles in (node_id, gpu_id) order.
+    may not have consecutive indices). This wrapper probes the PG once on first access
+    and caches the full (bundle_idx, node_id, gpu_id) mapping sorted by (node_id, gpu_id).
+
+    Attributes (all lazy, computed on first access):
+        reordered_bundle_indices: Bundle indices in (node_id, gpu_id) order.
+        bundle_node_ids: Node ID for each logical position.
+        bundle_gpu_ids: Physical GPU ID for each logical position.
+        num_nodes: Number of distinct nodes in the placement group.
+        num_gpus_per_node: Number of GPUs per node (assumes uniform distribution).
 
     Use .pg to access the underlying Ray PlacementGroup for Ray APIs.
     """
 
     def __init__(self, pg: PlacementGroup):
         self.pg = pg
+        self._bundle_placement = None
+
+    def _get_bundle_placement(self):
+        if self._bundle_placement is None:
+            self._bundle_placement = _probe_bundle_placement(self.pg)
+        return self._bundle_placement
 
     @functools.cached_property
     def reordered_bundle_indices(self):
-        return get_reordered_bundle_indices(self.pg)
+        return [info[0] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def bundle_node_ids(self):
+        """Node ID for each logical position (sorted by node_id, gpu_id)."""
+        return [info[1] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def bundle_gpu_ids(self):
+        """Physical GPU ID for each logical position (sorted by node_id, gpu_id)."""
+        return [info[2] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def num_nodes(self):
+        return len(set(self.bundle_node_ids))
+
+    @functools.cached_property
+    def num_gpus_per_node(self):
+        return len(self._get_bundle_placement()) // self.num_nodes
 
 
 def torch_dtype_to_str(dtype: torch.dtype) -> str:

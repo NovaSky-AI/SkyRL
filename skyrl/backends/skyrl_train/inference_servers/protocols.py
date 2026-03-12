@@ -55,23 +55,11 @@ class ServerActorProtocol(Protocol):
         num_gpus_per_server: int,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """
-        Compute per-server keyword arguments that depend on the placement group.
+        """Compute per-server kwargs that depend on the placement group.
 
-        Called by ServerGroup once per server *before* actor creation.
-        Implementations can probe the PG to resolve physical GPU IDs or
-        other placement-dependent configuration.
-
-        The default implementation passes kwargs through unchanged.
-
-        Args:
-            pg: The placement group the server will be scheduled in.
-            start_bundle_idx: First bundle index assigned to this server.
-            num_gpus_per_server: Number of GPU bundles for this server.
-            **kwargs: The server_actor_kwargs supplied to ServerGroup.
-
-        Returns:
-            A (possibly augmented) dict of kwargs to forward to ``__init__``.
+        Called by ServerGroup once per server before actor creation.
+        GPU IDs are pre-computed by ServerGroup from SkyRLPlacementGroup
+        and passed via _gpu_ids in kwargs.
         """
         ...
 
