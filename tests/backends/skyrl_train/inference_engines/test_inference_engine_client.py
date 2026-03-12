@@ -933,4 +933,7 @@ async def test_generate_retry_no_gen_finish():
     # client should return the second response directly (no aggregation)
     # Besides, since we completed in one turn, we return the text response of the first turn returned by
     # the underlying engine instead re-tokenizing the accumulated tokens
-    assert out == engines[0].responses[1]
+    assert out["responses"] == engines[0].responses[1]["responses"]
+    assert out["response_ids"] == engines[0].responses[1]["response_ids"]
+    assert out["stop_reasons"] == engines[0].responses[1]["stop_reasons"]
+    assert out["response_logprobs"] == engines[0].responses[1]["response_logprobs"]

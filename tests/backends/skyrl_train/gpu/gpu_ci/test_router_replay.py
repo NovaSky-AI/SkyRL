@@ -224,8 +224,8 @@ def test_logprobs(ray_init_fixture):
         cfg.trainer.policy.megatron_config.context_parallel_size = 1
         cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
-        cfg.trainer.micro_forward_batch_size_per_gpu = 1
-        cfg.trainer.micro_train_batch_size_per_gpu = 1
+        cfg.trainer.micro_forward_batch_size_per_gpu = 2
+        cfg.trainer.micro_train_batch_size_per_gpu = 2
 
         def run_megatron_forward(enable_replay: bool) -> torch.Tensor:
             cfg.trainer.policy.megatron_config.moe_enable_routing_replay = enable_replay
@@ -386,8 +386,8 @@ def test_forward_backward(ray_init_fixture):
         cfg.trainer.policy.megatron_config.context_parallel_size = 1
         cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
-        cfg.trainer.micro_forward_batch_size_per_gpu = 1
-        cfg.trainer.micro_train_batch_size_per_gpu = 1
+        cfg.trainer.micro_forward_batch_size_per_gpu = 2
+        cfg.trainer.micro_train_batch_size_per_gpu = 2
 
         def run_megatron_forward_backward(enable_replay: bool) -> dict:
             cfg.trainer.policy.megatron_config.moe_enable_routing_replay = enable_replay

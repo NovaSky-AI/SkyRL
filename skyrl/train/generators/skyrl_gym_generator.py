@@ -84,10 +84,10 @@ class TurnOutput:
 
     def get_turn_rollout_expert_indices(self) -> Optional[List[List[List[int]]]]:
         """
-        Get rollout inference indices for this turn's tokens (output + observation).
+        Get rollout inference indices for this turn's tokens (output tokens + observation tokens).
 
-        Returns indices for generated output tokens, with padding entries (all -1)
-        for any manually-added EOS token and observation tokens.
+        Returns indices for generated output tokens, with padding entries (all 0)
+        for any manually-added EOS token and observation tokens
         Returns None if rollout_expert_indices is None.
         """
         if self.rollout_expert_indices is None:
@@ -96,7 +96,7 @@ class TurnOutput:
             return self.rollout_expert_indices
         layer_num = len(self.rollout_expert_indices[0])
         topk = len(self.rollout_expert_indices[0][0]) if layer_num > 0 else 0
-        pad_entry = [[-1] * topk for _ in range(layer_num)]
+        pad_entry = [[0] * topk for _ in range(layer_num)]
         indices = list(self.rollout_expert_indices)
         if self.added_eos:
             indices.append(pad_entry)
@@ -203,6 +203,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 raise ValueError(
                     f"`step_wise_trajectories` doesn't support custom chat template, got {generator_cfg.chat_template}"
                 )
+
+            if self.generator_cfg.inference_engine.enable_return_routed_experts:
+                raise ValueError("`step_wise_trajectories` doesn't support `enable_return_routed_experts=True`")
 
             if not self.use_conversation_multi_turn:
                 raise ValueError("`step_wise_trajectories` doesn't support `use_conversation_multi_turn=False`")
@@ -342,6 +345,8 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             if rollout_expert_indices is not None:
                 rollout_expert_indices = rollout_expert_indices[0]
+                if self.custom_chat_template is not None:
+                    raise ValueError("Rollout expert indices bookkeeping is not supported with custom chat template")
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
             stop_strs = current_sampling_params.get("stop", None)
@@ -809,14 +814,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_logprobs = None
 
-        if self.generator_cfg.step_wise_trajectories:
-            all_indices = sum(
-                [[step_output.rollout_expert_indices for step_output in output.step_outputs] for output in all_outputs],
-                [],
-            )
+        if self.generator_cfg.inference_engine.enable_return_routed_experts:
+            rollout_expert_indices = [output.rollout_expert_indices for output in all_outputs]
         else:
-            all_indices = [output.rollout_expert_indices for output in all_outputs]
-        rollout_expert_indices = all_indices if any(idx is not None for idx in all_indices) else None
+            rollout_expert_indices = None
 
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
@@ -957,7 +958,9 @@ class SkyRLGymGenerator(GeneratorInterface):
         loss_mask_for_turn = turn_output.get_turn_loss_mask()
         rollout_logprobs_for_turn = turn_output.get_turn_rollout_logprobs()
 
-        rollout_expert_indices_for_turn = turn_output.get_turn_rollout_expert_indices()
+        # use the raw rollout expert indices without any appending of observation tokens
+        # this will be overwritten each turn, so we don't need to append observation tokens to it
+        rollout_expert_indices_for_turn = turn_output.rollout_expert_indices
 
         if self.generator_cfg.step_wise_trajectories:
             # cumulative input_ids is not tracked for step wise training
@@ -977,6 +980,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             if agent_loop_state.rollout_expert_indices is not None and rollout_expert_indices_for_turn is not None:
                 # overwrite the existing rollout inference indices, since the inference engine should
                 # return the expert indices for the entire sequence including each turn's input
+                # and the final response should not have an observation appended to it
                 agent_loop_state.rollout_expert_indices = rollout_expert_indices_for_turn
 
         return agent_loop_state
@@ -1042,14 +1046,6 @@ class SkyRLGymGenerator(GeneratorInterface):
                 obs_ids_to_add
             )
 
-        # rollout_expert_indices_for_turn = None
-        # if turn_output.rollout_expert_indices is not None and turn_output.rollout_expert_indices:
-        #     layer_num = len(turn_output.rollout_expert_indices[0])
-        #     topk = len(turn_output.rollout_expert_indices[0][0]) if layer_num > 0 else 0
-        #     pad_entry = [[-1] * topk for _ in range(layer_num)]
-        #     rollout_expert_indices_for_turn = list(turn_output.rollout_expert_indices[: len(new_resp_tokens)])
-        #     rollout_expert_indices_for_turn.extend(pad_entry for _ in range(len(obs_ids_to_add)))
-
         # Directly append turn output
         agent_loop_state.response_end_idx = len(agent_loop_state.input_ids) + len(new_resp_tokens) - 1
         agent_loop_state.input_ids += turn_ids
@@ -1060,6 +1056,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             self.generator_cfg.inference_engine.enable_return_routed_experts
             and turn_output.rollout_expert_indices is not None
         ):
+            # overwrite the existing rollout inference indices, since the inference engine should
+            # return the expert indices for the entire sequence including each turn's input and observation tokens
+            # and the final response should not have an observation appended to it
             agent_loop_state.rollout_expert_indices = turn_output.rollout_expert_indices
 
         return agent_loop_state

@@ -31,7 +31,7 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
-    rollout_expert_indices: Optional[List[List[List[List[int]]]]]  # [seq_len, layer_num, topk]
+    rollout_expert_indices: Optional[List[List[List[int]]]]  # [seq_len, layer_num, topk]
 
 
 class InferenceEngineInterface(ABC):

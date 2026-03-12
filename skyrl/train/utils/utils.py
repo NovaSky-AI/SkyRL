@@ -445,6 +445,11 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
+    if ie_cfg.enable_return_routed_experts:
+        assert ie_cfg.distributed_executor_backend == "mp", "rollout router replay (r3) can hang with the ray backend - use the vLLM mp backend instead"
+        assert cfg.trainer.strategy == "megatron", "rollout router replay (r3) is only supported with Megatron training backend"
+        assert cfg.trainer.policy.megatron_config.moe_enable_routing_replay, "moe_enable_routing_replay must be True to consume rollout expert indices"
+
     pp_size = ie_cfg.pipeline_parallel_size
     tp_pp_size = tp_size * pp_size
     num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node

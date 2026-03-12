@@ -579,10 +579,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self.enable_router_replay:
             from skyrl.backends.skyrl_train.utils.replay_utils import (
-                _patch_topk_router_layer_number,
+                patch_topk_router_layer_number,
             )
 
-            _patch_topk_router_layer_number()
+            patch_topk_router_layer_number()
 
         # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
