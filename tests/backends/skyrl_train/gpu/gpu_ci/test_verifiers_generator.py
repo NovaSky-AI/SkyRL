@@ -2,14 +2,20 @@
 uv run --isolated --extra dev --extra fsdp --with verifiers pytest tests/backends/skyrl_train/gpu/gpu_ci/test_verifiers_generator.py
 """
 
+import socket
+
 import pytest
 import ray
 from transformers import AutoTokenizer
-import socket
 
-from tests.backends.skyrl_train.gpu.utils import get_test_actor_config, InferenceEngineState
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
 from skyrl.train.config import GeneratorConfig, SamplingParams
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    get_test_actor_config,
+)
 
 # Mark all tests in this file as "integrations"
 # NOTE (sumanthrh): Skipping these tests until we make the verifiers integration compatible with verifiers repo `main` again.

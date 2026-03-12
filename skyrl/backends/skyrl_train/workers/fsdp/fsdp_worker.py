@@ -1,12 +1,19 @@
-from skyrl.train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
+import io
+from typing import TYPE_CHECKING
+
 import ray
 import torch
 import torch.distributed
-from transformers import AutoConfig
 from torch.distributed.fsdp.api import ShardedStateDictConfig, StateDictType
-from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
-import io
-from typing import TYPE_CHECKING
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    FullyShardedDataParallel as FSDP,
+)
+from transformers import AutoConfig
+
+from skyrl.train.utils.trainer_utils import (
+    get_rope_scaling_config,
+    get_rope_theta_config,
+)
 
 try:
     # for torch 2.5+
@@ -14,18 +21,33 @@ try:
 except ImportError:
     from torch.distributed._tensor import DTensor
 
-from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper, get_llm_for_sequence_regression
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl.train.utils.utils import str_to_torch_dtype
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
-from skyrl.backends.skyrl_train.distributed.fsdp_utils import fsdp_version, get_init_weight_context_manager
+from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+    fsdp_version,
+    get_init_weight_context_manager,
+)
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
+from skyrl.backends.skyrl_train.weight_sync import (
+    LoraLoadRequest,
+    WeightChunk,
+    WeightExtractor,
+)
+from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import (
+    yield_module_grouped_chunks,
+)
+from skyrl.backends.skyrl_train.workers.model_wrapper import (
+    HFModelWrapper,
+    get_llm_for_sequence_regression,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
-    PolicyWorkerBase,
     CriticWorkerBase,
+    PolicyWorkerBase,
     RefWorkerBase,
 )
-from skyrl.backends.skyrl_train.weight_sync import WeightExtractor, WeightChunk, LoraLoadRequest
-from skyrl.backends.skyrl_train.weight_sync.weight_extractor_utils import yield_module_grouped_chunks
+from skyrl.train.utils.utils import str_to_torch_dtype
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
@@ -84,6 +106,31 @@ class FSDPWeightExtractor(WeightExtractor):
                 batch_size_threshold_gb=self.batch_size_threshold_gb,
             ):
                 yield chunk
+
+    def get_weight_metadata(self, dtype: torch.dtype) -> dict:
+        """Return weight metadata without materializing full tensors.
+
+        Uses state_dict() to get clean parameter names (FSDP strips the
+        _fsdp_wrapped_module prefix), matching extract_weights behavior.
+        The sharded tensors returned by state_dict() are not gathered;
+        we only read their shape.
+        """
+        if fsdp_version(self.model) == 1:
+            FSDP.set_state_dict_type(
+                self.model,
+                state_dict_type=StateDictType.SHARDED_STATE_DICT,
+                state_dict_config=ShardedStateDictConfig(),
+            )
+
+        names = []
+        dtype_names = []
+        shapes = []
+        dtype_name = str(dtype).split(".")[-1]
+        for name, param in self.model.state_dict().items():
+            names.append(name)
+            dtype_names.append(dtype_name)
+            shapes.append(list(param.shape))
+        return {"names": names, "dtype_names": dtype_names, "shapes": shapes}
 
     def _gather_tensor(self, param: torch.Tensor) -> torch.Tensor:
         """Gather sharded tensor into full tensor."""
@@ -177,11 +224,15 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
         """Collect LoRA parameters, save and call inference engine to load."""
-        import os
         import json
+        import os
         from dataclasses import asdict
+
         from safetensors.torch import save_file
-        from skyrl.backends.skyrl_train.distributed.fsdp_utils import collect_lora_params
+
+        from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
+            collect_lora_params,
+        )
 
         lora_params = collect_lora_params(module=self.model.model)
 
@@ -226,7 +277,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             return
 
         # Extract and send weights using the sender created at init time
-        await self._weight_transfer_sender.send_chunks(self.weight_extractor.extract_weights(generator_dtype))
+        weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
+        weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+        await self._weight_transfer_sender.send_chunks(
+            weight_iterator,
+            weight_metadata=weight_metadata,
+        )
 
         if cache_reset_task is not None:
             await cache_reset_task

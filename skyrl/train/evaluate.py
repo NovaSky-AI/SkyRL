@@ -1,32 +1,33 @@
-import torch
-from tqdm import tqdm
-from typing import Dict, List, Any
-from pathlib import Path
-from loguru import logger
 from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, List
 
-from skyrl.train.utils import Timer
+import torch
+from loguru import logger
+from torchdata.stateful_dataloader import StatefulDataLoader
+from tqdm import tqdm
+from transformers import AutoTokenizer
 
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.generators.base import (
+    GeneratorInterface,
+    GeneratorOutput,
+)
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
     prepare_generator_input,
 )
-from skyrl.train.generators.base import (
-    GeneratorOutput,
-    GeneratorInterface,
-)
+from skyrl.train.utils import Timer
+from skyrl.train.utils.logging_utils import log_example
 from skyrl.train.utils.trainer_utils import (
     calculate_per_dataset_metrics,
     dump_per_dataset_eval_results,
     validate_generator_output,
 )
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.train.utils.logging_utils import log_example
-
-from skyrl.train.config import SkyRLTrainConfig
-from torchdata.stateful_dataloader import StatefulDataLoader
-from transformers import AutoTokenizer
 
 
 @torch.no_grad()

@@ -9,7 +9,10 @@ from unittest.mock import patch
 
 import pytest
 
-from skyrl.backends.skyrl_train.inference_engines.utils import route_prompts_to_engines, hash_with_sha256
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    hash_with_sha256,
+    route_prompts_to_engines,
+)
 
 
 def test_single_prompt_no_trajectory_random_engine():

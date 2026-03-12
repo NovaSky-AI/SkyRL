@@ -1,9 +1,8 @@
 """Base data structures for weight synchronization."""
 
-from typing import Any, Dict
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from functools import cached_property
-from typing import List
+from typing import Any, Dict, List
 
 import torch
 

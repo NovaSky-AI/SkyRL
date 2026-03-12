@@ -1,20 +1,22 @@
 import copy
 import os
-import torch
-from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
-from skyrl.train.generators.base import (
-    GeneratorOutput,
-    GeneratorInput,
-    TrajectoryID,
-    BatchMetadata,
-    TrainingPhase,
-    MetricsOutput,
-)
+import torch
+from loguru import logger
+
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.config import ChatTemplateConfig
-from loguru import logger
+from skyrl.train.generators.base import (
+    BatchMetadata,
+    GeneratorInput,
+    GeneratorOutput,
+    MetricsOutput,
+    TrainingPhase,
+    TrajectoryID,
+)
 from skyrl_gym.metrics import aggregate_for_environment
 
 

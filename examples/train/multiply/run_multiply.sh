@@ -1,9 +1,9 @@
 set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on a simple multiplication environment.
-# uv run examples/multiply/multiply_dataset.py --output_dir $HOME/data/multiply
+# uv run examples/train/multiply/multiply_dataset.py --output_dir $HOME/data/multiply
 # export WANDB_API_KEY=<your_key_here>
-# bash examples/multiply/run_multiply.sh
+# bash examples/train/multiply/run_multiply.sh
 
 DATA_DIR="$HOME/data/multiply"
 NUM_GPUS=4

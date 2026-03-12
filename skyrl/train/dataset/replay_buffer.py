@@ -9,11 +9,10 @@ import random
 from abc import ABC
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
-from jaxtyping import Float, Integer
 
 import torch
 import torch.nn.functional as F
-
+from jaxtyping import Float, Integer
 
 BasicType = Union[int, float, str, bool]
 
