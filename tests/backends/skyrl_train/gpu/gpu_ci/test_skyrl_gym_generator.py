@@ -468,23 +468,27 @@ async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
     assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
 
 
+@pytest.mark.asyncio
 async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
     """
     Test the generator with the multi-turn GSM8K environment for router replay
     """
+    num_prompts = 5
+    n_samples_per_prompt = 2
+    max_input_length = 4096
     generator_output: GeneratorOutput = await run_generator_end_to_end(
         use_async_engine=True,
         batched=False,
-        n_samples_per_prompt=5,
+        n_samples_per_prompt=n_samples_per_prompt,
         num_inference_engines=2,
         tensor_parallel_size=2,
         model="arcee-ai/Trinity-Nano-Preview",
         max_prompt_length=2048,
-        max_input_length=4096,
+        max_input_length=max_input_length,
         max_generate_length=1000,
         data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
         env_class="gsm8k_multi_turn",
-        num_prompts=2,
+        num_prompts=num_prompts,
         max_turns=2,
         use_conversation_multi_turn=True,
         max_env_workers=0,
@@ -496,3 +500,13 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
     assert isinstance(generator_output["is_last_step"], list) and isinstance(generator_output["is_last_step"][0], bool)
     # Expect atleast one response with more than one turn
     assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
+    assert generator_output["rollout_expert_indices"] is not None
+
+    # check that the rollout expert indices are non-zero, and that the shape is (bs, seq_len, layer_num, topk)
+    rollout_expert_indices = generator_output["rollout_expert_indices"]
+    total_batch_size = num_prompts * n_samples_per_prompt
+
+    assert len(rollout_expert_indices) == total_batch_size
+    assert len(rollout_expert_indices[0]) < max_input_length
+    assert len(rollout_expert_indices[0][0]) == 56  # 56 layers in Trinity-Nano-Preview
+    assert len(rollout_expert_indices[0][0][0]) == 8  # 8 topk for each layer

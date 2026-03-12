@@ -2,8 +2,9 @@
 Utility functions for MoE Router Replay.
 """
 
-import torch
 from typing import List
+
+import torch
 
 
 def _patch_topk_router_layer_number():
@@ -49,7 +50,9 @@ def _patch_alltoall_dispatcher_for_replay():
     Reference: https://github.com/verl-project/verl/pull/4986
     """
     try:
-        from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
+        from megatron.core.transformer.moe.token_dispatcher import (
+            MoEAlltoAllTokenDispatcher,
+        )
     except ImportError:
         return
 
@@ -137,7 +140,10 @@ def setup_per_microbatch_replay_forward(
     TopKRouter.set_layer_number) to index into the correct slice of the data.
     """
     import megatron.core.parallel_state as mpu
-    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
+    from megatron.core.transformer.moe.router_replay import (
+        RouterReplay,
+        RouterReplayAction,
+    )
 
     _patch_alltoall_dispatcher_for_replay()
 
@@ -177,6 +183,19 @@ def setup_per_microbatch_replay_forward(
                 )
             router_instance.set_target_indices(per_layer_data[layer_idx])
     RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+
+
+def setup_per_microbatch_replay_backward() -> None:
+    """Switch RouterReplay to backward mode so that activation-checkpoint
+    recomputation during the backward pass consumes indices from
+    ``replay_backward_list`` in FIFO order (populated during the forward pass).
+    """
+    from megatron.core.transformer.moe.router_replay import (
+        RouterReplay,
+        RouterReplayAction,
+    )
+
+    RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_BACKWARD)
 
 
 def clear_router_replay():

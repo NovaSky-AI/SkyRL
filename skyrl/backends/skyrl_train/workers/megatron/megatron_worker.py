@@ -351,6 +351,7 @@ class MegatronWorker:
             provider.moe_router_score_function = megatron_config.moe_router_score_function
         if megatron_config.moe_router_enable_expert_bias is not None:
             provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
+        provider.moe_enable_routing_replay = megatron_config.moe_enable_routing_replay
 
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
@@ -362,7 +363,7 @@ class MegatronWorker:
 
         self.strategy.hf_config = hf_config
         self.tokenizer = tokenizer
-        self.enable_router_replay = transformer_config_kwargs.get("moe_enable_routing_replay", False)
+        self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
         if lora_type == "lora":
@@ -577,7 +578,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
 
         if self.enable_router_replay:
-            from skyrl.backends.skyrl_train.utils.replay_utils import _patch_topk_router_layer_number
+            from skyrl.backends.skyrl_train.utils.replay_utils import (
+                _patch_topk_router_layer_number,
+            )
 
             _patch_topk_router_layer_number()
 

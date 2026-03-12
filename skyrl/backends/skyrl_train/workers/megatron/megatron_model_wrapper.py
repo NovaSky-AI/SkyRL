@@ -25,7 +25,10 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
 )
-from skyrl.backends.skyrl_train.utils.replay_utils import setup_per_microbatch_replay_forward
+from skyrl.backends.skyrl_train.utils.replay_utils import (
+    setup_per_microbatch_replay_backward,
+    setup_per_microbatch_replay_forward,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.config import TrainerConfig
 
@@ -413,6 +416,9 @@ class MegatronModelWrapper:
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
+
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_backward()
 
             return outputs, partial(loss_func, data=batch)
 

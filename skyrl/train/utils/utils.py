@@ -201,6 +201,11 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         if version > "2.8.1":
             logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
 
+    if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
+        assert (
+            cfg.generator.inference_engine.enable_return_routed_experts
+        ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
+
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
         # context, expert, and expert tensor parallel are not yet supported for megatron

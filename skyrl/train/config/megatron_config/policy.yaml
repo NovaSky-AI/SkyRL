@@ -14,6 +14,9 @@ moe_grouped_gemm: true
 moe_router_score_function: null
 moe_router_enable_expert_bias: null
 
+# whether to enable router replay (r3)
+moe_enable_routing_replay: False
+
 # pass-through config to Megatron's `DistributedDataParallelConfig` object
 # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/distributed/distributed_data_parallel_config.py#L8
 ddp_config:
@@ -57,7 +60,6 @@ transformer_config_kwargs:
   recompute_modules: ["core_attn"]
   recompute_method: uniform
   recompute_num_layers: 1
-  moe_enable_routing_replay: ${generator.enable_return_routed_experts}
 
 # flag to manually empty torch's cuda cache between the forward/backward pass and the optimizer step
 # this will free reserved but unallocated memory, and can help avoid OoMs in the optimizer

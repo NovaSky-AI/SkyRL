@@ -686,7 +686,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                 sample_logprobs = logprobs[i][: len(response)]
                 truncated_logprobs.append(sample_logprobs)
             if raw_rollout_expert_indices is not None:
-                truncated_indices.append(raw_rollout_expert_indices[i])
+                sample_indices = raw_rollout_expert_indices[i]
+                prompt_len = len(prompt_token_ids[i])
+                truncated_indices.append(sample_indices[: prompt_len + len(response)])
 
             # Get environment-specific metrics
             env_metrics.append(env.get_metrics())
@@ -1054,7 +1056,10 @@ class SkyRLGymGenerator(GeneratorInterface):
         agent_loop_state.loss_mask += loss_mask_for_turn
         if agent_loop_state.rollout_logprobs is not None and rollout_logprobs_for_turn is not None:
             agent_loop_state.rollout_logprobs += rollout_logprobs_for_turn
-        if self.generator_cfg.enable_return_routed_experts and turn_output.rollout_expert_indices is not None:
+        if (
+            self.generator_cfg.inference_engine.enable_return_routed_experts
+            and turn_output.rollout_expert_indices is not None
+        ):
             agent_loop_state.rollout_expert_indices = turn_output.rollout_expert_indices
 
         return agent_loop_state
