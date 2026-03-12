@@ -25,12 +25,9 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     compute_approx_kl,
 )
-<<<<<<< HEAD
 from skyrl.backends.skyrl_train.utils.replay_utils import setup_per_microbatch_replay_forward
-=======
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.config import TrainerConfig
->>>>>>> 4e19c1f09268636e8aa56ac6bbc27b70467f4bde
 
 
 class MegatronModelWrapper:

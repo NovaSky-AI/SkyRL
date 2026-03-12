@@ -236,13 +236,11 @@ class SkyRLTrainBackend(AbstractBackend):
         logger.info(f"Created model {model_id} using RayPPOTrainer")
 
     def _create_colocate_pg(self):
-        """Create placement group for colocated training + inference (following main_base.py pattern)."""
-        total_gpu_slots = (
-            self._cfg.generator.inference_engine.num_engines
-            * self._cfg.generator.inference_engine.tensor_parallel_size
-            * self._cfg.generator.inference_engine.pipeline_parallel_size
-            * self._cfg.generator.inference_engine.data_parallel_size
-        )
+        """Create a placement group for colocated training + inference."""
+        ie_cfg = self._cfg.generator.inference_engine
+        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+        total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+
         logger.info(f"Creating placement group with {total_gpu_slots} GPU slots for colocated training+inference")
         pg = placement_group([{"GPU": 1, "CPU": 1}] * total_gpu_slots, strategy="PACK")
 
@@ -739,6 +737,7 @@ def create_ray_wrapped_inference_engines_from_config(
         "backend": cfg.generator.inference_engine.backend,
         "engine_init_kwargs": cfg.generator.inference_engine.engine_init_kwargs,
         "enable_ray_prometheus_stats": cfg.generator.inference_engine.enable_ray_prometheus_stats,
+        "distributed_executor_backend": cfg.generator.inference_engine.distributed_executor_backend,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled

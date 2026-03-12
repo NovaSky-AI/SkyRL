@@ -425,6 +425,7 @@ class InferenceEngineState:
         max_num_seqs: Optional[int] = None,
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
         use_new_inference_servers: Optional[bool] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -454,24 +455,26 @@ class InferenceEngineState:
             ie_cfg.max_num_seqs = max_num_seqs
         if engine_init_kwargs is not None:
             ie_cfg.engine_init_kwargs = engine_init_kwargs
+        if distributed_executor_backend is not None:
+            ie_cfg.distributed_executor_backend = distributed_executor_backend
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
         if not ray.is_initialized():
             initialize_ray(cfg)
         if cfg.trainer.placement.colocate_all:
-            pg = placement_group(
-                [{"GPU": 1, "CPU": 1}]
-                * ie_cfg.tensor_parallel_size
-                * ie_cfg.pipeline_parallel_size
-                * ie_cfg.data_parallel_size
-                * ie_cfg.num_engines,
+            per_engine_gpu_count = (
+                ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+            )
+            total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+            shared_pg = placement_group(
+                [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
                 strategy="PACK",
             )
-            get_ray_pg_ready_with_timeout(pg, timeout=30)
+            get_ray_pg_ready_with_timeout(shared_pg, timeout=60)
             sleep = True
         else:
-            pg, sleep = None, False
+            shared_pg, sleep = None, False
 
         # Extract served_model_name from config if set
         served_model_name = ie_cfg.served_model_name
@@ -490,8 +493,9 @@ class InferenceEngineState:
             server_group = ServerGroup(
                 cli_args=build_vllm_cli_args(cfg),
                 num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,
-                placement_group=pg if cfg.trainer.placement.colocate_all else None,
+                placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
+                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
@@ -515,9 +519,10 @@ class InferenceEngineState:
                 pretrain=cfg.trainer.policy.model.path,
                 seed=42,
                 vllm_v1_disable_multiproc=True,
+                data_parallel_size=ie_cfg.data_parallel_size,
                 enable_prefix_caching=ie_cfg.enable_prefix_caching,
                 enforce_eager=ie_cfg.enforce_eager,
-                shared_pg=pg,
+                shared_pg=shared_pg,
                 gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
                 inference_engine_enable_sleep=sleep,
                 async_engine=ie_cfg.async_engine,
@@ -530,13 +535,14 @@ class InferenceEngineState:
                 engine_init_kwargs=ie_cfg.engine_init_kwargs,
                 enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
                 served_model_name=served_model_name,
+                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
             client = InferenceEngineClient(
                 eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.model.lora, ie_cfg
             )
             if sleep:
                 asyncio.run(client.wake_up())
-        return cls(client=client, pg=pg, router=router, server_group=server_group)
+        return cls(client=client, pg=shared_pg, router=router, server_group=server_group)
 
 
 def init_remote_inference_servers(
