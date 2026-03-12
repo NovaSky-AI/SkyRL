@@ -17,6 +17,7 @@ from skyrl.backends.skyrl_train.inference_engines.utils import (
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
+from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     get_test_prompts,
@@ -78,6 +79,7 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         tp_size=cfg.generator.inference_engine.tensor_parallel_size,
         colocate_all=cfg.trainer.placement.colocate_all,
         sleep_level=2,  # Full sleep since we explicitly sync weights
+        gpu_memory_utilization=0.5 if colocate_all else None,
     ) as engines:
         client, pg = engines.client, engines.pg
         # Initialize policy worker
@@ -121,7 +123,10 @@ def test_save_weights_for_sampler_then_inference(ray_init_fixture, colocate_all,
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=5), sampling_params))
+        tokenizer = get_tokenizer(MODEL)
+        outputs = asyncio.run(
+            run_inference(client, get_test_prompts(MODEL, num_samples=5), sampling_params, tokenizer=tokenizer)
+        )
 
         # Verify we got responses
         assert "responses" in outputs, "Inference should return responses"
@@ -186,5 +191,8 @@ def test_save_weights_for_sampler_multiple_training_steps(ray_init_fixture):
         sampling_params = get_sampling_params_for_backend(
             cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params))
+        tokenizer = get_tokenizer(MODEL)
+        outputs = asyncio.run(
+            run_inference(client, get_test_prompts(MODEL, num_samples=2), sampling_params, tokenizer=tokenizer)
+        )
         assert len(outputs["responses"]) == 2, "Should get 2 responses"

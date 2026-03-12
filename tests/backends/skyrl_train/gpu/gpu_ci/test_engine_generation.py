@@ -295,8 +295,7 @@ def test_token_based_generation_consistency(ray_init_fixture, tp_size: int, pp_s
                 )
 
 
-# TODO: Remove this once sample API is also supported in the new inference pathway
-@pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="New inference pathway doesn't support sample API yet")
+@pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Old sample API not used with new inference path")
 @pytest.mark.parametrize(
     "tp_size,dp_size",
     [
@@ -348,3 +347,112 @@ def test_sample_api(ray_init_fixture, tp_size: int, dp_size: int):
         print(f"Generated {len(unique_responses)} unique responses from {num_samples} samples")
         for i, resp in enumerate(output["responses"]):
             print(f"Sample {i}: {resp[:100]}..." if len(resp) > 100 else f"Sample {i}: {resp}")
+
+
+@pytest.mark.parametrize(
+    "tp_size,dp_size",
+    [
+        pytest.param(2, 1),
+    ],
+    ids=["tp2"],
+)
+def test_sample_api_remote(ray_init_fixture, tp_size: int, dp_size: int):
+    """Test the sample() API via RemoteInferenceClient (new inference path).
+
+    Makes two calls to validate both output correctness and sampling behavior:
+      - Call A (temp=1.0): schema checks, token decode, diversity across samples
+      - Call B (temp=0.0): determinism (all samples should be identical)
+    """
+    cfg = get_test_actor_config()
+
+    prompts = get_test_prompts(MODEL, 1)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompt_token_ids = tokenizer.apply_chat_template(
+        prompts, add_generation_prompt=True, tokenize=True, return_dict=True
+    )["input_ids"][0]
+
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
+
+    num_samples = 3
+
+    with InferenceEngineState.create(cfg, sleep_level=1, use_new_inference_servers=True) as engines:
+        llm_client = engines.client
+
+        def build_payload(temperature):
+            return {
+                "json": {
+                    "prompt": {"chunks": [{"tokens": prompt_token_ids}]},
+                    "num_samples": 1,
+                    "sampling_params": {
+                        "temperature": temperature,
+                        "max_tokens": cfg.generator.sampling_params.max_generate_length,
+                        "top_k": cfg.generator.sampling_params.top_k,
+                        "top_p": cfg.generator.sampling_params.top_p,
+                    },
+                },
+                "headers": {},
+            }
+
+        async def run_samples(temperature, n):
+            results = []
+            for _ in range(n):
+                output = await llm_client.sample(build_payload(temperature))
+                assert output["type"] == "sample", f"Expected type 'sample', got {output['type']!r}"
+                assert len(output["sequences"]) == 1, f"Expected 1 sequence per call, got {len(output['sequences'])}"
+                results.append(output["sequences"][0])
+            return results
+
+        # --- Call A: temp=1.0, expect diverse outputs ---
+        sequences = asyncio.run(run_samples(1.0, num_samples))
+
+        decoded_texts = []
+        for i, seq in enumerate(sequences):
+            assert seq["stop_reason"] in ("stop", "length"), f"Unexpected stop_reason: {seq['stop_reason']}"
+            assert isinstance(seq["tokens"], list), f"tokens should be a list, got {type(seq['tokens'])}"
+            assert len(seq["tokens"]) > 0, f"Sequence {i} has no tokens"
+            assert all(isinstance(t, int) for t in seq["tokens"]), f"Sequence {i} contains non-int tokens"
+            if seq.get("logprobs") is not None:
+                assert isinstance(
+                    seq["logprobs"], list
+                ), f"Sequence {i} logprobs should be a list, got {type(seq['logprobs'])}"
+
+            text = tokenizer.decode(seq["tokens"], skip_special_tokens=True)
+            assert len(text.strip()) > 0, f"Sequence {i} decoded to empty text from {len(seq['tokens'])} tokens"
+            decoded_texts.append(text)
+
+        unique_texts = set(decoded_texts)
+        assert len(unique_texts) > 1, (
+            f"All {num_samples} samples at temp=1.0 are identical — sampling params may be ignored. "
+            f"Text: {decoded_texts[0][:120]!r}"
+        )
+
+        print(f"Call A (temp=1.0): {len(unique_texts)}/{num_samples} unique samples")
+        for i, text in enumerate(decoded_texts):
+            print(f"  Sample {i}: {text[:100]}..." if len(text) > 100 else f"  Sample {i}: {text}")
+
+        # --- Call B: temp=0.0, expect deterministic outputs ---
+        det_sequences = asyncio.run(run_samples(0.0, num_samples))
+
+        det_token_seqs = []
+        det_texts = []
+        for i, seq in enumerate(det_sequences):
+            assert seq["stop_reason"] in ("stop", "length"), f"Unexpected stop_reason: {seq['stop_reason']}"
+            assert isinstance(
+                seq["tokens"], list
+            ), f"Deterministic sequence {i} tokens should be a list, got {type(seq['tokens'])}"
+            assert len(seq["tokens"]) > 0, f"Deterministic sequence {i} has no tokens"
+            det_token_seqs.append(tuple(seq["tokens"]))
+
+            text = tokenizer.decode(seq["tokens"], skip_special_tokens=True)
+            assert len(text.strip()) > 0, f"Deterministic sequence {i} decoded to empty text"
+            det_texts.append(text)
+
+        unique_det = set(det_token_seqs)
+        assert len(unique_det) == 1, (
+            f"temp=0.0 produced {len(unique_det)} distinct token sequences — expected deterministic output. "
+            f"Lengths: {[len(s) for s in det_token_seqs]}"
+        )
+
+        print(f"Call B (temp=0.0): all {num_samples} samples identical (deterministic)")
+        print(f"  Text: {det_texts[0][:120]}")

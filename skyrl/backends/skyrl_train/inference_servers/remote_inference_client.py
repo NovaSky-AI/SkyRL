@@ -297,6 +297,124 @@ class RemoteInferenceClient:
             "response_logprobs": response_logprobs if len(response_logprobs) > 0 else None,
         }
 
+    async def sample(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Sample completions via /inference/v1/generate.
+
+        Single request with n in sampling_params. No retry-on-abort.
+
+        Args:
+            request_payload: {"json": {...}, "headers": {...}}
+                json body matches Tinker SamplingClient.sample() args:
+                prompt (ModelInput), num_samples, sampling_params (SamplingParams),
+                include_prompt_logprobs, topk_prompt_logprobs.
+                session_id is optional for routing.
+
+        Returns:
+            Dict matching Tinker SampleResponse schema.
+        """
+        body = request_payload.get("json", {})
+        session_id = body.pop("session_id", None)
+
+        # Tinker input fields
+        prompt = body.get("prompt", {})  # ModelInput dict: {"chunks": [{"tokens": [...]}]}
+        num_samples = body.get("num_samples", 1)
+        sampling_params = body.get("sampling_params", {})
+        prompt_logprobs = body.get("include_prompt_logprobs", False)
+        topk_prompt_logprobs = body.get("topk_prompt_logprobs", 0)
+
+        prompt_token_ids = [tok for chunk in prompt.get("chunks", []) for tok in chunk.get("tokens", [])]
+
+        # Tinker types.py SamplingParams -> vLLM /inference/v1/generate sampling_params
+        vllm_sampling_params = {
+            "n": num_samples,
+            "temperature": sampling_params.get("temperature"),
+            "max_tokens": sampling_params.get("max_tokens"),
+            "seed": sampling_params.get("seed"),
+            "top_k": sampling_params.get("top_k", -1),
+            "top_p": sampling_params.get("top_p", 1.0),
+            "prompt_logprobs": max(topk_prompt_logprobs, 1) if prompt_logprobs else None,
+            "logprobs": 0,  # response logprobs
+        }
+        if sampling_params.get("stop_strings"):
+            vllm_sampling_params["stop"] = sampling_params["stop_strings"]
+        if sampling_params.get("stop_tokens"):
+            vllm_sampling_params["stop_token_ids"] = sampling_params["stop_tokens"]
+
+        payload = {
+            "sampling_params": vllm_sampling_params,
+            "model": self.model_name,
+            "token_ids": prompt_token_ids,
+        }
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        session = await self._get_session()
+        url = f"{self.proxy_url}/inference/v1/generate"
+
+        async with session.post(url, json=payload, headers=headers) as resp:
+            result = await resp.json()
+            raise_for_status(resp, result)
+
+        # Transform response choices -> tinker type SampleResponse dict
+        sequences = []
+        for choice in result["choices"]:
+            raw_stop = choice.get("finish_reason", "length")
+            stop_reason = "stop" if raw_stop in ("stop", "stop_token") else "length"
+
+            token_ids = choice.get("token_ids", [])
+
+            logprobs = None
+            lp = choice.get("logprobs")
+            if lp is not None:
+                logprobs_content = lp.get("content", [])
+                if logprobs_content:
+                    logprobs = [info["logprob"] if info["logprob"] is not None else 0.0 for info in logprobs_content]
+            # Convert to tinker type SampledSequence dict
+            sequences.append(
+                {
+                    "stop_reason": stop_reason,
+                    "tokens": token_ids,
+                    "logprobs": logprobs,
+                }
+            )
+
+        # Transform prompt_logprobs from vLLM format to Tinker SampleResponse format
+        transformed_prompt_logprobs = None
+        transformed_topk_prompt_logprobs = None
+        # raw_prompt_logprobs: VLLM type list[dict[int, Logprob]] | None
+        raw_prompt_logprobs = result.get("prompt_logprobs") if prompt_logprobs else None
+
+        if raw_prompt_logprobs is not None:
+            # prompt_logprobs: single float per token (logprob of the actual prompt token)
+            transformed_prompt_logprobs = []
+            for i, pos in enumerate(raw_prompt_logprobs):
+                if pos is None:
+                    transformed_prompt_logprobs.append(None)
+                else:
+                    token_key = str(prompt_token_ids[i])
+                    entry = pos.get(token_key)
+                    transformed_prompt_logprobs.append(entry["logprob"] if entry is not None else None)
+
+            # topk_prompt_logprobs: list of (token_id, logprob) tuples per position
+            if topk_prompt_logprobs > 0:
+                transformed_topk_prompt_logprobs = []
+                for pos in raw_prompt_logprobs:
+                    if pos is None:
+                        transformed_topk_prompt_logprobs.append(None)
+                    else:
+                        transformed_topk_prompt_logprobs.append(
+                            [(int(tid), info["logprob"]) for tid, info in pos.items()]
+                        )
+
+        return {
+            "type": "sample",
+            "sequences": sequences,
+            "prompt_logprobs": transformed_prompt_logprobs,
+            "topk_prompt_logprobs": transformed_topk_prompt_logprobs,
+        }
+
     async def chat_completion(
         self,
         request_payload: Dict[str, Any],
@@ -323,6 +441,40 @@ class RemoteInferenceClient:
 
         session = await self._get_session()
         url = f"{self.proxy_url}/v1/chat/completions"
+
+        async with session.post(url, json=body, headers=headers) as resp:
+            response = await resp.json()
+            raise_for_status(resp, response)
+            return response
+
+    async def render_chat_completion(
+        self,
+        request_payload: Dict[str, Any],
+    ) -> List[Any]:
+        """
+        Render chat messages into a tokenized prompt via /v1/chat/completions/render.
+
+        Applies the model's chat template and tokenizes without generating text.
+
+        Args:
+            request_payload: Dict with {"json": <request-body>, "headers": <headers-dict>}.
+                The request body should contain messages and optional chat template params.
+                session_id can be included in json for consistent routing.
+
+        Returns:
+            List of [conversation, engine_prompts] where engine_prompts contains
+            dicts with "prompt" and "prompt_token_ids".
+        """
+        body = request_payload.get("json", {})
+
+        session_id = body.pop("session_id", None)
+
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
+
+        session = await self._get_session()
+        url = f"{self.proxy_url}/v1/chat/completions/render"
 
         async with session.post(url, json=body, headers=headers) as resp:
             response = await resp.json()
