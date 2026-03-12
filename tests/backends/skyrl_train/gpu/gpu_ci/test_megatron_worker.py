@@ -41,9 +41,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
 # this might be a model specific mbridge issue - see if this persists when we transition to Megatron-Bridge
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
-# MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
-MOE_MODEL_NAME = "/home/ray/moonlight16b"
-
+MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
@@ -245,10 +243,10 @@ async def test_megatron_forward(
     cfg.trainer.use_sample_packing = use_sample_packing
     batch = get_test_training_batch(max(4, gpus_per_node))
 
-    # if ep > 1:
-    # if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
-    #     cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
-    # cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
+    if ep > 1:
+    if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
 
     if lora:
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
@@ -263,9 +261,6 @@ async def test_megatron_forward(
 
     action_log_probs_refs = actor_group.async_run_ray_method("mesh", "forward", data=batch)
     all_rank_action_log_probs = ray.get(action_log_probs_refs)
-    print(
-        f"Megatron logprobs - mean: {all_rank_action_log_probs.mean().item():.6f}, std: {all_rank_action_log_probs.std().item():.6f}"
-    )
     action_log_probs_megatron = concatenate_outputs_after_mesh_dispatch(
         actor_group.actor_infos, all_rank_action_log_probs
     )["output"]
@@ -278,8 +273,8 @@ async def test_megatron_forward(
     @ray.remote(num_gpus=1)
     def run_hf_forward(batch, model_name):
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True, dtype=torch.bfloat16)
-        # if ep > 1:
-        #     config.num_hidden_layers = 2
+        if ep > 1:
+            config.num_hidden_layers = 2
         model = AutoModelForCausalLM.from_pretrained(model_name, config=config, dtype=torch.bfloat16)
         model.eval()
         model.to("cuda")
