@@ -332,7 +332,7 @@ class RemoteInferenceClient:
             "seed": sampling_params.get("seed"),
             "top_k": sampling_params.get("top_k", -1),
             "top_p": sampling_params.get("top_p", 1.0),
-            "prompt_logprobs": max(topk_prompt_logprobs, 1) if prompt_logprobs else 0,
+            "prompt_logprobs": max(topk_prompt_logprobs, 1) if prompt_logprobs else None,
             "logprobs": 0,  # response logprobs
         }
         if sampling_params.get("stop_strings"):
