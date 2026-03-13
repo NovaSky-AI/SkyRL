@@ -283,9 +283,6 @@ class RemoteInferenceEngine(InferenceEngineInterface):
     async def teardown(self):
         await self._weight_loader.destroy_group()
 
-    async def abort_generation(self) -> None:
-        raise NotImplementedError("Abort generation is not supported for remote inference engines.")
-
 
 def create_remote_inference_engines(
     urls: List[str],

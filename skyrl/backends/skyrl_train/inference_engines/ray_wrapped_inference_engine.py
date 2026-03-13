@@ -82,9 +82,6 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def resume_generation(self) -> None:
         return await self.inference_engine_actor.resume_generation.remote()
 
-    async def abort_generation(self) -> None:
-        return await self.inference_engine_actor.abort_generation.remote()
-
 
 def create_ray_wrapped_inference_engines(
     num_inference_engines: int,

@@ -365,12 +365,6 @@ class InferenceEngineClient(InferenceEngineInterface):
         """
         await self._run_on_all_engines("resume_generation")
 
-    async def abort_generation(self) -> None:
-        raise NotImplementedError(
-            "InferenceEngineClient uses keep-mode pause/resume instead of abort. "
-            "Use pause_generation() and resume_generation()."
-        )
-
     # ----------------------------
     # HTTP endpoint related methods
     # ----------------------------
