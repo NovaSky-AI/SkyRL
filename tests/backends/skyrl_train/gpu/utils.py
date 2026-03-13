@@ -374,7 +374,10 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     if isinstance(client, RemoteInferenceClient):
         # convert to prompt token ids for RemoteInferenceClient
-        assert tokenizer is not None
+        if tokenizer is None:
+            from skyrl.utils.tok import get_tokenizer
+
+            tokenizer = get_tokenizer(client.model_name)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,
