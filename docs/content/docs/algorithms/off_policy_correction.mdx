@@ -133,8 +133,8 @@ can impact convergence of RL runs, and impact whether corrections like routing r
 
 # Routing Replay
 
-SkyRL supports rollout routing replay (R3), first introduced by [Ma et. al](https://arxiv.org/pdf/2510.11370) to help eliminate a source of trainer/inference mismatch for MoE at the source. Rollout routing replay works by recording expert 
-routing decisions at inference time, and replaying the same expert routing decisions at training time. 
+SkyRL supports rollout routing replay (R3), first introduced by [Ma et al.](https://arxiv.org/pdf/2510.11370) to help eliminate trainer/inference mismatch for MoE at the source. Rollout routing replay works by recording expert 
+routing decisions for MoE layers at inference time, and replaying the same per-layer expert routing decisions at training time, which helps reduce mismatched logprobs.
 
 ```yaml
 generator:
@@ -149,8 +149,8 @@ trainer:
 ```
 
 To enable rollout router replay, set `generator.inference_engine.enable_return_routed_experts=True`, `trainer.policy.megatron_config.moe_enable_routing_replay=True`, and use the `mp` distributed_executor_backend for vLLM. Note that 
-R3 does induce additional training bias when mini-batching, since routing decisions are fixed for all mini-batches in a training batch. However, it has been shown to be important for stabilizing large scale MoE training, particularly
-in models adopting a Deepseek-v3 like architecture (notably the GLM family) due to the use of sigmoid-based affinity scoring instead of softmax for top-k routing.
+R3 does induce additional training bias when mini-batching, since routing decisions are fixed for all mini-batches in a training batch. However, it has been shown to be important for stabilizing large-scale MoE training, particularly
+in models adopting a DeepSeek-V3 like architecture (notably the GLM family) due to the use of sigmoid-based affinity scoring instead of softmax for top-k routing.
 
 # Algorithmic Off Policy Correction
 
