@@ -21,15 +21,16 @@
 # limitations under the License.
 
 import gc
+
 import torch
 import torch.nn as nn
 from loguru import logger
-from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.transformer.module import Float16Module
-from megatron.core.optimizer import ChainedOptimizer
 from megatron.core import parallel_state as mpu
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.module import Float16Module
+from megatron.core.utils import get_attr_wrapped_model
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 

@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, TypedDict, Any, Optional, Hashable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Hashable, List, Optional, TypedDict
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync import WeightUpdateRequest
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
 
 MessageType = Dict[str, str]
 ConversationType = List[MessageType]
@@ -142,6 +144,16 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def pause_generation(self) -> None:
+        """Pause generation, freezing in-flight requests so they can be resumed later."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def resume_generation(self) -> None:
+        """Resume generation after a pause, continuing any frozen in-flight requests."""
+        raise NotImplementedError
+
+    @abstractmethod
     def tp_size(self) -> int:
         """Return the tensor parallel size of this inference engine."""
         raise NotImplementedError
@@ -154,13 +166,4 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     def dp_size(self) -> int:
         """Return the data parallel size of this inference engine."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def abort_generation(self) -> None:
-        """
-        Abort all running and waiting requests, which make the ongoing requests return the
-        already-generated tokens with a stop_reason of "abort". If the request was waiting,
-        it returns a response with zero completion tokens.
-        """
         raise NotImplementedError

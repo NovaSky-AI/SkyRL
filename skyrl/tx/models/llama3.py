@@ -1,17 +1,17 @@
-from flax import nnx
 import jax
+from flax import nnx
 from jax import numpy as jnp
 from jax.sharding import get_abstract_mesh
 from transformers import LlamaConfig
 
+from skyrl.tx.layers.attention import dot_product_attention
+from skyrl.tx.layers.layernorm import RMSNorm
 from skyrl.tx.layers.lora import LoRAEmbed, LoRALinear
 from skyrl.tx.layers.rotary_embedding import apply_rope
-from skyrl.tx.layers.layernorm import RMSNorm
-from skyrl.tx.layers.attention import dot_product_attention
 from skyrl.tx.layers.stacked import StackedDecoderLayers
-from skyrl.tx.utils.logits_processor import LogitsProcessorMixin, LMHead
 from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM, ModelOutput
 from skyrl.tx.utils.generator import GeneratorMixin, KVCache
+from skyrl.tx.utils.logits_processor import LMHead, LogitsProcessorMixin
 
 
 class Llama3Attention(nnx.Module):

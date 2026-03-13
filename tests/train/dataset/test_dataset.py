@@ -1,6 +1,8 @@
-import pytest
 from unittest.mock import patch
+
+import pytest
 from datasets import Dataset
+
 from skyrl.train.dataset import PromptDataset
 
 

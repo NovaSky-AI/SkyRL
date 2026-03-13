@@ -51,6 +51,7 @@ uv run --isolated --extra fsdp --with "openenv-core@git+https://github.com/meta-
   generator.sampling_params.top_p=0.95 \
   generator.sampling_params.stop='["</action>"]' \
   generator.eval_sampling_params.stop='["</action>"]' \
+  generator.eval_sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
   generator.max_turns=$MAX_TURNS \

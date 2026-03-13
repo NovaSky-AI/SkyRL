@@ -1,40 +1,52 @@
 import asyncio
-import os
-import ray
-import torch
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Union
-import time
 import copy
-import requests
 import importlib
+import os
+import subprocess
+import time
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import ray
+import requests
+import torch
 from loguru import logger
 from ray.util.placement_group import placement_group
-from typing import List, Tuple
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
-from functools import lru_cache
-import subprocess
 
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.dataset.replay_buffer import Experience
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.train.dataset import PromptDataset
-from skyrl.backends.skyrl_train.training_batch import TensorBatch, TrainingInputBatch, TrainingOutputBatch
-from skyrl.train.utils import get_ray_pg_ready_with_timeout
-from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl.train.generators.base import GeneratorInput, ConversationType, TrajectoryID
-from skyrl.train.utils.utils import peer_access_supported, print_mem, initialize_ray
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    concatenate_outputs_after_mesh_dispatch,
+)
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
-from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl.env_vars import SKYRL_PYTHONPATH_EXPORT, _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
-from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
+    create_remote_inference_engines,
+)
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
+from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.backends.skyrl_train.training_batch import (
+    TensorBatch,
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_PYTHONPATH_EXPORT
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.dataset import PromptDataset
+from skyrl.train.dataset.replay_buffer import Experience
+from skyrl.train.generators.base import ConversationType, GeneratorInput, TrajectoryID
+from skyrl.train.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.utils import initialize_ray, peer_access_supported, print_mem
 from skyrl.utils.tok import get_tokenizer
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
@@ -413,6 +425,7 @@ class InferenceEngineState:
         max_num_seqs: Optional[int] = None,
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
         use_new_inference_servers: Optional[bool] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> "InferenceEngineState":
         """
         Instantiates inference engines in SkyRL with the provided configuration and overrides
@@ -442,24 +455,26 @@ class InferenceEngineState:
             ie_cfg.max_num_seqs = max_num_seqs
         if engine_init_kwargs is not None:
             ie_cfg.engine_init_kwargs = engine_init_kwargs
+        if distributed_executor_backend is not None:
+            ie_cfg.distributed_executor_backend = distributed_executor_backend
 
         assert ie_cfg.run_engines_locally, "This test does not yet support remote engines."
 
         if not ray.is_initialized():
             initialize_ray(cfg)
         if cfg.trainer.placement.colocate_all:
-            pg = placement_group(
-                [{"GPU": 1, "CPU": 1}]
-                * ie_cfg.tensor_parallel_size
-                * ie_cfg.pipeline_parallel_size
-                * ie_cfg.data_parallel_size
-                * ie_cfg.num_engines,
+            per_engine_gpu_count = (
+                ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+            )
+            total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+            shared_pg = placement_group(
+                [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
                 strategy="PACK",
             )
-            get_ray_pg_ready_with_timeout(pg, timeout=30)
+            get_ray_pg_ready_with_timeout(shared_pg, timeout=60)
             sleep = True
         else:
-            pg, sleep = None, False
+            shared_pg, sleep = None, False
 
         # Extract served_model_name from config if set
         served_model_name = ie_cfg.served_model_name
@@ -478,8 +493,9 @@ class InferenceEngineState:
             server_group = ServerGroup(
                 cli_args=build_vllm_cli_args(cfg),
                 num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,
-                placement_group=pg if cfg.trainer.placement.colocate_all else None,
+                placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
+                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
             server_infos = server_group.start()
             server_urls = [info.url for info in server_infos]
@@ -503,9 +519,10 @@ class InferenceEngineState:
                 pretrain=cfg.trainer.policy.model.path,
                 seed=42,
                 vllm_v1_disable_multiproc=True,
+                data_parallel_size=ie_cfg.data_parallel_size,
                 enable_prefix_caching=ie_cfg.enable_prefix_caching,
                 enforce_eager=ie_cfg.enforce_eager,
-                shared_pg=pg,
+                shared_pg=shared_pg,
                 gpu_memory_utilization=ie_cfg.gpu_memory_utilization,
                 inference_engine_enable_sleep=sleep,
                 async_engine=ie_cfg.async_engine,
@@ -517,13 +534,14 @@ class InferenceEngineState:
                 enable_lora=enable_lora,
                 engine_init_kwargs=ie_cfg.engine_init_kwargs,
                 served_model_name=served_model_name,
+                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
             client = InferenceEngineClient(
                 eps, tokenizer, cfg.trainer.policy.model.path, cfg.trainer.policy.model.lora, ie_cfg
             )
             if sleep:
                 asyncio.run(client.wake_up())
-        return cls(client=client, pg=pg, router=router, server_group=server_group)
+        return cls(client=client, pg=shared_pg, router=router, server_group=server_group)
 
 
 def init_remote_inference_servers(

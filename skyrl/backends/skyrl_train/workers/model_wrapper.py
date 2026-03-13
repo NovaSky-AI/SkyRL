@@ -4,18 +4,26 @@
 # https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/models/model.py
 
 from typing import Any, Dict, Optional, Tuple, Union
+
+import numpy as np
 import torch
 import torch.nn as nn
+import transformers
+from flash_attn.bert_padding import pad_input, unpad_input
 from loguru import logger
+from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
-import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
-import numpy as np
-from skyrl.backends.skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
-from skyrl.backends.skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
-from flash_attn.bert_padding import pad_input, unpad_input
-from packaging.version import Version
+
+from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
+    gather_outputs_and_unpad,
+    ulysses_pad_and_slice_inputs,
+)
+from skyrl.backends.skyrl_train.utils.torch_utils import (
+    chunked_entropy_from_logits,
+    logprobs_from_logits,
+)
 
 
 class HFModelWrapper(nn.Module):
@@ -68,7 +76,7 @@ class HFModelWrapper(nn.Module):
         super().__init__()
         self.temperature = temperature
         self.sequence_parallel_size = sequence_parallel_size
-        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+        self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.use_sample_packing = use_sample_packing
         # packing samples using Flash Attention 2
         if use_sample_packing:
@@ -120,12 +128,13 @@ class HFModelWrapper(nn.Module):
 
                 if isinstance(self.model.config, GptOssConfig):
                     # patch attention with Unsloth's flex attn
+                    from transformers import AttentionInterface, AttentionMaskInterface
+
                     from skyrl.backends.skyrl_train.patches.gptoss.patch_transformers import (
                         custom_attention,
                         custom_attention_mask,
                         patch_GptOssAttention,
                     )
-                    from transformers import AttentionInterface, AttentionMaskInterface
 
                     AttentionInterface.register("custom_flex", custom_attention)
                     AttentionMaskInterface.register("custom_flex", custom_attention_mask)
@@ -165,8 +174,16 @@ class HFModelWrapper(nn.Module):
             # MoE - balancing loss
             model_config = self.model.config.to_dict()
             if "output_router_logits" in model_config:
-                logger.info("[MoE] set output_router_logits as True")
-                self.model.config.output_router_logits = True
+                # Skip for granitemoehybrid: its decoder layers don't return router
+                # logits, so enabling this flag causes an IndexError in
+                # load_balancing_loss_func when it tries to access empty gate_logits.
+                if model_config.get("model_type") == "granitemoehybrid":
+                    logger.info(
+                        "[MoE] granitemoehybrid detected, skipping output_router_logits (decoder layers don't return router logits)"
+                    )
+                else:
+                    logger.info("[MoE] set output_router_logits as True")
+                    self.model.config.output_router_logits = True
 
             # https://github.com/huggingface/transformers/issues/26877
             # Use `model.generate(use_cache=True)` instead.`
@@ -538,7 +555,7 @@ def get_llm_for_sequence_regression(
     assert model_type == "critic", f"Only model_type critic is supported, got: {model_type}."
 
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True, **model_config_kwargs)
-    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "eager"
+    config._attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
 
     base_class = AutoModel._model_mapping[type(config)]
     base_pretrained_class = base_class.__base__
@@ -597,8 +614,13 @@ def get_llm_for_sequence_regression(
     # MoE - balancing loss
     model_config = model.config.to_dict()
     if "output_router_logits" in model_config:
-        logger.info("[MoE] set output_router_logits as True")
-        model.config.output_router_logits = True
+        if model_config.get("model_type") == "granitemoehybrid":
+            logger.info(
+                "[MoE] granitemoehybrid detected, skipping output_router_logits (decoder layers don't return router logits)"
+            )
+        else:
+            logger.info("[MoE] set output_router_logits as True")
+            model.config.output_router_logits = True
 
     # https://github.com/huggingface/transformers/issues/26877
     model.config.use_cache = False

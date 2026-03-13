@@ -5,15 +5,15 @@ These mirror the YAML configuration structure 1:1. The top-level SkyRLTrainConfi
 can be constructed from a Hydra DictConfig via SkyRLTrainConfig.from_dict_config().
 """
 
-import os
-from abc import ABC
-import dataclasses
-from dataclasses import dataclass, field, asdict
-import typing
-from typing import Any, Dict, List, Optional, Union, Type, TypeVar, Annotated
-import yaml
 import copy
+import dataclasses
+import os
+import typing
+from abc import ABC
+from dataclasses import asdict, dataclass, field
+from typing import Annotated, Any, Dict, List, Optional, Type, TypeVar, Union
 
+import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from skyrl_gym.envs.search.env import SearchEnvConfig
@@ -464,6 +464,10 @@ class InferenceEngineConfig(BaseConfig):
     served_model_name: Optional[str] = None
     """Model name for HTTP endpoint validation. If set, must be used in the ``model`` field of
     ``/chat/completions`` requests instead of the model path. If ``None``, the model path is used."""
+    distributed_executor_backend: str = "ray"
+    """Distributed executor backend for vLLM. Set to ``"ray"`` to use the Ray backend
+    or ``"mp"`` to use the multiprocessing backend (single-node serving only). Per-engine 
+    placement groups are created when ``"mp"`` is used."""
     engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
     """Pass-through kwargs for the vLLM engine. Names must match the engine's args."""
     override_existing_update_group: str = "auto"
