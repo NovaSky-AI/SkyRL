@@ -218,7 +218,7 @@ def test_logprobs(ray_init_fixture):
 
         cfg.trainer.placement.policy_num_gpus_per_node = 8
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1 
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
         cfg.trainer.policy.megatron_config.context_parallel_size = 1
         cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
