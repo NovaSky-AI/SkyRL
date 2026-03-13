@@ -792,9 +792,9 @@ class ResolvedPlacementGroup:
     and caches the full (bundle_idx, node_id, gpu_id) mapping sorted by (node_id, gpu_id).
 
     Attributes (all lazy, computed on first access):
-        reordered_bundle_indices: Bundle indices in (node_id, gpu_id) order.
-        bundle_node_ids: Node ID for each logical position.
-        bundle_gpu_ids: Physical GPU ID for each logical position.
+        reordered_bundle_indices: Raw bundle indices sorted by (node_id, gpu_id).
+        bundle_node_ids: Node ID for each reordered bundle index.
+        bundle_gpu_ids: Physical GPU ID for each reordered bundle index.
         num_nodes: Number of distinct nodes in the placement group.
         num_gpus_per_node: Number of GPUs per node (assumes uniform distribution).
 
@@ -816,12 +816,12 @@ class ResolvedPlacementGroup:
 
     @functools.cached_property
     def bundle_node_ids(self):
-        """Node ID for each logical position (sorted by node_id, gpu_id)."""
+        """Node ID for each reordered bundle index."""
         return [info[1] for info in self._get_bundle_placement()]
 
     @functools.cached_property
     def bundle_gpu_ids(self):
-        """Physical GPU ID for each logical position (sorted by node_id, gpu_id)."""
+        """Physical GPU ID for each reordered bundle index."""
         return [info[2] for info in self._get_bundle_placement()]
 
     @functools.cached_property
