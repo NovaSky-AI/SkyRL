@@ -164,12 +164,24 @@ def _pack_replay_indices(
 
     seq_lens_cpu = seq_lens.tolist()
     seqlens_padded_cpu = seqlens_padded.tolist()
+    if cp_size > 1:
+        cp_rank = mpu.get_context_parallel_rank()
     offset = 0
     for i in range(batch_size):
         n = seq_lens_cpu[i]
         mask = attention_mask[i].bool()
-        packed[offset : offset + n] = rollout_expert_indices[i, mask]
-        offset += seqlens_padded_cpu[i] // cp_size if cp_size > 1 else seqlens_padded_cpu[i]
+        d = rollout_expert_indices[i, mask]
+        if cp_size > 1:
+            chunk_size = seqlens_padded_cpu[i] // cp_size
+            start = cp_rank * chunk_size
+            end = min(start + chunk_size, n)
+            valid_len = max(0, end - start)
+            if valid_len > 0:
+                packed[offset : offset + valid_len] = d[start:end]
+            offset += chunk_size
+        else:
+            packed[offset : offset + n] = d
+            offset += seqlens_padded_cpu[i]
 
     return packed.unsqueeze(0)  # [1, total_packed_len, layers, topk]
 
@@ -261,4 +273,3 @@ def clear_router_replay():
 
     RouterReplay.clear_global_indices()
     RouterReplay.clear_global_router_replay_action()
-    RouterReplay.clear_global_router_replay_instances()

@@ -273,6 +273,7 @@ def get_test_prompts(model: str, num_samples: int = 20) -> List[ConversationType
     # Ensure pad_token is set correctly
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    _ensure_chat_template(tokenizer)
 
     dataset = PromptDataset(
         datasets=[TEST_DATA_PATH],
@@ -289,6 +290,20 @@ def get_test_prompts(model: str, num_samples: int = 20) -> List[ConversationType
     return prompts
 
 
+def _ensure_chat_template(tokenizer):
+    """Set a minimal chat template if the tokenizer doesn't ship with one."""
+    if tokenizer.chat_template is None:
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{% if message['role'] == 'system' %}{{ message['content'] + '\n' }}"
+            "{% elif message['role'] == 'user' %}{{ 'User: ' + message['content'] + '\n' }}"
+            "{% elif message['role'] == 'assistant' %}{{ 'Assistant: ' + message['content'] + '\n' }}"
+            "{% endif %}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"
+        )
+
+
 def get_test_generator_input(
     model: str,
     num_prompts: int = 20,
@@ -301,6 +316,7 @@ def get_test_generator_input(
     # Ensure pad_token is set correctly
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    _ensure_chat_template(tokenizer)
 
     dataset = PromptDataset(
         datasets=[data_path],

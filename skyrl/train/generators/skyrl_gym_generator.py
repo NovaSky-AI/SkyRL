@@ -496,7 +496,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 if rollout_expert_indices_out is not None and rollout_expert_indices_out:
                     layer_num = len(rollout_expert_indices_out[0])
                     topk = len(rollout_expert_indices_out[0][0]) if layer_num > 0 else 0
-                    rollout_expert_indices_out.append([[-1] * topk for _ in range(layer_num)])
+                    rollout_expert_indices_out.append([[0] * topk for _ in range(layer_num)])
                 appended_eos_token = True
 
         if self.generator_cfg.step_wise_trajectories:

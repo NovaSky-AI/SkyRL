@@ -43,6 +43,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 # MOE_MODEL_NAME = "Qwen/Qwen1.5-MoE-A2.7B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
+
 def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model_name
@@ -244,9 +245,9 @@ async def test_megatron_forward(
     batch = get_test_training_batch(max(4, gpus_per_node))
 
     if ep > 1:
-    if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
-        cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
-    cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
+        if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
+            cfg.trainer.policy.megatron_config.transformer_config_kwargs = dict()
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs["num_layers"] = 2
 
     if lora:
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)

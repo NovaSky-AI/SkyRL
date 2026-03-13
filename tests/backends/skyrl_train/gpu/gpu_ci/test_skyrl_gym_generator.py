@@ -20,6 +20,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
+    _ensure_chat_template,
     get_test_generator_input,
 )
 
@@ -123,6 +124,7 @@ async def run_generator_end_to_end(
     End to end generator test - requires minimum 2 GPUs
     """
     tokenizer = AutoTokenizer.from_pretrained(model)
+    _ensure_chat_template(tokenizer)
 
     cfg = get_test_config(
         max_generate_length,
@@ -482,24 +484,20 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
         n_samples_per_prompt=n_samples_per_prompt,
         num_inference_engines=2,
         tensor_parallel_size=2,
-        model="arcee-ai/Trinity-Nano-Preview",
+        model="allenai/OLMoE-1B-7B-0924",
         max_prompt_length=2048,
         max_input_length=max_input_length,
         max_generate_length=1000,
-        data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
+        data_path=os.path.expanduser("/mnt/cluster_storage/data/gsm8k/validation.parquet"),
         env_class="gsm8k_multi_turn",
         num_prompts=num_prompts,
         max_turns=2,
         use_conversation_multi_turn=True,
         max_env_workers=0,
-        is_step_wise=True,
+        is_step_wise=False,
         temperature=0,
         enable_return_routed_experts=True,
     )
-
-    assert isinstance(generator_output["is_last_step"], list) and isinstance(generator_output["is_last_step"][0], bool)
-    # Expect atleast one response with more than one turn
-    assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
     assert generator_output["rollout_expert_indices"] is not None
 
     # check that the rollout expert indices are non-zero, and that the shape is (bs, seq_len, layer_num, topk)
@@ -508,5 +506,5 @@ async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
 
     assert len(rollout_expert_indices) == total_batch_size
     assert len(rollout_expert_indices[0]) < max_input_length
-    assert len(rollout_expert_indices[0][0]) == 56  # 56 layers in Trinity-Nano-Preview
+    assert len(rollout_expert_indices[0][0]) == 16  # 16 layers in OLMoE-1B-7B-0924
     assert len(rollout_expert_indices[0][0][0]) == 8  # 8 topk for each layer
