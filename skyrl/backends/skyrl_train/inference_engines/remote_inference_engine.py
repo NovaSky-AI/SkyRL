@@ -289,9 +289,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             ) as resp:
                 result = await resp.json()
                 if resp.status != 200:
-                    raise RuntimeError(
-                        f"Failed to pause generation: {result.get('error', result)}"
-                    )
+                    raise RuntimeError(f"Failed to pause generation: {result.get('error', result)}")
 
     async def resume_generation(self) -> None:
         """Resume generation after a keep-mode pause."""
@@ -299,9 +297,7 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             async with session.post(f"{self.url}/resume") as resp:
                 result = await resp.json()
                 if resp.status != 200:
-                    raise RuntimeError(
-                        f"Failed to resume generation: {result.get('error', result)}"
-                    )
+                    raise RuntimeError(f"Failed to resume generation: {result.get('error', result)}")
 
     async def teardown(self):
         await self._weight_loader.destroy_group()
