@@ -144,6 +144,16 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def pause_generation(self) -> None:
+        """Pause generation, freezing in-flight requests so they can be resumed later."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def resume_generation(self) -> None:
+        """Resume generation after a pause, continuing any frozen in-flight requests."""
+        raise NotImplementedError
+
+    @abstractmethod
     def tp_size(self) -> int:
         """Return the tensor parallel size of this inference engine."""
         raise NotImplementedError
