@@ -289,6 +289,13 @@ class CISPOConfig(BaseConfig):
     """Offset for upper bound of importance sampling ratio clipping (as opposed to PPO token update clipping)."""
 
 
+@dataclass
+class DROConfig(BaseConfig):
+
+    beta: float = 0.1
+    """Controls the degree of robustness in the exponential tilt. Larger values focus more on worst-case tokens."""
+
+
 # see https://docs.skyrl.ai/docs/algorithms/off_policy_correction for more details
 @dataclass
 class OffPolicyCorrectionConfig(BaseConfig):
@@ -346,7 +353,7 @@ class AlgorithmConfig(BaseConfig):
     policy_loss_type: str = "regular"
     """``"regular"``, ``"dual_clip"``, ``"gspo"``, ``"clip_cov"``, ``"kl_cov"``, or custom via ``PolicyLossRegistry``."""
     loss_reduction: str = "token_mean"
-    """``"token_mean"``, ``"sequence_mean"``, or ``"seq_mean_token_sum_norm"``."""
+    """``"token_mean"``, ``"sequence_mean"``, ``"seq_mean_token_sum_norm"``, or ``"sum"``."""
     grpo_norm_by_std: bool = True
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
@@ -370,6 +377,8 @@ class AlgorithmConfig(BaseConfig):
     """Only used when ``policy_loss_type="kl_cov"``."""
     cispo: CISPOConfig = field(default_factory=CISPOConfig)
     """Only used when ``policy_loss_type="cispo"``."""
+    dro: DROConfig = field(default_factory=DROConfig)
+    """Only used when ``policy_loss_type="dro"``."""
     max_seq_len: Optional[int] = None
     """Used for ``seq_mean_token_sum_norm`` loss reduction; set explicitly for multi-turn.
     If ``None``, calculated as ``generator.max_input_length + generator.sampling_params.max_generate_length``."""
