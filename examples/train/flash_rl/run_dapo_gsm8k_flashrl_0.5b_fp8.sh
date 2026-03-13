@@ -53,6 +53,7 @@ uv run --isolated --extra flashrl --env-file examples/train/flash_rl/.env.fp8 --
   generator.sampling_params.top_p=$TOP_P \
   generator.sampling_params.logprobs=0 \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \

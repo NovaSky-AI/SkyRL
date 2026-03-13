@@ -20,14 +20,15 @@ uv run --directory . --isolated --extra dev --extra fsdp pytest -s tests/backend
 #     echo "$add_integrations"
 # fi
 
+# TODO (sumanthrh): Migrate flashrl to vllm 0.16.0 and re-enable integration test
 # Run tests for vllm 0.9.2
 # TODO (sumanthrh): We should have a better way to override without pinning a flash-attn wheel
-uv run --isolated --extra fsdp --extra dev \
-    --with vllm==0.9.2 \
-    --with transformers==4.53.0 \
-    --with torch==2.7.0 \
-    --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
-    -- pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py::test_token_based_generation
+# uv run --isolated --extra fsdp --extra dev \
+#     --with vllm==0.9.2 \
+#     --with transformers==4.53.0 \
+#     --with torch==2.7.0 \
+#     --with "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" \
+#     -- pytest -s -vvv tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py::test_token_based_generation
 
 # Run tests for new inference layer
 # TODO (sumanthrh): Migrate the remaining tests: test_verifiers_generator.py , test_pause_and_continue_generation.py

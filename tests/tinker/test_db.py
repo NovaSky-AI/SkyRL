@@ -1,8 +1,7 @@
 import os
-from pathlib import Path
 import subprocess
 import tempfile
-
+from pathlib import Path
 
 ALEMBIC_CMD_PREFIX = ["uv", "run", "--extra", "dev"]
 

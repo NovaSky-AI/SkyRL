@@ -3,20 +3,25 @@
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py
 """
 
-import pytest
 import asyncio
+
+import pytest
 import ray
 
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
+from skyrl.train.config import SkyRLLoraConfig, SkyRLTrainConfig
+from skyrl.utils.tok import get_tokenizer
 from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    get_test_prompts,
     InferenceEngineState,
+    get_test_prompts,
+    init_worker_with_type,
     run_inference,
 )
-from skyrl.train.config import SkyRLTrainConfig, SkyRLLoraConfig
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
-from skyrl.utils.tok import get_tokenizer
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -110,13 +115,15 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
     ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
     [
         pytest.param(False, "nccl", "fsdp", 2),
+        pytest.param(True, "nccl", "fsdp", 2),
         pytest.param(False, "nccl", "fsdp2", 2),
-        # Colocated tests are skipped: CUDA IPC weight sync strategy doesn't support
-        # for_servers() yet, which is required by the new inference stack.
+        pytest.param(True, "nccl", "fsdp2", 2),
     ],
     ids=[
         "new_inference_no_colocate_nccl_fsdp",
+        "new_inference_colocate_nccl_fsdp",
         "new_inference_no_colocate_nccl_fsdp2",
+        "new_inference_colocate_nccl_fsdp2",
     ],
 )
 def test_policy_new_inference_lora_e2e(

@@ -1,6 +1,7 @@
 import jax
-import pytest
 import jax.numpy as jnp
+import pytest
+
 from skyrl.tx.layers.util import ragged_dot
 
 

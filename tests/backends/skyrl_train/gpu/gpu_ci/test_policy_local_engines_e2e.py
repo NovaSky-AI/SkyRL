@@ -3,28 +3,31 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_policy_local_engines_e2e.py
 """
 
-import pytest
 import asyncio
+
+import pytest
 import ray
 from transformers import AutoTokenizer
 
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    get_test_prompts,
     InferenceEngineState,
+    get_test_prompts,
+    init_worker_with_type,
     run_inference,
 )
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_actor_config() -> SkyRLTrainConfig:
+def get_test_actor_config(model: str) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
     cfg = SkyRLTrainConfig()
-    cfg.trainer.policy.model.path = MODEL
+    cfg.trainer.policy.model.path = model
     cfg.trainer.critic.model.path = ""
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.generator.inference_engine.async_engine = True
@@ -36,19 +39,28 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     return cfg
 
 
-# TODO (aaron): add back tests when we support nccl/ gloo
+# TODO (aaron): add back tests when we support gloo
 _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
+    (
+        "colocate_all",
+        "weight_sync_backend",
+        "strategy",
+        "num_engines",
+        "tp_size",
+        "distributed_executor_backend",
+    ),
     [
-        pytest.param(False, "nccl", "fsdp", 2),
-        pytest.param(True, "nccl", "fsdp", 2, marks=_skip_new_inference),
-        pytest.param(False, "gloo", "fsdp", 2, marks=_skip_new_inference),
-        pytest.param(True, "gloo", "fsdp", 2, marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 2),
-        pytest.param(True, "nccl", "fsdp2", 2, marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp", 1, 2, "ray"),
+        pytest.param(True, "nccl", "fsdp", 1, 2, "ray"),
+        pytest.param(False, "gloo", "fsdp", 1, 2, "ray", marks=_skip_new_inference),
+        pytest.param(True, "gloo", "fsdp", 1, 2, "ray", marks=_skip_new_inference),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "ray"),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray"),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp"),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp"),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -57,18 +69,29 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
         "colocate_gloo_fsdp_vllm",
         "no_colocate_nccl_fsdp2_vllm",
         "colocate_nccl_fsdp2_vllm",
+        "colocate_nccl_fsdp2_vllm_mp",
+        "non_colocated_nccl_fsdp2_vllm_mp",
     ],
 )
-def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
+def test_policy_local_engines_e2e(
+    ray_init_fixture,
+    colocate_all,
+    weight_sync_backend,
+    strategy,
+    num_engines,
+    tp_size,
+    distributed_executor_backend,
+):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
-    cfg = get_test_actor_config()
+    cfg = get_test_actor_config(MODEL)
     cfg.trainer.placement.colocate_all = colocate_all
     cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
     cfg.trainer.strategy = strategy
     cfg.generator.inference_engine.tensor_parallel_size = tp_size
-
+    cfg.generator.inference_engine.distributed_executor_backend = distributed_executor_backend
+    cfg.generator.inference_engine.num_engines = num_engines
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
@@ -86,7 +109,9 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
             "policy",
             shared_pg=pg,
             colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size
+            * cfg.generator.inference_engine.num_engines
+            * cfg.generator.inference_engine.data_parallel_size,
             cfg=cfg,
         )
 

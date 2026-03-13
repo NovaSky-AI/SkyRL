@@ -3,11 +3,15 @@ uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu
 """
 
 import os
+
 import pytest
 import ray
-from skyrl.train.utils.utils import initialize_ray
-from tests.backends.skyrl_train.gpu.gpu_ci.test_skyrl_gym_generator import run_generator_end_to_end
+
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils.utils import initialize_ray
+from tests.backends.skyrl_train.gpu.gpu_ci.test_skyrl_gym_generator import (
+    run_generator_end_to_end,
+)
 
 
 # TODO: Make this test lightweight. It currently requires a ~20GB dataset download. Then, transfer the test to gpu_ci.

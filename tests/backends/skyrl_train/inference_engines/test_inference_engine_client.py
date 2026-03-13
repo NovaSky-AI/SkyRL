@@ -6,32 +6,38 @@ Run with:
 uv run --isolated --extra dev pytest tests/backends/skyrl_train/inference_engines/test_inference_engine_client.py
 """
 
+import asyncio
+import random
+from copy import deepcopy
 from http import HTTPStatus
 from unittest.mock import patch
 
+import pytest
 from transformers import AutoTokenizer
-from skyrl.backends.skyrl_train.inference_engines.utils import (
-    postprocess_completion_request,
-    route_prompts_to_engines,
-    hash_with_sha256,
+
+from skyrl.backends.skyrl_train.inference_engines.base import (
+    InferenceEngineInput,
+    InferenceEngineOutput,
+)
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
 )
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     ErrorResponse,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
-from skyrl.train.config import (
-    SkyRLTrainConfig,
-    GeneratorConfig,
-    PolicyConfig,
-    ModelConfig,
-    TrainerConfig,
-    InferenceEngineConfig,
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    hash_with_sha256,
+    postprocess_completion_request,
+    route_prompts_to_engines,
 )
-import asyncio
-import pytest
-import random
-from copy import deepcopy
+from skyrl.train.config import (
+    GeneratorConfig,
+    InferenceEngineConfig,
+    ModelConfig,
+    PolicyConfig,
+    SkyRLTrainConfig,
+    TrainerConfig,
+)
 
 # -------------------------------------------
 # tests for postprocess_completion_request

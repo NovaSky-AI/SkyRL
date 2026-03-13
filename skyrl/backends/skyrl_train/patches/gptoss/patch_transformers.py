@@ -3,13 +3,13 @@
 Adapted from Unsloth's flex attention integration: https://github.com/unslothai/unsloth-zoo/blob/main/unsloth_zoo/temporary_patches/gpt_oss.py
 """
 
-from typing import Optional, Union, Callable, List, Any
+import inspect
+from typing import Any, Callable, List, Optional, Union
+
 import torch
 import torch.nn as nn
-from packaging.version import Version
-import inspect
-
 from loguru import logger
+from packaging.version import Version
 from transformers.masking_utils import causal_mask_function
 
 

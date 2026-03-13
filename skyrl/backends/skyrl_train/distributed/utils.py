@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import socket
 from datetime import timedelta
-from typing import Any, Optional, Union, Tuple
+from typing import Any, Optional, Tuple, Union
 
 import torch
+import torch.nn as nn
 from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
@@ -27,7 +28,6 @@ from torch.distributed.distributed_c10d import (
     rendezvous,
 )
 from torch.multiprocessing.reductions import rebuild_cuda_tensor
-import torch.nn as nn
 from torch.optim import Optimizer
 
 ModelOptimPair = Tuple[nn.Module, Optimizer]
