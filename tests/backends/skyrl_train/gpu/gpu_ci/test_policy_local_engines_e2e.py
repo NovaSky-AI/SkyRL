@@ -39,7 +39,7 @@ def get_test_actor_config(model: str) -> SkyRLTrainConfig:
     return cfg
 
 
-# TODO (aaron): add back tests when we support nccl/ gloo
+# TODO (aaron): add back tests when we support gloo
 _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
 
@@ -54,13 +54,13 @@ _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not y
     ),
     [
         pytest.param(False, "nccl", "fsdp", 1, 2, "ray"),
-        pytest.param(True, "nccl", "fsdp", 1, 2, "ray", marks=_skip_new_inference),
+        pytest.param(True, "nccl", "fsdp", 1, 2, "ray"),
         pytest.param(False, "gloo", "fsdp", 1, 2, "ray", marks=_skip_new_inference),
         pytest.param(True, "gloo", "fsdp", 1, 2, "ray", marks=_skip_new_inference),
         pytest.param(False, "nccl", "fsdp2", 1, 2, "ray"),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray", marks=_skip_new_inference),
-        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp", marks=_skip_new_inference),
-        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp", marks=_skip_new_inference),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "ray"),
+        pytest.param(True, "nccl", "fsdp2", 2, 2, "mp"),
+        pytest.param(False, "nccl", "fsdp2", 1, 2, "mp"),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
