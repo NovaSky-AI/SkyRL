@@ -71,7 +71,7 @@ class VLLMServerActor(ServerActorProtocol):
         num_gpus_per_server: int,
         **kwargs,
     ) -> dict:
-        # _gpu_ids is passed by ServerGroup from the cached SkyRLPlacementGroup.bundle_gpu_ids.
+        # _gpu_ids is passed by ServerGroup from the cached ResolvedPlacementGroup.bundle_gpu_ids.
         gpu_ids = kwargs.pop("_gpu_ids", None)
         if kwargs.get("distributed_executor_backend") == "mp" and gpu_ids is not None:
             kwargs["mp_cuda_visible_devices"] = ",".join(str(g) for g in gpu_ids)

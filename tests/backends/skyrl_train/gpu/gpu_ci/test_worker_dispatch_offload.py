@@ -21,7 +21,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import GPUState, WorkerDispatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
-from skyrl.train.utils.utils import SkyRLPlacementGroup, validate_cfg
+from skyrl.train.utils.utils import ResolvedPlacementGroup, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
     get_rank_0_memory,
     import_worker,
@@ -82,7 +82,7 @@ async def test_colocate_all_only_one_model_on_gpu(ray_init_fixture):
         # Create shared placement group
         raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
         get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
-        pg = SkyRLPlacementGroup(raw_pg)
+        pg = ResolvedPlacementGroup(raw_pg)
 
         # Initialize both actor groups on shared GPU
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
@@ -168,7 +168,7 @@ async def test_gpu_state_tracking_accuracy(ray_init_fixture):
     try:
         raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
         get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
-        pg = SkyRLPlacementGroup(raw_pg)
+        pg = ResolvedPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
         ref_group = init_colocated_actor_group(RefWorker, pg, cfg)
@@ -228,7 +228,7 @@ async def test_colocate_policy_critic_training_switch(ray_init_fixture):
     try:
         raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
         get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
-        pg = SkyRLPlacementGroup(raw_pg)
+        pg = ResolvedPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(PolicyWorker, pg, cfg)
         critic_group = init_colocated_actor_group(CriticWorker, pg, cfg)
@@ -317,7 +317,7 @@ async def test_dispatch_set_lr(ray_init_fixture, strategy):
         # Create placement group and policy actor
         raw_pg = placement_group([{"GPU": 1, "CPU": 2}], strategy="PACK")
         get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
-        pg = SkyRLPlacementGroup(raw_pg)
+        pg = ResolvedPlacementGroup(raw_pg)
 
         policy_group = init_colocated_actor_group(import_worker(strategy, "policy"), pg, cfg)
         ray.get(policy_group.async_init_model(MODEL_NAME))

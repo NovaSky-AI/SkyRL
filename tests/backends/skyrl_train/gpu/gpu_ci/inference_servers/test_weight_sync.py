@@ -34,7 +34,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo
-from skyrl.train.utils.utils import SkyRLPlacementGroup
+from skyrl.train.utils.utils import ResolvedPlacementGroup
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -188,7 +188,7 @@ async def weight_update_env(ray_init_fixture):
     # 4 bundles: trainer on 0-1, server on 2-3
     raw_pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(4)])
     ray.get(raw_pg.ready())
-    skyrl_pg = SkyRLPlacementGroup(raw_pg)
+    skyrl_pg = ResolvedPlacementGroup(raw_pg)
 
     # Trainer on bundle 0 (uses GPU 0-1 with TP=2 via the model itself)
     trainer = Trainer.options(

@@ -30,7 +30,7 @@ from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.utils import (
-    SkyRLPlacementGroup,
+    ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
     initialize_ray,
 )
@@ -48,7 +48,7 @@ __all__ = ["BasePPOExp", "config_dir"]
 
 def create_ray_wrapped_inference_engines_from_config(
     cfg: SkyRLTrainConfig,
-    colocate_pg: Optional[SkyRLPlacementGroup],
+    colocate_pg: Optional[ResolvedPlacementGroup],
     tokenizer: PreTrainedTokenizerBase,
 ):
     from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
@@ -186,7 +186,7 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[SkyRLPlacementGroup]:
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[ResolvedPlacementGroup]:
         """Initializes a placement group for colocated training.
 
         Creates a single placement group with per-GPU bundles for all inference
@@ -196,7 +196,7 @@ class BasePPOExp:
             timeout (int): The timeout for the placement group to be ready.
 
         Returns:
-            SkyRLPlacementGroup: The placement group wrapper for colocated training, or None.
+            ResolvedPlacementGroup: The placement group wrapper for colocated training, or None.
         """
         if not self.cfg.trainer.placement.colocate_all:
             return None
@@ -210,7 +210,7 @@ class BasePPOExp:
             strategy="PACK",
         )
         get_ray_pg_ready_with_timeout(pg, timeout=timeout)
-        return SkyRLPlacementGroup(pg)
+        return ResolvedPlacementGroup(pg)
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         """Initializes the generator.

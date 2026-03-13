@@ -781,8 +781,8 @@ def _probe_bundle_placement(pg):
     return sorted(bundle_infos, key=lambda x: (x[1], x[2]))
 
 
-class SkyRLPlacementGroup:
-    """Wrapper around Ray PlacementGroup that computes and stores reordered bundle indices.
+class ResolvedPlacementGroup:
+    """Wrapper around Ray PlacementGroup that resolves physical ordering of bundles and stores reordered bundle indices.
 
     Ray placement groups don't guarantee bundle ordering (bundles on the same node
     may not have consecutive indices). This wrapper probes the PG once on first access

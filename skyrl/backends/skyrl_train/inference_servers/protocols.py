@@ -58,7 +58,7 @@ class ServerActorProtocol(Protocol):
         """Compute per-server kwargs that depend on the placement group.
 
         Called by ServerGroup once per server before actor creation.
-        GPU IDs are pre-computed by ServerGroup from SkyRLPlacementGroup
+        GPU IDs are pre-computed by ServerGroup from ResolvedPlacementGroup
         and passed via _gpu_ids in kwargs.
         """
         ...

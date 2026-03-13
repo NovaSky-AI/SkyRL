@@ -4,7 +4,7 @@ import vllm
 from skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine import VLLMInferenceEngine
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
-from skyrl.train.utils.utils import SkyRLPlacementGroup
+from skyrl.train.utils.utils import ResolvedPlacementGroup
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
@@ -72,11 +72,11 @@ def create_ray_wrapped_inference_engines_flashrl(
         bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * tensor_parallel_size)]
         raw_pg = placement_group(bundles, strategy="PACK")
         get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-        shared_pg = SkyRLPlacementGroup(raw_pg)
+        shared_pg = ResolvedPlacementGroup(raw_pg)
 
     assert isinstance(
-        shared_pg, SkyRLPlacementGroup
-    ), f"shared_pg must be a `SkyRLPlacementGroup` got {type(shared_pg)}."
+        shared_pg, ResolvedPlacementGroup
+    ), f"shared_pg must be a `ResolvedPlacementGroup` got {type(shared_pg)}."
 
     # Use reordered bundle indices to ensure GPU-aware ordering.
     reordered = shared_pg.reordered_bundle_indices

@@ -29,7 +29,7 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
 from skyrl.train.utils.utils import (
-    SkyRLPlacementGroup,
+    ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
     initialize_ray,
 )
@@ -252,7 +252,7 @@ class SkyRLTrainBackend(AbstractBackend):
         get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         logger.info("Placement group ready!")
 
-        return SkyRLPlacementGroup(pg)
+        return ResolvedPlacementGroup(pg)
 
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:
@@ -717,7 +717,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg: SkyRLPlacementGroup | None, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainConfig, colocate_pg: ResolvedPlacementGroup | None, tokenizer: PreTrainedTokenizerBase
 ):
     engine_kwargs = {
         "num_inference_engines": cfg.generator.inference_engine.num_engines,

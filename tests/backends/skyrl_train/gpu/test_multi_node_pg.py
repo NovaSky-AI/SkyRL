@@ -13,7 +13,7 @@ from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import (
-    SkyRLPlacementGroup,
+    ResolvedPlacementGroup,
     get_ray_pg_ready_with_timeout,
     validate_cfg,
 )
@@ -42,14 +42,14 @@ def get_pg(placement_group_type, num_gpus_per_node, num_nodes):
             strategy="PACK",
         )
         get_ray_pg_ready_with_timeout(pg, timeout=60)
-        return SkyRLPlacementGroup(pg)
+        return ResolvedPlacementGroup(pg)
     elif placement_group_type == "whole_node_bundle":
         pg = placement_group(
             [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node}] * num_nodes,
             strategy="PACK",
         )
         get_ray_pg_ready_with_timeout(pg, timeout=60)
-        return SkyRLPlacementGroup(pg)
+        return ResolvedPlacementGroup(pg)
     elif placement_group_type == "none":
         return None
     else:

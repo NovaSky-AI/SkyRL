@@ -13,7 +13,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.inference_servers.server_pool import ServerActorPool
-from skyrl.train.utils.utils import SkyRLPlacementGroup
+from skyrl.train.utils.utils import ResolvedPlacementGroup
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class ServerGroup:
         cli_args: Namespace,
         num_servers: int,
         start_port: int = 8000,
-        placement_group: Optional[SkyRLPlacementGroup] = None,
+        placement_group: Optional[ResolvedPlacementGroup] = None,
         placement_group_bundle_offset: int = 0,
         enable_dp: bool = False,
         enable_pd: bool = False,
@@ -89,7 +89,7 @@ class ServerGroup:
         self._server_actor_kwargs = server_actor_kwargs
         self._external_pg = placement_group
 
-        # Extract the raw PG, reordered indices, and GPU IDs from SkyRLPlacementGroup.
+        # Extract the raw PG, reordered indices, and GPU IDs from ResolvedPlacementGroup.
         if placement_group is not None:
             self._external_pg = placement_group.pg
             self._reordered_bundle_indices = placement_group.reordered_bundle_indices
@@ -116,7 +116,7 @@ class ServerGroup:
         logger.info(f"Creating placement group with {total_bundles} bundles...")
         pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(total_bundles)])
         ray.get(pg.ready())
-        skyrl_pg = SkyRLPlacementGroup(pg)
+        skyrl_pg = ResolvedPlacementGroup(pg)
         self._reordered_bundle_indices = skyrl_pg.reordered_bundle_indices
         self._bundle_gpu_ids = skyrl_pg.bundle_gpu_ids
         logger.info("Placement group ready")
