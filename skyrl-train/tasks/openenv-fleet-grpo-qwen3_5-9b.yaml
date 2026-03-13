@@ -155,6 +155,7 @@ setup: |
 
 run: |
   set -euo pipefail
+  ulimit -n 65536
   cd skyrl-train
   source .venv/bin/activate
 
