@@ -273,7 +273,7 @@ class InferenceEngineClient(InferenceEngineInterface):
         # 2. Initialize fields we want to accumulate or update in each loop iteration
         accum_response_ids: List[int] = []
         accum_response_logprobs: List[float] = []
-        accum_rollout_expert_indices: List[List[List[int]]] = []
+        rollout_expert_indices: List[List[List[int]]] = None
         stop_reason: str = "abort"
 
         # We only use it if generation is completed in one turn to maintain original behavior with no retry.
@@ -323,7 +323,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
             if new_rollout_expert_indices is not None:
-                accum_rollout_expert_indices.extend(new_rollout_expert_indices)
+                rollout_expert_indices = new_rollout_expert_indices
             num_turns += 1
 
         # 4. Build the final response and return.
@@ -336,7 +336,7 @@ class InferenceEngineClient(InferenceEngineInterface):
             stop_reasons=[stop_reason],
             response_ids=[accum_response_ids],
             response_logprobs=[accum_response_logprobs] if len(accum_response_logprobs) > 0 else None,
-            rollout_expert_indices=([accum_rollout_expert_indices] if len(accum_rollout_expert_indices) > 0 else None),
+            rollout_expert_indices=([rollout_expert_indices] if rollout_expert_indices is not None else None),
         )
 
     async def _chat_completion_with_retry(

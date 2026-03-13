@@ -29,12 +29,9 @@ from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
 )
 
-# MOE_MODEL_NAME = "arcee-ai/Trinity-Nano-Preview"
-MOE_MODEL_NAME = "/home/ray/moonlight16b"
-# MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
-REPLAY_NUM_LAYERS = 2
-NUM_PROMPTS = 10
-N_SAMPLES_PER_PROMPT = 4
+MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B-Instruct"
+NUM_PROMPTS = 5
+N_SAMPLES_PER_PROMPT = 2
 MAX_GENERATE_LENGTH = 128
 
 
@@ -222,7 +219,7 @@ def test_logprobs(ray_init_fixture):
         cfg.trainer.placement.policy_num_gpus_per_node = 8
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
         cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
-        cfg.trainer.policy.megatron_config.context_parallel_size = 1
+        cfg.trainer.policy.megatron_config.context_parallel_size = 2
         cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
         cfg.trainer.micro_forward_batch_size_per_gpu = 2

@@ -939,7 +939,10 @@ class RayPPOTrainer:
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
-        data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
+        fwd_keys = ["sequences", "attention_mask"]
+        if training_input.get("rollout_expert_indices") is not None:
+            fwd_keys.append("rollout_expert_indices")
+        data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
 
         values = None
         base_log_probs = None
