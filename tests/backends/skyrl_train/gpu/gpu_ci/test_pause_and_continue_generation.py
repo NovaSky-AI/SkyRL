@@ -272,3 +272,87 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
             assert out["responses"][0] == tokenizer.decode(token_ids, skip_special_tokens=True)
             # Print a preview to aid debugging
             print(f"Output first 1500 chars: {out['responses'][0][:1500]}...")
+
+
+def test_pause_keep_generation_vllm_engine(ray_init_fixture):
+    """
+    Test that keep-mode pause freezes in-flight requests and resume lets them
+    complete normally.
+
+    We send 4 long-running requests, pause with mode='keep' (which freezes
+    rather than aborts), then resume. All requests should eventually finish
+    with a normal stop reason (e.g. 'length') and non-zero completion tokens.
+    """
+    cfg = get_test_actor_config(num_inference_engines=1, model=MODEL)
+    cfg.trainer.placement.colocate_all = True
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+    cfg.trainer.strategy = "fsdp2"
+    sampling_params = {
+        "max_tokens": 64,
+        "stop": None,
+        "stop_token_ids": None,
+        "ignore_eos": True,
+        "stream": False,
+    }
+    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+
+    with InferenceEngineState.create(
+        cfg=cfg,
+        use_local=True,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        backend="vllm",
+        model=MODEL,
+        num_inference_engines=cfg.generator.inference_engine.num_engines,
+        sleep_level=1,
+        max_num_seqs=2,
+    ) as engines:
+        client = engines.client
+
+        for api in ["chat_completion", "completion"]:
+            convs: List[ConversationType] = [
+                [
+                    {"role": "system", "content": "You are a token generator that keeps talking endlessly."},
+                    {"role": "user", "content": "Write a very long rambling response without ending."},
+                ]
+                for _ in range(4)
+            ]
+
+            async def run_requests_with_pause_resume():
+                async def one_req(i: int):
+                    if api == "chat_completion":
+                        body = {
+                            "model": MODEL,
+                            "messages": convs[i],
+                            **sampling_params,
+                        }
+                        return await client.engines[0].chat_completion({"json": body, "headers": {}})
+                    else:
+                        prompt_str = tokenizer.apply_chat_template(convs[i], add_generation_prompt=True, tokenize=False)
+                        body = {
+                            "model": MODEL,
+                            "prompt": prompt_str,
+                            **sampling_params,
+                        }
+                        return await client.engines[0].completion({"json": body, "headers": {}})
+
+                tasks = [asyncio.create_task(one_req(i)) for i in range(4)]
+                await asyncio.sleep(1)
+                await client.pause_generation()
+                await asyncio.sleep(1)
+                await client.resume_generation()
+                return await asyncio.gather(*tasks)
+
+            outputs = asyncio.run(run_requests_with_pause_resume())
+
+            for out in outputs:
+                assert "choices" in out and len(out["choices"]) == 1
+                assert out["usage"]["completion_tokens"] > 0, (
+                    f"Expected non-zero completion tokens after keep-mode pause/resume, "
+                    f"got {out['usage']['completion_tokens']}"
+                )
+                assert out["choices"][0].get("finish_reason") != "abort", (
+                    f"Expected non-abort finish reason with keep-mode pause, "
+                    f"got {out['choices'][0].get('finish_reason')}"
+                )

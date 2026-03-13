@@ -213,8 +213,11 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
 
-    async def abort_generation(self) -> None:
-        raise NotImplementedError("Abort generation is only supported for AsyncVLLMInferenceEngine.")
+    async def pause_generation(self, clear_cache: bool = False) -> None:
+        raise NotImplementedError("pause_generation is only supported for AsyncVLLMInferenceEngine.")
+
+    async def resume_generation(self) -> None:
+        raise NotImplementedError("resume_generation is only supported for AsyncVLLMInferenceEngine.")
 
 
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
@@ -639,17 +642,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
 
-    async def abort_generation(self) -> None:
-        """
-        Abort all running and waiting requests, which make the ongoing requests return the
-        already-generated tokens with a stop_reason of "abort".
-        """
+    async def pause_generation(self, clear_cache: bool = False) -> None:
+        """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
         engine = self._get_engine()
-        unfinished_request_ids = self._get_unfinished_request_ids(engine.output_processor)
-        if unfinished_request_ids:
-            await engine.abort(unfinished_request_ids)
-        await engine.reset_prefix_cache()  # avoid KV-cache pollution
-        logger.info(f"abort_generation() finished, aborted {len(unfinished_request_ids)} requests")
+        await engine.pause_generation(mode="keep", clear_cache=clear_cache)
+        logger.info("pause_generation(mode='keep') finished")
+
+    async def resume_generation(self) -> None:
+        """Resume generation after a keep-mode pause."""
+        engine = self._get_engine()
+        await engine.resume_generation()
+        logger.info("resume_generation() finished")
 
 
 class _MinimalRequest:
