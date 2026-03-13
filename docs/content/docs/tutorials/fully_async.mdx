@@ -83,13 +83,14 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
 
 For fully async specifically, the following are the main knobs to tune:
 
-- `trainer.policy_mini_batch_size`: The mini-batch size for policy training. The trainer triggers a training step whenever the generation workers have generated this many groups of trajectories.
-- `trainer.fully_async.max_staleness_steps`: The maximum off-policy steps allowed for each training batch, trading off between throughput and off-policy bias. See [async-staleness-manager](#async-staleness-manager) for more details.
+- `trainer.train_batch_size`: The outer fully async training batch size. The trainer waits until the generation workers have produced this many groups of trajectories, then runs one training step and one pause/sync/resume.
+- `trainer.policy_mini_batch_size`: The inner mini-batch size for policy training. Inside one outer fully async training step, the trainer runs `trainer.train_batch_size / trainer.policy_mini_batch_size` optimizer mini-batches.
+- `trainer.fully_async.max_staleness_steps`: The maximum off-policy outer training steps allowed for each training batch, trading off between throughput and off-policy bias. See [async-staleness-manager](#async-staleness-manager) for more details.
 
   - `max_staleness_steps = 0` is equivalent to synchronous training (despite wasting throughput since we cannot overlap training and generation).
 - `trainer.fully_async.num_parallel_generation_workers`: The number of generation workers to spawn, where
-  each worker works on a group of trajectories. It should be `&gt;= trainer.policy_mini_batch_size` to avoid wasted throughput,
-  and `&lt;= trainer.policy_mini_batch_size * (trainer.fully_async.max_staleness_steps + 1)` since it would be wasted due to capacity control.
+  each worker works on a group of trajectories. It should be `&gt;= trainer.train_batch_size` to avoid wasted throughput,
+  and `&lt;= trainer.train_batch_size * (trainer.fully_async.max_staleness_steps + 1)` since it would be wasted due to capacity control.
   The larger the number, the more throughput, and likely more staleness (and hence off-policy-ness).
 
 On GPU placement: first disable colocation of training and generation, then configure how many GPUs to dedicate to training and generation respectively. The following snippet dedicates 4 GPUs to each.
@@ -106,7 +107,7 @@ generator.inference_engine.tensor_parallel_size=1
 
 Other restrictions (will be validated by the trainer):
 
-- `trainer.train_batch_size`: Must be set to the same as `trainer.policy_mini_batch_size`.
+- `trainer.train_batch_size`: Must be `&gt;= trainer.policy_mini_batch_size` and divisible by it.
 - `generator.batched`: Must be set to `false` to use non-batched vLLM engines.
 - `generator.inference_engine.async_engine`: Must be set to `true` to use async vLLM engines.
 - `trainer.algorithm.dynamic_sampling.type`: Must be set to `"none"` to disable dynamic sampling (not supported yet).
@@ -153,9 +154,9 @@ While we call it a "training worker", it is simply the single thread that runs t
 
 It follows the following steps in a for-loop over the number of steps per epoch:
 
-1. Get precisely `trainer.policy_mini_batch_size` groups from the `GenerationOutputGroupBuffer`.
+1. Get precisely `trainer.train_batch_size` groups from the `GenerationOutputGroupBuffer`.
    The staleness controller enforces a global capacity bound that aims to keep batches within `trainer.fully_async.max_staleness_steps` steps stale. However, it does not strictly guarantee it. See [async-staleness-manager](#async-staleness-manager) for more details.
-2. Train on the generated groups.
+2. Train on the generated groups. Inside this step, the trainer still slices the batch into `trainer.policy_mini_batch_size` mini-batches for optimizer updates.
 3. Mark the data that we used to train as "consumed" to the `AsyncDataloader`, so that when we resume
    training from a checkpoint, we know what data has been trained on and hence can be skipped.
 4. Make `AnyGenerator` (really the `InferenceEngineClient` in the back): pause generation, sync weights, resume generation. Note that this operation is agnostic to what the generator is doing. It can either be in the middle of a `/chat/completions` generation, or interacting with the environment.
@@ -175,10 +176,10 @@ The async dataloader is a thin wrapper around the `torchdata.stateful_dataloader
 
 - Thread-safe dataloader iteration with a lock, as there are multiple concurrent generation workers polling data.
 - Records consumed data UIDs for checkpointing to avoid training on the same data upon resuming.
-- Do proper trimming of the dataset to ensure that the dataloader always returns a full mini-batch.
+- Do proper trimming of the dataset to ensure that the dataloader always returns a full outer train batch.
 
   - We cannot rely on `drop_last` because the batch size is 1 in fully async training (since each generation worker works on a single group at a time).
-  - We also cannot trim the `train_dataset` before building the dataloader, because it will affect the random permutations of the dataset, and the data order of async training will be different from synchronous training. However if we keep the datasets the same, even if the batch size of the dataloader is different, the permutation is the same after aggregating the batches of size one to the same size as the mini-batch size.
+  - We also cannot trim the `train_dataset` before building the dataloader, because it will affect the random permutations of the dataset, and the data order of async training will be different from synchronous training. However if we keep the datasets the same, even if the batch size of the dataloader is different, the permutation is the same after aggregating the batches of size one to the same size as the outer train batch size.
 
 The `AsyncDataloader` is used in the following cases:
 
@@ -200,7 +201,7 @@ Modeled after AReal's [StalenessManager](https://github.com/inclusionAI/AReaL/bl
 
 - **Consumed by trainer**: groups that have already been used for updating the model weights.
 - `current_global_step`: the model version currently being worked on; the model has completed `current_global_step - 1` updates.
-- `mini_batch_size = B`: number of groups consumed per training step.
+- `train_batch_size = B`: number of groups consumed per outer training step.
 - `max_staleness_steps = S`: the maximum allowed difference between when a group was scheduled to generate, and the step that trains on it.
 - `accepted`: total number of groups that finished generation (either already consumed or waiting in the buffer). This includes all the generation outputs throughout the entire training process. Thus, this number is strictly increasing.
 - `running`: number of groups currently being generated by workers.
