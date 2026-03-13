@@ -42,8 +42,7 @@ Timeout for waiting until the inference server is healthy.
 SKYRL_HTTP_CONNECTION_LIMIT = int(os.environ.get("SKYRL_HTTP_CONNECTION_LIMIT", 50_000))
 """
 Maximum number of concurrent HTTP connections for the inference client, router,
-and server. During generation, concurrent requests can reach
-batch_size * n_samples_per_prompt
+and server.
 
 This controls:
 - aiohttp TCPConnector limit in `RemoteInferenceClient`
