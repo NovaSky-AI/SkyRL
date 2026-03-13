@@ -17,20 +17,26 @@ SkyRL provides built-in utilities for correcting off-policy drift from trainer/i
 We recommend adding the following configs in order to your training runs to help address off-policy drift:
 
 ```yaml
-# we recommend trying basic TIS correction first
+# For dense models, we recommend trying basic TIS correction first
 trainer.algorithm.off_policy_correction.tis_ratio_type="token"
 trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0
 
-# for long context + MoE models, try geometric sequence masking - tune geo_mask_high/geo_mask_low as needed
+# for MoE models, enabling router replay (R3) to fix the source of train/infer mismatch is recommended 
+trainer.policy.megatron_config.moe_enable_routing_replay=True
+generator.inference_engine.enable_return_routed_experts=True
+generator.inference_engine.distributed_executor_backend="mp"    # this is temporarily needed for vLLM, since routed experts cause issues with the ray backend.
+
+# The following masking strategies can additionally help mitigate off policy drift, especially from sources other than train/infer mismatch
+# geometric sequence masking - tune geo_mask_high/geo_mask_low as needed
 trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
 trainer.algorithm.off_policy_correction.geo_mask_high=1.01
 trainer.algorithm.off_policy_correction.geo_mask_low=0.99
 
-# alternatively, for long context + MoE you can try token masking (icepop) and tune token_mask_is_threshold_low/high
+# token masking (icepop): tune token_mask_is_threshold_low/high
 trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5
 trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0
 
-# for longer context + MoE, you can also try outlier based sequence masking, which stacks on top of geometric sequence masking
+# outlier based sequence masking: stacks on top of geometric sequence masking
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_low=1e-4
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_high=100
 ```
@@ -125,10 +131,31 @@ policies. To mitigate this, the max staleness of trajectories can be tuned to pr
 Mini batching results in off-policy updates, which can be clamped within an acceptable range in the common dual clip formulation of the PPO loss. Tuning the number of mini batches per training batch
 can impact convergence of RL runs, and impact whether corrections like routing replay and masking are needed.
 
+# Routing Replay
+
+SkyRL supports rollout routing replay (R3), first introduced by [Ma et. al](https://arxiv.org/pdf/2510.11370) to help eliminate a source of trainer/inference mismatch for MoE at the source. Rollout routing replay works by recording expert 
+routing decisions at inference time, and replaying the same expert routing decisions at training time. 
+
+```yaml
+generator:
+  inference_engine:
+    enable_return_routed_experts: True    # pass through argument to vLLM
+    distributed_executor_backend: "mp"    # temporarily needed to work around hanging issues with other backends
+...
+trainer:
+  policy:
+    megatron_config:
+      moe_enable_routing_replay: True     # enables Megatron native RoutingReplay feature
+```
+
+To enable rollout router replay, set `generator.inference_engine.enable_return_routed_experts=True`, `trainer.policy.megatron_config.moe_enable_routing_replay=True`, and use the `mp` distributed_executor_backend for vLLM. Note that 
+R3 does induce additional training bias when mini-batching, since routing decisions are fixed for all mini-batches in a training batch. However, it has been shown to be important for stabilizing large scale MoE training, particularly
+in models adopting a Deepseek-v3 like architecture (notably the GLM family) due to the use of sigmoid-based affinity scoring instead of softmax for top-k routing.
+
 # Algorithmic Off Policy Correction
 
-In the previous section, we described some reasons why off-policy drift can occur, and some ways to mitigate it (e.g., batch invariant kernels, routing replay). However,
-these solutions come with tradeoffs (slower inference for batch invariant kernels, additional bias for routing replay), and are not sufficient to address all sources of drift, like fully async RL.
+In the previous sections, we described some reasons why off-policy drift can occur, and some ways to mitigate it (e.g., batch invariant kernels, routing replay). However,
+these solutions come with tradeoffs (slower inference for batch invariant kernels), and are not sufficient to address all sources of drift, like fully async RL.
 
 Recent works ([Liu et. al 2025](https://yingru.notion.site/When-Speed-Kills-Stability-Demystifying-RL-Collapse-from-the-Training-Inference-Mismatch-271211a558b7808d8b12d403fd15edda), [Yao et. al 2025](https://fengyao.notion.site/off-policy-rl))
 have proposed additional techniques for off-policy correction. In this section, we describe these techniques and how to enable them in SkyRL.
