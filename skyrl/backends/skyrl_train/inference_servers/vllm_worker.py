@@ -95,24 +95,6 @@ class WorkerWrap:
         for weight in weight_list:
             del weight
 
-    def load_weights_rdt(self, packed_tensor, metadata):
-        """Load weights from RDT transfer. Tensor is already on GPU.
-
-        Called via collective_rpc from VLLMInferenceEngine.update_weights_rdt().
-        With UniProcExecutor (TP=PP=1), this is a direct in-process call --
-        the GPU tensor passes through without any serialization.
-
-        Args:
-            packed_tensor: Contiguous GPU tensor containing packed weights.
-            metadata: Dict with keys ``names``, ``shapes``, ``sizes``.
-        """
-        weight_list = []
-        offset = 0
-        for name, shape, size in zip(metadata["names"], metadata["shapes"], metadata["sizes"]):
-            weight_list.append((name, packed_tensor[offset : offset + size].view(*shape)))
-            offset += size
-        self.model_runner.model.load_weights(weights=weight_list)
-
     def teardown_weight_receiver(self):
         """Clean up weight receiver resources."""
         if not hasattr(self, "_weight_receiver") or self._weight_receiver is None:

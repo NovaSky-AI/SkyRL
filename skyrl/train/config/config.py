@@ -433,8 +433,7 @@ class InferenceEngineConfig(BaseConfig):
     backend: str = "vllm"
     """``"vllm"``."""
     weight_sync_backend: str = "nccl"
-    """``"nccl"``, ``"gloo"``, or ``"rdt"``. Use ``"rdt"`` for Ray Direct Transport
-    (alpha API, requires TP=PP=1)."""
+    """``"nccl"`` or ``"gloo"``."""
     weight_transfer_threshold_cuda_ipc_GB: float = 1.0
     """When using ``cuda_ipc``, send weights in batches of this size (GB)."""
     tensor_parallel_size: int = 1

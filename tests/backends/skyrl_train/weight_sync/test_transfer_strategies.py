@@ -6,11 +6,8 @@ from skyrl.backends.skyrl_train.weight_sync import (
     get_transfer_strategy_cls,
     BroadcastTransferStrategy,
     CudaIpcTransferStrategy,
-    RdtTransferStrategy,
-    RdtWeightTransferReceiver,
     BroadcastInitInfo,
     CudaIpcInitInfo,
-    RdtInitInfo,
     BroadcastWeightUpdateRequest,
     CudaIpcWeightUpdateRequest,
     LoraLoadRequest,
@@ -27,8 +24,6 @@ class TestGetTransferStrategyCls:
             ("nccl", False, BroadcastTransferStrategy),
             ("gloo", True, BroadcastTransferStrategy),
             ("gloo", False, BroadcastTransferStrategy),
-            ("rdt", True, RdtTransferStrategy),
-            ("rdt", False, RdtTransferStrategy),
         ],
     )
     def test_returns_correct_strategy(self, backend, colocate_all, expected_strategy):
@@ -201,178 +196,6 @@ class TestCudaIpcWeightUpdateRequest:
         data = request.serialize()
 
         assert len(data) % 4 == 0
-
-
-class TestRdtCreateInitInfo:
-    """Tests for RdtTransferStrategy.create_init_info."""
-
-    def _make_ie_cfg(self, **kwargs):
-        defaults = {
-            "weight_sync_backend": "rdt",
-            "model_dtype": "torch.bfloat16",
-            "num_engines": 1,
-            "tensor_parallel_size": 1,
-            "pipeline_parallel_size": 1,
-            "data_parallel_size": 1,
-            "override_existing_update_group": "enable",
-        }
-        defaults.update(kwargs)
-        return InferenceEngineConfig(**defaults)
-
-    def test_create_init_info(self):
-        """RdtTransferStrategy.create_init_info should create RdtInitInfo with model_dtype_str."""
-        ie_cfg = self._make_ie_cfg(model_dtype="torch.float32")
-        init_info = RdtTransferStrategy.create_init_info(ie_cfg)
-
-        assert isinstance(init_info, RdtInitInfo)
-        assert init_info.model_dtype_str == "torch.float32"
-        assert init_info.override_existing_receiver is True
-
-    def test_create_init_info_override_disabled(self):
-        """RdtTransferStrategy.create_init_info should set override_existing_receiver=False when config is 'disable'."""
-        ie_cfg = self._make_ie_cfg(override_existing_update_group="disable")
-        init_info = RdtTransferStrategy.create_init_info(ie_cfg)
-
-        assert init_info.override_existing_receiver is False
-
-    def test_create_init_info_rejects_tp_gt_1(self):
-        """RdtTransferStrategy.create_init_info should raise ValueError when TP > 1."""
-        ie_cfg = self._make_ie_cfg(tensor_parallel_size=2)
-        with pytest.raises(ValueError, match="TP=PP=1"):
-            RdtTransferStrategy.create_init_info(ie_cfg)
-
-    def test_create_init_info_rejects_pp_gt_1(self):
-        """RdtTransferStrategy.create_init_info should raise ValueError when PP > 1."""
-        ie_cfg = self._make_ie_cfg(pipeline_parallel_size=2)
-        with pytest.raises(ValueError, match="TP=PP=1"):
-            RdtTransferStrategy.create_init_info(ie_cfg)
-
-    def test_strategy_type_roundtrip(self):
-        """RdtInitInfo.strategy_type() should return RdtTransferStrategy."""
-        ie_cfg = self._make_ie_cfg()
-        init_info = RdtTransferStrategy.create_init_info(ie_cfg)
-        assert init_info.strategy_type() is RdtTransferStrategy
-
-
-class TestRdtReceiverUnpacking:
-    """CPU-only tests for RdtWeightTransferReceiver.receive_weights unpacking logic."""
-
-    def _pack_tensors(self, tensors, dtype=torch.bfloat16):
-        """Pack a list of tensors into a contiguous 1D buffer (mimics sender logic)."""
-        total_numel = sum(t.numel() for t in tensors)
-        packed = torch.empty(total_numel, dtype=dtype)
-        offset = 0
-        for t in tensors:
-            size = t.numel()
-            packed[offset : offset + size].copy_(t.detach().view(-1))
-            offset += size
-        return packed
-
-    def test_basic_unpacking(self):
-        """Receiver should correctly unpack multiple tensors from a packed buffer."""
-        t1 = torch.randn(32, 64, dtype=torch.bfloat16)
-        t2 = torch.randn(64, dtype=torch.bfloat16)
-        t3 = torch.randn(16, 16, dtype=torch.bfloat16)
-
-        packed = self._pack_tensors([t1, t2, t3])
-        metadata = {
-            "names": ["layer1.weight", "layer1.bias", "layer2.weight"],
-            "dtypes": ["bfloat16", "bfloat16", "bfloat16"],
-            "shapes": [[32, 64], [64], [16, 16]],
-            "sizes": [t1.numel(), t2.numel(), t3.numel()],
-        }
-
-        receiver = RdtWeightTransferReceiver(model_dtype=torch.bfloat16)
-        results = list(receiver.receive_weights(packed, metadata))
-
-        assert len(results) == 3
-        assert results[0][0] == "layer1.weight"
-        assert results[0][1].shape == (32, 64)
-        assert torch.allclose(results[0][1], t1)
-        assert results[1][0] == "layer1.bias"
-        assert results[1][1].shape == (64,)
-        assert torch.allclose(results[1][1], t2)
-        assert results[2][0] == "layer2.weight"
-        assert results[2][1].shape == (16, 16)
-        assert torch.allclose(results[2][1], t3)
-
-    def test_single_tensor(self):
-        """Receiver should handle a single tensor."""
-        t = torch.randn(8, 8, dtype=torch.bfloat16)
-        packed = self._pack_tensors([t])
-        metadata = {
-            "names": ["single.weight"],
-            "dtypes": ["bfloat16"],
-            "shapes": [[8, 8]],
-            "sizes": [t.numel()],
-        }
-
-        receiver = RdtWeightTransferReceiver(model_dtype=torch.bfloat16)
-        results = list(receiver.receive_weights(packed, metadata))
-
-        assert len(results) == 1
-        assert results[0][0] == "single.weight"
-        assert torch.allclose(results[0][1], t)
-
-    def test_dtype_mismatch_raises(self):
-        """Receiver should raise ValueError when metadata dtype doesn't match model dtype."""
-        packed = torch.randn(10, dtype=torch.float32)
-        metadata = {
-            "names": ["w"],
-            "dtypes": ["float32"],
-            "shapes": [[10]],
-            "sizes": [10],
-        }
-
-        receiver = RdtWeightTransferReceiver(model_dtype=torch.bfloat16)
-        with pytest.raises(ValueError, match="mismatch dtype"):
-            list(receiver.receive_weights(packed, metadata))
-
-    def test_mixed_dtypes_in_metadata_raises(self):
-        """Receiver should raise ValueError when metadata contains mixed dtypes."""
-        packed = torch.randn(20, dtype=torch.bfloat16)
-        metadata = {
-            "names": ["w1", "w2"],
-            "dtypes": ["bfloat16", "float32"],
-            "shapes": [[10], [10]],
-            "sizes": [10, 10],
-        }
-
-        receiver = RdtWeightTransferReceiver(model_dtype=torch.bfloat16)
-        with pytest.raises(ValueError, match="packed weight update should have all tensors with the same dtype"):
-            list(receiver.receive_weights(packed, metadata))
-
-    def test_mismatched_sizes_names_raises(self):
-        """Receiver should raise ValueError when sizes and names have different lengths."""
-        packed = torch.randn(10, dtype=torch.bfloat16)
-        metadata = {
-            "names": ["w1", "w2"],
-            "dtypes": ["bfloat16", "bfloat16"],
-            "shapes": [[5], [5]],
-            "sizes": [10],
-        }
-
-        receiver = RdtWeightTransferReceiver(model_dtype=torch.bfloat16)
-        with pytest.raises(ValueError, match="sizes must have the same length as names"):
-            list(receiver.receive_weights(packed, metadata))
-
-    def test_unpacked_tensors_are_views_of_packed_buffer(self):
-        """Unpacked tensors should be views (not copies) of the packed buffer for zero-copy."""
-        t1 = torch.randn(4, 4, dtype=torch.bfloat16)
-        t2 = torch.randn(8, dtype=torch.bfloat16)
-        packed = self._pack_tensors([t1, t2])
-        metadata = {
-            "names": ["w1", "w2"],
-            "dtypes": ["bfloat16", "bfloat16"],
-            "shapes": [[4, 4], [8]],
-            "sizes": [16, 8],
-        }
-
-        receiver = RdtWeightTransferReceiver(model_dtype=torch.bfloat16)
-        results = list(receiver.receive_weights(packed, metadata))
-
-        assert results[0][1].data_ptr() == packed.data_ptr()
-        assert results[1][1].data_ptr() == packed[16:].data_ptr()
 
 
 class TestLoraLoadRequest:
