@@ -1040,7 +1040,7 @@ def importance_sampling_loss(
 def reduce_loss(
     loss: torch.Tensor,
     loss_mask: Optional[torch.Tensor],
-    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm"],
+    loss_reduction: Literal["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "sum"],
     max_seq_len: Optional[int] = None,
 ) -> torch.Tensor:
     if loss_reduction == "token_mean":
@@ -1061,6 +1061,11 @@ def reduce_loss(
             # If no mask, assume all tokens are valid
             seq_losses = torch.sum(loss, dim=-1) / max_seq_len
         loss = torch.mean(seq_losses)
+    elif loss_reduction == "sum":
+        if loss_mask is not None:
+            loss = (loss * loss_mask).sum()
+        else:
+            loss = loss.sum()
     else:
         raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
     return loss
