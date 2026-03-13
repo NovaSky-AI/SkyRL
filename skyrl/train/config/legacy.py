@@ -41,8 +41,6 @@ GENERATOR_TO_INFERENCE_ENGINE_FIELDS: Dict[str, str | None] = {
     "override_existing_update_group": None,
     "external_proxy_url": None,
     "external_server_urls": None,
-    "enable_return_routed_experts": None,
-    "distributed_executor_backend": None,
 }
 
 # Fields that should be removed (deprecated or derived)
