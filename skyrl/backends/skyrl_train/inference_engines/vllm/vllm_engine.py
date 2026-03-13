@@ -348,14 +348,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         enable_log_requests = kwargs.pop("enable_log_requests", False)
         max_log_len = kwargs.pop("max_log_len", None)
 
-        # Log if enable_return_routed_experts is being passed
-        if "enable_return_routed_experts" in kwargs:
-            logger.info(
-                f"DEBUG: enable_return_routed_experts={kwargs['enable_return_routed_experts']} is being passed to AsyncEngineArgs"
-            )
-        else:
-            logger.warning("DEBUG: enable_return_routed_experts is NOT in kwargs")
-
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
             engine_args = vllm.AsyncEngineArgs(enable_log_requests=enable_log_requests, **kwargs)
         else:
