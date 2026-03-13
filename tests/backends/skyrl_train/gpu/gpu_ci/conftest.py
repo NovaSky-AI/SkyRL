@@ -51,3 +51,45 @@ def ray_init_fixture():
     yield
     # call ray shutdown after a test regardless
     ray.shutdown()
+
+
+@pytest.fixture(scope="class")
+def ray_init_new_inference_fixture():
+    """Ray init fixture with _SKYRL_USE_NEW_INFERENCE=1 for new inference stack tests.
+
+    This ensures Ray workers use the new inference code paths (vLLM native NCCL,
+    HTTP-based weight sync, etc.) regardless of the host environment.
+    """
+    if ray.is_initialized():
+        ray.shutdown()
+
+    env_vars = {
+        "VLLM_USE_V1": "1",
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+        "_SKYRL_USE_NEW_INFERENCE": "1",
+    }
+
+    if not peer_access_supported(max_num_gpus_per_node=2):
+        log_once("Disabling NCCL P2P for CI environment")
+        env_vars.update(
+            {
+                "NCCL_P2P_DISABLE": "1",
+                "NCCL_SHM_DISABLE": "1",
+            }
+        )
+
+    env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    env_vars["NVTE_FUSED_ATTN"] = "0"
+
+    if SKYRL_PYTHONPATH_EXPORT:
+        pythonpath = os.environ.get("PYTHONPATH")
+        if pythonpath is None:
+            raise RuntimeError("SKYRL_PYTHONPATH_EXPORT is set but PYTHONPATH is not defined in environment")
+        env_vars["PYTHONPATH"] = pythonpath
+
+    logger.info(f"Initializing Ray (new inference) with environment variables: {env_vars}")
+    ray.init(runtime_env={"env_vars": env_vars})
+
+    yield
+    ray.shutdown()

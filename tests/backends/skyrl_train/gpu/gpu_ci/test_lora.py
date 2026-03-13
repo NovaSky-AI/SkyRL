@@ -15,6 +15,8 @@ from tests.backends.skyrl_train.gpu.utils import (
 )
 from skyrl.train.config import SkyRLTrainConfig, SkyRLLoraConfig
 from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+from skyrl.utils.tok import get_tokenizer
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
@@ -101,4 +103,70 @@ def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_ba
             )
         )
         outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params))
+        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
+
+
+@pytest.mark.parametrize(
+    ("colocate_all", "weight_sync_backend", "strategy", "tp_size"),
+    [
+        pytest.param(False, "nccl", "fsdp", 2),
+        pytest.param(False, "nccl", "fsdp2", 2),
+        # Colocated tests are skipped: CUDA IPC weight sync strategy doesn't support
+        # for_servers() yet, which is required by the new inference stack.
+    ],
+    ids=[
+        "new_inference_no_colocate_nccl_fsdp",
+        "new_inference_no_colocate_nccl_fsdp2",
+    ],
+)
+def test_policy_new_inference_lora_e2e(
+    ray_init_new_inference_fixture, colocate_all, weight_sync_backend, strategy, tp_size
+):
+    """
+    Tests LoRA weight sync and generation using the new HTTP-based inference stack.
+    """
+    cfg = get_test_actor_config(enable_lora=True)
+    cfg.trainer.placement.colocate_all = colocate_all
+    cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
+    cfg.trainer.strategy = strategy
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+
+    tokenizer = get_tokenizer(MODEL)
+
+    with InferenceEngineState.create(
+        cfg=cfg,
+        model=MODEL,
+        use_local=True,
+        async_engine=cfg.generator.inference_engine.async_engine,
+        tp_size=cfg.generator.inference_engine.tensor_parallel_size,
+        colocate_all=cfg.trainer.placement.colocate_all,
+        sleep_level=1,
+        enable_lora=True,
+        use_new_inference_servers=True,
+    ) as engines:
+        client, pg = engines.client, engines.pg
+        assert isinstance(client, RemoteInferenceClient), "Expected RemoteInferenceClient for new inference stack"
+
+        policy = init_worker_with_type(
+            "policy",
+            shared_pg=pg,
+            colocate_all=cfg.trainer.placement.colocate_all,
+            num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+            cfg=cfg,
+        )
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+            )
+        )
+        asyncio.run(client.reset_prefix_cache())
+        ray.get(
+            policy.async_run_ray_method(
+                "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+            )
+        )
+        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL), sampling_params, tokenizer=tokenizer))
         print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")

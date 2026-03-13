@@ -78,6 +78,7 @@ from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInp
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.base import LoraLoadRequest
 
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,7 @@ class RemoteInferenceClient:
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
+    _active_lora_name: Optional[str] = field(default=None, repr=False)
 
     # ---------------------------
     # Session Management
@@ -259,9 +261,12 @@ class RemoteInferenceClient:
             # New prompt = original + accumulated tokens
             new_prompt_ids = prompt_token_ids + accum_token_ids
 
+            # Use LoRA adapter name if one is active, otherwise use base model name
+            effective_model = self._active_lora_name if self._active_lora_name else self.model_name
+
             payload = {
                 "sampling_params": cur_params,
-                "model": self.model_name,
+                "model": effective_model,
                 "token_ids": new_prompt_ids,
             }
 
@@ -591,22 +596,80 @@ class RemoteInferenceClient:
 
     async def update_named_weights(
         self,
-        update_info: Dict[str, Any],
+        update_info: Union[Dict[str, Any], "LoraLoadRequest"],
     ) -> Dict[str, Any]:
         """
-        Update weights via vLLM native /update_weights.
+        Update weights via vLLM native /update_weights, or load a LoRA adapter from disk.
 
         Args:
             update_info: Dict with keys expected by vLLM (e.g. names, dtype_names,
-                shapes, packed for NCCL).
+                shapes, packed for NCCL), OR a LoraLoadRequest to load LoRA from disk.
 
         Returns:
             Dict mapping server_url to response.
         """
+        from skyrl.backends.skyrl_train.weight_sync.base import LoraLoadRequest
+
+        if isinstance(update_info, LoraLoadRequest):
+            return await self.load_lora_adapter(update_info.lora_path)
+
         return await self._call_all_servers(
             "/update_weights",
             {"update_info": update_info},
         )
+
+    async def load_lora_adapter(
+        self,
+        lora_path: str,
+        lora_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Load a LoRA adapter from disk on all backend servers via /v1/load_lora_adapter.
+
+        After loading, generation requests will automatically use the LoRA adapter
+        by setting the model name to the LoRA adapter name.
+
+        Args:
+            lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
+            lora_name: Name for the LoRA adapter. If None, a unique name is generated.
+
+        Returns:
+            Dict mapping server_url to response.
+        """
+        import time
+
+        if lora_name is None:
+            lora_name = f"skyrl-lora-{int(time.time_ns() % 0x7FFFFFFF)}"
+
+        payload = {
+            "lora_name": lora_name,
+            "lora_path": lora_path,
+        }
+
+        # Call /v1/load_lora_adapter on all servers directly.
+        # This endpoint returns a plain text response (not JSON), so we use a
+        # custom call instead of _call_all_servers which expects JSON.
+        session = await self._get_session()
+
+        async def _load_on_server(server_url: str):
+            url = f"{server_url}/v1/load_lora_adapter"
+            async with session.post(url, json=payload) as resp:
+                # vLLM returns 200 with text body on success, or JSON ErrorResponse on failure
+                if resp.status >= 400:
+                    try:
+                        body = await resp.json()
+                    except Exception:
+                        body = {"error": {"message": await resp.text()}}
+                    raise_for_status(resp, body)
+                return server_url, {"status": resp.status, "body": await resp.text()}
+
+        results = await asyncio.gather(*[_load_on_server(url) for url in self.server_urls])
+
+        # Track the active LoRA name so generate() can use it
+        self._active_lora_name = lora_name
+        logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
+
+        return {url: resp for url, resp in results}
 
     # ---------------------------
     # Info

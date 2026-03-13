@@ -470,9 +470,6 @@ class InferenceEngineState:
         router = None
         server_group = None
         if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
-            # init with internal router and servers
-            if enable_lora:
-                raise ValueError("LoRA is not supported with new inference backend")
             # NOTE: In the case of the new inference backend, server is up by default, so we don't need
             # any special handling for sleep
             server_group = ServerGroup(
