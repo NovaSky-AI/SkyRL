@@ -791,14 +791,15 @@ class ResolvedPlacementGroup:
     may not have consecutive indices). This wrapper probes the PG once on first access
     and caches the full (bundle_idx, node_id, gpu_id) mapping sorted by (node_id, gpu_id).
 
-    Attributes (all lazy, computed on first access):
+    All attributes are lazy and computed on first access.
+    Use ``.pg`` to access the underlying Ray PlacementGroup for Ray APIs.
+
+    Attributes:
         reordered_bundle_indices: Raw bundle indices sorted by (node_id, gpu_id).
         bundle_node_ids: Node ID for each reordered bundle index.
         bundle_gpu_ids: Physical GPU ID for each reordered bundle index.
         num_nodes: Number of distinct nodes in the placement group.
         num_gpus_per_node: Number of GPUs per node (assumes uniform distribution).
-
-    Use .pg to access the underlying Ray PlacementGroup for Ray APIs.
     """
 
     def __init__(self, pg: PlacementGroup):
