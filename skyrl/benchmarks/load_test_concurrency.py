@@ -2,6 +2,10 @@
 """
 Load test for concurrency limits across the inference stack.
 
+NOTE: This is not a full fledged serving benchmark script. This is primarily 
+aimed to testing bottlenecks in client/ API server code in handling
+concurrent requests before they are handed off to the inference engine.
+
 Spins up vLLM server(s) + router + RemoteInferenceClient via Ray, then sends
 concurrent requests to verify that the full HTTP
 pipeline handles high concurrency without dropping connections.
@@ -110,12 +114,17 @@ async def _post_chat_completion(session: aiohttp.ClientSession, url: str, payloa
         return {"status": resp.status, "body": await resp.json()}
 
 
-async def _rate_limited_gather(coros, qps):
-    """Launch coroutines at a steady rate of *qps* per second, then await all."""
+async def _rate_limited_gather(coro_fns, qps):
+    """Launch coroutine factories at a steady rate of *qps* per second, then await all.
+
+    *coro_fns* is an iterable of zero-arg callables that each return a coroutine.
+    Each factory is called (and thus the coroutine created & scheduled) only when
+    its turn arrives, giving precise control over request launch timing.
+    """
     tasks = []
     interval = 1.0 / qps
-    for coro in coros:
-        tasks.append(asyncio.ensure_future(coro))
+    for fn in coro_fns:
+        tasks.append(asyncio.ensure_future(fn()))
         await asyncio.sleep(interval)
     return await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -131,12 +140,13 @@ async def fire_chat_completions(base_url: str, n: int, model_name: str, max_toke
     connector = aiohttp.TCPConnector(limit=0)
     timeout = aiohttp.ClientTimeout(total=300)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        tasks = [_post_chat_completion(session, url, payload) for _ in range(n)]
         t0 = time.monotonic()
         if math.isinf(qps):
+            tasks = [_post_chat_completion(session, url, payload) for _ in range(n)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
-            results = await _rate_limited_gather(tasks, qps)
+            coro_fns = [lambda: _post_chat_completion(session, url, payload) for _ in range(n)]
+            results = await _rate_limited_gather(coro_fns, qps)
         elapsed = time.monotonic() - t0
 
     ok = sum(1 for r in results if isinstance(r, dict) and r["status"] == 200)
@@ -171,13 +181,13 @@ async def fire_client_generate(
             # Re-raise with context about which request and what type
             raise RuntimeError(f"request {idx}: {type(e).__name__}: {e}") from e
 
-    tasks = [_single(i) for i in range(n)]
-
     t0 = time.monotonic()
     if math.isinf(qps):
+        tasks = [_single(i) for i in range(n)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     else:
-        results = await _rate_limited_gather(tasks, qps)
+        coro_fns = [lambda i=i: _single(i) for i in range(n)]
+        results = await _rate_limited_gather(coro_fns, qps)
     elapsed = time.monotonic() - t0
 
     ok = sum(1 for r in results if not isinstance(r, Exception))
