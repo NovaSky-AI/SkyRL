@@ -50,8 +50,8 @@ envs:
   FLEET_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
-  # Dataset version: "v53" (v52 minus github tasks)
-  DATA_VERSION: "v53"
+  # Dataset version: "v54" (v53 with 12 cross-contaminated verifiers patched)
+  DATA_VERSION: "v54"
   # Task selection: env_keys to filter (comma-separated, e.g., "github,booking,reddit")
   ENV_KEYS: ""
   # Difficulty filter: 1=easy, 2=medium, 3=hard (comma-separated, e.g., "1,2" for easy+medium)
@@ -137,7 +137,9 @@ setup: |
   echo "export PATH=$CUDA_HOME/bin:\$PATH" >> "$HOME/.cuda_env"
   uv pip install wandb boto3 awscli
 
-  uv pip install "litellm>=1.75.5" "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client" fleet-python logfire "mcp>=1.0.0"
+  uv pip install "litellm>=1.75.5" fleet-python logfire "mcp>=1.0.0"
+  # OpenEnv: force reinstall to pick up latest changes (version number doesn't always bump)
+  uv pip install --force-reinstall --no-cache-dir --no-deps "git+https://github.com/fleet-ai/OpenEnv.git@deniz/fleet_client"
 
   mkdir -p /workspace/data/fleet
   TASKS_FILE="/workspace/data/fleet/tasks_${MODALITY}.json"
