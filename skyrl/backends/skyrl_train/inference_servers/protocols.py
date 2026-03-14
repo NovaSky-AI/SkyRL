@@ -5,7 +5,9 @@ These define the interfaces that server implementations must follow.
 """
 
 from argparse import Namespace
-from typing import Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Dict, Optional, Protocol, Tuple, runtime_checkable
+
+from ray.util.placement_group import PlacementGroup
 
 from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo
 
@@ -46,6 +48,33 @@ class ServerActorProtocol(Protocol):
         """
         ...
 
+    @staticmethod
+    def prepare_server_kwargs(
+        pg: PlacementGroup,
+        start_bundle_idx: int,
+        num_gpus_per_server: int,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        Compute per-server keyword arguments that depend on the placement group.
+
+        Called by ServerGroup once per server *before* actor creation.
+        Implementations can probe the PG to resolve physical GPU IDs or
+        other placement-dependent configuration.
+
+        The default implementation passes kwargs through unchanged.
+
+        Args:
+            pg: The placement group the server will be scheduled in.
+            start_bundle_idx: First bundle index assigned to this server.
+            num_gpus_per_server: Number of GPU bundles for this server.
+            **kwargs: The server_actor_kwargs supplied to ServerGroup.
+
+        Returns:
+            A (possibly augmented) dict of kwargs to forward to ``__init__``.
+        """
+        ...
+
     def __init__(
         self,
         cli_args: Namespace,
@@ -58,6 +87,7 @@ class ServerActorProtocol(Protocol):
         enable_pd: bool,
         nixl_side_channel_base: int,
         colocated_training: bool,
+        **kwargs: Any,
     ) -> None:
         """
         Initialize the server actor.
@@ -73,6 +103,8 @@ class ServerActorProtocol(Protocol):
             enable_pd: Enable prefill-decode disaggregation.
             nixl_side_channel_base: Base port for NIXL side channels.
             colocated_training: Whether the server is colocated with training workers.
+            **kwargs: Additional engine-specific keyword arguments (e.g.
+                ``distributed_executor_backend``, ``mp_cuda_visible_devices``).
         """
         ...
 

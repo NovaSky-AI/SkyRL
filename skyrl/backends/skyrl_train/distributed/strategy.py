@@ -1,16 +1,16 @@
 import random
 from abc import ABC, abstractmethod
+from typing import Any, Dict, Optional, TypeVar, Union
 
-from loguru import logger
 import numpy as np
 import torch
-from torch import distributed as dist
-from typing import Optional, Dict, Any, Union, TypeVar
 import torch.optim as optim
 from jaxtyping import Float
+from loguru import logger
+from torch import distributed as dist
 from transformers import GenerationConfig, PretrainedConfig, PreTrainedTokenizer
-from skyrl.backends.skyrl_train.utils.io import io
 
+from skyrl.backends.skyrl_train.utils.io import io
 
 DataT = TypeVar("DataT", bound=Union[Dict[str, Any], torch.Tensor])
 

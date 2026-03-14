@@ -94,6 +94,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.policy.model.path=$MODEL_NAME \
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \

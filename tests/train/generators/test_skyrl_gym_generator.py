@@ -2,17 +2,24 @@
 uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_generator.py
 """
 
-import pytest
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import numpy as np
+import pytest
 
-from skyrl.train.config import GeneratorConfig, ChatTemplateConfig
+from skyrl.train.config import ChatTemplateConfig, GeneratorConfig
+from skyrl.train.generators.base import (
+    ConversationType,
+    GeneratorInput,
+    GeneratorOutput,
+)
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
-from skyrl.train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
-from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput, BaseTextEnv
-
+from skyrl.train.generators.utils import (
+    concatenate_generator_outputs,
+    get_metrics_from_generator_output,
+)
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 
 # Mock constants, where 4 is the eos token id
 MOCK_LLM_OUTPUT_IDS = [1, 10, 12, 4]
@@ -364,6 +371,7 @@ def test_generator_output_concatenation():
         "stop_reasons",
         "rollout_metrics",
         "rollout_logprobs",
+        "rollout_expert_indices",
         # optional but present in the signature
         "trajectory_ids",
         "is_last_step",

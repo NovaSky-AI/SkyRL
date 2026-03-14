@@ -2,21 +2,27 @@
 uv run --extra dev --isolated pytest tests/train/generators/test_skyrl_gym_generator_chat_templating.py
 """
 
-import pytest
-from typing import Dict, Any
-from unittest.mock import AsyncMock, MagicMock
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
-from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
-from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from transformers import AutoTokenizer
-from skyrl_gym.envs import register
-from skyrl.train.generators.utils import get_custom_chat_template
-from skyrl.train.config import GeneratorConfig, SamplingParams, ChatTemplateConfig, SkyRLGymConfig
-from skyrl.train.generators.utils import CUSTOM_CHAT_TEMPLATES
 from pathlib import Path
+from typing import Any, Dict
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from transformers import AutoTokenizer
+
+from skyrl.train.config import (
+    ChatTemplateConfig,
+    GeneratorConfig,
+    SamplingParams,
+    SkyRLGymConfig,
+)
+from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from skyrl.train.generators.utils import CUSTOM_CHAT_TEMPLATES, get_custom_chat_template
+from skyrl_gym.envs import register
+from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from tests.train.generators.chat_templating_test_constants import (
-    QWEN2_5_EXPECTED_STR,
     LLAMA3_2_EXPECTED_STR,
+    QWEN2_5_EXPECTED_STR,
     QWEN3_TITO_EXPECTED_STR,
     QWEN3_WITHOUT_THINKING_EXPECTED_STR,
     get_expected_chat_history,

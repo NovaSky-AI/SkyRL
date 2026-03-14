@@ -1,7 +1,7 @@
 """Layer normalization implementations."""
 
-from flax import nnx
 import jax
+from flax import nnx
 from jax import numpy as jnp
 
 from skyrl.tx.layers.util import Param

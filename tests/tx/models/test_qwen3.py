@@ -1,19 +1,20 @@
 import os
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from peft import LoraConfig, get_peft_model
 import pytest
 import torch
+from flax import nnx
+from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
-from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock
+from transformers.models.qwen3_moe.modeling_qwen3_moe import (
+    Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock,
+)
 
 from skyrl.tx.layers.lora import LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
-
 from tests.tx.models.conftest import load_model
 
 

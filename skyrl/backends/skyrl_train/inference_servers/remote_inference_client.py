@@ -28,8 +28,9 @@ Key features:
 - Two URL types:
   - proxy_url: Single URL for data plane operations (routed requests)
   - server_urls: List of backend URLs for control plane operations (fan-out)
-- Lazy world_size fetching from /get_world_size
-- Built-in retry on abort for in-flight weight updates (temporary)
+- Lazy world_size fetching from /get_server_info
+- Keep-mode pause: in-flight requests are frozen by the vLLM scheduler and
+  resume where they left off after /resume. No client-side retry needed.
 
 Usage:
     client = RemoteInferenceClient(
@@ -41,26 +42,6 @@ Comparison with existing code:
 - Replaces: InferenceEngineClient + RemoteInferenceEngine (for remote-only usage)
 - Key difference: Talks directly to router via HTTP, no Ray actor wrapping
 - The router handles session-aware routing; this client handles control plane fan-out
-
-TODO: Data Plane Operations - Future Deprecation
-------------------------------------------------
-All data plane operations (generate, chat_completion, completion, tokenize, detokenize)
-and the retry-on-abort logic will eventually be removed from this client.
-
-When vLLM RFC #32103 lands with PauseMode.KEEP:
-- The retry logic in generate() will be deleted
-- pause() will use mode="keep" which preserves KV cache and scheduler state
-- Requests resume seamlessly after unpause with zero client changes
-
-The generator code will transition to:
-1. OpenAI-compatible endpoints (/v1/chat/completions) for text-based interaction
-2. Tinker sample API for token-in-token-out workflows:
-   - Input: ModelInput.from_ints(tokens=input_ids)
-   - Output: sequences[0].tokens, sequences[0].logprobs
-   - Internally maps to /v1/completions with token-in-token-out
-   - May become a native vLLM API in the future
-
-This client will then primarily handle control plane operations only.
 """
 
 from __future__ import annotations
@@ -71,16 +52,23 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
-
 import aiohttp
 
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput, InferenceEngineOutput
-from skyrl.env_vars import SKYRL_GENERATE_CONCURRENCY_PER_ENGINE, SKYRL_HTTP_CONNECTION_LIMIT
+from skyrl.backends.skyrl_train.inference_engines.base import (
+    InferenceEngineInput,
+    InferenceEngineOutput,
+)
+from skyrl.env_vars import (
+    SKYRL_GENERATE_CONCURRENCY_PER_ENGINE,
+    SKYRL_HTTP_CONNECTION_LIMIT,
+)
 
 _DATA_PLANE_RETRIES = 3
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -90,21 +78,21 @@ class PauseMode(Enum):
     """
     Pause mode for inference servers.
 
-    This enum mirrors the pause modes that will be available in vLLM RFC #32103.
-    For now, we map these to the existing `wait_for_inflight_request` parameter.
+    Maps to the ``mode`` query parameter on vLLM's ``/pause`` endpoint.
 
     Modes:
         ABORT: Abort in-flight requests immediately. Clients receive partial
-            tokens and must retry with accumulated context.
-            Maps to: wait_for_inflight_request=False
-
-        FINISH: Wait for in-flight requests to complete before pausing.
+            tokens with ``finish_reason="abort"`` and must retry.
+        KEEP: Freeze in-flight requests in the scheduler. They resume
+            exactly where they left off when ``/resume`` is called.
+            No retry needed. KV cache is preserved.
+        WAIT: Wait for in-flight requests to complete before pausing.
             New requests are blocked. No retry needed.
-            Maps to: wait_for_inflight_request=True
     """
 
     ABORT = "abort"
-    FINISH = "finish"
+    KEEP = "keep"
+    WAIT = "wait"
 
 
 @dataclass
@@ -210,6 +198,9 @@ class RemoteInferenceClient:
         Each prompt is sent as a separate request to allow the router to route
         based on session_id. All requests are made in parallel.
 
+        With keep-mode pause, in-flight requests are frozen and resume
+        transparently after /resume -- no client-side retry needed.
+
         Args:
             input_batch: Contains prompt_token_ids, sampling_params, and optional session_ids.
 
@@ -265,7 +256,6 @@ class RemoteInferenceClient:
             response_logprobs=[r["response_logprobs"] for r in results] if get_logprobs else None,
         )
 
-    # TODO: Delete retry logic when vLLM RFC #32103 lands with PauseMode.KEEP
     async def _generate_single(
         self,
         prompt_token_ids: List[int],
@@ -273,79 +263,45 @@ class RemoteInferenceClient:
         session_id: Optional[Any],
     ) -> Dict[str, Any]:
         """
-        Generate completion for a single prompt with built-in retry on abort.
+        Generate completion for a single prompt.
 
-        When pause(mode=ABORT) is called, running requests return partial tokens
-        with stop_reason="abort". This method retries with accumulated tokens
-        until generation completes with a non-abort stop reason.
-
-        TODO: Retry logic will be deleted when vLLM RFC #32103 lands.
-        With PauseMode.KEEP, requests resume seamlessly after unpause.
+        With keep-mode pause, in-flight requests are frozen by the vLLM
+        scheduler and resume where they left off after /resume. No retry
+        logic is needed.
 
         Returns:
-            Dict with keys: response, stop_reason, response_ids
+            Dict with keys: response, stop_reason, response_ids, response_logprobs
         """
         url = f"{self.proxy_url}/inference/v1/generate"
 
-        # Determine max_tokens key and original value
-        max_key = None
-        if "max_tokens" in sampling_params:
-            max_key = "max_tokens"
-        elif "max_completion_tokens" in sampling_params:
-            max_key = "max_completion_tokens"
-        original_max_tokens = sampling_params.get(max_key) if max_key else None
+        payload = {
+            "sampling_params": sampling_params,
+            "model": self.model_name,
+            "token_ids": prompt_token_ids,
+        }
 
-        # Accumulate across retries
-        accum_token_ids: List[int] = []
-        stop_reason = "abort"
+        headers = {"Content-Type": "application/json"}
+        if session_id:
+            headers["X-Session-ID"] = str(session_id)
 
-        response_logprobs: Optional[List[float]] = []
+        response = await self._post(url, json=payload, headers=headers)
 
-        while stop_reason == "abort":
-            # Build payload with accumulated context
-            cur_params = sampling_params.copy()
-            if original_max_tokens is not None and max_key:
-                remaining = original_max_tokens - len(accum_token_ids)
-                if remaining <= 0:
-                    # If `remaining` is zero, but the stop_reason was "abort",
-                    # we assume that the generation was interrupted but has reached the max length
-                    stop_reason = "length"
-                    break
-                cur_params[max_key] = remaining
+        choice = response["choices"][0]
+        token_ids = choice["token_ids"]
+        stop_reason = choice["finish_reason"]
 
-            # New prompt = original + accumulated tokens
-            new_prompt_ids = prompt_token_ids + accum_token_ids
-
-            payload = {
-                "sampling_params": cur_params,
-                "model": self.model_name,
-                "token_ids": new_prompt_ids,
-            }
-
-            headers = {"Content-Type": "application/json"}
-            if session_id:
-                headers["X-Session-ID"] = str(session_id)
-
-            response = await self._post(url, json=payload, headers=headers)
-
-            choice = response["choices"][0]
-            new_token_ids = choice["token_ids"]
-            stop_reason = choice["finish_reason"]
-            logprobs = choice.get("logprobs", None)
-            if logprobs is not None:
-                logprobs_content = choice["logprobs"].get("content", [])
-                if logprobs_content:
-                    response_logprobs.extend([logprob_info["logprob"] for logprob_info in logprobs_content])
-
-            # Accumulate token ids
-            accum_token_ids += new_token_ids
+        response_logprobs: Optional[List[float]] = None
+        logprobs = choice.get("logprobs")
+        if logprobs is not None:
+            logprobs_content = logprobs.get("content", [])
+            if logprobs_content:
+                response_logprobs = [logprob_info["logprob"] for logprob_info in logprobs_content]
 
         return {
-            # Another vllm server request per sample for detokenization is bad - we should just store tokenizer in the RemoteInferenceClient
-            "response": (await self.detokenize([accum_token_ids]))[0],
+            "response": (await self.detokenize([token_ids]))[0],
             "stop_reason": stop_reason,
-            "response_ids": accum_token_ids,
-            "response_logprobs": response_logprobs if len(response_logprobs) > 0 else None,
+            "response_ids": token_ids,
+            "response_logprobs": response_logprobs,
         }
 
     async def chat_completion(
@@ -467,24 +423,26 @@ class RemoteInferenceClient:
         self,
         server_url: str,
         endpoint: str,
-        json: Dict[str, Any],
+        json: Optional[Dict[str, Any]] = None,
         method: str = "POST",
-    ) -> tuple:
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
         Call endpoint on a single server.
 
         Args:
             server_url: Base URL of the server.
             endpoint: Endpoint path (e.g., "/pause").
-            json: JSON payload to send.
+            json: JSON payload to send as request body.
             method: HTTP method (default: POST).
+            params: URL query parameters (e.g., for FastAPI Query() params).
 
         Returns:
             Tuple of (server_url, {"status": <int>, "body": <response>}).
         """
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
-        async with session.request(method, url, json=json) as resp:
+        async with session.request(method, url, json=json, params=params) as resp:
             body = await resp.json() if resp.content_length else None
             raise_for_status(resp, body)
             return server_url, {"status": resp.status, "body": body}
@@ -492,64 +450,63 @@ class RemoteInferenceClient:
     async def _call_all_servers(
         self,
         endpoint: str,
-        json: Dict[str, Any],
+        json: Optional[Dict[str, Any]] = None,
         method: str = "POST",
+        params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Call endpoint on all server_urls concurrently with the same payload.
+        Call endpoint on all server_urls concurrently.
 
         Args:
             endpoint: Endpoint path (e.g., "/pause").
-            json: JSON payload to broadcast to all servers.
+            json: JSON payload to send as request body.
             method: HTTP method (default: POST).
+            params: URL query parameters (e.g., for FastAPI Query() params).
 
         Returns:
             Dict mapping server_url to response.
         """
-        results = await asyncio.gather(*[self._call_server(url, endpoint, json, method) for url in self.server_urls])
+        results = await asyncio.gather(
+            *[self._call_server(url, endpoint, json, method, params) for url in self.server_urls]
+        )
         return {url: resp for url, resp in results}
 
-    async def pause(self, mode: Union[PauseMode, str] = PauseMode.ABORT) -> Dict[str, Any]:
+    async def pause(self, mode: Union[PauseMode, str] = PauseMode.KEEP, clear_cache: bool = False) -> Dict[str, Any]:
         """
         Pause generation on all backends.
 
         Args:
             mode: Pause mode determining how in-flight requests are handled.
-                Can be a PauseMode enum or string ("abort", "finish").
+                Can be a PauseMode enum or string ("abort", "keep", "wait").
+                - KEEP / "keep": Freeze in-flight requests in the scheduler.
+                    They resume where they left off on /resume. KV cache is
+                    preserved. No retry needed. (default)
                 - ABORT / "abort": Abort in-flight requests immediately. Clients
                     receive partial tokens and must retry with accumulated context.
-                    New requests are blocked.
-                - FINISH / "finish": Wait for in-flight requests to complete before
+                - WAIT / "wait": Wait for in-flight requests to complete before
                     pausing. New requests are blocked. No retry needed.
+            clear_cache: Whether to clear the KV cache on pause. Defaults to False.
 
         Returns:
             Dict mapping server_url to response.
-
-        TODO:
-            When vLLM RFC #32103 lands, we'll use the native mode parameter.
-            For now, we map modes to wait_for_inflight_request:
-            - ABORT → wait_for_inflight_request=False
-            - FINISH → wait_for_inflight_request=True
         """
-        # Convert string to PauseMode if needed
         if isinstance(mode, str):
             mode = PauseMode(mode.lower())
 
-        wait_for_inflight_request = mode == PauseMode.FINISH
+        params: Dict[str, Any] = {"mode": mode.value, "clear_cache": str(clear_cache).lower()}
 
-        return await self._call_all_servers("/pause", {"wait_for_inflight_request": wait_for_inflight_request})
+        return await self._call_all_servers("/pause", params=params)
 
     async def resume(self) -> Dict[str, Any]:
         """Resume generation on all backends."""
-        return await self._call_all_servers("/resume", {})
+        return await self._call_all_servers("/resume")
 
-    # TODO (Kourosh): Compatibility aliases for InferenceEngineClient interface, delete this when we deprecate the old interface
-    async def pause_generation(self) -> Dict[str, Any]:
-        """Alias for pause() - compatibility with InferenceEngineClient interface."""
-        return await self.pause(mode=PauseMode.ABORT)
+    async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
+        """Pause using keep mode - compatibility with InferenceEngineClient interface."""
+        return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
 
     async def resume_generation(self) -> Dict[str, Any]:
-        """Alias for resume() - compatibility with InferenceEngineClient interface."""
+        """Resume after pause - compatibility with InferenceEngineClient interface."""
         return await self.resume()
 
     async def sleep(self, level: int = 2, tags: Optional[List[str]] = None) -> Dict[str, Any]:

@@ -7,6 +7,7 @@ Uses Ray's public network utilities for consistency with Ray's cluster managemen
 import logging
 import socket
 from dataclasses import dataclass
+from typing import Tuple
 
 import ray
 
@@ -72,3 +73,29 @@ def get_open_port(start_port: int | None = None) -> int:
     with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
+
+
+def find_and_reserve_port(start_port: int) -> Tuple[int, socket.socket]:
+    """Find an available port and hold the socket to prevent race conditions.
+
+    This keeps the socket bound so no other process can claim the same port
+    between discovery and actual server startup.
+
+    Returns:
+        (port, socket) -- caller must close the socket before rebinding.
+    """
+    port = start_port
+    sock: socket.socket | None = None
+    while True:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", port))
+            sock.listen(1)
+            return port, sock
+        except OSError:
+            if sock:
+                sock.close()
+            port += 1
+            if port > 65535:
+                raise RuntimeError(f"No available port found starting from {start_port}")

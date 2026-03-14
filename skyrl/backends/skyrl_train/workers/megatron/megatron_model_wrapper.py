@@ -1,29 +1,36 @@
-from typing import Optional, Callable, List, Dict, Any
+from dataclasses import asdict
 from functools import partial
+from typing import Any, Callable, Dict, List, Optional
+
+import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
-from omegaconf import OmegaConf
-from dataclasses import asdict
-
-from megatron.core.pipeline_parallel import get_forward_backward_func
-import megatron.core.parallel_state as mpu
 from megatron.core.distributed import finalize_model_grads
+from megatron.core.pipeline_parallel import get_forward_backward_func
+from omegaconf import OmegaConf
 
-from skyrl.train.config import TrainerConfig
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    get_model_config,
+    make_batch_generator,
+    postprocess_packed_seqs,
+    preprocess_packed_seqs,
+    recover_left_padding,
+    remove_left_padding,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     vocab_parallel_entropy,
 )
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl.backends.skyrl_train.utils.ppo_utils import compute_approx_kl, PolicyLossRegistry
-from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-    make_batch_generator,
-    preprocess_packed_seqs,
-    postprocess_packed_seqs,
-    remove_left_padding,
-    recover_left_padding,
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+    compute_approx_kl,
 )
+from skyrl.backends.skyrl_train.utils.replay_utils import (
+    setup_per_microbatch_replay_backward,
+    setup_per_microbatch_replay_forward,
+)
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.train.config import TrainerConfig
 
 
 class MegatronModelWrapper:
@@ -103,6 +110,13 @@ class MegatronModelWrapper:
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
+
+            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_forward(
+                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                )
+
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
@@ -355,6 +369,12 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
+            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_forward(
+                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                )
+
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
@@ -400,6 +420,9 @@ class MegatronModelWrapper:
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
+
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_backward()
 
             return outputs, partial(loss_func, data=batch)
 

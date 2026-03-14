@@ -13,17 +13,19 @@ Three modes:
 
 Usage:
   # Requires at least 1 GPU
-  uv run --isolated --extra dev --extra fsdp python skyrl/benchmarks/load_test_connections.py
+  uv run --isolated --extra dev --extra fsdp python skyrl/benchmarks/load_test_concurrency.py
 
-  # Custom levels and modes
-  uv run --isolated --extra dev --extra fsdp python skyrl/benchmarks/load_test_connections.py \\
-      --levels 100,500,1000 --modes direct,e2e
+  # Custom options
+  uv run --isolated --extra dev --extra fsdp python skyrl/benchmarks/load_test_concurrency.py \
+      --num-prompts 500 --modes direct --qps 200 --max-tokens 32
 """
 
 import argparse
 import asyncio
 import logging
+import math
 import time
+from concurrent.futures import ProcessPoolExecutor
 from typing import Tuple
 
 import aiohttp
@@ -31,7 +33,9 @@ import ray
 from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer
 
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
 from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
@@ -42,7 +46,6 @@ logger = logging.getLogger(__name__)
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 SERVED_MODEL_NAME = "load_test_model"
-DEFAULT_LEVELS = [100, 500, 1000, 2000, 5000, 10000]
 VALID_MODES = ["direct", "router", "e2e"]
 
 
@@ -107,28 +110,43 @@ async def _post_chat_completion(session: aiohttp.ClientSession, url: str, payloa
         return {"status": resp.status, "body": await resp.json()}
 
 
-async def fire_chat_completions(base_url: str, n: int, model_name: str) -> dict:
+async def _rate_limited_gather(coros, qps):
+    """Launch coroutines at a steady rate of *qps* per second, then await all."""
+    tasks = []
+    interval = 1.0 / qps
+    for coro in coros:
+        tasks.append(asyncio.ensure_future(coro))
+        await asyncio.sleep(interval)
+    return await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def fire_chat_completions(base_url: str, n: int, model_name: str, max_tokens: int, qps: float = math.inf) -> dict:
     """Send *n* concurrent /v1/chat/completions requests."""
     url = f"{base_url}/v1/chat/completions"
     payload = {
         "model": model_name,
         "messages": [{"role": "user", "content": "Say hi"}],
-        "max_tokens": 16,
+        "max_tokens": max_tokens,
     }
     connector = aiohttp.TCPConnector(limit=0)
     timeout = aiohttp.ClientTimeout(total=300)
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         tasks = [_post_chat_completion(session, url, payload) for _ in range(n)]
         t0 = time.monotonic()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if math.isinf(qps):
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            results = await _rate_limited_gather(tasks, qps)
         elapsed = time.monotonic() - t0
 
     ok = sum(1 for r in results if isinstance(r, dict) and r["status"] == 200)
     errors = [r for r in results if isinstance(r, Exception) or (isinstance(r, dict) and r["status"] != 200)]
-    return {"n": n, "ok": ok, "errors": len(errors), "elapsed": f"{elapsed:.2f}s", "first_errors": errors[:3]}
+    return {"n": n, "ok": ok, "errors": len(errors), "elapsed_s": elapsed, "first_errors": errors[:3]}
 
 
-async def fire_client_generate(client: RemoteInferenceClient, tokenizer, n: int) -> dict:
+async def fire_client_generate(
+    client: RemoteInferenceClient, tokenizer, n: int, max_tokens: int, qps: float = math.inf
+) -> dict:
     """Send *n* concurrent prompts through RemoteInferenceClient.generate().
 
     Bypasses client.generate() to use return_exceptions=True so we get
@@ -139,7 +157,7 @@ async def fire_client_generate(client: RemoteInferenceClient, tokenizer, n: int)
         add_generation_prompt=True,
         tokenize=True,
     )
-    sampling_params = {"max_tokens": 16}
+    sampling_params = {"max_tokens": max_tokens}
 
     async def _single(idx: int) -> dict:
         """Wrap _generate_single to tag errors with the phase that failed."""
@@ -156,31 +174,84 @@ async def fire_client_generate(client: RemoteInferenceClient, tokenizer, n: int)
     tasks = [_single(i) for i in range(n)]
 
     t0 = time.monotonic()
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    if math.isinf(qps):
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    else:
+        results = await _rate_limited_gather(tasks, qps)
     elapsed = time.monotonic() - t0
 
     ok = sum(1 for r in results if not isinstance(r, Exception))
     errors = [r for r in results if isinstance(r, Exception)]
-    return {"n": n, "ok": ok, "errors": len(errors), "elapsed": f"{elapsed:.2f}s", "first_errors": errors[:3]}
+    return {"n": n, "ok": ok, "errors": len(errors), "elapsed_s": elapsed, "first_errors": errors[:3]}
 
 
 def print_result(result: dict):
+    elapsed = result["elapsed_s"]
+    throughput = result["n"] / elapsed if elapsed > 0 else float("inf")
     status = "PASS" if result["errors"] == 0 else "FAIL"
     print(
         f"  [{status}] n={result['n']:>6}  ok={result['ok']:>6}  "
-        f"errors={result['errors']:>4}  time={result['elapsed']}"
+        f"errors={result['errors']:>4}  time={elapsed:.2f}s  throughput={throughput:.1f} req/s"
     )
     for e in result["first_errors"]:
         print(f"         err: {str(e)[:120]}")
 
 
+def _worker_fire(base_url: str, n: int, model_name: str, max_tokens: int, qps: float = math.inf) -> dict:
+    """Entry point for child processes — runs fire_chat_completions in a fresh event loop."""
+    return asyncio.run(fire_chat_completions(base_url, n, model_name, max_tokens, qps))
+
+
+def _merge_results(results: list[dict]) -> dict:
+    """Merge results from multiple workers into a single summary."""
+    total_n = sum(r["n"] for r in results)
+    total_ok = sum(r["ok"] for r in results)
+    total_errors = sum(r["errors"] for r in results)
+    max_elapsed = max(r["elapsed_s"] for r in results)
+    first_errors = []
+    for r in results:
+        first_errors.extend(r["first_errors"])
+    return {
+        "n": total_n,
+        "ok": total_ok,
+        "errors": total_errors,
+        "elapsed_s": max_elapsed,
+        "first_errors": first_errors[:3],
+    }
+
+
+def run_chat_completions(
+    base_url: str, n: int, model_name: str, max_tokens: int, qps: float = math.inf, max_workers: int = 1
+):
+    """Run chat completions with optional multi-process workers."""
+    if max_workers > 1:
+        chunk = n // max_workers
+        # Per-worker QPS so aggregate matches requested QPS
+        worker_qps = qps / max_workers
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(_worker_fire, base_url, chunk, model_name, max_tokens, worker_qps)
+                for _ in range(max_workers)
+            ]
+            worker_results = [f.result() for f in futures]
+        return _merge_results(worker_results)
+    else:
+        return asyncio.run(fire_chat_completions(base_url, n, model_name, max_tokens, qps))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Load test inference connection limits")
     parser.add_argument(
-        "--levels",
-        type=str,
-        default=None,
-        help=f"Comma-separated concurrency levels (default: {','.join(map(str, DEFAULT_LEVELS))})",
+        "--num-prompts",
+        type=int,
+        default=1000,
+        help="Number of prompts to send (default: 1000)",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=16,
+        help="Max tokens per generation (default: 16)",
     )
     parser.add_argument(
         "--modes",
@@ -189,22 +260,45 @@ def parse_args():
         help=f"Comma-separated modes (default: {','.join(VALID_MODES)}). "
         "direct=vLLM server only, router=router+vLLM, e2e=RemoteInferenceClient+router+vLLM",
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Number of worker processes for direct/router modes (default: 1)",
+    )
+
+    parser.add_argument(
+        "--qps",
+        type=float,
+        default=math.inf,
+        help="Submit requests at a steady rate (requests/sec). " "Default: inf (all requests fired at time 0).",
+    )
+
     args = parser.parse_args()
 
-    levels = [int(x) for x in args.levels.split(",")] if args.levels else DEFAULT_LEVELS
     modes = [x.strip() for x in args.modes.split(",")] if args.modes else VALID_MODES
     for mode in modes:
         if mode not in VALID_MODES:
             parser.error(f"Invalid mode '{mode}', expected one of {VALID_MODES}")
 
-    return levels, modes
+    if args.max_workers > 1 and "e2e" in modes and len(modes) == 1:
+        parser.error("--max-workers is not supported for e2e mode")
+
+    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers
 
 
 def main():
     logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
-    levels, modes = parse_args()
+    num_prompts, modes, max_tokens, qps, max_workers = parse_args()
 
-    print(f"Load test: model={MODEL}, levels={levels}, modes={modes}")
+    print("Load test config:")
+    print(f"  model={MODEL}")
+    print(f"  num_prompts={num_prompts}")
+    print(f"  max_tokens={max_tokens}")
+    print(f"  modes={modes}")
+    print(f"  qps={qps}")
+    print(f"  max_workers={max_workers}")
+    print()
     print("Starting servers...")
 
     cfg = get_config()
@@ -225,18 +319,16 @@ def main():
             print("=" * 60)
             print("Mode: direct - vLLM server (bypass router)")
             print("=" * 60)
-            for n in levels:
-                result = asyncio.run(fire_chat_completions(server_urls[0], n, SERVED_MODEL_NAME))
-                print_result(result)
+            result = run_chat_completions(server_urls[0], num_prompts, SERVED_MODEL_NAME, max_tokens, qps, max_workers)
+            print_result(result)
             print()
 
         if "router" in modes:
             print("=" * 60)
             print("Mode: router - through `InferenceRouter`")
             print("=" * 60)
-            for n in levels:
-                result = asyncio.run(fire_chat_completions(proxy_url, n, SERVED_MODEL_NAME))
-                print_result(result)
+            result = run_chat_completions(proxy_url, num_prompts, SERVED_MODEL_NAME, max_tokens, qps, max_workers)
+            print_result(result)
             print()
 
         if "e2e" in modes:
@@ -244,14 +336,12 @@ def main():
             print("Mode: e2e - `RemoteInferenceClient.generate()`")
             print("=" * 60)
 
-            for n in levels:
+            async def _run_e2e():
+                result = await fire_client_generate(client, tokenizer, num_prompts, max_tokens, qps)
+                print_result(result)
+                await client.teardown()
 
-                async def _run_e2e(n=n):
-                    result = await fire_client_generate(client, tokenizer, n)
-                    print_result(result)
-                    await client.teardown()
-
-                asyncio.run(_run_e2e())
+            asyncio.run(_run_e2e())
             print()
 
     finally:

@@ -10,7 +10,6 @@ from skyrl.tx.models.configs import Llama3Config, ModelConfig, Qwen3Config
 from skyrl.tx.models.llama3 import Llama3ForCausalLM
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
 from skyrl.tx.models.types import CausalLMOutput, ModelForCausalLM
-
 from tests.tx.models.conftest import create_model, load_model
 
 MODEL_PARAMS = [

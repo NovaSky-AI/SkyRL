@@ -6,16 +6,16 @@ uv run --isolated --extra dev -- pytest tests/train/algorithms/test_off_policy_c
 
 import pytest
 import torch
-from skyrl.train.config import OffPolicyCorrectionConfig, AlgorithmConfig
 
-from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
-    compute_tis_ratio,
-    compute_sequence_mask,
-    compute_outlier_token_mask,
-    compute_token_mask,
     compute_off_policy_correction,
+    compute_outlier_token_mask,
+    compute_sequence_mask,
+    compute_tis_ratio,
+    compute_token_mask,
 )
+from skyrl.backends.skyrl_train.utils.ppo_utils import PolicyLossRegistry
+from skyrl.train.config import AlgorithmConfig, OffPolicyCorrectionConfig
 
 
 def test_compute_tis_ratio_token_level():

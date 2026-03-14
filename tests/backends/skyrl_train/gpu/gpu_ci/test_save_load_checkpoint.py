@@ -6,20 +6,21 @@ For Megatron, run:
 uv run --isolated --extra dev --extra mcore -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_save_load_checkpoint.py -m "megatron"
 """
 
-import ray
-import pytest
-import torch
+import json
 import os
 import shutil
-import json
+
+import pytest
+import ray
+import torch
 from transformers import AutoTokenizer
 
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import print_mem, validate_cfg
 from tests.backends.skyrl_train.gpu.utils import (
+    get_model_logits_from_actor,
     init_worker_with_type,
     make_dummy_training_batch,
-    get_model_logits_from_actor,
 )
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -112,7 +113,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
 
         # For Megatron, build training batches and reuse the second one pre/post checkpoint resume
         if "megatron" in strategy:
-            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import get_test_training_batch
+            from tests.backends.skyrl_train.gpu.gpu_ci.test_megatron_worker import (
+                get_test_training_batch,
+            )
 
             dp_size = actor_group.actor_infos[0].rank.dp_size
             train_batch_1 = get_test_training_batch(dp_size if dp_size % NUM_GPUS == 0 else NUM_GPUS)

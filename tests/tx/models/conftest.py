@@ -1,8 +1,8 @@
 from typing import Any
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from transformers import AutoConfig
 
 from skyrl.tx.models.configs import ModelConfig
