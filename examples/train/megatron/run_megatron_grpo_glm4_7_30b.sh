@@ -20,7 +20,7 @@ set -x
 #        bash examples/train/megatron/run_megatron_grpo_glm4_7_30b.sh
 
 MODEL_NAME="zai-org/GLM-4.7-Flash"
-DATA_DIR=${DATA_DIR:-"$HOME/data/gsm8k"}
+DATA_DIR=${DATA_DIR:-"/mnt/cluster_storage/data/gsm8k"}
 CKPT_DIR=${CKPT_DIR:-"$HOME/ckpts/glm4_7_30b_a3b_grpo_megatron"}
 LOGGER="wandb"  # change to "console" to print to stdout
 
@@ -30,7 +30,7 @@ NUM_NODES=1
 NUM_GPUS=8
 
 # Megatron parallelism: TP=1, EP=8 fits 64 MoE experts across 8 GPUs (8 experts/GPU)
-MEGATRON_TP=1
+MEGATRON_TP=4
 MEGATRON_PP=1
 MEGATRON_CP=1
 MEGATRON_EP=8
@@ -57,7 +57,11 @@ MOE_ROUTER_EXPERT_BIAS=true
 OPTIMIZER_CPU_OFFLOAD=true
 OPTIMIZER_OFFLOAD_FRACTION=1.0
 
-uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
+# Routing replay params
+ROUTER_REPLAY=false
+DISTRIBUTED_EXECUTION_BACKEND="ray"
+
+SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -82,6 +86,9 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.policy.megatron_config.moe_router_enable_expert_bias=$MOE_ROUTER_EXPERT_BIAS \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_cpu_offload=$OPTIMIZER_CPU_OFFLOAD \
   trainer.policy.megatron_config.optimizer_config_kwargs.optimizer_offload_fraction=$OPTIMIZER_OFFLOAD_FRACTION \
+  trainer.policy.megatron_config.moe_enable_routing_replay=$ROUTER_REPLAY \
+  generator.inference_engine.enable_return_routed_experts=$ROUTER_REPLAY \
+  generator.inference_engine.distributed_executor_backend=$DISTRIBUTED_EXECUTION_BACKEND \
   trainer.policy.megatron_config.empty_cuda_cache=true \
   trainer.use_sample_packing=true \
   trainer.flash_attn=$FLASH_ATTN \
@@ -92,8 +99,8 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=128 \
   trainer.policy_mini_batch_size=64 \
-  trainer.micro_forward_batch_size_per_gpu=4 \
-  trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.micro_forward_batch_size_per_gpu=2 \
+  trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=512 \
   generator.sampling_params.max_generate_length=1024 \
@@ -108,10 +115,10 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
-  generator.inference_engine.gpu_memory_utilization=0.5 \
+  generator.inference_engine.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="glm4_7_30b_grpo" \
-  trainer.run_name="glm4_7_30b_a3b_grpo_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
+  trainer.run_name="glm4_7_30b_a3b_grpo_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_baseline" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$CKPT_DIR" \
   $@
