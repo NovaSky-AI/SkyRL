@@ -3,7 +3,7 @@
 Load test for concurrency limits across the inference stack.
 
 Spins up vLLM server(s) + router + RemoteInferenceClient via Ray, then sends
-concurrent requests at increasing batch sizes to verify that the full HTTP
+concurrent requests to verify that the full HTTP
 pipeline handles high concurrency without dropping connections.
 
 Three modes:
