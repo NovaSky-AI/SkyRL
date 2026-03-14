@@ -223,6 +223,7 @@ class RemoteInferenceClient:
         # the router and vLLM server with thousands of simultaneous requests.
         # Each task includes both the generate and detokenize HTTP calls.
         # Scales with number of engines so the limit fits the cluster size.
+        # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): We should move this outside of the client to a runner abstraction that will also parallelize client requests across processes.
         num_engines = len(self.server_urls)
         concurrency = SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * num_engines
         sem = asyncio.Semaphore(concurrency) if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0 else None
