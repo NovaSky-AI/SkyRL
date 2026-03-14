@@ -57,7 +57,7 @@ Maximum number of concurrent generate tasks per inference engine.
 The effective concurrency limit is ``SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * num_engines``.
 Large batch sizes (e.g. 5120) can overwhelm the router's single-threaded
 event loop and vLLM's accept queue when all requests fire simultaneously.
-The semaphore ensures at most this many tasks per engine are in-flight at
+We ensure that at most this many tasks per engine are in-flight at
 once; the rest queue locally and proceed as slots free up.
 
 Set to 0 to disable throttling (all tasks fire immediately).
