@@ -22,7 +22,10 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
-from skyrl.env_vars import SKYRL_HTTP_CONNECTION_LIMIT, SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
+from skyrl.env_vars import (
+    SKYRL_HTTP_CONNECTION_LIMIT,
+    SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
+)
 
 _PROXY_RETRIES = 3
 
