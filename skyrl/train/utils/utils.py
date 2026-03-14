@@ -287,6 +287,14 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         f"invalid loss_reduction: {cfg.trainer.algorithm.loss_reduction}. "
         f"Must be one of `['token_mean', 'sequence_mean', 'seq_mean_token_sum_norm']`"
     )
+    if cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
+        if cfg.trainer.algorithm.max_seq_len is None:
+            raise ValueError(
+                "`trainer.algorithm.max_seq_len` must be set explicitly when "
+                "`trainer.algorithm.loss_reduction='seq_mean_token_sum_norm'`. "
+                "Choose the total sequence-length normalization constant for your setup; "
+                "this often matches the model context window / vLLM `max_model_len` when appropriate."
+            )
 
     # TODO (erictang000): remove this after deprecation period
     if cfg.trainer.algorithm.use_tis:

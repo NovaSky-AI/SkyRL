@@ -127,8 +127,9 @@ trainer:
     tis_imp_ratio_cap: -1.0
     use_tis: false
 
-    # Used for seq_mean_token_sum_norm loss reduction. Users should set this value for multi-turn for that loss.
-    # If not set, will be calculated as generator.max_input_length + generator.sampling_params.max_generate_length.
+    # Used for seq_mean_token_sum_norm loss reduction.
+    # Must be set explicitly when trainer.algorithm.loss_reduction=seq_mean_token_sum_norm.
+    # Choose the total sequence-length normalization constant for your setup.
     max_seq_len: null
 
     # references
