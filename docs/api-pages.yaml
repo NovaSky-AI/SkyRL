@@ -215,6 +215,15 @@
             - skyrl.backends.skyrl_train.workers.worker.Worker
             - skyrl.backends.skyrl_train.workers.worker.PPORayActorGroup
 
+    - slug: utils
+      title: Utils
+      description: Utility classes for the SkyRL-Train backend.
+      sections:
+        - heading: Placement Group
+          description: ""
+          objects:
+            - skyrl.train.utils.utils.ResolvedPlacementGroup
+
     - slug: data
       title: Data Interface
       description: Data Interface — TensorBatch, TrainingInput, GeneratorInput/Output.

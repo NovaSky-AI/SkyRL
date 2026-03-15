@@ -13,6 +13,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.inference_servers.server_pool import ServerActorPool
+from skyrl.train.utils.utils import ResolvedPlacementGroup
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class ServerGroup:
         cli_args: Namespace,
         num_servers: int,
         start_port: int = 8000,
-        placement_group: Optional[PlacementGroup] = None,
+        placement_group: Optional[ResolvedPlacementGroup] = None,
         placement_group_bundle_offset: int = 0,
         enable_dp: bool = False,
         enable_pd: bool = False,
@@ -88,6 +89,16 @@ class ServerGroup:
         self._server_actor_kwargs = server_actor_kwargs
         self._external_pg = placement_group
 
+        # Extract the raw PG, reordered indices, and GPU IDs from ResolvedPlacementGroup.
+        if placement_group is not None:
+            self._external_pg = placement_group.pg
+            self._reordered_bundle_indices = placement_group.reordered_bundle_indices
+            self._bundle_gpu_ids = placement_group.bundle_gpu_ids
+        else:
+            self._external_pg = None
+            self._reordered_bundle_indices = None
+            self._bundle_gpu_ids = None
+
         # Query the actor class for GPU requirements
         self._num_gpus_per_server = self._server_actor_cls.compute_num_gpus_per_server(cli_args)
 
@@ -105,6 +116,9 @@ class ServerGroup:
         logger.info(f"Creating placement group with {total_bundles} bundles...")
         pg = placement_group([{"CPU": 1, "GPU": 1} for _ in range(total_bundles)])
         ray.get(pg.ready())
+        skyrl_pg = ResolvedPlacementGroup(pg)
+        self._reordered_bundle_indices = skyrl_pg.reordered_bundle_indices
+        self._bundle_gpu_ids = skyrl_pg.bundle_gpu_ids
         logger.info("Placement group ready")
         return pg
 
@@ -128,6 +142,22 @@ class ServerGroup:
             ),
         )
 
+    def _get_bundle_indices_for_server(self, server_idx: int) -> List[int]:
+        """Get the bundle indices for a server, using reordered indices if available."""
+        gpus = self._num_gpus_per_server
+        logical_base = self._bundle_offset + server_idx * gpus
+        if self._reordered_bundle_indices is not None:
+            return [self._reordered_bundle_indices[logical_base + k] for k in range(gpus)]
+        return list(range(logical_base, logical_base + gpus))
+
+    def _get_gpu_ids_for_server(self, server_idx: int) -> Optional[List[int]]:
+        """Get the physical GPU IDs for a server, using cached gpu_ids if available."""
+        if self._bundle_gpu_ids is None:
+            return None
+        gpus = self._num_gpus_per_server
+        logical_base = self._bundle_offset + server_idx * gpus
+        return [self._bundle_gpu_ids[logical_base + k] for k in range(gpus)]
+
     def _create_actors(self) -> List[Any]:
         """Create server actors with GPU resources."""
         pg = self._get_placement_group()
@@ -136,19 +166,25 @@ class ServerGroup:
         dp_address, dp_rpc_port = None, None
 
         for server_idx in range(self._num_servers):
-            start_bundle_idx = self._bundle_offset + server_idx * self._num_gpus_per_server
+            bundle_indices = self._get_bundle_indices_for_server(server_idx)
+            start_bundle_idx = bundle_indices[0]
 
             ServerActorClass = self._create_actor_class(pg, start_bundle_idx)
 
+            gpu_ids = self._get_gpu_ids_for_server(server_idx)
             server_kwargs = self._server_actor_cls.prepare_server_kwargs(
-                pg, start_bundle_idx, self._num_gpus_per_server, **self._server_actor_kwargs
+                pg,
+                start_bundle_idx,
+                self._num_gpus_per_server,
+                _gpu_ids=gpu_ids,
+                **self._server_actor_kwargs,
             )
 
             actor = ServerActorClass.remote(
                 self._cli_args,
                 self._start_port + server_idx,
                 server_idx=server_idx,
-                start_bundle_idx=start_bundle_idx,
+                bundle_indices=bundle_indices,
                 dp_size=self._num_servers if self._enable_dp else -1,
                 dp_master_address=dp_address,
                 dp_rpc_port=dp_rpc_port,

@@ -4,6 +4,7 @@ import vllm
 from skyrl.backends.skyrl_train.inference_engines.vllm.vllm_engine import VLLMInferenceEngine
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import RayWrappedInferenceEngine
 from ray.util.placement_group import PlacementGroupSchedulingStrategy, placement_group
+from skyrl.train.utils.utils import ResolvedPlacementGroup
 
 from skyrl.backends.skyrl_train.inference_engines.base import (
     InferenceEngineInterface,
@@ -69,18 +70,29 @@ def create_ray_wrapped_inference_engines_flashrl(
     if not use_hybrid_engine:
         # Create a big placement group to ensure that all inference engines are packed
         bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * tensor_parallel_size)]
-        shared_pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        raw_pg = placement_group(bundles, strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        shared_pg = ResolvedPlacementGroup(raw_pg)
+
+    assert isinstance(
+        shared_pg, ResolvedPlacementGroup
+    ), f"shared_pg must be a `ResolvedPlacementGroup` got {type(shared_pg)}."
+
+    # Use reordered bundle indices to ensure GPU-aware ordering.
+    reordered = shared_pg.reordered_bundle_indices
+    raw_pg = shared_pg.pg
 
     for i in range(num_inference_engines):
+        logical_base = i * tensor_parallel_size
+        base_pg_index = reordered[logical_base]
         bundle_indices = None
         if tensor_parallel_size > 1:
-            bundle_indices = list(range(i * tensor_parallel_size, (i + 1) * tensor_parallel_size))
+            bundle_indices = [reordered[logical_base + k] for k in range(tensor_parallel_size)]
 
         scheduling_strategy = PlacementGroupSchedulingStrategy(
-            placement_group=shared_pg,
+            placement_group=raw_pg,
             placement_group_capture_child_tasks=True,
-            placement_group_bundle_index=i * tensor_parallel_size,
+            placement_group_bundle_index=base_pg_index,
         )
 
         if backend == "vllm":

@@ -46,7 +46,12 @@ from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.train.generators.base import ConversationType, GeneratorInput, TrajectoryID
 from skyrl.train.utils import get_ray_pg_ready_with_timeout
-from skyrl.train.utils.utils import initialize_ray, peer_access_supported, print_mem
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    initialize_ray,
+    peer_access_supported,
+    print_mem,
+)
 from skyrl.utils.tok import get_tokenizer
 
 TEST_DATA_PATH = os.path.expanduser("~/data/gsm8k/validation.parquet")
@@ -159,8 +164,9 @@ def init_worker_with_type(
         num_gpus_per_actor = 0.2
     else:
         bundles = [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node} for _ in range(num_nodes)]
-        pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(pg, timeout=30)
+        raw_pg = placement_group(bundles, strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=30)
+        pg = ResolvedPlacementGroup(raw_pg)
         num_gpus_per_actor = 0.75
 
     worker_cls = import_worker(cfg.trainer.strategy, worker_type)
@@ -483,11 +489,12 @@ class InferenceEngineState:
                 ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
             )
             total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
-            shared_pg = placement_group(
+            raw_pg = placement_group(
                 [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
                 strategy="PACK",
             )
-            get_ray_pg_ready_with_timeout(shared_pg, timeout=60)
+            get_ray_pg_ready_with_timeout(raw_pg, timeout=60)
+            shared_pg = ResolvedPlacementGroup(raw_pg)
             sleep = True
         else:
             shared_pg, sleep = None, False

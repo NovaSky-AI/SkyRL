@@ -13,7 +13,7 @@ import torch
 from jaxtyping import Float
 from loguru import logger
 from ray import ObjectRef
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -76,7 +76,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
-from skyrl.train.utils.utils import configure_ray_worker_logging
+from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
 
 
 class RayPPOTrainer:
@@ -88,7 +88,7 @@ class RayPPOTrainer:
         train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
         generator: GeneratorInterface,
-        colocate_pg: Optional[PlacementGroup] = None,
+        colocate_pg: Optional[ResolvedPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
     ):
         self.cfg = cfg
@@ -466,8 +466,9 @@ class RayPPOTrainer:
                     }
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                raw_pg = placement_group(bundles, strategy="PACK")
+                get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                pg = ResolvedPlacementGroup(raw_pg)
 
             policy_model = PPORayActorGroup(
                 cfg.trainer,

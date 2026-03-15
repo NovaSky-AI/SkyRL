@@ -12,7 +12,11 @@ from ray.util.placement_group import placement_group
 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
-from skyrl.train.utils.utils import get_ray_pg_ready_with_timeout
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    get_ray_pg_ready_with_timeout,
+    validate_cfg,
+)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -22,6 +26,7 @@ def get_test_actor_config() -> SkyRLTrainConfig:
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
     cfg.trainer.strategy = "fsdp2"
+    validate_cfg(cfg)
     return cfg
 
 
@@ -37,14 +42,14 @@ def get_pg(placement_group_type, num_gpus_per_node, num_nodes):
             strategy="PACK",
         )
         get_ray_pg_ready_with_timeout(pg, timeout=60)
-        return pg
+        return ResolvedPlacementGroup(pg)
     elif placement_group_type == "whole_node_bundle":
         pg = placement_group(
             [{"GPU": num_gpus_per_node, "CPU": num_gpus_per_node}] * num_nodes,
             strategy="PACK",
         )
         get_ray_pg_ready_with_timeout(pg, timeout=60)
-        return pg
+        return ResolvedPlacementGroup(pg)
     elif placement_group_type == "none":
         return None
     else:
@@ -58,10 +63,10 @@ def test_multi_node_pg_invalid_pg(ray_init_fixture, cfg):
     pg = get_pg("whole_node_bundle", num_gpus_per_node, num_nodes)
     with pytest.raises(
         AssertionError,
-        match="if colocate_all is True, the number of bundles in the shared placement group must match the world size",
+        match="if colocate_all is True, the number of bundles in the placement group",
     ):
         PPORayActorGroup(
-            cfg,
+            cfg.trainer,
             num_nodes=num_nodes,
             num_gpus_per_node=num_gpus_per_node,
             ray_actor_type=PolicyWorker,
@@ -81,7 +86,7 @@ def test_multi_node_pg_errors_no_pg(ray_init_fixture, cfg):
         match="if colocate_all is True, the shared placement group must be provided to PPORayActorGroup",
     ):
         PPORayActorGroup(
-            cfg,
+            cfg.trainer,
             num_nodes=num_nodes,
             num_gpus_per_node=num_gpus_per_node,
             ray_actor_type=PolicyWorker,
@@ -118,7 +123,7 @@ def test_multi_node_pg_init(ray_init_fixture, cfg, colocate_all, placement_group
         )
 
         policy = PPORayActorGroup(
-            cfg,
+            cfg.trainer,
             num_nodes=cfg.trainer.placement.policy_num_nodes,
             num_gpus_per_node=cfg.trainer.placement.policy_num_gpus_per_node,
             ray_actor_type=PolicyWorker,
