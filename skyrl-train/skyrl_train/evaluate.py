@@ -236,6 +236,11 @@ async def evaluate_step_wise(
     # Log examples to wandb
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
     output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
+    true_output_responses = []
+    for response in output_responses:
+        true_output_responses.append(response.split(tokenizer.eos_token)[0])
+    output_responses = true_output_responses
+        
     if cfg.trainer.logger in ["wandb", ["wandb"]] or (
         isinstance(cfg.trainer.logger, list) and "wandb" in cfg.trainer.logger
     ):
