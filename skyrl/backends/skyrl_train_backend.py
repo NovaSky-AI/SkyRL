@@ -22,7 +22,7 @@ from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import
 from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
     create_ray_wrapped_inference_engines,
 )
-from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
@@ -309,15 +309,6 @@ class SkyRLTrainBackend(AbstractBackend):
         if has_advantages:
             batch_dict["advantages"] = torch.tensor(advantages_list, dtype=torch.float32)
 
-        # Conditionally add multi-modal vision fields
-        if hasattr(prepared_batch, "all_pixel_values") and prepared_batch.all_pixel_values:
-            from skyrl.backends.skyrl_train.utils.mm_processor import extract_vision_data
-
-            pv, thw = extract_vision_data(prepared_batch.all_pixel_values, prepared_batch.all_image_grid_thw)
-            if pv is not None:
-                batch_dict["pixel_values"] = pv
-                batch_dict["image_grid_thw"] = thw
-
         batch = TrainingInputBatch(batch_dict)
         batch.metadata = {"response_length": max_response_len}
         return batch
@@ -346,19 +337,14 @@ class SkyRLTrainBackend(AbstractBackend):
         new_tensors = {}
         for key, tensor in batch.items():
             if tensor is not None:
-                if isinstance(tensor, TensorList):
-                    # Repeat from beginning to fill padding slots
-                    padding = TensorList([tensor[i % len(tensor)] for i in range(pad_size)])
-                    new_tensors[key] = TensorList.cat([tensor, padding])
-                elif key == "loss_mask":
+                if key == "loss_mask":
                     # Padding entries must not contribute to the loss
                     additional_dims = tensor.shape[1:]
                     padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
                 else:
                     # Clone real data so shapes/dtypes are valid for the model
                     padding_tensor = tensor[torch.arange(pad_size) % tensor.shape[0]].clone()
-                    new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+                new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
 
         padded = TrainingInputBatch(new_tensors)
         padded.metadata = batch.metadata
