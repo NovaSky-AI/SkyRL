@@ -457,11 +457,12 @@ def test_get_metrics_from_generator_output():
     assert metrics["mean_positive_reward"] == 1.0
 
     # Mixed per-token rewards with negatives - per-token rewards
+    # Last tokens: -1.0 and 0.5, neither >= 1.0 so no passes
     generator_output["rewards"] = [[1.0, -1.0], [-0.5, 0.5]]
     uids = ["a", "b"]
     metrics = get_metrics_from_generator_output(generator_output, uids)
     assert metrics["avg_score"] == 0.0
-    assert metrics["pass_at_n"] == 0.5
+    assert metrics["pass_at_n"] == 0.0
     assert metrics["mean_positive_reward"] == 0.75
 
 

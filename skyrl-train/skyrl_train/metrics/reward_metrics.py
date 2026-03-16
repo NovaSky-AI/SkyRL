@@ -63,11 +63,12 @@ def compute_pass_at_n(
     rewards: Union[List[float], List[List[float]]],
     uids: List[str],
 ) -> float:
-    """Compute pass@n: fraction of unique prompts with at least one positive reward.
+    """Compute pass@n: fraction of unique prompts with at least one fully successful rollout.
 
-    For each unique prompt (identified by uid), if ANY of its rollouts has a positive
-    reward, that prompt counts as a "pass". This metric measures how often the model
-    can succeed at least once when given multiple attempts.
+    For each unique prompt (identified by uid), if ANY of its rollouts achieves a
+    perfect reward (>= 1.0), that prompt counts as a "pass". This metric measures
+    how often the model can fully solve a task when given multiple attempts.
+    Partial rewards (e.g. 0.3 from partial_reward mode) do not count as a pass.
 
     Args:
         rewards: List of rewards (one per rollout). Can be scalar (List[float])
@@ -85,7 +86,7 @@ def compute_pass_at_n(
     if not uid_to_rewards:
         return 0.0
 
-    passed = sum(1 for r_list in uid_to_rewards.values() if any(r > 0 for r in r_list))
+    passed = sum(1 for r_list in uid_to_rewards.values() if any(r >= 1.0 for r in r_list))
     return passed / len(uid_to_rewards)
 
 

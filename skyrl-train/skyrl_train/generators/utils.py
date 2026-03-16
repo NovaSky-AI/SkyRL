@@ -197,9 +197,9 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
         for i, reward in enumerate(rewards):
             uid_to_trajectory_rewards[uids[i]].append(reward)
 
-    # For each trajectory, if the reward is positive, then it's a "pass". So for a single example, if
-    # any of its trajectories' reward is positive, pass@n for that uid is 1.
-    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r > 0 for r in v)) / len(
+    # For each trajectory, if the reward is a full success (>= 1.0), then it's a "pass".
+    # Partial rewards (e.g. 0.3 from partial_reward mode) do not count as a pass.
+    pass_at_n = sum(1 for v in uid_to_trajectory_rewards.values() if any(r >= 1.0 for r in v)) / len(
         uid_to_trajectory_rewards
     )
 

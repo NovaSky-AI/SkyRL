@@ -230,9 +230,9 @@ def test_sanitize_data_source_normal_string():
 
 def test_calculate_per_dataset_metrics_single_source():
     """Test calculate_per_dataset_metrics with single data source."""
-    # Create test data
+    # Create test data - rewards must be >= 1.0 to count as pass
     generator_outputs = {
-        "rewards": [0.5, 0.7, 0.9],
+        "rewards": [1.0, 1.0, 0.5],
         "prompt_token_ids": [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
         "response_ids": [[10, 11], [12, 13], [14, 15]],
     }
@@ -242,22 +242,22 @@ def test_calculate_per_dataset_metrics_single_source():
     result = calculate_per_dataset_metrics(generator_outputs, uids, data_sources, 2)
 
     # Verify results - actual computed values
-    # Pass@N: all rewards > 0, all unique uids, so 3/3 = 1.0
+    # Pass@N: uid1=1.0, uid2=1.0 pass; uid3=0.5 does not pass -> 2/3
     # variance_per_prompt: 0.0 (single sample per uid)
-    # mean_positive_reward: (0.5 + 0.7 + 0.9) / 3 = 0.7
+    # mean_positive_reward: (1.0 + 1.0 + 0.5) / 3 = 0.8333
     assert "eval/dataset1/pass_at_2" in result
     assert "eval/dataset1/variance_per_prompt" in result
     assert "eval/dataset1/mean_positive_reward" in result
-    assert result["eval/dataset1/pass_at_2"] == 1.0
+    assert result["eval/dataset1/pass_at_2"] == pytest.approx(2.0 / 3.0)
     assert result["eval/dataset1/variance_per_prompt"] == 0.0  # single sample per uid
-    assert result["eval/dataset1/mean_positive_reward"] == pytest.approx(0.7)
+    assert result["eval/dataset1/mean_positive_reward"] == pytest.approx(5.0 / 6.0)
 
 
 def test_calculate_per_dataset_metrics_multiple_sources():
     """Test calculate_per_dataset_metrics with multiple data sources including None."""
-    # Create test data with mixed sources
+    # Create test data with mixed sources - rewards >= 1.0 count as pass
     generator_outputs = {
-        "rewards": [0.5, 0.7, 0.9, 0.4],
+        "rewards": [1.0, 0.7, 0.5, 1.0],
         "prompt_token_ids": [[1, 2], [3, 4], [5, 6], [7, 8]],
         "response_ids": [[10, 11], [12, 13], [14, 15], [16, 17]],
     }
@@ -267,8 +267,8 @@ def test_calculate_per_dataset_metrics_multiple_sources():
     result = calculate_per_dataset_metrics(generator_outputs, uids, data_sources, 2)
 
     # Verify results for both datasets - actual computed values
-    # dataset1: indices 0, 2 -> rewards [0.5, 0.9] -> mean_positive = 0.7, pass@n = 2/2 = 1.0
-    # unknown (None): indices 1, 3 -> rewards [0.7, 0.4] -> mean_positive = 0.55, pass@n = 2/2 = 1.0
+    # dataset1: indices 0, 2 -> rewards [1.0, 0.5] -> mean_positive = 0.75, pass@n = 1/2 = 0.5
+    # unknown (None): indices 1, 3 -> rewards [0.7, 1.0] -> mean_positive = 0.85, pass@n = 1/2 = 0.5
     assert "eval/dataset1/pass_at_2" in result
     assert "eval/dataset1/variance_per_prompt" in result
     assert "eval/dataset1/mean_positive_reward" in result
@@ -276,12 +276,12 @@ def test_calculate_per_dataset_metrics_multiple_sources():
     assert "eval/unknown/variance_per_prompt" in result
     assert "eval/unknown/mean_positive_reward" in result
 
-    assert result["eval/dataset1/pass_at_2"] == 1.0
+    assert result["eval/dataset1/pass_at_2"] == 0.5
     assert result["eval/dataset1/variance_per_prompt"] == 0.0  # single sample per uid
-    assert result["eval/dataset1/mean_positive_reward"] == pytest.approx(0.7)
-    assert result["eval/unknown/pass_at_2"] == 1.0
+    assert result["eval/dataset1/mean_positive_reward"] == pytest.approx(0.75)
+    assert result["eval/unknown/pass_at_2"] == 0.5
     assert result["eval/unknown/variance_per_prompt"] == 0.0  # single sample per uid
-    assert result["eval/unknown/mean_positive_reward"] == pytest.approx(0.55)
+    assert result["eval/unknown/mean_positive_reward"] == pytest.approx(0.85)
 
 
 @patch("builtins.open", new_callable=mock_open)
