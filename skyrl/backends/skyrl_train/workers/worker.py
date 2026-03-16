@@ -815,6 +815,8 @@ class PolicyWorkerBase(Worker):
                 return_output=True,
                 compute_entropy=True,
                 entropy_requires_grad=self.cfg.algorithm.use_entropy_loss,
+                pixel_values=experience.pixel_values,
+                image_grid_thw=experience.image_grid_thw,
             )
             # loss function
             # TODO: recompute advantages
@@ -1031,6 +1033,8 @@ class PolicyWorkerBase(Worker):
                 attention_mask,
                 return_output=False,
                 temperature=self.cfg.algorithm.temperature,
+                pixel_values=micro_batch.get("pixel_values"),
+                image_grid_thw=micro_batch.get("image_grid_thw"),
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(

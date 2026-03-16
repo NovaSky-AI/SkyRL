@@ -14,7 +14,13 @@ from loguru import logger
 from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
 from peft.tuners.lora import LoraLayer
-from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import (
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForVision2Seq,
+    BitsAndBytesConfig,
+)
 
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
@@ -105,6 +111,15 @@ class HFModelWrapper(nn.Module):
 
             model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
 
+            # Fall back to AutoModelForVision2Seq for VLMs (e.g. Qwen3-VL)
+            # whose config type has no AutoModelForCausalLM mapping.
+            if not use_liger_kernel and type(model_config) not in AutoModelForCausalLM._model_mapping:
+                logger.info(
+                    f"[VLM] Config {type(model_config).__name__} not in AutoModelForCausalLM mapping, "
+                    "falling back to AutoModelForVision2Seq"
+                )
+                model_class = AutoModelForVision2Seq
+
             rope_scaling_kwargs = {}
             if rope_scaling:
                 rope_scaling_kwargs["rope_scaling"] = rope_scaling
@@ -190,6 +205,11 @@ class HFModelWrapper(nn.Module):
             self.model.config.use_cache = False
         else:
             self.model = pretrain_or_model
+
+        # Detect VLM: model was loaded via AutoModelForVision2Seq (not a standard CausalLM)
+        self.is_vlm = (
+            hasattr(self.model, "config") and type(self.model.config) not in AutoModelForCausalLM._model_mapping
+        )
 
         # TODO (sumanthrh): do the same for `logprobs_from_logits` and test.
         # Credits: https://www.tylerromero.com/posts/2025-02-selective-log-softmax/#efficient-solution
@@ -284,8 +304,23 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
+        pixel_values=None,
+        image_grid_thw=None,
     ) -> torch.Tensor:
         """Returns action log probs"""
+        # VLM path: the model computes its own mRoPE position_ids from image_grid_thw
+        has_vision = self.is_vlm and pixel_values is not None and image_grid_thw is not None
+        if has_vision:
+            assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
+            assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
+            # Convert TensorList → concatenated tensors for the HF model
+            from skyrl.backends.skyrl_train.training_batch import TensorList
+
+            if isinstance(pixel_values, TensorList):
+                pixel_values = torch.cat(pixel_values.tensors, dim=0)
+            if isinstance(image_grid_thw, TensorList):
+                image_grid_thw = torch.cat(image_grid_thw.tensors, dim=0)
+
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
@@ -320,7 +355,16 @@ class HFModelWrapper(nn.Module):
             )
 
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+        if has_vision:
+            # VLM: let the model compute mRoPE position_ids from image_grid_thw
+            output = self.model(
+                sequences_fwd,
+                attention_mask=attention_mask_fwd,
+                position_ids=None,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
+        elif self.use_sample_packing and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
             output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
