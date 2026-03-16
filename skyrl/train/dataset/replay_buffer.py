@@ -14,6 +14,8 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Float, Integer
 
+from skyrl.backends.skyrl_train.training_batch import TensorList
+
 BasicType = Union[int, float, str, bool]
 
 
@@ -70,9 +72,8 @@ class Experience:
     info: Optional[dict]
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
     metadata: Optional[Dict[str, Any]] = None
-    # Multi-modal vision fields (variable-shape per example, stored as TensorList)
-    pixel_values: Optional[Any] = None
-    image_grid_thw: Optional[Any] = None
+    pixel_values: Optional[TensorList] = None
+    image_grid_thw: Optional[TensorList] = None
 
     @torch.no_grad()
     def to_device(self, device: torch.device) -> None:

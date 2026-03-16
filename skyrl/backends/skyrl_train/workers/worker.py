@@ -1025,6 +1025,8 @@ class PolicyWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        pixel_values = micro_batch.get("pixel_values", None)
+        image_grid_thw = micro_batch.get("image_grid_thw", None)
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
@@ -1033,8 +1035,8 @@ class PolicyWorkerBase(Worker):
                 attention_mask,
                 return_output=False,
                 temperature=self.cfg.algorithm.temperature,
-                pixel_values=micro_batch.get("pixel_values"),
-                image_grid_thw=micro_batch.get("image_grid_thw"),
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(

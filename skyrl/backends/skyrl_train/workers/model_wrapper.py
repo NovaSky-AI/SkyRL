@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
     ulysses_pad_and_slice_inputs,
 )
+from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.torch_utils import (
     chunked_entropy_from_logits,
     logprobs_from_logits,
@@ -84,6 +85,7 @@ class HFModelWrapper(nn.Module):
         self.sequence_parallel_size = sequence_parallel_size
         self.attn_implementation = "flash_attention_2" if use_flash_attention_2 else "sdpa"
         self.use_sample_packing = use_sample_packing
+        self.is_vlm = False
         # packing samples using Flash Attention 2
         if use_sample_packing:
             assert (
@@ -119,6 +121,7 @@ class HFModelWrapper(nn.Module):
                     "falling back to AutoModelForVision2Seq"
                 )
                 model_class = AutoModelForVision2Seq
+                self.is_vlm = True
 
             rope_scaling_kwargs = {}
             if rope_scaling:
@@ -205,11 +208,6 @@ class HFModelWrapper(nn.Module):
             self.model.config.use_cache = False
         else:
             self.model = pretrain_or_model
-
-        # Detect VLM: model was loaded via AutoModelForVision2Seq (not a standard CausalLM)
-        self.is_vlm = (
-            hasattr(self.model, "config") and type(self.model.config) not in AutoModelForCausalLM._model_mapping
-        )
 
         # TODO (sumanthrh): do the same for `logprobs_from_logits` and test.
         # Credits: https://www.tylerromero.com/posts/2025-02-selective-log-softmax/#efficient-solution
@@ -304,18 +302,15 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
-        pixel_values=None,
-        image_grid_thw=None,
+        pixel_values: Optional[TensorList] = None,
+        image_grid_thw: Optional[TensorList] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
-        # VLM path: the model computes its own mRoPE position_ids from image_grid_thw
-        has_vision = self.is_vlm and pixel_values is not None and image_grid_thw is not None
-        if has_vision:
+        if self.is_vlm:
             assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
-            # Convert TensorList → concatenated tensors for the HF model
-            from skyrl.backends.skyrl_train.training_batch import TensorList
 
+            # Convert TensorList -> concatenated tensors for the HF model
             if isinstance(pixel_values, TensorList):
                 pixel_values = torch.cat(pixel_values.tensors, dim=0)
             if isinstance(image_grid_thw, TensorList):
@@ -354,9 +349,8 @@ class HFModelWrapper(nn.Module):
                 sequences_rolled, None, None, self.sequence_parallel_size
             )
 
-        # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        if has_vision:
-            # VLM: let the model compute mRoPE position_ids from image_grid_thw
+        if self.is_vlm:
+            # VLMs use model specific 3D positional IDs
             output = self.model(
                 sequences_fwd,
                 attention_mask=attention_mask_fwd,
@@ -364,6 +358,7 @@ class HFModelWrapper(nn.Module):
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
             )
+        # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
         elif self.use_sample_packing and self.attn_implementation == "flash_attention_2":
             # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
             # Not using attention mask leads to higher perf since flash attention varlen func is enabled
