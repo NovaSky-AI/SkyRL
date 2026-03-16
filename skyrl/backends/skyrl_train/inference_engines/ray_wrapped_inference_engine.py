@@ -185,7 +185,7 @@ def create_ray_wrapped_inference_engines(
     # CUDA_VISIBLE_DEVICES for the mp-spawned workers to see only the
     # TP*PP GPUs allocated to that DP rank.
     # Since reordered indices are sorted by (node_id, gpu_id), the physical
-    # GPU IDs are directly available from shared_pg.gpu_ids.
+    # GPU IDs are directly available from shared_pg.bundle_gpu_ids.
     engine_gpu_ids_map = {}
     if use_mp_backend:
         all_gpu_ids = shared_pg.bundle_gpu_ids
