@@ -100,9 +100,11 @@ def _remove_left_padding_from_indices(
 
     seq_lens = attention_mask.sum(dim=1)
     effective_seq_len = seq_lens.max().item()
-    sp_world_size = mpu.get_tensor_model_parallel_world_size()
-    if sp_world_size > 1:
-        pad_size = (sp_world_size - effective_seq_len % sp_world_size) % sp_world_size
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    cp_size = mpu.get_context_parallel_world_size()
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    if align_size > 1:
+        pad_size = (align_size - effective_seq_len % align_size) % align_size
         effective_seq_len += pad_size
 
     batch_size = rollout_expert_indices.shape[0]
@@ -193,14 +195,26 @@ def setup_per_microbatch_replay_forward(
     """Set up RouterReplay for a single micro-batch, aligning indices
     with the left-padding-removed token layout that the MoE layer sees.
 
+    Handles context parallelism: when CP > 1, the sequence is split into
+    2*cp_size chunks with each CP rank receiving a front chunk and a back
+    chunk (for causal-mask load balancing). Replay indices are split using 
+    the same pattern so they stay aligned with the tokens each rank sees.
+
     Handles sequence parallelism: when TP > 1, the sequence is split across
     TP ranks, so each rank's MoE router only sees its local chunk of tokens.
 
     Handles dense-layer mismatch: DeepSeek V3-style models have dense FFN
-    layers before the MoE layers.  vLLM reports routing indices for ALL
+    layers before the MoE layers. vLLM reports routing indices for ALL
     transformer layers, but Megatron only has RouterReplay instances for MoE
-    layers.  We use each instance's global layer_number (set by the patched
+    layers. We use each instance's global layer_number (set by the patched
     TopKRouter.set_layer_number) to index into the correct slice of the data.
+
+    Handles pipeline parallelism: when PP > 1, the sequence is split across
+    PP ranks, so each rank only sees its local RouterReplay instances. In cases
+    where the number of local RouterReplay instances does not match the local 
+    layer count, indicating that the model has dense layers before MoE layers, 
+    we use the global layer_number to index into the correct slice of the data.
+
     """
     import megatron.core.parallel_state as mpu
     from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
@@ -209,8 +223,20 @@ def setup_per_microbatch_replay_forward(
 
     aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)
 
-    # handles megatron sequence parallelism across the tensor model parallel region
-    # since we automatically enable sequence parallelism when TP > 1
+    # CP splitting: mirror the front+back chunking from preprocess_packed_seqs
+    cp_size = mpu.get_context_parallel_world_size()
+    if cp_size > 1:
+        cp_rank = mpu.get_context_parallel_rank()
+        seq_len = aligned.shape[1]
+        seqlen_per_cp = seq_len // cp_size
+        half = seqlen_per_cp // 2 # we do *2 for causal masking, so get half of the sequence length per CP rank
+        front = aligned[:, half * cp_rank : half * (cp_rank + 1), :, :]
+        back_start = seq_len - half * (cp_rank + 1)
+        back_end = seq_len - half * cp_rank
+        back = aligned[:, back_start:back_end, :, :]
+        aligned = torch.cat([front, back], dim=1)
+
+    # TP splitting: sequence parallelism across the tensor model parallel region
     tp_size = mpu.get_tensor_model_parallel_world_size()
     if tp_size > 1:
         tp_rank = mpu.get_tensor_model_parallel_rank()

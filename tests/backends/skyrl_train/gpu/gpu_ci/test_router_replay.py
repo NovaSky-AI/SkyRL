@@ -23,12 +23,12 @@ from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_para
 from skyrl.train.dataset.preprocess import convert_prompts_responses_to_batch_tensors
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
-MOE_MODEL_NAME = "arcee-ai/Trinity-Nano-Preview"
 # MOE_MODEL_NAME = "/home/ray/moonlight16b"
 # MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
+MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B"
 REPLAY_NUM_LAYERS = 2
-NUM_PROMPTS = 10
-N_SAMPLES_PER_PROMPT = 4
+NUM_PROMPTS = 2
+N_SAMPLES_PER_PROMPT = 2
 MAX_GENERATE_LENGTH = 128
 
 
@@ -189,7 +189,16 @@ def test_generate_with_router_replay(ray_init_fixture):
 
 
 @pytest.mark.megatron
-def test_logprobs(ray_init_fixture):
+@pytest.mark.parametrize(
+    "tp,pp,cp,ep,etp,extra_tf_kwargs",
+    [
+        pytest.param(2, 1, 1, 2, 1, {}, id="baseline"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_last_pipeline_stage": 13}, id="pp2"),
+        pytest.param(4, 1, 2, 8, 1, {}, id="cp2"),
+        pytest.param(2, 2, 2, 4, 1, {"num_layers_in_last_pipeline_stage": 13}, id="cp2_pp2"),
+    ],
+)
+def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
     Check that logprob diff is lower when using router replay. Requires full 8xH100 setup to do full forward pass.
     """
@@ -299,17 +308,18 @@ def test_logprobs(ray_init_fixture):
         training_input.metadata = {"response_length": num_actions}
 
         cfg.trainer.placement.policy_num_gpus_per_node = 8
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
-        cfg.trainer.policy.megatron_config.context_parallel_size = 1
-        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 2
-        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.policy.megatron_config.context_parallel_size = cp
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
         cfg.trainer.micro_forward_batch_size_per_gpu = 1
         cfg.trainer.micro_train_batch_size_per_gpu = 1
 
         def run_megatron_forward(enable_replay: bool) -> torch.Tensor:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {
                 "moe_enable_routing_replay": enable_replay,
+                **extra_tf_kwargs,
             }
             actor_group = init_worker_with_type(
                 "policy",
@@ -347,7 +357,14 @@ def test_logprobs(ray_init_fixture):
 
 
 @pytest.mark.megatron
-def test_forward_backward(ray_init_fixture):
+@pytest.mark.parametrize(
+    "tp,pp,cp,ep,etp,extra_tf_kwargs",
+    [
+        pytest.param(4, 1, 1, 8, 1, {}, id="baseline"),
+        pytest.param(2, 2, 1, 2, 1, {"num_layers_in_last_pipeline_stage": 13}, id="pp2"),
+    ],
+)
+def test_forward_backward(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
     """
     Check that forward_backward produces similar losses with and without
     router replay (same weights, so routing decisions should nearly match).
@@ -459,17 +476,18 @@ def test_forward_backward(ray_init_fixture):
         training_input.metadata = {"response_length": num_actions}
 
         cfg.trainer.placement.policy_num_gpus_per_node = 8
-        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
-        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
-        cfg.trainer.policy.megatron_config.context_parallel_size = 1
-        cfg.trainer.policy.megatron_config.expert_model_parallel_size = 8
-        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = tp
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = pp
+        cfg.trainer.policy.megatron_config.context_parallel_size = cp
+        cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
+        cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
         cfg.trainer.micro_forward_batch_size_per_gpu = 1
         cfg.trainer.micro_train_batch_size_per_gpu = 1
 
         def run_megatron_forward_backward(enable_replay: bool) -> dict:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {
                 "moe_enable_routing_replay": enable_replay,
+                **extra_tf_kwargs,
             }
             actor_group = init_worker_with_type(
                 "policy",
