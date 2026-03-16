@@ -22,7 +22,12 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_node_ip
-from skyrl.backends.skyrl_train.env_vars import SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S
+from skyrl.env_vars import (
+    SKYRL_HTTP_CONNECTION_LIMIT,
+    SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
+)
+
+_PROXY_RETRIES = 3
 
 logger = logging.getLogger(__name__)
 
@@ -149,19 +154,35 @@ class InferenceRouter:
 
         # Forward headers (filter out hop-by-hop headers)
         headers = self._forward_headers(request)
+        body = await request.body()
 
-        response = await self._client.request(
-            method=request.method,
-            url=url,
-            headers=headers,
-            content=await request.body(),
-        )
+        # Retry on connection-level errors (ReadError, ConnectError).
+        # These are transient: the server closed a keep-alive connection
+        # between the pool handing it out and the request being read.
+        last_exc = None
+        for attempt in range(_PROXY_RETRIES):
+            try:
+                response = await self._client.request(
+                    method=request.method,
+                    url=url,
+                    headers=headers,
+                    content=body,
+                )
+                return Response(
+                    content=response.content,
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                )
+            except (httpx.ReadError, httpx.ConnectError) as e:
+                last_exc = e
+                logger.warning(f"Proxy retry {attempt + 1}/{_PROXY_RETRIES} for {path}: {e}")
+                continue
+            except Exception as e:
+                logger.info(f"Encountered an exception while proxying a request to path {path}: {e}")
+                raise
 
-        return Response(
-            content=response.content,
-            status_code=response.status_code,
-            headers=dict(response.headers),
-        )
+        logger.error(f"Proxy to {path} failed after {_PROXY_RETRIES} retries: {last_exc}")
+        raise last_exc
 
     def start(self) -> str:
         """
@@ -174,7 +195,12 @@ class InferenceRouter:
             raise ValueError("No servers available")
 
         # Create HTTP client for proxying
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(None))
+        limits = httpx.Limits(
+            max_connections=SKYRL_HTTP_CONNECTION_LIMIT,
+            max_keepalive_connections=SKYRL_HTTP_CONNECTION_LIMIT,
+        )
+        transport = httpx.AsyncHTTPTransport(limits=limits)
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(None), transport=transport)
 
         # Build FastAPI app and uvicorn server
         self._app = self._build_app()
@@ -184,6 +210,7 @@ class InferenceRouter:
             port=self._port,
             log_level="warning",
             access_log=False,
+            backlog=SKYRL_HTTP_CONNECTION_LIMIT,
         )
         self._server = uvicorn.Server(config)
 

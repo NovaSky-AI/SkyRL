@@ -1,23 +1,27 @@
 """
-uv run --isolated --extra dev pytest tests/gpu/gpu_ci/distributed/test_fsdp_strategy.py
+uv run --isolated --extra dev pytest tests/backends/skyrl_train/gpu/gpu_ci/distributed/test_fsdp_strategy.py
 """
 
-from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
 import os
-import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.distributed_c10d import init_process_group
 
-from skyrl.train.config import SkyRLConfig
+import torch.distributed as dist
+from torch.distributed.distributed_c10d import init_process_group
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
 from skyrl.backends.skyrl_train.distributed.fsdp_strategy import FSDPStrategy
-from skyrl.train.utils.trainer_utils import get_rope_scaling_config, get_rope_theta_config
+from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils.trainer_utils import (
+    get_rope_scaling_config,
+    get_rope_theta_config,
+)
 from skyrl.train.utils.utils import get_free_port
 
 MODEL_NAME = "llamafactory/tiny-random-Llama-3"
 
 
 def test_fsdp1_wrap_policy():
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.strategy = "fsdp"
 

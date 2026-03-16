@@ -2,6 +2,10 @@
 title: "Off Policy Correction in SkyRL"
 ---
 
+<Callout type="info">
+Off-policy correction is supported with the `fsdp` and `megatron` backends.
+</Callout>
+
 SkyRL provides built-in utilities for correcting off-policy drift from trainer/inference mismatch and AsyncRL. This guide covers:
 
 1. **Sources of off-policy drift** — why training and inference policies diverge
@@ -13,16 +17,26 @@ SkyRL provides built-in utilities for correcting off-policy drift from trainer/i
 We recommend adding the following configs in order to your training runs to help address off-policy drift:
 
 ```yaml
-# we recommend trying basic TIS correction first
+# For dense models, we recommend trying basic TIS correction first
 trainer.algorithm.off_policy_correction.tis_ratio_type="token"
 trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=2.0
 
-# for long context + MoE models, try geometric sequence masking - tune geo_mask_high/geo_mask_low as needed
+# for MoE models, enabling router replay (R3) to fix the source of train/infer mismatch is recommended 
+trainer.policy.megatron_config.moe_enable_routing_replay=True
+generator.inference_engine.enable_return_routed_experts=True
+generator.inference_engine.distributed_executor_backend="mp"    # this is temporarily needed for vLLM, since routed experts cause issues with the ray backend.
+
+# The following masking strategies can additionally help mitigate off policy drift, especially from sources other than train/infer mismatch
+# geometric sequence masking - tune geo_mask_high/geo_mask_low as needed
 trainer.algorithm.off_policy_correction.sequence_mask_metric="geometric"
 trainer.algorithm.off_policy_correction.geo_mask_high=1.01
 trainer.algorithm.off_policy_correction.geo_mask_low=0.99
 
-# for longer context + MoE, you can also try outlier based sequence masking, which stacks on top of geometric sequence masking
+# token masking (icepop): tune token_mask_is_threshold_low/high
+trainer.algorithm.off_policy_correction.token_mask_is_threshold_low=0.5
+trainer.algorithm.off_policy_correction.token_mask_is_threshold_high=2.0
+
+# outlier based sequence masking: stacks on top of geometric sequence masking
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_low=1e-4
 trainer.algorithm.off_policy_correction.outlier_token_is_threshold_high=100
 ```
@@ -117,10 +131,31 @@ policies. To mitigate this, the max staleness of trajectories can be tuned to pr
 Mini batching results in off-policy updates, which can be clamped within an acceptable range in the common dual clip formulation of the PPO loss. Tuning the number of mini batches per training batch
 can impact convergence of RL runs, and impact whether corrections like routing replay and masking are needed.
 
+# Routing Replay
+
+SkyRL supports rollout routing replay (R3), first introduced by [Ma et al.](https://arxiv.org/pdf/2510.11370) to help eliminate trainer/inference mismatch for MoE at the source. Rollout routing replay works by recording expert 
+routing decisions for MoE layers at inference time, and replaying the same per-layer expert routing decisions at training time, which helps reduce mismatched logprobs.
+
+```yaml
+generator:
+  inference_engine:
+    enable_return_routed_experts: True    # pass through argument to vLLM
+    distributed_executor_backend: "mp"    # temporarily needed to work around hanging issues with other backends
+...
+trainer:
+  policy:
+    megatron_config:
+      moe_enable_routing_replay: True     # enables Megatron native RoutingReplay feature
+```
+
+To enable rollout router replay, set `generator.inference_engine.enable_return_routed_experts=True`, `trainer.policy.megatron_config.moe_enable_routing_replay=True`, and use the `mp` distributed_executor_backend for vLLM. Note that 
+R3 does induce additional training bias when mini-batching, since routing decisions are fixed for all mini-batches in a training batch. However, it has been shown to be important for stabilizing large-scale MoE training, particularly
+in models adopting a DeepSeek-V3 like architecture (notably the GLM family) due to the use of sigmoid-based affinity scoring instead of softmax for top-k routing.
+
 # Algorithmic Off Policy Correction
 
-In the previous section, we described some reasons why off-policy drift can occur, and some ways to mitigate it (e.g., batch invariant kernels, routing replay). However,
-these solutions come with tradeoffs (slower inference for batch invariant kernels, additional bias for routing replay), and are not sufficient to address all sources of drift, like fully async RL.
+In the previous sections, we described some reasons why off-policy drift can occur, and some ways to mitigate it (e.g., batch invariant kernels, routing replay). However,
+these solutions come with tradeoffs (slower inference for batch invariant kernels), and are not sufficient to address all sources of drift, like fully async RL.
 
 Recent works ([Liu et. al 2025](https://yingru.notion.site/When-Speed-Kills-Stability-Demystifying-RL-Collapse-from-the-Training-Inference-Mismatch-271211a558b7808d8b12d403fd15edda), [Yao et. al 2025](https://fengyao.notion.site/off-policy-rl))
 have proposed additional techniques for off-policy correction. In this section, we describe these techniques and how to enable them in SkyRL.
@@ -180,6 +215,7 @@ off_policy_correction:
   product_mask_low: 0.5
   outlier_token_is_threshold_low: null
   outlier_token_is_threshold_high: null
+  ...
 ```
 
 To enable sequence masking in SkyRL, set `sequence_mask_metric` to either `product` or `geometric`. For `geometric`, set `geo_mask_high` and `geo_mask_low`; for `product`, set `product_mask_high` and `product_mask_low`.
@@ -194,6 +230,33 @@ $$
 $$
 
 To enable masking sequences with outlier tokens, set `outlier_token_is_threshold_low` and `outlier_token_is_threshold_high`.
+
+## Token Masking
+
+Unlike sequence masking (which rejects *entire sequences* when a sequence-level metric exceeds a threshold), token masking zeros out only the **individual tokens** whose importance-sampling ratio falls outside an acceptable range. This is a finer-grained correction that preserves the rest of the sequence for learning.
+This technique was introduced by [Zhou et. al](https://ringtech.notion.site/icepop) as Icepop, and has since been used in the training of [GLM-5](https://arxiv.org/pdf/2602.15763).
+
+$$
+\textcolor{red}{m_t = \begin{cases}
+1 & \text{if } C_\text{low} \leq \frac{\pi_{\theta_{\text{old}}}(x_t)}{\mu_{\theta_{\text{old}}}(x_t)} \leq C_\text{high} \\
+0 & \text{otherwise}
+\end{cases}}
+$$
+
+The per-token mask $m_t$ is multiplied element-wise into the loss mask, so masked tokens contribute zero gradient while all other tokens in the sequence remain unaffected.
+
+```yaml
+off_policy_correction:
+  ...
+  token_mask_is_threshold_low: 0.5   # suggested starting value
+  token_mask_is_threshold_high: 2.0  # suggested starting value
+```
+
+To enable token masking, set both `token_mask_is_threshold_low` and `token_mask_is_threshold_high`. Both must be set for the mask to activate; setting only one has no effect.
+
+Token masking can be combined with other corrections (TIS, sequence masking, outlier masking). When multiple masks are active, they are applied multiplicatively to the loss mask in order: outlier sequence mask, then token mask, then sequence mask.
+
+When enabled, the metric `token_mask_ratio` is logged, representing the fraction of originally-valid tokens that were zeroed by the token mask.
 
 # Metrics and Monitoring
 If off-policy correction is enabled, you can view relevant metrics, like the mean/std of the importance sampling ratio, the mean/std of logprob diffs, and the fraction of masked sequences in the logger of your choice under `policy/loss_metrics`.

@@ -1,3 +1,5 @@
+> **Note:** SkyRL configuration has transitioned to Python-based dataclasses. The canonical config reference is now `skyrl/train/config/config.py`.
+
 ## Guide: Verifiers (Environments Hub) + SkyRL
 
 This directory holds the workflow to train on Environments Hub environments with SkyRL.
@@ -7,9 +9,9 @@ To start training, follow three simple steps:
 2) Prepare the environment's training and validation datasets.
 3) Launch training!
 
-Start by following the SkyRL [installation instructions](https://docs.skyrl.ai/docs/getting-started/installation), then enter the `skyrl-train` directory:
+Start by following the SkyRL [installation instructions](https://docs.skyrl.ai/docs/getting-started/installation):
 ```bash
-cd SkyRL/skyrl-train
+cd SkyRL/
 ```
 
 ### 1) Install the environment
@@ -61,7 +63,7 @@ bash integrations/verifiers/run_verifiers.sh
 
 All training parameters can be modified in `run_verifiers.sh`, such as the model choice (`trainer.policy.model.path`), GRPO group size (`generator.n_samples_per_prompt`), or training batch size (`trainer.train_batch_size`).
 
-See all available training configuration parameters in `ppo_base_config.yaml`.
+See all available training configuration parameters in `skyrl/train/config/config.py` (Python dataclass definitions).
 
 
 ## Troubleshooting

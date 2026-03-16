@@ -5,7 +5,8 @@ uv run --isolated --extra dev pytest tests/train/test_eval.py
 from unittest.mock import MagicMock
 
 import pytest
-from skyrl.train.config import SamplingParams, EnvironmentConfig
+
+from skyrl.train.config import EnvironmentConfig, SamplingParams
 from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import GeneratorInterface, GeneratorOutput
 from tests.train.util import example_dummy_config
@@ -40,7 +41,7 @@ class DummyGenerator(GeneratorInterface):
 @pytest.mark.asyncio
 async def test_evaluate_computes_expected_metrics(dummy_config, tmp_path):
     cfg = dummy_config
-    cfg.generator.backend = "vllm"
+    cfg.generator.inference_engine.backend = "vllm"
     cfg.generator.eval_sampling_params = SamplingParams(
         max_generate_length=20,
         temperature=0.0,

@@ -1,33 +1,41 @@
 """
 Run with:
-uv run --isolated --extra dev --extra mcore -- pytest tests/gpu/gpu_ci/test_megatron_worker.py
+uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py
 """
 
-import ray
-import pytest
-import torch
 import asyncio
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    ray_init_for_tests,
-    get_rank_0_memory,
-    init_inference_engines,
-    run_inference,
-    get_test_prompts,
-    Timer,
+
+import pytest
+import ray
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    concatenate_outputs_after_mesh_dispatch,
+)
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import (
+    MegatronTorchProfilerConfig,
+    SkyRLLoraConfig,
+    SkyRLTrainConfig,
 )
 from skyrl.train.utils.utils import print_mem, validate_cfg
-from skyrl.train.config import (
-    SkyRLConfig,
-    SkyRLLoraConfig,
-    MegatronTorchProfilerConfig,
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    Timer,
+    get_rank_0_memory,
+    get_test_prompts,
+    init_worker_with_type,
+    ray_init_for_tests,
+    run_inference,
 )
-from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 
+_skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 # TODO (erictang000): we would prefer to use this smaller MoE model for testing, but seeing incorrect logprobs when using EP > 1
@@ -36,8 +44,8 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 
 
-def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLConfig:
-    cfg = SkyRLConfig()
+def get_test_actor_config(model_name=MODEL_NAME) -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model_name
     cfg.trainer.micro_forward_batch_size_per_gpu = 2
     cfg.trainer.micro_train_batch_size_per_gpu = 2
@@ -111,12 +119,15 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
 
 @pytest.mark.parametrize(
     ("colocate_all", "inference_tp", "megatron_tp", "megatron_pp", "megatron_ep", "megatron_etp", "lora"),
-    [(True, 4, 2, 2, 1, None, False), (False, 2, 2, 1, 1, None, False), (True, 4, 2, 2, 1, None, True)],
-    ids=["colocate_all", "non_colocated", "colocate_all_lora"],
+    [
+        pytest.param(True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
+        pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
+        pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
+    ],
 )
 @pytest.mark.megatron
 def test_megatron_policy_weight_sync(
-    colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
+    ray_init_fixture, colocate_all, inference_tp, megatron_tp, megatron_pp, megatron_ep, megatron_etp, lora
 ):
     """
     Test that we can sync weights between policy and inference for megatron then run inference
@@ -126,10 +137,10 @@ def test_megatron_policy_weight_sync(
         if lora:
             cfg.trainer.policy.model.lora = SkyRLLoraConfig(rank=16, alpha=16)
         cfg.trainer.placement.colocate_all = colocate_all
-        cfg.generator.weight_sync_backend = "nccl"
+        cfg.generator.inference_engine.weight_sync_backend = "nccl"
         cfg.trainer.strategy = "megatron"
-        cfg.generator.backend = "vllm"
-        cfg.generator.inference_engine_tensor_parallel_size = inference_tp
+        cfg.generator.inference_engine.backend = "vllm"
+        cfg.generator.inference_engine.tensor_parallel_size = inference_tp
 
         # set tp and pp to 2 to check that gather for weight sync works correctly
         cfg.trainer.policy.megatron_config.tensor_model_parallel_size = megatron_tp
@@ -138,41 +149,53 @@ def test_megatron_policy_weight_sync(
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = megatron_etp
 
         # If colocate is True, this will load the engine, sleep, and wake up the engine
-        client, pg, router, server_group = init_inference_engines(
-            model=MODEL_NAME,
+        with InferenceEngineState.create(
             cfg=cfg,
+            model=MODEL_NAME,
             use_local=True,
-            async_engine=cfg.generator.async_engine,
-            tp_size=cfg.generator.inference_engine_tensor_parallel_size,
-            colocate_all=cfg.trainer.placement.colocate_all,
             backend="vllm",
             sleep_level=2,  # since we explicitly sync weights
-        )
+        ) as engines:
+            client, pg = engines.client, engines.pg
+            asyncio.run(client.sleep())
 
-        asyncio.run(client.sleep())
+            policy = init_worker_with_type(
+                "policy",
+                shared_pg=pg,
+                colocate_all=cfg.trainer.placement.colocate_all,
+                num_gpus_per_node=cfg.generator.inference_engine.tensor_parallel_size,
+                cfg=cfg,
+            )
+            ray.get(
+                policy.async_run_ray_method(
+                    "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
+                )
+            )
+            asyncio.run(client.wake_up(tags=["weights"]))
+            # TODO (erictang000): improve this timing
+            # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
+            # or ~20 seconds on 8xH100
+            # ~75 seconds on 8xH100 for Qwen3-30B-A3B
+            with Timer("sync_weights"):
+                ray.get(
+                    policy.async_run_ray_method(
+                        "pass_through", "broadcast_to_inference_engines", client, cfg.generator.inference_engine
+                    )
+                )
 
-        policy = init_worker_with_type(
-            "policy",
-            shared_pg=pg,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
-            cfg=cfg,
-        )
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        asyncio.run(client.wake_up(tags=["weights"]))
-        # TODO (erictang000): improve this timing
-        # currently this is ~30 seconds for a 14B MoE model (on 8xL40S)
-        # or ~20 seconds on 8xH100
-        # ~75 seconds on 8xH100 for Qwen3-30B-A3B
-        with Timer("sync_weights"):
-            ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+            policy.offload_to_cpu()
+            asyncio.run(client.wake_up(tags=["kv_cache"]))
+            sampling_params = get_sampling_params_for_backend(
+                cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+            )
+            tokenizer = (
+                AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True) if _SKYRL_USE_NEW_INFERENCE else None
+            )
+            outputs = asyncio.run(
+                run_inference(client, get_test_prompts(MODEL_NAME), sampling_params, tokenizer=tokenizer)
+            )
 
-        policy.offload_to_cpu()
-        asyncio.run(client.wake_up(tags=["kv_cache"]))
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
-        outputs = asyncio.run(run_inference(client, get_test_prompts(MODEL_NAME), sampling_params))
-
-        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
+            print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
         ray.shutdown()
 
@@ -552,7 +575,6 @@ async def test_megatron_train(
         keys_to_compare.extend(
             [
                 "loss_metrics/is_ratio_mean",
-                "loss_metrics/outlier_seq_masked_ratio",
                 "loss_metrics/geo_sequence_mask_masked_ratio",
             ]
         )

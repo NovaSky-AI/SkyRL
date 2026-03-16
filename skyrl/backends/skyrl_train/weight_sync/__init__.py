@@ -1,37 +1,33 @@
 """Weight synchronization abstractions for distributed RL training."""
 
-from typing import Type, Union, TYPE_CHECKING
+from typing import Type
 
-if TYPE_CHECKING:
-    from omegaconf import DictConfig
-    from skyrl.train.config import SkyRLConfig
-
-from .base import WeightChunk, WeightUpdateRequest, LoraLoadRequest
-from .weight_extractor import WeightExtractor
-from .weight_loader import WeightLoader
-from .transfer_strategy import (
-    WeightTransferStrategy,
-    WeightTransferSender,
-    WeightTransferReceiver,
-    WeightSyncInitInfo,
-)
+from .base import LoraLoadRequest, WeightChunk, WeightUpdateRequest
 from .broadcast_strategy import (
     BroadcastInitInfo,
     BroadcastTransferStrategy,
-    BroadcastWeightTransferSender,
     BroadcastWeightTransferReceiver,
+    BroadcastWeightTransferSender,
     BroadcastWeightUpdateRequest,
 )
 from .cuda_ipc_strategy import (
     CudaIpcInitInfo,
     CudaIpcTransferStrategy,
-    CudaIpcWeightTransferSender,
     CudaIpcWeightTransferReceiver,
+    CudaIpcWeightTransferSender,
     CudaIpcWeightUpdateRequest,
 )
+from .transfer_strategy import (
+    WeightSyncInitInfo,
+    WeightTransferReceiver,
+    WeightTransferSender,
+    WeightTransferStrategy,
+)
+from .weight_extractor import WeightExtractor
+from .weight_loader import WeightLoader
 
 
-def get_transfer_strategy_cls(cfg: "Union[SkyRLConfig, DictConfig]") -> Type[WeightTransferStrategy]:
+def get_transfer_strategy_cls(weight_sync_backend: str, colocate_all: bool) -> Type[WeightTransferStrategy]:
     """Get the appropriate transfer strategy class based on config.
 
     Uses CUDA IPC when:
@@ -41,14 +37,23 @@ def get_transfer_strategy_cls(cfg: "Union[SkyRLConfig, DictConfig]") -> Type[Wei
     Otherwise uses broadcast.
 
     Args:
-        cfg: Configuration object containing generator and trainer settings.
+        weight_sync_backend: The weight sync backend ("nccl" or other).
+        colocate_all: Whether training and inference are colocated on same nodes.
 
     Returns:
         The strategy class (CudaIpcTransferStrategy or BroadcastTransferStrategy).
     """
-    if cfg.generator.weight_sync_backend == "nccl" and cfg.trainer.placement.colocate_all:
+    strategy = get_transfer_strategy(weight_sync_backend, colocate_all)
+    if strategy == "ipc":
         return CudaIpcTransferStrategy
     return BroadcastTransferStrategy
+
+
+def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
+    """Get the appropriate transfer strategy string based on config."""
+    if weight_sync_backend == "nccl" and colocate_all:
+        return "ipc"
+    return "nccl"
 
 
 __all__ = [

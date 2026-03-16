@@ -2,6 +2,9 @@
 title: "FlashRL + SkyRL: Training with Quantized Rollouts"
 ---
 
+<Callout type="info">
+FlashRL is supported with the `fsdp` backend.
+</Callout>
 
 In this example, we walk through how to train a model with quantized rollouts using [FlashRL](https://fengyao.notion.site/flash-rl) and SkyRL.
 
@@ -26,7 +29,7 @@ At a high level, we sample generations from the inference engine with quantized 
 
 ## Examples
 
-We provide examples for training with FP8 and Int8 rollouts for DAPO. The FlashRL related files are in the `examples/flash_rl/` folder. 
+We provide examples for training with FP8 and Int8 rollouts for DAPO. The FlashRL related files are in the `examples/train/flash_rl/` folder. 
 
 For FP8, you simply need to specify `FLASHRL_CONFIG=fp8_vllm` in your environment variables. 
 
@@ -40,15 +43,15 @@ For Int8, we need to provide calibration data. We leverage the provided calibrat
 First, prepare and save the dataset in a chosen `DATA_DIR` by running:
 
 ```bash
-# execute from skyrl-train directory
+# execute from SkyRL root directory
 
-DATA_DIR="$HOME/data/dapo" bash examples/algorithms/dapo/prepare_dapo_data.sh
+DATA_DIR="$HOME/data/dapo" bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 
 ```
 
-We highlight some important training parameters configured for FlashRL from our example configuration at `examples/flash_rl/run_dapo_repro_flashrl_32b_int8.sh`:
+We highlight some important training parameters configured for FlashRL from our example configuration at `examples/train/flash_rl/run_dapo_repro_flashrl_32b_int8.sh`:
 
-```bash title="examples/flash_rl/run_dapo_repro_flashrl_32b_int8.sh"
+```bash title="examples/train/flash_rl/run_dapo_repro_flashrl_32b_int8.sh"
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/dapo"
 
@@ -56,28 +59,28 @@ DATA_DIR="$HOME/data/dapo"
 USE_TIS=true
 TIS_IMP_RATIO_CAP=8.0
 
-uv run --isolated --extra flashrl --env-file examples/flash_rl/.env.int8 -m examples.flash_rl.main_dapo_flashrl \
+uv run --isolated --extra flashrl --env-file examples/train/flash_rl/.env.int8 -m examples.train.flash_rl.main_dapo_flashrl \
     ...
     trainer.algorithm.use_tis=$USE_TIS \
     trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
-    generator.sampling_params.logprobs=0 \
+    generator.sampling_params.logprobs=1 \
     ...
 
 ```
 
-Here, we've configured training to use TIS with the importance sampling ratio cap of 8.0. `generator.sampling_params.logprobs=0` ensures that logprobs for the chosen tokens are returned by the inference engine, which is required for TIS. Note that for making sure the FlashRL patches are applied for vLLM, we use the `FLASHRL_CONFIG` environment variable in `examples/flash_rl/.env.int8`: 
+Here, we've configured training to use TIS with the importance sampling ratio cap of 8.0. `generator.sampling_params.logprobs=1` ensures that logprobs for the chosen tokens are returned by the inference engine, which is required for TIS. Note that for making sure the FlashRL patches are applied for vLLM, we use the `FLASHRL_CONFIG` environment variable in `examples/train/flash_rl/.env.int8`: 
 
-```bash title="examples/flash_rl/.env.int8"
+```bash title="examples/train/flash_rl/.env.int8"
 FLASHRL_CONFIG=LiyuanLucasLiu/Qwen2.5-32B-quantized.w8a8/flashrl_config.yaml
 # FLASHRL_LOGGING_LEVEL=DEBUG <--- optional
 ...
 ```
 
-For a more lightweight example, we also provide scripts for training on Qwen2.5-0.5B-Instruct with Int8 rollouts at `examples/flash_rl/run_dapo_repro_flashrl_0.5b_int8.sh`.
+For a more lightweight example, we also provide scripts for training on Qwen2.5-0.5B-Instruct with Int8 rollouts at `examples/train/flash_rl/run_dapo_repro_flashrl_0.5b_int8.sh`.
 
 ### Training with FP8
 
-The configuration is similar to the Int8 example. The only difference is the value for `FLASHRL_CONFIG` in `examples/flash_rl/.env.0.5b_fp8`. We provide a script for training Qwen2.5-0.5B-Instruct with FP8 rollouts  at `examples/flash_rl/run_dapo_gsm8k_flashrl_0.5b_fp8.sh`.
+The configuration is similar to the Int8 example. The only difference is the value for `FLASHRL_CONFIG` in `examples/train/flash_rl/.env.0.5b_fp8`. We provide a script for training Qwen2.5-0.5B-Instruct with FP8 rollouts  at `examples/train/flash_rl/run_dapo_gsm8k_flashrl_0.5b_fp8.sh`.
 
 ## What does the `FLASHRL_CONFIG` do?
 

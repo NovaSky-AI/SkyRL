@@ -14,24 +14,32 @@ GPU Requirements:
     - Broadcast test: 4 GPUs (each sender and receiver uses 1 GPU).
 
 Run with:
-    uv run --isolated --extra dev pytest tests/gpu/gpu_ci/test_transfer_strategy.py -v
+    uv run --isolated --extra dev pytest tests/backends/skyrl_train/gpu/gpu_ci/test_transfer_strategies_e2e.py -v
 """
 
 import asyncio
+
+import pytest
 import ray
 import torch
 import torch.distributed as dist
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl.train.config import SkyRLConfig
 from skyrl.backends.skyrl_train.weight_sync import (
-    WeightChunk,
-    CudaIpcTransferStrategy,
     BroadcastTransferStrategy,
+    CudaIpcTransferStrategy,
+    WeightChunk,
     WeightSyncInitInfo,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import get_free_port, str_to_torch_dtype
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from ray.util.placement_group import placement_group
+
+pytestmark = pytest.mark.skipif(
+    _SKYRL_USE_NEW_INFERENCE,
+    reason="Transfer strategy e2e tests use legacy receiver which is incompatible with new inference path",
+)
 
 
 def make_cfg(
@@ -44,13 +52,13 @@ def make_cfg(
 
     Assumes no intra-engine parallelism (tp=pp=dp=1).
     """
-    cfg = SkyRLConfig()
-    cfg.generator.weight_sync_backend = weight_sync_backend
-    cfg.generator.model_dtype = model_dtype
-    cfg.generator.num_inference_engines = num_inference_engines
-    cfg.generator.inference_engine_tensor_parallel_size = 1
-    cfg.generator.inference_engine_pipeline_parallel_size = 1
-    cfg.generator.inference_engine_data_parallel_size = 1
+    cfg = SkyRLTrainConfig()
+    cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
+    cfg.generator.inference_engine.model_dtype = model_dtype
+    cfg.generator.inference_engine.num_engines = num_inference_engines
+    cfg.generator.inference_engine.tensor_parallel_size = 1
+    cfg.generator.inference_engine.pipeline_parallel_size = 1
+    cfg.generator.inference_engine.data_parallel_size = 1
     cfg.trainer.placement.colocate_all = colocate_all
     return cfg
 
@@ -231,7 +239,7 @@ def _run_weight_sync_e2e(
 
     # Simplifying assumption: each receiver represents one complete engine with 1 rank
     # (not testing intra-engine parallelism like TP/PP/DP)
-    assert num_inference_engines == cfg.generator.num_inference_engines, "Test assumes 1 rank per engine"
+    assert num_inference_engines == cfg.generator.inference_engine.num_engines, "Test assumes 1 rank per engine"
 
     # For CUDA IPC, each sender-receiver pair must share the same GPU (required for IPC handles)
     pg = None
@@ -267,7 +275,9 @@ def _run_weight_sync_e2e(
     ray.get([sender.init_process_group.remote(master_addr, training_master_port) for sender in senders])
 
     # Only rank 0 creates init_info
-    init_info: WeightSyncInitInfo = ray.get(senders[0].create_init_info.remote(strategy_cls, cfg))
+    init_info: WeightSyncInitInfo = ray.get(
+        senders[0].create_init_info.remote(strategy_cls, cfg.generator.inference_engine)
+    )
 
     # Create receiver actors
     receivers = []

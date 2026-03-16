@@ -1,7 +1,8 @@
 import os
-from loguru import logger
+
 import torch
 import torch.distributed
+from loguru import logger
 
 
 class Profiler:

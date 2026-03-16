@@ -1,34 +1,42 @@
-from typing import Optional, Callable, List, Dict, Any
+from dataclasses import asdict
 from functools import partial
+from typing import Any, Callable, Dict, List, Optional
+
+import megatron.core.parallel_state as mpu
 import torch
 import torch.nn as nn
+from megatron.core.distributed import finalize_model_grads
+from megatron.core.pipeline_parallel import get_forward_backward_func
 from omegaconf import OmegaConf
 
-from megatron.core.pipeline_parallel import get_forward_backward_func
-import megatron.core.parallel_state as mpu
-from megatron.core.distributed import finalize_model_grads
-
+from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    get_model_config,
+    make_batch_generator,
+    postprocess_packed_seqs,
+    preprocess_packed_seqs,
+    recover_left_padding,
+    remove_left_padding,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
     from_parallel_logits_to_logprobs,
     vocab_parallel_entropy,
 )
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import get_model_config
-from skyrl.backends.skyrl_train.utils.ppo_utils import compute_approx_kl, PolicyLossRegistry
-from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
-
-from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-    make_batch_generator,
-    preprocess_packed_seqs,
-    postprocess_packed_seqs,
-    remove_left_padding,
-    recover_left_padding,
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    PolicyLossRegistry,
+    compute_approx_kl,
 )
+from skyrl.backends.skyrl_train.utils.replay_utils import (
+    setup_per_microbatch_replay_backward,
+    setup_per_microbatch_replay_forward,
+)
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.train.config import TrainerConfig
 
 
 class MegatronModelWrapper:
     def __init__(
         self,
-        config,
+        config: TrainerConfig,
         actor_module: List[nn.Module],
         actor_optimizer: Optional[torch.optim.Optimizer] = None,
         policy_loss_fn: Optional[Callable] = None,
@@ -37,12 +45,17 @@ class MegatronModelWrapper:
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.policy_loss_fn = policy_loss_fn
-        self.use_sample_packing = self.cfg.trainer.use_sample_packing
+        self.use_sample_packing = self.cfg.use_sample_packing
 
         config = get_model_config(self.actor_module[0])
         # This is set to None by default: https://github.com/NVIDIA/Megatron-LM/blob/07b22a05136a3cb08ece05f7de38cf6aeeb165fb/megatron/core/model_parallel_config.py#L95
         # use the build in finalize_model_grads function to all reduce gradients across parallelism dimensions
         config.finalize_model_grads_func = finalize_model_grads
+        # Wire up the optimizer's loss scaler so Megatron's pipeline schedule can scale
+        # the loss before backward (critical for fp16 dynamic loss scaling, MoE aux loss
+        # scaling, and any explicit loss_scale configuration).
+        if actor_optimizer is not None:
+            config.grad_scale_func = actor_optimizer.scale_loss
 
     def train(self):
         [module.train() for module in self.actor_module]
@@ -97,6 +110,13 @@ class MegatronModelWrapper:
 
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
+
+            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_forward(
+                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                )
+
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
@@ -200,16 +220,19 @@ class MegatronModelWrapper:
         forward_backward_func = get_forward_backward_func()
 
         # Resolve loss function
-        resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.trainer.algorithm.policy_loss_type
+        resolved_loss_name = loss_fn if loss_fn is not None else self.cfg.algorithm.policy_loss_type
         if loss_fn is not None:
             current_loss_fn = PolicyLossRegistry.get(loss_fn)
         else:
             current_loss_fn = self.policy_loss_fn
 
         # Build config for loss function, applying any overrides
-        loss_config = self.cfg.trainer.algorithm
+        loss_config = self.cfg.algorithm
         if loss_fn_config is not None:
-            loss_config = OmegaConf.merge(loss_config, OmegaConf.create(loss_fn_config))
+
+            new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
+            # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
+            loss_config = type(loss_config).from_dict_config(new_loss_config)
 
         def loss_func(logits, data):
             sequences = data["sequences"]
@@ -346,6 +369,12 @@ class MegatronModelWrapper:
         def forward_step(batch_iter, model):
             batch = next(batch_iter)
 
+            rollout_expert_indices = batch.pop("rollout_expert_indices", None)
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_forward(
+                    rollout_expert_indices, batch["attention_mask"], use_sample_packing=self.use_sample_packing
+                )
+
             sequences = batch["sequences"]
             attention_mask = batch["attention_mask"].to(bool)
             position_ids = batch["position_ids"]
@@ -391,6 +420,9 @@ class MegatronModelWrapper:
                     seq_len,
                     post_process=mpu.is_pipeline_last_stage(ignore_virtual=True),
                 )
+
+            if rollout_expert_indices is not None:
+                setup_per_microbatch_replay_backward()
 
             return outputs, partial(loss_func, data=batch)
 

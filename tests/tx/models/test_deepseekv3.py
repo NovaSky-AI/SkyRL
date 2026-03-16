@@ -1,14 +1,17 @@
 import os
 import tempfile
 
-from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+from flax import nnx
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
-from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3MoE as HFDeepseekV3MoE
+from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
+    DeepseekV3MoE as HFDeepseekV3MoE,
+)
+
 from skyrl.tx.layers.lora import LoRAMixin
 from skyrl.tx.models.configs import DeepseekV3Config
 from skyrl.tx.models.deepseekv3 import DeepseekV3ForCausalLM, DeepseekV3MoE

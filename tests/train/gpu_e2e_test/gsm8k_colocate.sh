@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+RUN_NAME="run_$(date +%Y%m%d%H)"
+SCRIPT_DIR=$(dirname $(realpath $0))
+
+# Thresholds: 5% allowance from min/max of last 10 CI runs as of 23rd Feb 2026
+EVAL_ACC_MIN_VALUE=0.69
+TRAIN_ACC_MIN_VALUE=0.69
+NUM_TOKENS_MAX_VALUE=232
+LOGPROBS_DIFF_MAX_VALUE=0.0104
+
 # The anyscale job's working_dir is the repo root, so we can use relative paths.
 bash examples/train/gsm8k/run_gsm8k.sh \
   trainer.epochs=1 \
@@ -8,4 +17,11 @@ bash examples/train/gsm8k/run_gsm8k.sh \
   trainer.micro_forward_batch_size_per_gpu=16 \
   trainer.micro_train_batch_size_per_gpu=16 \
   trainer.project_name=\"gsm8k_ci\" \
-  trainer.run_name=\"run_$(date +%Y%m%d%H)\"
+  trainer.run_name=\"$RUN_NAME\"
+
+# check if the run is successful
+# We check for the following metrics:
+# Eval and train accuracy should be greater than the threshold
+# Average number of tokens generated should decrease over time
+# Policy rollout train logprobs absolute difference should be small
+uv run --isolated --extra fsdp $SCRIPT_DIR/get_summary.py --run_name $RUN_NAME --project_name "gsm8k_ci" --asserts "eval/all/avg_score >= $EVAL_ACC_MIN_VALUE" "loss/avg_final_rewards >= $TRAIN_ACC_MIN_VALUE" "generate/avg_num_tokens <= $NUM_TOKENS_MAX_VALUE" "policy/rollout_train_logprobs_abs_diff_mean <= $LOGPROBS_DIFF_MAX_VALUE"

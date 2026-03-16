@@ -39,5 +39,5 @@ Welcome to the SkyRL-Train examples! In this folder you can find the following e
 
 ## Features and More
 - `lora/`: LoRA RL fine-tuning recipes.
-- `remote_inference_engine/`: Scripts for running remote vLLM/sglang inference servers and connecting them to SkyRL.
+- `remote_inference_engine/`: Scripts for running remote vLLM inference servers and connecting them to SkyRL.
 - `training_backends/`: Runner scripts demonstrating how to use different training backends on SkyRL.

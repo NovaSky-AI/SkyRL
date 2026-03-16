@@ -21,15 +21,16 @@
 # limitations under the License.
 
 import gc
+
 import torch
 import torch.nn as nn
 from loguru import logger
-from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.transformer.module import Float16Module
-from megatron.core.optimizer import ChainedOptimizer
 from megatron.core import parallel_state as mpu
-from megatron.core.utils import get_attr_wrapped_model
+from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.optimizer import ChainedOptimizer
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.module import Float16Module
+from megatron.core.utils import get_attr_wrapped_model
 
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
@@ -111,14 +112,10 @@ def freeze_moe_router(model):
 def offload_megatron_grads_to_cpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    if buffer.grad_data.storage().size() > 0:
-                        buffer.grad_data_size = buffer.grad_data.storage().size()
-                        buffer.grad_data.storage().resize_(0)
+            # use megatron DDP built in function to offload grads to cpu
+            # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.16.0/megatron/core/distributed/distributed_data_parallel.py#L575
+            model_chunk.offload_grad_buffers(synchronize=False, empty_cache=False)
         else:
-            # we need this for ref module
             for _, param in model_chunk.named_parameters():
                 if param.grad is not None:
                     param.grad = param.grad.to("cpu", non_blocking=True)
@@ -130,15 +127,8 @@ def offload_megatron_grads_to_cpu(models):
 def load_megatron_grads_to_gpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    # grad_data_size is set
-                    if hasattr(buffer, "grad_data_size"):
-                        buffer.grad_data.storage().resize_(buffer.grad_data_size)
-                        buffer.grad_data.zero_()
+            model_chunk.restore_grad_buffers(synchronize=False)
         else:
-            # we need this for ref module
             for _, param in model_chunk.named_parameters():
                 if param.grad is not None:
                     param.grad = param.grad.to(torch.cuda.current_device(), non_blocking=True)
@@ -157,18 +147,13 @@ def offload_megatron_model_to_cpu(models):
     """
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    # offload parameters from fused Megatron buffers
-                    if buffer.param_data.storage().size() > 0:
-                        buffer.param_data.cpu_data = buffer.param_data.data.cpu().pin_memory()
-                        buffer.param_data_size = buffer.param_data.storage().size()
-                        buffer.param_data.storage().resize_(0)
+            for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                # use megatron buffer built in function to offload to cpu
+                # https://github.com/NVIDIA/Megatron-LM/blob/core_v0.16.0/megatron/core/distributed/param_and_grad_buffer.py#L964
+                buffer.offload_to_cpu(move_params=True, move_grads=False)
 
-                    assert buffer.param_data_size == buffer.param_data.cpu_data.storage().size()
-
-            # lora aware offloading - if using lora,offload non-lora base weights, since megatron fused buffers do not include the HF/bridge "to_wrap" weights
+            # LoRA-aware offloading: offload non-lora base weights that live
+            # outside the fused Megatron buffers (e.g. HF/bridge "to_wrap" weights).
             for name, param in model_chunk.named_parameters():
                 if (
                     param.is_cuda
@@ -176,19 +161,11 @@ def offload_megatron_model_to_cpu(models):
                     and "adapter" not in name
                     and param.data.storage().size() > 0
                 ):
-                    # Always refresh the CPU copy and release GPU storage.
                     cpu_tensor = param.data.detach().cpu().pin_memory()
                     param._offload_cpu_data = cpu_tensor
                     param._offload_cuda_numel = param.data.numel()
-                    # Release GPU storage while keeping dtype/device metadata.
-                    empty_cuda = torch.empty(
-                        0,
-                        dtype=param.data.dtype,
-                        device=param.data.device,
-                    )
-                    param.data = empty_cuda
+                    param.data = torch.empty(0, dtype=param.data.dtype, device=param.data.device)
         else:
-            # we need this for ref module
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to("cpu", non_blocking=True)
     gc.collect()
@@ -199,13 +176,8 @@ def offload_megatron_model_to_cpu(models):
 def load_megatron_model_to_gpu(models):
     for model_chunk in models:
         if isinstance(model_chunk, DDP):
-            model_chunk_all_buffers = [model_chunk.buffers, model_chunk.expert_parallel_buffers]
-            for buffers in model_chunk_all_buffers:
-                for buffer in buffers:
-                    if buffer.param_data.storage().size() == 0:
-                        buffer.param_data.storage().resize_(buffer.param_data_size)
-                        # copy data from cpu to cuda
-                        buffer.param_data.copy_(buffer.param_data.cpu_data, non_blocking=True)
+            for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                buffer.reload_from_cpu(move_params=True, move_grads=False)
 
             # Restore any LoRA-frozen base weights that were offloaded above.
             device_id = torch.cuda.current_device()
@@ -214,7 +186,6 @@ def load_megatron_model_to_gpu(models):
                     restored = param._offload_cpu_data.to(device_id, non_blocking=True)
                     param.data = restored
         else:
-            # we need this for ref module
             device_id = torch.cuda.current_device()
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to(device_id, non_blocking=True)

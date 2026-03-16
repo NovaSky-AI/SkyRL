@@ -5,15 +5,15 @@ vLLM Server Actor - Ray actor running a vLLM OpenAI-compatible API server.
 import asyncio
 import logging
 import os
-import pickle
 import time
 from argparse import Namespace
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import httpx
 import uvicorn
 import vllm.envs as envs
-from fastapi import Request, HTTPException
+from fastapi import Request
+from ray.util.placement_group import PlacementGroup
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.api_server import (
@@ -24,13 +24,17 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import set_ulimit
 
-from skyrl.backends.skyrl_train.env_vars import (
+from skyrl.backends.skyrl_train.inference_servers.common import (
+    ServerInfo,
+    find_and_reserve_port,
+    get_node_ip,
+)
+from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
+from skyrl.env_vars import (
+    SKYRL_HTTP_CONNECTION_LIMIT,
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
-from skyrl.backends.skyrl_train.inference_servers.common import ServerInfo, get_node_ip, get_open_port
-from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
-from skyrl.backends.skyrl_train.inference_servers.vllm_worker import VLLM_WORKER_EXTENSION_CLS
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +49,10 @@ class VLLMServerActor(ServerActorProtocol):
     called from anywhere (other actors, driver, external processes).
 
     Custom endpoints added for SkyRL:
-    - /get_server_info: Return parallelism info
+    - /reset_prefix_cache: Reset prefix cache
 
-    - (vLLM RFC: https://github.com/vllm-project/vllm/issues/31848)
-    - /init_weight_transfer: Initialize weight sync process group
-    - /update_weights: Update model weights via NCCL broadcast
-    - /finalize_weight_update: Post-processing after weight sync
+    Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
+    /update_weights, /get_world_size) from the RLHF router when VLLM_SERVER_DEV_MODE=1.
     """
 
     @staticmethod
@@ -62,6 +64,21 @@ class VLLMServerActor(ServerActorProtocol):
         vllm-specific utility for it and keep the logic inside the engine.
         """
         return vllm_cli_args.tensor_parallel_size * vllm_cli_args.pipeline_parallel_size
+
+    @staticmethod
+    def prepare_server_kwargs(
+        pg: PlacementGroup,
+        start_bundle_idx: int,
+        num_gpus_per_server: int,
+        **kwargs,
+    ) -> dict:
+        if kwargs.get("distributed_executor_backend") == "mp":
+            from skyrl.train.utils.utils import get_gpu_ids_for_pg_bundles
+
+            bundle_indices = list(range(start_bundle_idx, start_bundle_idx + num_gpus_per_server))
+            gpu_ids = get_gpu_ids_for_pg_bundles(pg, bundle_indices)
+            kwargs["mp_cuda_visible_devices"] = ",".join(str(g) for g in gpu_ids)
+        return kwargs
 
     def __init__(
         self,
@@ -76,6 +93,8 @@ class VLLMServerActor(ServerActorProtocol):
         enable_pd: bool = False,
         nixl_side_channel_base: int = 5600,
         colocated_training: bool = False,
+        distributed_executor_backend: str = "ray",
+        mp_cuda_visible_devices: Optional[str] = None,
     ):
         """
         Initialize the vLLM server actor.
@@ -93,22 +112,30 @@ class VLLMServerActor(ServerActorProtocol):
             enable_pd: Enable prefill-decode disaggregation
             nixl_side_channel_base: Base port for NIXL side channel
             colocated_training: Whether the server is colocated with training workers
+            distributed_executor_backend: vLLM distributed executor backend.
+                ``"ray"`` spawns TP/PP workers as Ray tasks (default).
+                ``"mp"`` spawns workers as local processes using
+                CUDA_VISIBLE_DEVICES.
+            mp_cuda_visible_devices: Comma-separated physical GPU IDs for the
+                ``"mp"`` backend. Pre-computed by ServerGroup from the
+                per-server placement group. Only used when
+                ``distributed_executor_backend="mp"`` and TP*PP > 1.
         """
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
-        self._port = get_open_port(start_port)
+        self._port, self._port_reservation = find_and_reserve_port(start_port)
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
-
-        # Ensure SkyRL's custom worker extension is used for weight sync
-        self._ensure_worker_extension()
+        self._use_mp_backend = distributed_executor_backend == "mp"
 
         # Ensure vLLM sleep endpoints are enabled by using dev mode
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
+        # TODO (aaron): once native ipc stops needing this, remove
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-        # Ensure Ray executor is used (required for GPU inheritance in placement groups)
-        self._ensure_ray_executor()
+        # Configure the distributed executor backend
+        self._cli_args.distributed_executor_backend = distributed_executor_backend
 
         # Update args with our assigned host/port
         self._cli_args.host = "0.0.0.0"
@@ -139,41 +166,37 @@ class VLLMServerActor(ServerActorProtocol):
                 f"dp_master_address={dp_master_address}, dp_rpc_port={dp_rpc_port}"
             )
 
-        # Set bundle indices for this server's TP/PP workers in the placement group
-        bundle_indices = list(range(start_bundle_idx, start_bundle_idx + self._num_gpus_per_server))
-        os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
-        logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
+        # Configure GPU visibility for this server's TP/PP workers
+        if self._use_mp_backend:
+            self._setup_mp_gpu_visibility(mp_cuda_visible_devices)
+        else:
+            bundle_indices = list(range(start_bundle_idx, start_bundle_idx + self._num_gpus_per_server))
+            os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
+            logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
 
         # Initialized lazily to not block the actor initialization.
         self._engine: Optional[AsyncLLMEngine] = None
         self._server_task: Optional[asyncio.Task] = None
 
-    def _ensure_worker_extension(self) -> None:
-        """
-        Ensure the SkyRL worker extension is configured.
+    def _setup_mp_gpu_visibility(self, mp_cuda_visible_devices: Optional[str]) -> None:
+        """Set CUDA_VISIBLE_DEVICES for the mp backend.
 
-        The worker extension (WorkerWrap) provides the RPC methods needed for
-        weight synchronization (init_weight_update_communicator, load_weights).
+        When using the mp backend, vLLM spawns workers as local processes.
+        They discover GPUs via CUDA_VISIBLE_DEVICES rather than inheriting
+        from a placement group.
         """
-        if not hasattr(self._cli_args, "worker_extension_cls") or not self._cli_args.worker_extension_cls:
-            self._cli_args.worker_extension_cls = VLLM_WORKER_EXTENSION_CLS
-            logger.info(f"Using default worker extension: {VLLM_WORKER_EXTENSION_CLS}")
+        if mp_cuda_visible_devices is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
+            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+            logger.info(f"Server {self._server_idx}: mp backend, " f"CUDA_VISIBLE_DEVICES={mp_cuda_visible_devices}")
         else:
-            logger.info(f"Using provided worker extension: {self._cli_args.worker_extension_cls}")
-
-    def _ensure_ray_executor(self) -> None:
-        """
-        Ensure Ray is used as the distributed executor backend.
-
-        When running inside a Ray actor, we must use the Ray executor so that
-        workers are spawned and properly inherit GPU allocation from the
-        placement group.
-        """
-        if (
-            not hasattr(self._cli_args, "distributed_executor_backend")
-            or self._cli_args.distributed_executor_backend != "ray"
-        ):
-            self._cli_args.distributed_executor_backend = "ray"
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+            logger.info(
+                f"Server {self._server_idx}: mp backend, " f"cleared CUDA_VISIBLE_DEVICES (single-GPU or auto-detect)"
+            )
 
     def _setup_nixl_side_channel(self, base_port: int) -> None:
         """
@@ -208,16 +231,6 @@ class VLLMServerActor(ServerActorProtocol):
     def get_server_info(self) -> ServerInfo:
         """Get the server's IP and port info."""
         return ServerInfo(ip=self._ip, port=self._port)
-
-    def _get_extended_server_info(self) -> Dict[str, Any]:
-        """Return extended server info including parallelism settings."""
-        return {
-            "ip": self._ip,
-            "port": self._port,
-            "url": f"http://{self._ip}:{self._port}",
-            "server_idx": self._server_idx,
-            "world_size": self._num_gpus_per_server,
-        }
 
     def get_dp_info(self) -> Tuple[str, int]:
         """Get the DP master address and RPC port (for server 0 to share with others)."""
@@ -267,6 +280,11 @@ class VLLMServerActor(ServerActorProtocol):
 
     async def _run_server(self) -> None:
         """Internal method to run the HTTP server."""
+        # Release the port reservation right before vLLM rebinds.
+        if self._port_reservation is not None:
+            self._port_reservation.close()
+            self._port_reservation = None
+
         sock_addr = (self._cli_args.host, self._cli_args.port)
         sock = create_server_socket(sock_addr)
         app = build_app(self._cli_args)
@@ -291,6 +309,7 @@ class VLLMServerActor(ServerActorProtocol):
             port=self._cli_args.port,
             log_level=self._cli_args.uvicorn_log_level,
             timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+            backlog=SKYRL_HTTP_CONNECTION_LIMIT,
             ssl_keyfile=self._cli_args.ssl_keyfile,
             ssl_certfile=self._cli_args.ssl_certfile,
             ssl_ca_certs=self._cli_args.ssl_ca_certs,
@@ -304,75 +323,9 @@ class VLLMServerActor(ServerActorProtocol):
         """Add custom SkyRL endpoints to the FastAPI app."""
         engine = self._engine
 
-        @app.get("/get_server_info")
-        async def _get_server_info():
-            """Return server parallelism info."""
-            return self._get_extended_server_info()
-
-        # TODO (Kourosh): After https://github.com/vllm-project/vllm/pull/
-        # 31943/ is merged, use the native API.
-        @app.post("/init_weight_transfer")
-        async def _init_weight_transfer(request: Request):
-            """Initialize weight sync process group."""
-            from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo, CudaIpcInitInfo
-
-            data = await request.json()
-            # simple way to figure out the strategy type: try to load with BroadcastInitInfo else fallback to CudaIpcInitInfo
-            # Can be derived from vllm cli args once https://github.com/vllm-project/vllm/pull/31943/ is merged.
-            try:
-                init_info = BroadcastInitInfo(**data)
-            except Exception:
-                try:
-                    init_info = CudaIpcInitInfo(**data)
-                except Exception:
-                    raise HTTPException(status_code=400, detail="Received invalid init info")
-
-            init_info = init_info.for_engine(
-                engine_index=self._server_idx,
-                tp_size=self._cli_args.tensor_parallel_size,
-                pp_size=self._cli_args.pipeline_parallel_size,
-            )
-            pickled_init_info = pickle.dumps(init_info)
-
-            await engine.collective_rpc(
-                "init_weight_update_communicator",
-                args=(pickled_init_info,),
-            )
-            return {"status": "ok"}
-
-        @app.post("/update_weights")
-        async def _update_weights(request: Request):
-            """Update model weights via NCCL broadcast."""
-            from skyrl.backends.skyrl_train.weight_sync import BroadcastWeightUpdateRequest, CudaIpcWeightUpdateRequest
-
-            data = await request.json()
-            try:
-                weight_request = BroadcastWeightUpdateRequest.from_json_dict(data)
-            except Exception:
-                try:
-                    weight_request = CudaIpcWeightUpdateRequest.from_json_dict(data)
-                except Exception:
-                    raise HTTPException(status_code=400, detail="Received invalid weight update request")
-
-            pickled_request = pickle.dumps(weight_request)
-
-            await engine.collective_rpc(
-                "load_weights",
-                args=(pickled_request,),
-            )
-            return {"status": "ok"}
-
-        @app.post("/finalize_weight_update")
-        async def _finalize_weight_update(request: Request):
-            """
-            Finalize weight update - post-processing hook.
-
-            Currently a no-op, reserved for future use e.g. Quantization
-            See https://github.com/vllm-project/vllm/issues/31848 for more
-            details.
-            """
-            # No-op for now - placeholder for future post-processing
-            return {"status": "ok"}
+        # Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
+        # /update_weights, /get_world_size) registered by the RLHF router when
+        # VLLM_SERVER_DEV_MODE=1.
 
         @app.post("/reset_prefix_cache")
         async def _reset_prefix_cache(request: Request):

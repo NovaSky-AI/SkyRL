@@ -1,15 +1,14 @@
+import sys
+
 import torch
 import ray
-from omegaconf import DictConfig
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.entrypoints.main_base import BasePPOExp
-import hydra
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import initialize_ray
-from skyrl.train.entrypoints.main_base import config_dir, validate_cfg
+from skyrl.train.entrypoints.main_base import validate_cfg
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
-    register_policy_loss,
-    reduce_loss,
 )
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
@@ -44,31 +43,19 @@ def compute_no_op_advantage(token_level_rewards: torch.Tensor, **kwargs):
     return token_level_rewards, token_level_rewards
 
 
-@register_policy_loss("importance_sampling")
-def compute_importance_sampling_policy_loss(
-    log_probs, old_log_probs, advantages, config, loss_mask=None, rollout_logprobs=None, **kwargs
-):
-    # as defined here: https://tinker-docs.thinkingmachines.ai/losses#policy-gradient-importance_sampling
-    loss = -torch.exp(log_probs - old_log_probs) * advantages
-
-    loss = reduce_loss(loss, loss_mask, "seq_mean_token_sum_norm", config.max_seq_len)
-    # return loss and a dummy clip ratio value as we aren't clipping here
-    return loss, {"clip_ratio": 0.0}
-
-
 class OnPolicyDistillationExp(BasePPOExp):
     def get_trainer(self, *args, **kwargs):
         return OnPolicyDistillationTrainer(*args, **kwargs)
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg: SkyRLTrainConfig):
     exp = OnPolicyDistillationExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
+def main() -> None:
+    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     # validate the arguments
     validate_cfg(cfg)
 

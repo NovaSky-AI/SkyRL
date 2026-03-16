@@ -2,16 +2,30 @@
 uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo
 """
 
+import sys
+
 import ray
-import hydra
 import torch
+from dataclasses import dataclass
 from typing import List
-from omegaconf import DictConfig
+
+from skyrl.train.config import AlgorithmConfig, make_config
 from skyrl.train.trainer import RayPPOTrainer
-from skyrl.train.utils import initialize_ray
-from skyrl.train.entrypoints.main_base import BasePPOExp, config_dir, validate_cfg
+from skyrl.train.utils import initialize_ray, validate_cfg
+from skyrl.train.entrypoints.main_base import BasePPOExp
 
 from skyrl.train.generators.base import GeneratorOutput
+
+
+@dataclass
+class DAPOAlgorithmConfig(AlgorithmConfig):
+    """Extended algorithm config with DAPO-specific overlong buffer settings."""
+
+    overlong_buffer_len: int = 512
+    overlong_buffer_penalty_factor: float = 1.0
+
+
+DAPOConfig = make_config(algorithm_cls=DAPOAlgorithmConfig)
 
 
 class DAPOTrainer(RayPPOTrainer):
@@ -23,18 +37,12 @@ class DAPOTrainer(RayPPOTrainer):
 
     @torch.no_grad()
     def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
-        """
-        Overrides the postprocess_generator_output method to additionally apply DAPO specific soft overlong punishment to rewards.
-
-        Args:
-            generator_output: GeneratorOutput
-            uids: List[str]
-
-        Returns:
-            GeneratorOutput
-        """
-        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer.len
-        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer.penalty_factor
+        # NOTE (sumanthrh): Given the usage of `make_config`, the algorithm config subclass for DAPO is
+        # created dynamically and thus IDEs will not be able to resolve the attributes
+        # For better typing, you can always define a custom subclass of DAPOConfig manually.
+        # See examples/terminal_bench for an example.
+        overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
+        overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
         # modify rewards here
         response_ids = generator_output["response_ids"]
         rewards = generator_output["rewards"]
@@ -75,16 +83,14 @@ class DAPOExp(BasePPOExp):
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: DictConfig):
+def skyrl_entrypoint(cfg):
     exp = DAPOExp(cfg)
     exp.run()
 
 
-@hydra.main(config_path=config_dir, config_name="ppo_base_config", version_base=None)
-def main(cfg: DictConfig) -> None:
-    # validate the arguments
+def main() -> None:
+    cfg = DAPOConfig.from_cli_overrides(sys.argv[1:])
     validate_cfg(cfg)
-
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
 

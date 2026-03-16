@@ -1,13 +1,20 @@
 from typing import cast
 from unittest.mock import MagicMock
 
-from flax import nnx
 import jax.numpy as jnp
+from flax import nnx
+
+from skyrl.tinker.types import SamplingParams
 from skyrl.tx.models.configs import ModelConfig
 from skyrl.tx.models.types import CausalLMOutput
-from skyrl.tinker.types import SamplingParams
-from skyrl.tx.utils.generator import GenerateOutput, GeneratorMixin, KVCache, apply_top_k_batch, apply_top_p_batch
-from skyrl.tx.utils.logits_processor import LogitsProcessorMixin, LMHead
+from skyrl.tx.utils.generator import (
+    GenerateOutput,
+    GeneratorMixin,
+    KVCache,
+    apply_top_k_batch,
+    apply_top_p_batch,
+)
+from skyrl.tx.utils.logits_processor import LMHead, LogitsProcessorMixin
 
 
 class DummyModel(GeneratorMixin, LogitsProcessorMixin, nnx.Module):

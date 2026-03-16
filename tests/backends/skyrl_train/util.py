@@ -1,6 +1,12 @@
 # utility functions used for CPU tests
 
-from skyrl.train.config import SkyRLConfig, AlgorithmConfig, SamplingParams, TrainerConfig, GeneratorConfig
+from skyrl.train.config import (
+    AlgorithmConfig,
+    GeneratorConfig,
+    SamplingParams,
+    SkyRLTrainConfig,
+    TrainerConfig,
+)
 
 
 def example_dummy_config():
@@ -36,6 +42,6 @@ def example_dummy_config():
         http_endpoint_host="127.0.0.1",
         http_endpoint_port=8000,
     )
-    cfg = SkyRLConfig(trainer=trainer_cfg, generator=generator_cfg)
+    cfg = SkyRLTrainConfig(trainer=trainer_cfg, generator=generator_cfg)
 
     return cfg

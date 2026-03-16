@@ -2,7 +2,7 @@
 title: Using SkyRL as a Library
 ---
 
-To use SkyRL-Train as a dependency in your project, configure your `pyproject.toml` with `uv`. You can install from either PyPI (stable releases) or Git (latest development version).
+To use SkyRL as a dependency in your project, configure your `pyproject.toml` with `uv`. You can install from either PyPI (stable releases) or Git (latest development version).
 
 Some additional dependencies that depend on custom indexes/wheels, such as flash-attn and flashinfer-jit-cache. Below is an example configuration using uv:
 
@@ -10,9 +10,9 @@ Some additional dependencies that depend on custom indexes/wheels, such as flash
 [project]
 dependencies = [
     # Option A: Install from PyPI (stable release)
-    "skyrl-train[vllm]==0.3.1",
+    "skyrl[fsdp]",
     # Option B: Install from Git (latest)
-    # "skyrl-train[vllm]",
+    # "skyrl[fsdp]",
 
     "flashinfer-jit-cache==0.5.3",
     "flash-attn==2.8.3"
@@ -25,7 +25,7 @@ flash-attn = [{requirement = "torch", match-runtime = true}]
 flashinfer-jit-cache = { index = "flashinfer-cu128" }
 # Only needed for Option B (Git install):
 # skyrl-gym = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-gym" }
-# skyrl-train = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-train" }
+# skyrl = { git = "https://github.com/NovaSky-AI/SkyRL" }
 
 [[tool.uv.index]]
 name = "flashinfer-cu128"
@@ -33,6 +33,6 @@ url = "https://flashinfer.ai/whl/cu128"
 explicit = true
 ```
 
-**Option A (PyPI)**: Use the pinned version `skyrl-train[vllm]==0.3.1`. No additional sources needed.
+**Option A (PyPI)**: Use `skyrl[fsdp]`. No additional sources needed.
 
-**Option B (Git)**: Remove the version pin and uncomment the `skyrl-gym` and `skyrl-train` sources to install from the latest commit.
+**Option B (Git)**: Uncomment the `skyrl-gym` and `skyrl` sources to install from the latest commit.

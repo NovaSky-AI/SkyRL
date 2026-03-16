@@ -48,8 +48,8 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_
   trainer.strategy=fsdp2 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS_PER_NODE \
   trainer.placement.ref_num_gpus_per_node=$NUM_GPUS_PER_NODE \
-  generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
-  generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \
+  generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
+  generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP_SIZE \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=true \
@@ -61,7 +61,7 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_
   trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=2048 \
-  generator.enforce_eager=$ENFORCE_EAGER \
+  generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.sampling_params.max_generate_length=8192 \
   generator.sampling_params.temperature=$TEMPERATURE \
   generator.sampling_params.top_p=$TOP_P \
@@ -74,13 +74,13 @@ uv run --isolated --extra fsdp -m examples.train.on_policy_distillation.main_on_
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
-  generator.backend=vllm \
-  generator.run_engines_locally=true \
-  generator.async_engine=false \
+  generator.inference_engine.backend=vllm \
+  generator.inference_engine.run_engines_locally=true \
+  generator.inference_engine.async_engine=false \
   generator.batched=true \
   environment.env_class=aime \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
-  generator.gpu_memory_utilization=0.8 \
+  generator.inference_engine.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="aime_on_policy_distillation" \
   trainer.run_name="on_policy_distillation_aime_qwen3_4b_base_from_4b" \

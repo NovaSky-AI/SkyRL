@@ -9,20 +9,20 @@ from typing import Callable
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel
-from sqlmodel import create_engine, Session, select, update, func
+from sqlmodel import Session, create_engine, func, select, update
 
+from skyrl.backends.utils import log_timing
+from skyrl.tinker import types
+from skyrl.tinker.config import EngineConfig, add_model
 from skyrl.tinker.db_models import (
-    FutureDB,
-    RequestStatus,
     CheckpointDB,
     CheckpointStatus,
+    FutureDB,
     ModelDB,
+    RequestStatus,
     SessionDB,
     enable_sqlite_wal,
 )
-from skyrl.tinker import types
-from skyrl.tinker.config import EngineConfig, add_model
-from skyrl.backends.utils import log_timing
 from skyrl.utils.log import logger
 
 
@@ -164,13 +164,19 @@ def get_backend_classes(backend_name: str):
 
         return JaxBackend, JaxBackendConfig
     elif backend_name == "fsdp":
-        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, FSDPBackendConfig
+        from skyrl.backends.skyrl_train_backend import (
+            FSDPBackendOverrides,
+            SkyRLTrainBackend,
+        )
 
-        return SkyRLTrainBackend, FSDPBackendConfig
+        return SkyRLTrainBackend, FSDPBackendOverrides
     elif backend_name == "megatron":
-        from skyrl.backends.skyrl_train_backend import SkyRLTrainBackend, MegatronBackendConfig
+        from skyrl.backends.skyrl_train_backend import (
+            MegatronBackendOverrides,
+            SkyRLTrainBackend,
+        )
 
-        return SkyRLTrainBackend, MegatronBackendConfig
+        return SkyRLTrainBackend, MegatronBackendOverrides
     else:
         raise ValueError(
             f"Unknown backend: {backend_name}. Available backends: jax, fsdp, megatron. "

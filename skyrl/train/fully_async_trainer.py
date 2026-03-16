@@ -12,25 +12,32 @@ High-level notes:
 """
 
 import asyncio
-import os
-import torch
-import traceback
-import sys
-from loguru import logger
-from skyrl.train.trainer import RayPPOTrainer
-from tqdm import tqdm
-from skyrl.train.utils import Timer
-from skyrl.backends.skyrl_train.utils.ppo_utils import normalize_advantages_dict
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.train.generators.base import GeneratorOutput
-from skyrl.train.utils.trainer_utils import ResumeMode, build_dataloader
-from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.train.generators.utils import prepare_generator_input, concatenate_generator_outputs
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from dataclasses import dataclass
-from torchdata.stateful_dataloader import StatefulDataLoader
-from typing import List, Tuple, Iterable, Set
 import inspect
+import os
+import sys
+import traceback
+from dataclasses import dataclass
+from typing import Iterable, List, Set, Tuple
+
+import torch
+from loguru import logger
+from torchdata.stateful_dataloader import StatefulDataLoader
+from tqdm import tqdm
+
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.utils.ppo_utils import normalize_advantages_dict
+from skyrl.train.generators.base import GeneratorOutput
+from skyrl.train.generators.utils import (
+    concatenate_generator_outputs,
+    prepare_generator_input,
+)
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils import Timer
+from skyrl.train.utils.trainer_utils import ResumeMode, build_dataloader
 
 
 @dataclass
@@ -292,7 +299,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         assert (
             not self.cfg.generator.batched
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
-        assert self.cfg.generator.async_engine, "async_engine must be True for fully async training."
+        assert self.cfg.generator.inference_engine.async_engine, "async_engine must be True for fully async training."
         # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
 
@@ -490,6 +497,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             with Timer("save_hf_model", self.all_timings):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")
+        self.tracker.finish()
         logger.info("Training done!")
 
     async def _run_training(self, training_input: TrainingInputBatch):
@@ -542,7 +550,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 generator_input, uids = prepare_generator_input(
                     rand_prompts,
                     self.cfg.generator.n_samples_per_prompt,
-                    get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                    get_sampling_params_for_backend(
+                        self.cfg.generator.inference_engine.backend, self.cfg.generator.sampling_params
+                    ),
                     self.cfg.environment.env_class,
                     "train",
                     self.global_step,
@@ -594,7 +604,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def async_sync_policy_weights_to_inference_engines(self):
         return await self.policy_model.async_run_method(
-            "pass_through", "broadcast_to_inference_engines", self.inference_engine_client
+            "pass_through",
+            "broadcast_to_inference_engines",
+            self.inference_engine_client,
+            self.cfg.generator.inference_engine,
         )
 
     def convert_generation_group_mini_batch_to_training_input(

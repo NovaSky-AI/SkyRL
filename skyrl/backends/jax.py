@@ -25,35 +25,36 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, get_type_hints
 
-from cloudpathlib import AnyPath
-import numpy as np
 import jax
 import jax.numpy as jnp
-from jax.experimental import multihost_utils
+import numpy as np
 import optax
+from cloudpathlib import AnyPath
 from flax import nnx
 from flax.training import checkpoints
+from jax.experimental import multihost_utils
 from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
-from skyrl.tx.models.configs import Qwen3Config
-from skyrl.tx.layers.lora import clear_lora_adapter, init_lora_adapter
-from skyrl.tinker import types
 from skyrl.backends.backend import AbstractBackend
 from skyrl.backends.utils import pad, pad_batch, pad_to_fsdp
+from skyrl.tinker import types
 from skyrl.tinker.loss_fns import LOSS_FUNCTIONS, LossFnConfig
 from skyrl.tinker.types import LOSS_TYPES
+from skyrl.tx.layers.connectors import is_connector_path
+from skyrl.tx.layers.lora import clear_lora_adapter, init_lora_adapter
+from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.utils.models import (
+    extract_adapter_state,
+    get_adapter_idx,
     get_dtype,
     get_model_class,
-    load_safetensors,
-    load_lora_checkpoint,
-    save_lora_checkpoint,
-    extract_adapter_state,
     insert_adapter_state,
-    round_up_seq_len,
+    load_lora_checkpoint,
+    load_safetensors,
     resolve_model_path,
-    get_adapter_idx,
+    round_up_seq_len,
+    save_lora_checkpoint,
 )
 from skyrl.utils.log import logger
 
@@ -88,6 +89,15 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=False,
         description="Per-layer activation checkpointing: recompute activations during backward to save memory",
     )
+    mhc_expansion_rate: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "EXPERIMENTAL: mHC expansion rate (number of residual streams). "
+            "When set to 1, connectors are frozen and excluded from adapter checkpoints; "
+            "when >1, connectors are trainable and checkpointed."
+        ),
+    )
     loss_chunk_size: int = Field(
         default=1024,
         description="Chunk size for cross-entropy loss computation. Reduces memory by avoiding full [B*T, V] logits materialization. Set to 0 to disable chunking.",
@@ -101,6 +111,23 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=None,
         description="Total number of processes in the multi-node cluster",
     )
+
+
+@jax.tree_util.register_dataclass
+@dataclass
+class OptimStepMetrics:
+    grad_norm: jax.Array
+    learning_rate: jax.Array
+    mhc_gradient_norm: jax.Array | None = None
+
+    def to_output_metrics(self) -> dict[str, float]:
+        metrics = {
+            "skyrl.ai/grad_norm": self.grad_norm.item(),
+            "skyrl.ai/learning_rate": self.learning_rate.item(),
+        }
+        if self.mhc_gradient_norm is not None:
+            metrics["skyrl.ai/mhc_gradient_norm"] = self.mhc_gradient_norm.item()
+        return metrics
 
 
 @jax.tree_util.register_dataclass
@@ -131,10 +158,11 @@ class AccumulatedGradients:
     def get_mean(self, adapter_index: jax.Array) -> nnx.State:
         """Compute mean gradients for a specific adapter, with zeros for all other adapters."""
         count = self.counts[adapter_index]
+        safe_count = jnp.maximum(count, jnp.int32(1))
 
         def compute_mean(path, g):
             idx = get_adapter_idx(path, adapter_index)
-            return jnp.zeros_like(g).at[idx].set(g[idx] / count.astype(g.dtype))
+            return jnp.zeros_like(g).at[idx].set(g[idx] / safe_count.astype(g.dtype))
 
         return jax.tree.map_with_path(compute_mean, self.grad_sum)
 
@@ -164,10 +192,11 @@ class JaxBackendImpl(AbstractBackend):
     - Supports both FORWARD and FORWARD_BACKWARD request types
     """
 
-    def __init__(self, base_model: str, config: JaxBackendConfig):
+    def __init__(self, base_model: str, config: JaxBackendConfig, process_id: int):
         """Initialize JAX LoRA backend."""
         self.base_model = base_model
         self.config = config
+        self.process_id = process_id
         self.metrics = types.EngineMetrics()
 
         # Initialize the shared base model with LoRA config
@@ -181,6 +210,7 @@ class JaxBackendImpl(AbstractBackend):
             shard_attention_heads=config.shard_attention_heads,
             loss_chunk_size=config.loss_chunk_size,
             gradient_checkpointing=config.gradient_checkpointing,
+            mhc_expansion_rate=config.mhc_expansion_rate,
         )
 
         model_class = get_model_class(self.model_config)
@@ -196,7 +226,11 @@ class JaxBackendImpl(AbstractBackend):
             axis_types=(jax.sharding.AxisType.Auto,) * 3,
         )
         with jax.set_mesh(self.mesh), nnx.use_eager_sharding(True):
-            self.model = model_class(self.model_config, dtype=get_dtype(self.model_config.dtype), rngs=nnx.Rngs(0))
+            self.model = model_class(
+                self.model_config,
+                dtype=get_dtype(self.model_config.get_config().dtype),
+                rngs=nnx.Rngs(0),
+            )
             load_safetensors(checkpoint_path, self.model_config, self.model)
 
             # Split model into LoRA and non-LoRA parameters
@@ -483,10 +517,24 @@ class JaxBackendImpl(AbstractBackend):
             lora_params: nnx.State,
             optimizer: nnx.Optimizer,
             adapter_index: jax.Array,
-        ) -> AccumulatedGradients:
+        ) -> tuple[AccumulatedGradients, OptimStepMetrics]:
             """Compute full gradients, apply optimizer update, and reset accumulated grads."""
-            optimizer.update(lora_params, accumulated_grads.get_mean(adapter_index))
-            return accumulated_grads.reset_adapter(adapter_index)
+            mean_grads = accumulated_grads.get_mean(adapter_index)
+            grad_norm = optax.global_norm(mean_grads)
+            mhc_gradient_norm = None
+            if self.config.mhc_expansion_rate > 1:
+                mhc_grads = jax.tree.map_with_path(
+                    lambda path, g: g if is_connector_path(path) else jnp.zeros_like(g),
+                    mean_grads,
+                )
+                mhc_gradient_norm = optax.global_norm(mhc_grads)
+            optimizer.update(lora_params, mean_grads)
+            metrics = OptimStepMetrics(
+                grad_norm=grad_norm,
+                learning_rate=optimizer.opt_state.hyperparams["learning_rate"],
+                mhc_gradient_norm=mhc_gradient_norm,
+            )
+            return accumulated_grads.reset_adapter(adapter_index), metrics
 
         if self.config.enforce_eager:
             self._compute_grads_and_update = compute_grads_and_update
@@ -732,15 +780,15 @@ class JaxBackendImpl(AbstractBackend):
         """Apply an optimizer step using accumulated gradients."""
         adapter_index = self.models[model_id].adapter_index
         optimizer = self.optimizers[model_id]
+        learning_rate = request_data.adam_params.learning_rate
 
         # Check if we have any gradients accumulated (count > 0)
         if self.accumulated_grads.counts[adapter_index] == 0:
-            logger.warning(f"No accumulated gradients for model {model_id}, skipping optimizer step")
-            return types.OptimStepOutput()
+            logger.warning(f"No accumulated gradients for model {model_id}; applying step with zero gradients")
 
         # Update hyperparameters from the request
         hp = optimizer.opt_state.hyperparams
-        hp["learning_rate"][...] = request_data.adam_params.learning_rate
+        hp["learning_rate"][...] = learning_rate
         hp["b1"][...] = request_data.adam_params.beta1
         hp["b2"][...] = request_data.adam_params.beta2
         hp["eps"][...] = request_data.adam_params.eps
@@ -748,15 +796,16 @@ class JaxBackendImpl(AbstractBackend):
 
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
         with jax.set_mesh(self.mesh):
-            self.accumulated_grads = self._compute_grads_and_update(
+            self.accumulated_grads, optim_metrics = self._compute_grads_and_update(
                 self.accumulated_grads,
                 self.lora_params,
                 optimizer,
                 jnp.int32(adapter_index),
             )
 
-        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index})")
-        return types.OptimStepOutput()
+        output_metrics = jax.device_get(optim_metrics).to_output_metrics()
+        logger.info(f"Applied optimizer step for model {model_id} (adapter {adapter_index}), metrics={output_metrics}")
+        return types.OptimStepOutput(metrics=output_metrics)
 
     def sample(
         self,
@@ -913,6 +962,7 @@ class JaxBackendImpl(AbstractBackend):
             lora_model.lora_config,
             lora_model.adapter_index,
             output_path,
+            self.process_id,
         )
         logger.info(f"Saved LoRA sampler checkpoint to {output_path}")
 
@@ -987,13 +1037,15 @@ class RpcPayload(BaseModel):
 RpcPayloadAdapter: TypeAdapter[RpcPayload] = TypeAdapter(RpcPayload)
 
 
-def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
+def _broadcast_command(cmd: RpcPayload | None, process_id: int) -> RpcPayload:
     """Broadcast an RpcPayload from coordinator to all workers using JSON.
 
     On coordinator (process 0): serializes and broadcasts the payload.
     On workers: receives and deserializes the payload (pass None).
     """
-    if jax.process_index() == 0:
+    is_source = process_id == 0
+
+    if is_source:
         assert cmd is not None, "Coordinator must provide a command to broadcast."
         data = RpcPayloadAdapter.dump_json(cmd)
         size = np.array([len(data)], dtype=np.int64)
@@ -1001,15 +1053,15 @@ def _broadcast_command(cmd: RpcPayload | None) -> RpcPayload:
         size = np.array([0], dtype=np.int64)
 
     # Broadcast size first
-    size = multihost_utils.broadcast_one_to_all(size)
+    size = multihost_utils.broadcast_one_to_all(size, is_source=is_source)
 
-    # Broadcast data
-    if jax.process_index() == 0:
+    if is_source:
         data_arr = np.frombuffer(data, dtype=np.uint8)
     else:
         data_arr = np.zeros(size[0], dtype=np.uint8)
 
-    data_arr = multihost_utils.broadcast_one_to_all(data_arr)
+    # Broadcast data
+    data_arr = multihost_utils.broadcast_one_to_all(data_arr, is_source=is_source)
 
     return RpcPayloadAdapter.validate_json(data_arr.tobytes())
 
@@ -1021,18 +1073,19 @@ class JaxBackend(JaxBackendImpl):
     """
 
     def __init__(self, base_model: str, config: JaxBackendConfig):
+        self.process_id = 0  # Coordinator is always process 0
         if config.coordinator_address is not None:
             jax.distributed.initialize(
                 coordinator_address=config.coordinator_address,
                 num_processes=config.num_processes,
-                process_id=0,
+                process_id=self.process_id,
             )
             logger.info(
-                f"JAX distributed initialized: process_id={jax.process_index()} ({jax.process_count()} total), "
+                f"JAX distributed initialized: process_id={self.process_id} ({jax.process_count()} total), "
                 f"local devices: {jax.local_device_count()}, total devices: {jax.device_count()}"
             )
 
-        self._broadcast_and_call("__init__", base_model=base_model, config=config)
+        self._broadcast_and_call("__init__", base_model=base_model, config=config, process_id=self.process_id)
 
     def _broadcast_and_call(self, method: str, **kwargs):
         """Broadcast method call to workers and execute locally via super()."""
@@ -1045,7 +1098,10 @@ class JaxBackend(JaxBackendImpl):
                     return str(v)
                 return TypeAdapter(hints[k]).dump_python(v, mode="json") if k in hints else v
 
-            _broadcast_command(RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}))
+            _broadcast_command(
+                RpcPayload(method=method, kwargs={k: serialize(k, v) for k, v in kwargs.items()}),
+                process_id=self.process_id,
+            )
         return getattr(super(), method)(**kwargs)
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig) -> None:
@@ -1097,21 +1153,21 @@ def run_worker(coordinator_address: str, num_processes: int, process_id: int):
         process_id=process_id,
     )
     logger.info(
-        f"Worker process_id={jax.process_index()} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
+        f"Worker process_id={process_id} ({jax.process_count()} total) initialized, waiting for config from coordinator..."
     )
 
     # Receive INIT payload with base_model and config from coordinator
-    init_payload = _broadcast_command(None)
+    init_payload = _broadcast_command(None, process_id=process_id)
     assert init_payload.method == "__init__", f"Expected __init__, got {init_payload.method}"
     config = JaxBackendConfig.model_validate(init_payload.kwargs["config"])
     logger.info(f"Worker received config: base_model={init_payload.kwargs['base_model']}, config={config}")
 
-    backend = JaxBackendImpl(init_payload.kwargs["base_model"], config)
+    backend = JaxBackendImpl(init_payload.kwargs["base_model"], config, process_id)
 
-    logger.info(f"Worker process_id={jax.process_index()} entering command loop")
+    logger.info(f"Worker process_id={process_id} entering command loop")
 
     while True:
-        payload: RpcPayload = _broadcast_command(None)
+        payload: RpcPayload = _broadcast_command(None, process_id=process_id)
 
         if not hasattr(backend, payload.method):
             logger.error(f"Unknown method: {payload.method}")

@@ -62,11 +62,28 @@ def ppo_loss(
     return -safe_loss_mask(jnp.minimum(unclipped, clipped), loss_mask)
 
 
+def cispo_loss(
+    target_logprobs: jax.Array,
+    loss_mask: jax.Array,
+    sampling_logprobs: jax.Array,
+    advantages: jax.Array,
+    loss_fn_config: LossFnConfig,
+) -> jax.Array:
+    "CISPO clipped-ratio policy gradient loss."
+    prob_ratio = jnp.exp(target_logprobs - sampling_logprobs)
+    clip_low_threshold = loss_fn_config.clip_low_threshold
+    clip_high_threshold = loss_fn_config.clip_high_threshold
+    clipped_ratio = jnp.clip(prob_ratio, clip_low_threshold, clip_high_threshold)
+    cispo_objective = jax.lax.stop_gradient(clipped_ratio) * target_logprobs * advantages
+    return -safe_loss_mask(cispo_objective, loss_mask)
+
+
 # Map from string names to loss functions
 LOSS_FUNCTION_MAP = {
     "cross_entropy": cross_entropy_loss,
     "importance_sampling": importance_sampling_loss,
     "ppo": ppo_loss,
+    "cispo": cispo_loss,
 }
 
 # Build list of functions indexed by LOSS_TYPES values (for jax.lax.switch)

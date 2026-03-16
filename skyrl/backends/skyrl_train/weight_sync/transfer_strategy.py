@@ -7,7 +7,7 @@ transfer mechanisms (broadcast, CUDA IPC) to be used interchangeably.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Iterator, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterable, Iterator, Optional, Tuple, Union
 
 import torch
 
@@ -15,9 +15,12 @@ from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk
 
 if TYPE_CHECKING:
     from omegaconf import DictConfig
-    from skyrl.train.config import SkyRLConfig
-    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
+
+    from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+        InferenceEngineClient,
+    )
     from skyrl.backends.skyrl_train.weight_sync.base import WeightUpdateRequest
+    from skyrl.train.config import SkyRLTrainConfig
 
 
 @dataclass
@@ -58,7 +61,11 @@ class WeightTransferSender(ABC):
     """
 
     @abstractmethod
-    async def send_chunks(self, chunks: Iterable[WeightChunk]) -> None:
+    async def send_chunks(
+        self,
+        chunks: Iterable[WeightChunk],
+        weight_metadata: Optional[Dict[str, list]] = None,
+    ) -> None:
         """Send chunks using this transfer strategy.
 
         This method must be called on all training ranks. Implementations may have
@@ -66,6 +73,9 @@ class WeightTransferSender(ABC):
 
         Args:
             chunks: Iterable of WeightChunk objects to send.
+            weight_metadata: Optional pre-computed metadata (names, dtype_names, shapes).
+                When provided, allows the sender to avoid materializing all chunks
+                to collect metadata upfront.
         """
         ...
 
@@ -123,7 +133,7 @@ class WeightTransferStrategy(ABC):
     @staticmethod
     @abstractmethod
     def create_init_info(
-        cfg: "Union[SkyRLConfig, DictConfig]", inference_world_size: Optional[int] = None
+        cfg: "Union[SkyRLTrainConfig, DictConfig]", inference_world_size: Optional[int] = None
     ) -> WeightSyncInitInfo:
         """Create init info with all config-derived args.
 

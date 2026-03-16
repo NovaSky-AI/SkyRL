@@ -1,32 +1,33 @@
 """
-# Run only vllm tests (requires vllm extra):
-uv run --isolated --extra dev --extra vllm pytest tests/gpu/gpu_ci/test_engine_generation.py -m "vllm"
-
-# Run only sglang tests (requires sglang extra):
-uv run --isolated --extra dev --extra sglang pytest tests/gpu/gpu_ci/test_engine_generation.py -m "sglang"
+To run:
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_engine_generation.py
 """
 
-import pytest
-
-from skyrl.backends.skyrl_train.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import asyncio
+
+import pytest
+from transformers import AutoTokenizer
+
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import SkyRLTrainConfig
 from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
     are_responses_similar,
     get_test_prompts,
-    init_inference_engines,
     init_remote_inference_servers,
 )
-from transformers import AutoTokenizer
-from skyrl.train.config import SkyRLConfig
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInput
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
+MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B"
 
 
-def get_test_actor_config() -> SkyRLConfig:
+def get_test_actor_config() -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
 
     cfg.generator.sampling_params.temperature = 0.0
@@ -37,34 +38,6 @@ def get_test_actor_config() -> SkyRLConfig:
     cfg.generator.sampling_params.logprobs = None
 
     return cfg
-
-
-def init_ray_inference_engines(backend: str, tp_size: int, pp_size: int, dp_size: int, config: SkyRLConfig):
-    """Initialize ray-wrapped inference engines for the specified backend.
-
-    Returns:
-        Tuple of (client, pg, router, server_group) where router and server_group
-        may be None for the old inference pathway.
-    """
-    # Set config parameters for new inference pathway (used by build_vllm_cli_args)
-    config.generator.inference_engine_tensor_parallel_size = tp_size
-    config.generator.inference_engine_pipeline_parallel_size = pp_size
-    config.generator.inference_engine_data_parallel_size = dp_size
-
-    client, pg, router, server_group = init_inference_engines(
-        config,
-        model=config.trainer.policy.model.path,
-        async_engine=True,
-        use_local=True,
-        tp_size=tp_size,
-        colocate_all=True,
-        backend=backend,
-        gpu_memory_utilization=0.8,
-        num_inference_engines=1,
-        # SGLang always discards weights, so sleep_level is not applicable.
-        sleep_level=1 if backend == "vllm" else 2,
-    )
-    return client, pg, router, server_group
 
 
 async def run_batch_generation(client, prompts, sampling_params):
@@ -117,29 +90,28 @@ async def run_single_generation_with_tokens(client, prompt_token_ids, sampling_p
 
 @pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="New inference pathway doesn't support text based generation")
 @pytest.mark.parametrize(
-    "backend,tp_size,pp_size,dp_size",
+    "tp_size,pp_size,dp_size",
     [
-        pytest.param("vllm", 2, 1, 1, marks=pytest.mark.vllm),
-        pytest.param("vllm", 2, 1, 2, marks=pytest.mark.vllm),
-        pytest.param("vllm", 2, 2, 1, marks=pytest.mark.vllm),  # TP=2, PP=2
-        # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param("sglang", 1, 1, 1, marks=pytest.mark.sglang),
+        pytest.param(2, 1, 1),
+        pytest.param(2, 1, 2),
+        pytest.param(2, 2, 1),  # TP=2, PP=2
     ],
-    ids=["vllm_tp2", "vllm_dp2", "vllm_tp2_pp2", "sglang"],
+    ids=["tp2_pp1_dp1", "tp2_pp1_dp2", "tp2_pp2_dp1"],
 )
-def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: int, pp_size: int, dp_size: int):
+def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int):
     """
-    Tests generation with both remote and ray-wrapped engines for the specified backend.
+    Tests generation with both remote and ray-wrapped engines.
     """
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
 
     prompts = get_test_prompts(MODEL)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
 
     try:
-        llm_client, remote_server_process = init_remote_inference_servers(tp_size, backend, tokenizer, cfg, MODEL)
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+        llm_client, remote_server_process = init_remote_inference_servers(tp_size, "vllm", tokenizer, cfg, MODEL)
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         # Batched generation
         remote_batch_responses, batch_finish_reasons = asyncio.run(
@@ -174,10 +146,17 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
             remote_server_process.terminate()
             remote_server_process.wait()
 
+    # Set config parameters for new inference pathway
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.pipeline_parallel_size = pp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
+
     # Get responses from Ray engine
-    try:
-        llm_client, pg, router, server_group = init_ray_inference_engines(backend, tp_size, pp_size, dp_size, cfg)
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
+    with InferenceEngineState.create(cfg, sleep_level=1) as engines:
+        llm_client = engines.client
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
+        )
 
         # Batched generation
         local_batch_responses, batch_finish_reasons = asyncio.run(
@@ -214,41 +193,42 @@ def test_inference_engines_generation(ray_init_fixture, backend: str, tp_size: i
                 print(
                     f"Remote and local batch generation responses are not similar, got remote={remote_batch_responses[i]} and local={local_batch_responses[i]}"
                 )
-    finally:
-        if "router" in locals() and router is not None:
-            router.shutdown()
-        if "server_group" in locals() and server_group is not None:
-            server_group.shutdown()
 
 
 @pytest.mark.parametrize(
-    "backend,tp_size,pp_size,dp_size",
+    "tp_size,pp_size,dp_size,model,distributed_executor_backend",
     [
-        pytest.param("vllm", 2, 1, 1, marks=pytest.mark.vllm),
-        pytest.param("vllm", 2, 2, 1, marks=pytest.mark.vllm),
-        pytest.param("vllm", 2, 1, 2, marks=pytest.mark.vllm),
-        # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param("sglang", 1, 1, 1, marks=pytest.mark.sglang),
+        pytest.param(2, 1, 1, MODEL, "ray"),
+        pytest.param(2, 2, 1, MODEL, "ray"),
+        pytest.param(2, 1, 2, MOE_MODEL, "ray"),
+        pytest.param(2, 1, 2, MOE_MODEL, "mp"),
     ],
-    ids=["vllm_tp2_pp1_dp1", "vllm_tp2_pp2_dp1", "vllm_tp2_pp1_dp2", "sglang_tp1_pp1_dp1"],
+    ids=["tp2_pp1_dp1_ray", "tp2_pp2_dp1_ray", "tp2_pp1_dp2_moe_ray", "tp2_pp1_dp2_moe_mp"],
 )
-def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, pp_size: int, dp_size: int):
-    """Test generation using prompt_token_ids for the specified backend."""
+def test_token_based_generation(
+    ray_init_fixture, tp_size: int, pp_size: int, dp_size: int, model: str, distributed_executor_backend: str
+):
+    """Test generation using prompt_token_ids."""
 
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
+    cfg.trainer.policy.model.path = model
 
-    prompts = get_test_prompts(MODEL, 3)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    prompts = get_test_prompts(model, 3)
+    tokenizer = AutoTokenizer.from_pretrained(model)
     prompt_token_ids = tokenizer.apply_chat_template(
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"]
 
-    try:
-        llm_client, pg, router, server_group = init_ray_inference_engines(
-            backend, tp_size=tp_size, pp_size=pp_size, dp_size=dp_size, config=cfg
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.pipeline_parallel_size = pp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
+    cfg.generator.inference_engine.distributed_executor_backend = distributed_executor_backend
+
+    with InferenceEngineState.create(cfg, sleep_level=1) as engines:
+        llm_client = engines.client
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Test batch generation with tokens
         token_batch_responses, _ = asyncio.run(
@@ -268,26 +248,18 @@ def test_token_based_generation(ray_init_fixture, backend: str, tp_size: int, pp
                 print(
                     f"Token batch and single generation responses are not similar, got batch={token_batch_responses[i]} and single={token_single_responses[i]}"
                 )
-    finally:
-        if "router" in locals() and router is not None:
-            router.shutdown()
-        if "server_group" in locals() and server_group is not None:
-            server_group.shutdown()
 
 
 @pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="New inference pathway doesn't support text based generation")
 @pytest.mark.parametrize(
-    "backend,tp_size,pp_size,dp_size",
+    "tp_size,pp_size,dp_size",
     [
-        pytest.param("vllm", 2, 1, 1, marks=pytest.mark.vllm),
-        # TODO(Charlie): add TP > 1 tests for sglang when we support it
-        pytest.param("sglang", 1, 1, 1, marks=pytest.mark.sglang),
+        pytest.param(2, 1, 1),
     ],
-    ids=["vllm_tp2_pp1_dp1", "sglang_tp1_pp1_dp1"],
+    ids=["tp2_pp1_dp1"],
 )
-def test_token_based_generation_consistency(ray_init_fixture, backend: str, tp_size: int, pp_size: int, dp_size: int):
+def test_token_based_generation_consistency(ray_init_fixture, tp_size: int, pp_size: int, dp_size: int):
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
 
     prompts = get_test_prompts(MODEL, 3)
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -295,11 +267,15 @@ def test_token_based_generation_consistency(ray_init_fixture, backend: str, tp_s
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"]
 
-    try:
-        llm_client, pg, router, server_group = init_ray_inference_engines(
-            backend, tp_size=tp_size, pp_size=pp_size, dp_size=dp_size, config=cfg
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.pipeline_parallel_size = pp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
+
+    with InferenceEngineState.create(cfg, sleep_level=1) as engines:
+        llm_client = engines.client
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         # Batch generation with tokens
         token_batch_responses, _ = asyncio.run(
@@ -317,26 +293,20 @@ def test_token_based_generation_consistency(ray_init_fixture, backend: str, tp_s
                 print(
                     f"Token and prompt responses differ: token={token_batch_responses[i]}, prompt={prompt_responses[i]}"
                 )
-    finally:
-        if "router" in locals() and router is not None:
-            router.shutdown()
-        if "server_group" in locals() and server_group is not None:
-            server_group.shutdown()
 
 
 # TODO: Remove this once sample API is also supported in the new inference pathway
 @pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="New inference pathway doesn't support sample API yet")
 @pytest.mark.parametrize(
-    "backend,tp_size,dp_size",
+    "tp_size,dp_size",
     [
-        pytest.param("vllm", 2, 1, marks=pytest.mark.vllm),
+        pytest.param(2, 1),
     ],
-    ids=["vllm_tp2"],
+    ids=["tp2"],
 )
-def test_sample_api(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
+def test_sample_api(ray_init_fixture, tp_size: int, dp_size: int):
     """Test the Tinker-compatible sample() API for generating multiple independent samples."""
     cfg = get_test_actor_config()
-    cfg.generator.backend = backend
     cfg.generator.sampling_params.temperature = 0.7
 
     prompts = get_test_prompts(MODEL, 1)
@@ -345,11 +315,14 @@ def test_sample_api(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
         prompts, add_generation_prompt=True, tokenize=True, return_dict=True
     )["input_ids"][0]
 
-    try:
-        llm_client, pg, router, server_group = init_ray_inference_engines(
-            backend, tp_size=tp_size, pp_size=1, dp_size=dp_size, config=cfg
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg.generator.inference_engine.data_parallel_size = dp_size
+
+    with InferenceEngineState.create(cfg, sleep_level=1) as engines:
+        llm_client = engines.client
+        sampling_params = get_sampling_params_for_backend(
+            cfg.generator.inference_engine.backend, cfg.generator.sampling_params
         )
-        sampling_params = get_sampling_params_for_backend(cfg.generator.backend, cfg.generator.sampling_params)
 
         num_samples = 3
 
@@ -375,8 +348,3 @@ def test_sample_api(ray_init_fixture, backend: str, tp_size: int, dp_size: int):
         print(f"Generated {len(unique_responses)} unique responses from {num_samples} samples")
         for i, resp in enumerate(output["responses"]):
             print(f"Sample {i}: {resp[:100]}..." if len(resp) > 100 else f"Sample {i}: {resp}")
-    finally:
-        if "router" in locals() and router is not None:
-            router.shutdown()
-        if "server_group" in locals() and server_group is not None:
-            server_group.shutdown()

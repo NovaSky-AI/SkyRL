@@ -1,15 +1,15 @@
-from flax import nnx
 import jax
 import jax.numpy as jnp
 import optax
+from flax import nnx
 from huggingface_hub import snapshot_download
 from transformers import PretrainedConfig
 
+from skyrl.tinker.types import LoraConfig
+from skyrl.tx.layers.lora import init_lora_adapter
 from skyrl.tx.models.configs import DeepseekV3Config
 from skyrl.tx.models.deepseekv3 import DeepseekV3ForCausalLM
 from skyrl.tx.utils.models import get_dtype, load_safetensors
-from skyrl.tx.layers.lora import init_lora_adapter
-from skyrl.tinker.types import LoraConfig
 from tests.tx.models.lora_test_utils import (
     get_adapter_params,
     get_moe_out_of_rank_params,
@@ -29,7 +29,7 @@ def test_lora_training_moe_rank_normalized():
         axis_types=(jax.sharding.AxisType.Auto,) * 3,
     )
     with jax.set_mesh(mesh):
-        model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
+        model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.get_config().dtype), rngs=nnx.Rngs(0))
         load_safetensors(checkpoint_path, config, model)
 
         # Set different ranks for each adapter (0: rank 16, 1: rank 8)
@@ -110,7 +110,7 @@ def test_lora_training_high_rank():
         axis_types=(jax.sharding.AxisType.Auto,) * 3,
     )
     with jax.set_mesh(mesh):
-        model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.dtype), rngs=nnx.Rngs(0))
+        model = DeepseekV3ForCausalLM(config, dtype=get_dtype(config.get_config().dtype), rngs=nnx.Rngs(0))
         load_safetensors(checkpoint_path, config, model)
 
         init_lora_adapter(model, adapter_index=0, lora_config=LoraConfig(rank=16, alpha=16, seed=0))

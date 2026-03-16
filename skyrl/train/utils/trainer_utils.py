@@ -1,24 +1,27 @@
-from typing import List, Dict, Any, Union, Callable, Optional, Tuple, TypedDict
-from enum import Enum
-import ray
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-import os
-from loguru import logger
 import json
-import torch
-import numpy as np
+import os
 from collections import defaultdict
-from omegaconf import DictConfig
-
-from skyrl.train.config import TrainerConfig, SkyRLConfig
-from skyrl.train.generators.utils import get_metrics_from_generator_output, concatenate_generator_outputs
-from skyrl.train.generators.base import GeneratorOutput
-from transformers import AutoTokenizer
+from enum import Enum
 from pathlib import Path
-from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.train.dataset import PromptDataset
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict, Union
+
+import numpy as np
+import ray
+import torch
+from loguru import logger
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from torchdata.stateful_dataloader import StatefulDataLoader
+from transformers import AutoTokenizer
+
+from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.train.config import SkyRLTrainConfig, TrainerConfig
+from skyrl.train.dataset import PromptDataset
+from skyrl.train.generators.base import GeneratorOutput
+from skyrl.train.generators.utils import (
+    concatenate_generator_outputs,
+    get_metrics_from_generator_output,
+)
 
 BasicType = Union[int, float, str, bool, type(None)]
 
@@ -659,7 +662,7 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
 
 
 def build_dataloader(
-    cfg: Union[SkyRLConfig, DictConfig], dataset: PromptDataset, is_train=True, is_fully_async=False
+    cfg: SkyRLTrainConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
 ) -> StatefulDataLoader:
     """
     Build the dataloader for the training or evaluation dataset.
@@ -684,7 +687,7 @@ def build_dataloader(
         shuffle=True if is_train else False,
         collate_fn=dataset.collate_fn,
         # TODO(Charlie): debug why inference http endpoint is slow when num_workers is 8
-        num_workers=0 if cfg.generator.enable_http_endpoint else 8,
+        num_workers=0 if cfg.generator.inference_engine.enable_http_endpoint else 8,
         drop_last=True if is_train else False,
         generator=seeded_generator,
     )
@@ -699,17 +702,9 @@ def build_dataloader(
     return dataloader
 
 
-def get_rope_scaling_config(trainer_cfg: Union[TrainerConfig, DictConfig]) -> dict[str, Any]:
-    if isinstance(trainer_cfg, DictConfig):
-        if "rope_scaling" not in trainer_cfg:
-            return None
-        return trainer_cfg.rope_scaling
+def get_rope_scaling_config(trainer_cfg: TrainerConfig) -> dict[str, Any]:
     return trainer_cfg.rope_scaling
 
 
-def get_rope_theta_config(trainer_cfg: Union[TrainerConfig, DictConfig]) -> int | None:
-    if isinstance(trainer_cfg, DictConfig):
-        if "rope_theta" not in trainer_cfg:
-            return None
-        return trainer_cfg.rope_theta
+def get_rope_theta_config(trainer_cfg: TrainerConfig) -> int | None:
     return trainer_cfg.rope_theta

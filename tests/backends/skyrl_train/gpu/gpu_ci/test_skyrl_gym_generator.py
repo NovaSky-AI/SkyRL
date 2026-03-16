@@ -1,25 +1,28 @@
 """
-uv run --extra dev --extra vllm --isolated pytest tests/gpu/gpu_ci/test_skyrl_gym_generator.py
+uv run --extra dev --extra fsdp --isolated pytest tests/backends/skyrl_train/gpu/gpu_ci/test_skyrl_gym_generator.py
 """
 
 import os
+from typing import Any, Dict
+
 import pytest
-import ray
+from loguru import logger
 from transformers import AutoTokenizer
-from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
-    create_ray_wrapped_inference_engines,
+
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
+from skyrl.train.config import SamplingParams, SkyRLTrainConfig
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
-from tests.backends.skyrl_train.gpu.utils import Timer, get_test_generator_input
-from skyrl.train.utils.utils import initialize_ray
+from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_gym.envs import register
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
-from typing import Any, Dict
-from loguru import logger
-from skyrl.train.config import SkyRLConfig, SamplingParams
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    Timer,
+    _ensure_chat_template,
+    get_test_generator_input,
+)
 
 OBSERVATION_PROMPT = "give me another solution"
 
@@ -35,12 +38,13 @@ def get_test_config(
     is_step_wise,
     temperature,
     get_logprobs,
+    enable_return_routed_experts,
 ):
-    cfg = SkyRLConfig()
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
     cfg.generator.sampling_params = SamplingParams(
         max_generate_length=max_generate_length,
-        logprobs=0 if get_logprobs else None,
+        logprobs=1 if get_logprobs else None,
         temperature=temperature,
     )
     cfg.generator.append_eos_token_after_stop_str_in_multi_turn = True
@@ -50,12 +54,12 @@ def get_test_config(
     cfg.generator.zero_reward_on_non_stop = False
     cfg.generator.use_conversation_multi_turn = use_conversation_multi_turn
     cfg.generator.apply_overlong_filtering = False
-    cfg.generator.backend = "vllm"
-    cfg.generator.enable_http_endpoint = False
-    cfg.generator.http_endpoint_host = "127.0.0.1"
-    cfg.generator.http_endpoint_port = 8000
+    cfg.generator.inference_engine.backend = "vllm"
+    cfg.generator.inference_engine.enable_http_endpoint = False
+    cfg.generator.inference_engine.http_endpoint_host = "127.0.0.1"
+    cfg.generator.inference_engine.http_endpoint_port = 8000
     cfg.generator.step_wise_trajectories = is_step_wise
-
+    cfg.generator.inference_engine.enable_return_routed_experts = enable_return_routed_experts
     cfg.environment.skyrl_gym.search.log_requests = True
     cfg.environment.skyrl_gym.search.search_url = "http://127.0.0.1:8000/retrieve"
     cfg.environment.skyrl_gym.max_env_workers = max_env_workers
@@ -114,30 +118,13 @@ async def run_generator_end_to_end(
     is_step_wise: bool = False,
     temperature=1.0,
     get_logprobs: bool = False,
+    enable_return_routed_experts: bool = False,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
     """
     tokenizer = AutoTokenizer.from_pretrained(model)
-
-    inference_engines = create_ray_wrapped_inference_engines(
-        num_inference_engines=num_inference_engines,
-        tensor_parallel_size=tensor_parallel_size,
-        model_dtype="bfloat16",
-        pretrain=model,
-        seed=42,
-        vllm_v1_disable_multiproc=True,
-        enable_prefix_caching=True,
-        enforce_eager=True,
-        shared_pg=None,
-        gpu_memory_utilization=0.8,
-        inference_engine_enable_sleep=True,
-        async_engine=use_async_engine,
-        max_num_batched_tokens=32768,
-        max_num_seqs=1024,
-        tokenizer=tokenizer,
-        sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
-    )
+    _ensure_chat_template(tokenizer)
 
     cfg = get_test_config(
         max_generate_length,
@@ -150,104 +137,117 @@ async def run_generator_end_to_end(
         is_step_wise,
         temperature,
         get_logprobs,
+        enable_return_routed_experts,
     )
 
-    env_cfg = cfg.environment.skyrl_gym
-    generator_cfg = cfg.generator
-
-    inference_engine_client = InferenceEngineClient(
-        inference_engines,
-        tokenizer,
-        cfg,
-    )
-
-    await inference_engine_client.wake_up()
-
-    generator = SkyRLGymGenerator(
-        generator_cfg=generator_cfg,
-        skyrl_gym_cfg=env_cfg,
-        inference_engine_client=inference_engine_client,
-        tokenizer=tokenizer,
-        model_name=model,
-    )
-
-    input_batch: GeneratorInput = get_test_generator_input(
+    # Use InferenceEngineState to support both legacy and new inference backends
+    with InferenceEngineState.create(
+        cfg=cfg,
         model=model,
-        num_prompts=num_prompts,
-        n_samples_per_prompt=n_samples_per_prompt,
-        max_prompt_length=max_prompt_length,
-        data_path=data_path,
-        env_class=env_class,
-    )
-    # Attach request-time sampling params into the generator input
-    input_batch["sampling_params"] = get_sampling_params_for_backend(
-        "vllm",
-        SamplingParams(
-            temperature=1.0,
-            top_p=1.0,
-            top_k=-1,
-            max_generate_length=max_generate_length,
-            min_p=0.0,
-            logprobs=0 if get_logprobs else None,
-            stop=["</search>", "</answer>"] if env_class == "search" else None,
-        ),
-    )
+        use_local=True,
+        async_engine=use_async_engine,
+        tp_size=tensor_parallel_size,
+        colocate_all=False,
+        backend="vllm",
+        gpu_memory_utilization=0.8,
+        num_inference_engines=num_inference_engines,
+        sleep_level=1,  # in unit tests that do not explicitly sync weights, we do not discard weights
+    ) as engines:
+        inference_engine_client = engines.client
+        env_cfg = cfg.environment.skyrl_gym
+        generator_cfg = cfg.generator
 
-    with Timer(f"generate_responses_async_engine_{use_async_engine}"):
-        generator_output = await generator.generate(input_batch)
+        await inference_engine_client.wake_up()
 
-    prompts_out = generator_output["prompt_token_ids"]
-    outputs = [
-        {
-            "response": generator_output["response_ids"][i],
-            "loss_mask": generator_output["loss_masks"][i],
-            "rollout_logprobs": (
-                generator_output["rollout_logprobs"][i] if generator_output["rollout_logprobs"] else None
+        generator = SkyRLGymGenerator(
+            generator_cfg=generator_cfg,
+            skyrl_gym_cfg=env_cfg,
+            inference_engine_client=inference_engine_client,
+            tokenizer=tokenizer,
+        )
+
+        input_batch: GeneratorInput = get_test_generator_input(
+            model=model,
+            num_prompts=num_prompts,
+            n_samples_per_prompt=n_samples_per_prompt,
+            max_prompt_length=max_prompt_length,
+            data_path=data_path,
+            env_class=env_class,
+        )
+        # Attach request-time sampling params into the generator input
+        input_batch["sampling_params"] = get_sampling_params_for_backend(
+            "vllm",
+            SamplingParams(
+                temperature=1.0,
+                top_p=1.0,
+                top_k=-1,
+                max_generate_length=max_generate_length,
+                min_p=0.0,
+                logprobs=1 if get_logprobs else None,
+                stop=["</search>", "</answer>"] if env_class == "search" else None,
             ),
-        }
-        for i in range(len(generator_output["response_ids"]))
-    ]
+        )
 
-    output_keys = [
-        "prompt_token_ids",
-        "response_ids",
-        "rewards",
-        "loss_masks",
-        "stop_reasons",
-        "rollout_metrics",
-        "rollout_logprobs",
-    ]
-    for key in output_keys:
-        assert key in generator_output, f"Key {key} not found in generator output"
-    if max_turns == 1:
-        # make sure that the max number of tokens is less than the max generate length for single turn generation
-        assert "generate/max_num_tokens" in generator_output["rollout_metrics"]
-        assert generator_output["rollout_metrics"]["generate/max_num_tokens"] <= max_generate_length
+        with Timer(f"generate_responses_async_engine_{use_async_engine}"):
+            generator_output = await generator.generate(input_batch)
 
-    assert len(prompts_out) == len(outputs), "Mismatch between prompts and outputs"
-    assert isinstance(prompts_out[0], list), "Prompts output should be a list"
-    assert isinstance(prompts_out[0][0], int), "Prompts output should be a list of list of token ids"
-    assert isinstance(outputs[0]["response"][0], int), "Prompts output should be a list of list of token ids"
-    if not is_step_wise:
-        assert (
-            len(outputs) == num_prompts * n_samples_per_prompt
-        ), "Mismatch between number of outputs and expected outputs"
+        prompts_out = generator_output["prompt_token_ids"]
+        outputs = [
+            {
+                "response": generator_output["response_ids"][i],
+                "loss_mask": generator_output["loss_masks"][i],
+                "rollout_logprobs": (
+                    generator_output["rollout_logprobs"][i] if generator_output["rollout_logprobs"] else None
+                ),
+                "rollout_expert_indices": (
+                    generator_output["rollout_expert_indices"][i]
+                    if generator_output["rollout_expert_indices"]
+                    else None
+                ),
+            }
+            for i in range(len(generator_output["response_ids"]))
+        ]
 
-    if get_logprobs:
-        assert generator_output["rollout_logprobs"] is not None, "expected `rollout_logprobs` to be computed"
+        output_keys = [
+            "prompt_token_ids",
+            "response_ids",
+            "rewards",
+            "loss_masks",
+            "stop_reasons",
+            "rollout_metrics",
+            "rollout_logprobs",
+        ]
+        for key in output_keys:
+            assert key in generator_output, f"Key {key} not found in generator output"
+        if max_turns == 1:
+            # make sure that the max number of tokens is less than the max generate length for single turn generation
+            assert "generate/max_num_tokens" in generator_output["rollout_metrics"]
+            assert generator_output["rollout_metrics"]["generate/max_num_tokens"] <= max_generate_length
 
-    for i in range(len(outputs)):
-        response_length = len(outputs[i]["response"])
-        # TODO (erictang000): make this more precise for multi-turn
-        assert response_length <= max_generate_length + max_input_length, f"Output {i} exceeds max length"
-        assert response_length == len(outputs[i]["loss_mask"]), f"Output {i} loss mask length mismatch"
+        assert len(prompts_out) == len(outputs), "Mismatch between prompts and outputs"
+        assert isinstance(prompts_out[0], list), "Prompts output should be a list"
+        assert isinstance(prompts_out[0][0], int), "Prompts output should be a list of list of token ids"
+        assert isinstance(outputs[0]["response"][0], int), "Prompts output should be a list of list of token ids"
+        if not is_step_wise:
+            assert (
+                len(outputs) == num_prompts * n_samples_per_prompt
+            ), "Mismatch between number of outputs and expected outputs"
+
         if get_logprobs:
-            assert response_length == len(
-                outputs[i]["rollout_logprobs"]
-            ), f"Output {i} rollout logprobs lenght mismatch"
+            assert generator_output["rollout_logprobs"] is not None, "expected `rollout_logprobs` to be computed"
 
-    # TODO (tgriggs): Extend this test to compare the outputs to HF generation with temperature 0
-    return generator_output
+        for i in range(len(outputs)):
+            response_length = len(outputs[i]["response"])
+            # TODO (erictang000): make this more precise for multi-turn
+            assert response_length <= max_generate_length + max_input_length, f"Output {i} exceeds max length"
+            assert response_length == len(outputs[i]["loss_mask"]), f"Output {i} loss mask length mismatch"
+            if get_logprobs:
+                assert response_length == len(
+                    outputs[i]["rollout_logprobs"]
+                ), f"Output {i} rollout logprobs length mismatch"
+
+        # TODO (tgriggs): Extend this test to compare the outputs to HF generation with temperature 0
+        return generator_output
 
 
 @pytest.mark.asyncio
@@ -264,229 +264,247 @@ async def run_generator_end_to_end(
     ],
 )
 async def test_generator_single_turn_gsm8k(
-    use_async_engine, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
+    ray_init_fixture, use_async_engine, batched, n_samples_per_prompt, num_inference_engines, tensor_parallel_size
 ):
     """
     Test the generator with a single turn of GSM8K
     """
-    initialize_ray(SkyRLConfig())
-    try:
-        await run_generator_end_to_end(
-            use_async_engine=use_async_engine,
-            batched=batched,
-            n_samples_per_prompt=n_samples_per_prompt,
-            num_inference_engines=num_inference_engines,
-            tensor_parallel_size=tensor_parallel_size,
-            # TODO (sumanthrh): Add tests for non-batched mode once supported
-            get_logprobs=batched,
-        )
-    finally:
-        ray.shutdown()
+    await run_generator_end_to_end(
+        use_async_engine=use_async_engine,
+        batched=batched,
+        n_samples_per_prompt=n_samples_per_prompt,
+        num_inference_engines=num_inference_engines,
+        tensor_parallel_size=tensor_parallel_size,
+        # TODO (sumanthrh): Add tests for non-batched mode once supported
+        get_logprobs=batched,
+    )
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_search():
+async def test_generator_multi_turn_search(ray_init_fixture):
     """
     Test the generator with multiple turns of search
     """
-    initialize_ray(SkyRLConfig())
-    try:
-        await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=5,
-            num_inference_engines=2,
-            tensor_parallel_size=2,
-            model="Qwen/Qwen2.5-1.5B-Instruct",
-            max_prompt_length=2048,
-            max_input_length=4096,
-            max_generate_length=1000,
-            data_path=os.path.expanduser("~/data/searchR1/validation.parquet"),
-            env_class="search",
-            num_prompts=2,
-            max_turns=2,
-            use_conversation_multi_turn=False,
-            max_env_workers=0,
-        )
-    finally:
-        ray.shutdown()
+    await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=5,
+        num_inference_engines=2,
+        tensor_parallel_size=2,
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        max_prompt_length=2048,
+        max_input_length=4096,
+        max_generate_length=1000,
+        data_path=os.path.expanduser("~/data/searchR1/validation.parquet"),
+        env_class="search",
+        num_prompts=2,
+        max_turns=2,
+        use_conversation_multi_turn=False,
+        max_env_workers=0,
+    )
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
 )
-async def test_generator_formatting_use_conversation_multi_turn(model_name):
+async def test_generator_formatting_use_conversation_multi_turn(ray_init_fixture, model_name):
     """
     Test generator formatting when using conversation formatting for multi-turn
     """
-    initialize_ray(SkyRLConfig())
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        generator_output = await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=1,
-            num_inference_engines=1,
-            tensor_parallel_size=1,
-            model=model_name,
-            max_prompt_length=3000,
-            max_input_length=10000,
-            max_generate_length=3000,
-            env_class="test_env",
-            num_prompts=2,
-            max_turns=3,
-            use_conversation_multi_turn=True,
-        )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    generator_output = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=1,
+        num_inference_engines=1,
+        tensor_parallel_size=1,
+        model=model_name,
+        max_prompt_length=3000,
+        max_input_length=10000,
+        max_generate_length=3000,
+        env_class="test_env",
+        num_prompts=2,
+        max_turns=3,
+        use_conversation_multi_turn=True,
+    )
 
-        for i, resp_ids in enumerate(generator_output["response_ids"]):
-            loss_mask = generator_output["loss_masks"][i]
-            prompt_token_ids = generator_output["prompt_token_ids"][i]
-            stop_reason = generator_output["stop_reasons"][i]
-            masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
-            masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
+    for i, resp_ids in enumerate(generator_output["response_ids"]):
+        loss_mask = generator_output["loss_masks"][i]
+        prompt_token_ids = generator_output["prompt_token_ids"][i]
+        stop_reason = generator_output["stop_reasons"][i]
+        masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
+        masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
 
-            masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
-            masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
+        masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
+        masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
 
-            assert (
-                MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
-                and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-            ), "generation prompts should be loss masked out"
+        assert (
+            MODEL_TO_GENERATION_PROMPT[model_name] in masked_out_resp_str
+            and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
+        ), "generation prompts should be loss masked out"
 
-            # Observations and EOS expectations only strictly apply when the model finished turns
-            if stop_reason == "stop":
-                assert (
-                    f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str
-                ), f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
-                assert (
-                    f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str
-                ), f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
-                # TODO(Charlie): add more rigorous tests that is robust to stop_reason being length.
-                # Either make GeneratorOutput return stop reason for each turn, or change the way we manage
-                # max generation length.
-                num_resp_eos = sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id)
-                num_total_eos = sum(1 for _ in resp_ids if _ == tokenizer.eos_token_id)
-                common_msg = "Could be due to stop_reason is length in some of the turns."
-                # count number of eos tokens in masked_in_resp_ids: 1 eos per assistant response (3 turns)
-                if num_resp_eos != 3:
-                    logger.warning(f"Got {num_resp_eos} eos tokens in masked_in_resp_ids, expected 3. {common_msg}")
-                # total eos in full response: 2 user eos + 3 assistant eos
-                if num_total_eos != 5:
-                    logger.warning(f"Got {num_total_eos} eos tokens in resp_ids, expected 5. {common_msg}")
-            else:
-                # On length stops, the model may not produce EOS at the end of each assistant turn.
-                # Only check that generation prompts are masked out.
-                logger.warning(f"Got stop reason {stop_reason}, so we did not fully check the response")
-            if model_name == "Qwen/Qwen3-0.6B":
-                assert (
-                    sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
-                )  # 1 user eos (no system for Qwen3)
-            else:
-                assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
-    finally:
-        ray.shutdown()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
-)
-async def test_generator_formatting_no_use_conversation_multi_turn(model_name):
-    """
-    Test generator formatting when not using conversation formatting for multi-turn
-    """
-    initialize_ray(SkyRLConfig())
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        generator_output = await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=1,
-            num_inference_engines=1,
-            tensor_parallel_size=1,
-            model=model_name,
-            max_prompt_length=3000,
-            max_input_length=10000,
-            max_generate_length=3000,
-            env_class="test_env",
-            num_prompts=2,
-            max_turns=3,
-            use_conversation_multi_turn=False,
-        )
-
-        for i, resp_ids in enumerate(generator_output["response_ids"]):
-            loss_mask = generator_output["loss_masks"][i]
-            prompt_token_ids = generator_output["prompt_token_ids"][i]
-            masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
-            masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
-
-            prompt_str = tokenizer.decode(prompt_token_ids)
-            resp_str = tokenizer.decode(resp_ids)
-            masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
-            masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
-
+        # Observations and EOS expectations only strictly apply when the model finished turns
+        if stop_reason == "stop":
             assert (
                 f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str
             ), f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
             assert (
                 f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str
             ), f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
+            # TODO(Charlie): add more rigorous tests that is robust to stop_reason being length.
+            # Either make GeneratorOutput return stop reason for each turn, or change the way we manage
+            # max generation length.
+            num_resp_eos = sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id)
+            num_total_eos = sum(1 for _ in resp_ids if _ == tokenizer.eos_token_id)
+            common_msg = "Could be due to stop_reason is length in some of the turns."
+            # count number of eos tokens in masked_in_resp_ids: 1 eos per assistant response (3 turns)
+            if num_resp_eos != 3:
+                logger.warning(f"Got {num_resp_eos} eos tokens in masked_in_resp_ids, expected 3. {common_msg}")
+            # total eos in full response: 2 user eos + 3 assistant eos
+            if num_total_eos != 5:
+                logger.warning(f"Got {num_total_eos} eos tokens in resp_ids, expected 5. {common_msg}")
+        else:
+            # On length stops, the model may not produce EOS at the end of each assistant turn.
+            # Only check that generation prompts are masked out.
+            logger.warning(f"Got stop reason {stop_reason}, so we did not fully check the response")
+        if model_name == "Qwen/Qwen3-0.6B":
             assert (
-                prompt_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
-                + resp_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
-                == 1
-            ), "the single generation prompt should be included in the prompt"
-            assert (
-                MODEL_TO_GENERATION_PROMPT[model_name] in prompt_str
-                and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
-            ), "the single generation prompt should be included in the prompt"
-
-            # count number of eos tokens in masked_in_resp_ids
-            assert (
-                sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
-            )  # 1 eos for each assistant response
-            if model_name == "Qwen/Qwen3-0.6B":
-                assert (
-                    sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
-                )  # 1 user eos (no system for Qwen3)
-            else:
-                assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
-    finally:
-        ray.shutdown()
+                sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
+            )  # 1 user eos (no system for Qwen3)
+        else:
+            assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
 
 
 @pytest.mark.asyncio
-async def test_generator_multi_turn_gsm8k_step_wise():
+@pytest.mark.parametrize(
+    "model_name", ["unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen2.5-1.5B-Instruct", "Qwen/Qwen3-0.6B"]
+)
+async def test_generator_formatting_no_use_conversation_multi_turn(ray_init_fixture, model_name):
+    """
+    Test generator formatting when not using conversation formatting for multi-turn
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    generator_output = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=1,
+        num_inference_engines=1,
+        tensor_parallel_size=1,
+        model=model_name,
+        max_prompt_length=3000,
+        max_input_length=10000,
+        max_generate_length=3000,
+        env_class="test_env",
+        num_prompts=2,
+        max_turns=3,
+        use_conversation_multi_turn=False,
+    )
+
+    for i, resp_ids in enumerate(generator_output["response_ids"]):
+        loss_mask = generator_output["loss_masks"][i]
+        prompt_token_ids = generator_output["prompt_token_ids"][i]
+        masked_out_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 0]
+        masked_in_resp_ids = [resp_ids[j] for j in range(len(resp_ids)) if loss_mask[j] == 1]
+
+        prompt_str = tokenizer.decode(prompt_token_ids)
+        resp_str = tokenizer.decode(resp_ids)
+        masked_out_resp_str = tokenizer.decode(masked_out_resp_ids)
+        masked_in_resp_str = tokenizer.decode(masked_in_resp_ids)
+
+        assert (
+            f"{OBSERVATION_PROMPT} 1" in masked_out_resp_str
+        ), f'"{OBSERVATION_PROMPT} 1" observation should be loss masked out'
+        assert (
+            f"{OBSERVATION_PROMPT} 2" in masked_out_resp_str
+        ), f'"{OBSERVATION_PROMPT} 2" observation should be loss masked out'
+        assert (
+            prompt_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
+            + resp_str.count(MODEL_TO_GENERATION_PROMPT[model_name])
+            == 1
+        ), "the single generation prompt should be included in the prompt"
+        assert (
+            MODEL_TO_GENERATION_PROMPT[model_name] in prompt_str
+            and MODEL_TO_GENERATION_PROMPT[model_name] not in masked_in_resp_str
+        ), "the single generation prompt should be included in the prompt"
+
+        # count number of eos tokens in masked_in_resp_ids
+        assert (
+            sum(1 for _ in masked_in_resp_ids if _ == tokenizer.eos_token_id) == 1
+        )  # 1 eos for each assistant response
+        if model_name == "Qwen/Qwen3-0.6B":
+            assert (
+                sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 1
+            )  # 1 user eos (no system for Qwen3)
+        else:
+            assert sum(1 for _ in prompt_token_ids if _ == tokenizer.eos_token_id) == 2  # 1 system eos, 1 user eos
+
+
+@pytest.mark.asyncio
+async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
     """
     Test the generator with the multi-turn GSM8K environment for step-wise training
     """
-    initialize_ray(SkyRLConfig())
-    try:
-        generator_output: GeneratorOutput = await run_generator_end_to_end(
-            use_async_engine=True,
-            batched=False,
-            n_samples_per_prompt=5,
-            num_inference_engines=2,
-            tensor_parallel_size=2,
-            model="Qwen/Qwen2.5-1.5B-Instruct",
-            max_prompt_length=2048,
-            max_input_length=4096,
-            max_generate_length=1000,
-            data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
-            env_class="gsm8k_multi_turn",
-            num_prompts=2,
-            max_turns=2,
-            use_conversation_multi_turn=True,
-            max_env_workers=0,
-            is_step_wise=True,
-            temperature=0,
-        )
+    generator_output: GeneratorOutput = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=5,
+        num_inference_engines=2,
+        tensor_parallel_size=2,
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        max_prompt_length=2048,
+        max_input_length=4096,
+        max_generate_length=1000,
+        data_path=os.path.expanduser("~/data/gsm8k/validation.parquet"),
+        env_class="gsm8k_multi_turn",
+        num_prompts=2,
+        max_turns=2,
+        use_conversation_multi_turn=True,
+        max_env_workers=0,
+        is_step_wise=True,
+        temperature=0,
+    )
 
-        assert isinstance(generator_output["is_last_step"], list) and isinstance(
-            generator_output["is_last_step"][0], bool
-        )
-        # Expect atleast one response with more than one turn
-        assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
-    finally:
-        ray.shutdown()
+    assert isinstance(generator_output["is_last_step"], list) and isinstance(generator_output["is_last_step"][0], bool)
+    # Expect atleast one response with more than one turn
+    assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
+
+
+@pytest.mark.asyncio
+async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
+    """
+    Test the generator with the multi-turn GSM8K environment for router replay
+    """
+    num_prompts = 5
+    n_samples_per_prompt = 2
+    max_input_length = 4096
+    generator_output: GeneratorOutput = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=n_samples_per_prompt,
+        num_inference_engines=2,
+        tensor_parallel_size=2,
+        model="allenai/OLMoE-1B-7B-0924",
+        max_prompt_length=2048,
+        max_input_length=max_input_length,
+        max_generate_length=1000,
+        data_path=os.path.expanduser("/mnt/cluster_storage/data/gsm8k/validation.parquet"),
+        env_class="gsm8k_multi_turn",
+        num_prompts=num_prompts,
+        max_turns=2,
+        use_conversation_multi_turn=True,
+        max_env_workers=0,
+        is_step_wise=False,
+        temperature=0,
+        enable_return_routed_experts=True,
+    )
+    assert generator_output["rollout_expert_indices"] is not None
+
+    # check that the rollout expert indices are non-zero, and that the shape is (bs, seq_len, layer_num, topk)
+    rollout_expert_indices = generator_output["rollout_expert_indices"]
+    total_batch_size = num_prompts * n_samples_per_prompt
+
+    assert len(rollout_expert_indices) == total_batch_size
+    assert len(rollout_expert_indices[0]) < max_input_length
+    assert len(rollout_expert_indices[0][0]) == 16  # 16 layers in OLMoE-1B-7B-0924
+    assert len(rollout_expert_indices[0][0][0]) == 8  # 8 topk for each layer

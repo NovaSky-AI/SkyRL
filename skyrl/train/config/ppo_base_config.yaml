@@ -1,3 +1,6 @@
+# NOTE: This YAML is now deprecated. 
+# The SkyRL-Train Backend now uses a dataclass based configuration
+# See skyrl/train/config/config.py for the dataclass based configuration.
 defaults:
   - _self_
   # <folder_name>@<field_name>.<field_name>: <yaml_file_name>
@@ -125,7 +128,7 @@ trainer:
     use_tis: false
 
     # Used for seq_mean_token_sum_norm loss reduction. Users should set this value for multi-turn for that loss.
-    # If not set, will be calculated as generator.max_input_length + generator.sampling_params.max_generate_length
+    # If not set, will be calculated as generator.max_input_length + generator.sampling_params.max_generate_length.
     max_seq_len: null
 
     # references
@@ -158,11 +161,16 @@ trainer:
       product_mask_low: 0.5
 
       # separate from sequence_mask_metric and tis_ratio_type 
-      # if any off_policy_correction is enabled, masks out sequences with any token having importance ratio
+      # if set, masks out sequences with any token having importance ratio outside the thresholds
       # far outside an acceptable range (low and high thresholds) - set to null to disable
       # suggested values: 1e-4 for low and 100 for high
       outlier_token_is_threshold_low: null
       outlier_token_is_threshold_high: null
+
+      # set to apply a per-token hard mask when IS ratio < `token_mask_is_threshold_low` or > `token_mask_is_threshold_high`
+      # suggested values: 0.5 for low and 2 for high
+      token_mask_is_threshold_low: null
+      token_mask_is_threshold_high: null
 
     # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
     sapo:
@@ -315,7 +323,7 @@ generator:
   # Chat templating kwargs to pass to `tokenizer.apply_chat_template`
   chat_template_kwargs: {}
 
-  # Inference engine arguments. Arguments are passed directly to the vLLM or SGLang engine, so names must match
+  # Inference engine arguments. Arguments are passed directly to the vLLM engine, so names must match
   # the engine's args. To specify an engine arg in the CLI override, use the format: +generator.engine_init_kwargs.arg_name=value
   engine_init_kwargs: {}
   
@@ -328,7 +336,7 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
-    logprobs: 0
+    logprobs: 1
     stop: null
 
   # whether to use a conversation based format for multi-turn generations
@@ -349,7 +357,7 @@ generator:
     top_p: 1.0
     min_p: 0.0
     top_k: -1
-    logprobs: 0
+    logprobs: 1
     stop: null
 
   # number of samples per prompt for evaluation

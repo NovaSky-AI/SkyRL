@@ -1,38 +1,51 @@
 import os
-from typing import List, Any, Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
+import asyncio
+import time
 from dataclasses import dataclass
 from http import HTTPStatus
-import ray
-import asyncio
-import vllm
 from types import SimpleNamespace
+from uuid import uuid4
+
+import ray
+import vllm
+from loguru import logger
+from packaging import version
 from vllm import SamplingParams
-from vllm.inputs import TokensPrompt
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
-    ErrorResponse,
+)
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
+from vllm.entrypoints.openai.models.serving import BaseModelPath, OpenAIServingModels
+from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
-from uuid import uuid4
+
 from skyrl.backends.skyrl_train.inference_engines.base import (
-    InferenceEngineInterface,
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
 )
-from skyrl.backends.skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 from skyrl.backends.skyrl_train.inference_engines.vllm.utils import pop_openai_kwargs
-from loguru import logger
-import time
-from packaging import version
+
+# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
+# This alias preserves the old import path for existing scripts/configs.
+# TODO (Kourosh): Remove this alias once all references are updated.
+from skyrl.backends.skyrl_train.inference_servers.vllm_worker import (
+    WorkerWrap,  # noqa: F401, E402
+)
+from skyrl.backends.skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest
 
 
 @dataclass
@@ -44,16 +57,25 @@ class Logprob:
 
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
-    if kwargs.get("distributed_executor_backend") == "ray":
-        # a hack to make the script work.
-        # stop ray from manipulating *_VISIBLE_DEVICES
-        # at the top-level when the distributed_executor_backend is ray.
+    mp_cuda_visible_devices = kwargs.pop("mp_cuda_visible_devices", None)
+
+    if kwargs.get("distributed_executor_backend") == "mp" and mp_cuda_visible_devices is not None:
+        # For mp backend in colocated mode, set CUDA_VISIBLE_DEVICES to the
+        # pre-computed GPU IDs for this engine so spawned workers see the
+        # correct GPUs (not all GPUs on the node).
+        os.environ["CUDA_VISIBLE_DEVICES"] = mp_cuda_visible_devices
+        os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+        os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        logger.info(f"mp backend: setting CUDA_VISIBLE_DEVICES={mp_cuda_visible_devices}")
+    elif kwargs.get("distributed_executor_backend") in ("ray", "mp"):
+        # For ray backend (and non-colocate mp), clear CUDA_VISIBLE_DEVICES
+        # so vLLM workers can discover GPUs via their own scheduling.
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         os.environ.pop("ROCR_VISIBLE_DEVICES", None)
         os.environ.pop("HIP_VISIBLE_DEVICES", None)
     elif noset_visible_devices:
         # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
-        # when the distributed_executor_backend is not rayargs and
+        # when the distributed_executor_backend is not ray/mp and
         # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
         os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
 
@@ -62,12 +84,6 @@ def setup_envvars_for_vllm(kwargs, bundle_indices):
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(num_gpus)
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
         logger.info(f"creating LLM with bundle_indices={bundle_indices}")
-
-
-# Backward compatibility: WorkerWrap has moved to inference_servers.vllm_worker
-# This alias preserves the old import path for existing scripts/configs.
-# TODO (Kourosh): Remove this alias once all references are updated.
-from skyrl.backends.skyrl_train.inference_servers.vllm_worker import WorkerWrap  # noqa: F401, E402
 
 
 class BaseVLLMInferenceEngine(InferenceEngineInterface):
@@ -133,6 +149,7 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
         stop_reasons: List[str] = []
         response_ids: List[List[int]] = []
         response_logprobs: Optional[List[List[float]]] = []
+        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = []
 
         for output in outputs:
             # TODO(tgriggs): Support n>1 sampling.
@@ -154,26 +171,53 @@ class BaseVLLMInferenceEngine(InferenceEngineInterface):
                     del token_logprobs
             response_logprobs.append(_logprobs)
 
+            _routed_experts = None
+            if resp.routed_experts is not None:
+                if hasattr(resp.routed_experts, "tolist"):
+                    _routed_experts = resp.routed_experts.tolist()
+                else:
+                    _routed_experts = resp.routed_experts
+            rollout_expert_indices.append(_routed_experts)
+
         if len(response_logprobs) and response_logprobs[0] is None:
             response_logprobs = None  # hack: assume uniform sampling params
+
+        if len(rollout_expert_indices) > 0 and rollout_expert_indices[0] is None:
+            rollout_expert_indices = None  # hack: assume uniform sampling params
 
         return InferenceEngineOutput(
             responses=responses,
             stop_reasons=stop_reasons,
             response_ids=response_ids,
             response_logprobs=response_logprobs,
+            rollout_expert_indices=rollout_expert_indices,
         )
 
     def _get_engine(self):
         """Get the underlying engine for RPC calls."""
         return self.llm.engine if hasattr(self.llm, "engine") else self.llm
 
+    @staticmethod
+    def _get_unfinished_request_ids(output_processor) -> list:
+        """Get unfinished request IDs suitable for abort/abort_request calls.
+
+        In vllm 0.16.0+, request_states is keyed by internal IDs (with a random suffix),
+        while abort() expects external IDs by default. We use external_req_ids when
+        available and fall back to request_states keys for older vllm versions.
+        """
+        if hasattr(output_processor, "external_req_ids"):
+            return list(output_processor.external_req_ids.keys())
+        return list(output_processor.request_states.keys())
+
     def reset_prefix_cache(self):
         """Reset the prefix cache. Subclasses override for async version."""
         return self.llm.llm_engine.reset_prefix_cache()
 
-    async def abort_generation(self) -> None:
-        raise NotImplementedError("Abort generation is only supported for AsyncVLLMInferenceEngine.")
+    async def pause_generation(self, clear_cache: bool = False) -> None:
+        raise NotImplementedError("pause_generation is only supported for AsyncVLLMInferenceEngine.")
+
+    async def resume_generation(self) -> None:
+        raise NotImplementedError("resume_generation is only supported for AsyncVLLMInferenceEngine.")
 
 
 class VLLMInferenceEngine(BaseVLLMInferenceEngine):
@@ -243,7 +287,7 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "generation should be done before sleep() is called. Check for potential failures or "
                 "dangling requests in your Generator/Env. Aborting all unfinished requests."
             )
-            unfinished_request_ids = list(output_processor.request_states.keys())
+            unfinished_request_ids = self._get_unfinished_request_ids(output_processor)
             await asyncio.to_thread(engine.abort_request, unfinished_request_ids)
 
         level = 1 if self._is_lora else kwargs.get("level", 2)
@@ -341,8 +385,8 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             legacy_kwargs["model_config"] = model_config
 
         # Build request logger for debugging (off by default).
-        # Enable via: +generator.engine_init_kwargs.enable_log_requests=true
-        # Optionally limit logged chars: +generator.engine_init_kwargs.max_log_len=256
+        # Enable via: generator.engine_init_kwargs.enable_log_requests=true
+        # Optionally limit logged chars: generator.engine_init_kwargs.max_log_len=256
         request_logger = None
         if enable_log_requests:
             from vllm.entrypoints.logger import RequestLogger
@@ -455,7 +499,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "generation should be done before sleep() is called. Check for potential failures or "
                 "dangling requests in your Generator/Env. Aborting all unfinished requests."
             )
-            unfinished_request_ids = list(output_processor.request_states.keys())
+            unfinished_request_ids = self._get_unfinished_request_ids(output_processor)
             await engine.abort(unfinished_request_ids)
 
         # TODO(team): remove once vllm fixes this
@@ -519,8 +563,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             assert request.stream is False, "Streaming is not supported in SkyRL yet, please set stream to False."
         except Exception as e:
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
-
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
@@ -558,9 +600,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             # NOTE(Charlie): This is hacky. With the refactored inference stack, we
             # should be able to directly reuse the error handling from the served vllm.
             error_message = str(e).lower()
-            is_context_length_error = (
-                "maximum context length" in error_message or "maximum model length" in error_message
-            )
+            is_context_length_error = "context length" in error_message or "maximum input length" in error_message
 
             if is_context_length_error:
                 http_status = HTTPStatus.BAD_REQUEST
@@ -568,8 +608,6 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
                 http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
             if version.parse(vllm.__version__) >= version.parse("0.10.0"):
-                from vllm.entrypoints.openai.protocol import ErrorInfo
-
                 return ErrorResponse(
                     error=ErrorInfo(
                         message=str(e),
@@ -604,18 +642,17 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         """
         return await self._handle_openai_request(request_payload, endpoint="/completions")
 
-    async def abort_generation(self) -> None:
-        """
-        Abort all running and waiting requests, which make the ongoing requests return the
-        already-generated tokens with a stop_reason of "abort".
-        """
+    async def pause_generation(self, clear_cache: bool = False) -> None:
+        """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
         engine = self._get_engine()
-        # Collect all request IDs currently tracked by the scheduler/output processor
-        unfinished_request_ids = list(engine.output_processor.request_states.keys())
-        if unfinished_request_ids:
-            await engine.abort(unfinished_request_ids)
-        await engine.reset_prefix_cache()  # avoid KV-cache pollution
-        logger.info(f"abort_generation() finished, aborted {len(unfinished_request_ids)} requests")
+        await engine.pause_generation(mode="keep", clear_cache=clear_cache)
+        logger.info("pause_generation(mode='keep') finished")
+
+    async def resume_generation(self) -> None:
+        """Resume generation after a keep-mode pause."""
+        engine = self._get_engine()
+        await engine.resume_generation()
+        logger.info("resume_generation() finished")
 
 
 class _MinimalRequest:

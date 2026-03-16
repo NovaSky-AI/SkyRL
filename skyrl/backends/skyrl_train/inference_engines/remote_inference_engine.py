@@ -1,15 +1,24 @@
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
 import aiohttp
+
 from skyrl.backends.skyrl_train.inference_engines.base import (
-    InferenceEngineInterface,
     InferenceEngineInput,
+    InferenceEngineInterface,
     InferenceEngineOutput,
 )
-from skyrl.backends.skyrl_train.weight_sync import WeightLoader, WeightUpdateRequest, BroadcastWeightUpdateRequest
-from typing import List, Optional, Any, Dict, TYPE_CHECKING
+from skyrl.backends.skyrl_train.weight_sync import (
+    BroadcastWeightUpdateRequest,
+    WeightLoader,
+    WeightUpdateRequest,
+)
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import WeightSyncInitInfo
+    from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
+        WeightSyncInitInfo,
+    )
 import json
+
 from transformers import PreTrainedTokenizerBase
 
 
@@ -17,7 +26,7 @@ class RemoteWeightLoader(WeightLoader):
     """Loads weights into remote inference engine via HTTP.
 
     This loader coordinates weight updates with remote inference servers
-    (vLLM or SGLang) via their HTTP APIs.
+    via their HTTP APIs.
     """
 
     def __init__(self, url: str, engine_backend: str) -> None:
@@ -25,7 +34,7 @@ class RemoteWeightLoader(WeightLoader):
 
         Args:
             url: Base URL of the remote inference server.
-            engine_backend: Backend type ("vllm" or "sglang").
+            engine_backend: Backend type ("vllm").
         """
         self._url = url
         self._engine_backend = engine_backend
@@ -50,22 +59,7 @@ class RemoteWeightLoader(WeightLoader):
             )
 
         async with aiohttp.ClientSession() as session:
-            if self._engine_backend == "sglang":
-                # SGLang native API - only send fields it expects
-                async with session.post(
-                    f"{self._url}/init_weights_update_group",
-                    json={
-                        "master_address": init_info.master_addr,
-                        "master_port": init_info.master_port,
-                        "rank_offset": init_info.rank_offset,
-                        "world_size": init_info.world_size,
-                        "group_name": init_info.group_name,
-                        "backend": init_info.backend,
-                    },
-                ) as response:
-                    return await response.json()
-            elif self._engine_backend == "vllm":
-                # vLLM - our custom API, pass entire init_info
+            if self._engine_backend == "vllm":
                 from dataclasses import asdict
 
                 async with session.post(
@@ -89,23 +83,11 @@ class RemoteWeightLoader(WeightLoader):
             Response from the remote server.
         """
         async with aiohttp.ClientSession() as session:
-            if self._engine_backend == "sglang":
-                # SGLang native API expects singular name, dtype, shape
-                resp = await session.post(
-                    f"{self._url}/update_weights_from_distributed",
-                    json={
-                        "name": request.names[0],
-                        "dtype": request.dtypes[0],
-                        "shape": request.shapes[0],
-                    },
-                )
-                return await resp.json()
-            elif self._engine_backend == "vllm":
-                # vLLM - our custom API, pass entire request
+            if self._engine_backend == "vllm":
                 from dataclasses import asdict
 
                 resp = await session.post(
-                    f"{self._url}/update_weights",
+                    f"{self._url}/update_weights_skyrl",
                     json=asdict(request),
                 )
                 return await resp.json()
@@ -193,14 +175,6 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 payload["model"] = self.model_name
                 payload["prompt"] = prompt_token_ids
                 request_url = f"{self.url}/v1/completions"
-            elif self.engine_backend == "sglang":
-                # SGLang supports /generate, works exactly like its Python `async_generate()` method
-                # and can do batch generation.
-                payload = {
-                    "input_ids": prompt_token_ids,
-                    "sampling_params": sampling_params,
-                }
-                request_url = f"{self.url}/generate"
             else:
                 raise ValueError(f"Invalid engine backend: {self.engine_backend}")
             async with session.post(request_url, json=payload, headers=headers) as resp:
@@ -222,15 +196,6 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 # returning token IDs via HTTP requests. Fix after this vLLM PR is merged:
                 # https://github.com/vllm-project/vllm/pull/22587
                 output_ids.append(self.tokenizer.encode(text, add_special_tokens=False))
-        elif self.engine_backend == "sglang":
-            # since prompt_token_ids is a list of lists, response is a list of dicts
-            for output in response:
-                cur_output_ids = output["output_ids"]
-                output_ids.append(cur_output_ids)
-                # SGLang only returns tokens not text when skip_tokenizer_init is True, so
-                # we manually decode it.
-                outputs.append(self.tokenizer.decode(cur_output_ids, skip_special_tokens=True))
-                finish_reasons.append(output["meta_info"]["finish_reason"]["type"])
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 
@@ -269,8 +234,6 @@ class RemoteInferenceEngine(InferenceEngineInterface):
 
     async def sleep(self, *args: Any, **kwargs: Any):
         async with aiohttp.ClientSession() as session:
-            # TODO(Charlie): this is vLLM's API, not SGLang (which uses tags). Fix when need to
-            # support sleeping with remote engines.
             resp = await session.post(f"{self.url}/sleep", json={"level": kwargs.get("level", 1)})
             return await resp.json()
 
@@ -300,8 +263,6 @@ class RemoteInferenceEngine(InferenceEngineInterface):
     async def reset_prefix_cache(self):
         if self.engine_backend == "vllm":
             reset_prefix_cache_method = "reset_prefix_cache"
-        elif self.engine_backend == "sglang":
-            reset_prefix_cache_method = "flush_cache"
         else:
             raise ValueError(f"Invalid engine backend: {self.engine_backend}")
 
@@ -319,11 +280,27 @@ class RemoteInferenceEngine(InferenceEngineInterface):
                 "body": text,
             }
 
+    async def pause_generation(self) -> None:
+        """Pause generation using vLLM's native keep mode, freezing in-flight requests."""
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.url}/pause",
+                params={"mode": "keep"},
+            ) as resp:
+                result = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"Failed to pause generation: {result.get('error', result)}")
+
+    async def resume_generation(self) -> None:
+        """Resume generation after a keep-mode pause."""
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{self.url}/resume") as resp:
+                result = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"Failed to resume generation: {result.get('error', result)}")
+
     async def teardown(self):
         await self._weight_loader.destroy_group()
-
-    async def abort_generation(self) -> None:
-        raise NotImplementedError("Abort generation is not supported for remote inference engines.")
 
 
 def create_remote_inference_engines(

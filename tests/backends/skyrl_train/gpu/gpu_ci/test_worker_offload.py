@@ -1,32 +1,33 @@
 """
-uv run --extra dev --isolated pytest tests/gpu/gpu_ci/test_worker_offload.py
+uv run --extra dev --isolated pytest tests/backends/skyrl_train/gpu/gpu_ci/test_worker_offload.py
 """
 
-import ray
-import pytest
 import os
 import shutil
 
-from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    make_dummy_training_batch,
-    make_dummy_tensorbatch,
-    get_rank_0_memory,
-)
-from skyrl.train.config import SkyRLConfig
-from skyrl.train.utils.utils import validate_cfg
+import pytest
+import ray
+
 from skyrl.backends.skyrl_train.training_batch import TrainingOutputBatch
+from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.utils.utils import validate_cfg
+from tests.backends.skyrl_train.gpu.utils import (
+    get_rank_0_memory,
+    init_worker_with_type,
+    make_dummy_tensorbatch,
+    make_dummy_training_batch,
+)
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_actor_config() -> SkyRLConfig:
-    cfg = SkyRLConfig()
+def get_test_actor_config() -> SkyRLTrainConfig:
+    cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL_NAME
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.trainer.use_sample_packing = False
     cfg.trainer.logger = "console"
-    cfg.generator.inference_engine_tensor_parallel_size = 2
+    cfg.generator.inference_engine.tensor_parallel_size = 2
 
     validate_cfg(cfg)
 
@@ -34,7 +35,7 @@ def get_test_actor_config() -> SkyRLConfig:
 
 
 @pytest.fixture
-def cfg() -> SkyRLConfig:
+def cfg() -> SkyRLTrainConfig:
     return get_test_actor_config()
 
 

@@ -1,19 +1,22 @@
+import copy
 import os
-import torch
-from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
-from skyrl.train.generators.base import (
-    GeneratorOutput,
-    GeneratorInput,
-    TrajectoryID,
-    BatchMetadata,
-    TrainingPhase,
-    MetricsOutput,
-)
+import torch
+from loguru import logger
+
 from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
 from skyrl.train.config import ChatTemplateConfig
-from loguru import logger
+from skyrl.train.generators.base import (
+    BatchMetadata,
+    GeneratorInput,
+    GeneratorOutput,
+    MetricsOutput,
+    TrainingPhase,
+    TrajectoryID,
+)
 from skyrl_gym.metrics import aggregate_for_environment
 
 
@@ -273,20 +276,26 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
 
 def apply_overlong_filtering(
     loss_masks: List[List[int]],
-    response_ids: List[List[int]],
-    eos_token_id: int,
+    stop_reasons: List[str],
 ) -> List[List[int]]:
     """
     Implements DAPO Overlong Filtering: zero-out every token's mask whenever
-    the response does not end with the eos token id (i.e. truncated).
+    the response was truncated (i.e. did not end with a stop token).
+
+    Uses stop_reasons from the inference engine rather than checking for a
+    specific eos token id, making this model/tokenizer agnostic.
+
+    Args:
+        loss_masks: Per-trajectory token loss masks.
+        stop_reasons: Per-trajectory stop reasons from the inference engine
+            (e.g. "stop" for normal completion, "length" for truncation).
 
     Returns:
-        - The loss masks with tokens zeroed out for truncated responses
+        The loss masks with tokens zeroed out for truncated responses.
     """
-    assert len(loss_masks) == len(response_ids), "loss_masks and response_ids must have the same length"
+    assert len(loss_masks) == len(stop_reasons), "loss_masks and stop_reasons must have the same length"
     return [
-        [0] * len(mask) if not response or response[-1] != eos_token_id else mask
-        for mask, response in zip(loss_masks, response_ids)
+        [0] * len(mask) if stop_reason != "stop" else mask[:] for mask, stop_reason in zip(loss_masks, stop_reasons)
     ]
 
 
@@ -379,7 +388,7 @@ def prepare_generator_input(
     ]
 
     # all the other columns are env_extras
-    env_extras = [prompt["env_extras"] for prompt in prompts for _ in range(n_samples_per_prompt)]
+    env_extras = [copy.deepcopy(prompt["env_extras"]) for prompt in prompts for _ in range(n_samples_per_prompt)]
 
     # Create TrajectoryID objects - one UID per row, repetition_id for multiple samples
     trajectory_ids = []

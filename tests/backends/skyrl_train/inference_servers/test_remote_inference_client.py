@@ -13,7 +13,10 @@ import uvicorn
 from fastapi import FastAPI, Request
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient, PauseMode
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    PauseMode,
+    RemoteInferenceClient,
+)
 
 
 def create_mock_vllm_server(server_id: int) -> FastAPI:
@@ -24,15 +27,9 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def health():
         return {"status": "ok"}
 
-    @app.get("/get_server_info")
-    async def get_server_info():
-        return {
-            "ip": "127.0.0.1",
-            "port": 8000 + server_id,
-            "url": f"http://127.0.0.1:{8000 + server_id}",
-            "server_idx": server_id,
-            "world_size": 2,  # Simulate TP=2
-        }
+    @app.get("/get_world_size")
+    async def get_world_size():
+        return {"world_size": 2}  # Simulate TP=2
 
     @app.post("/v1/completions")
     async def completions(request: Request):
@@ -43,6 +40,18 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             "choices": [
                 {"index": i, "text": f"Response {i} from server {server_id}", "finish_reason": "stop"}
                 for i in range(n_prompts)
+            ]
+        }
+
+    @app.post("/inference/v1/generate")
+    async def generate(request: Request):
+        body = await request.json()  # Consume body
+        num_prompts = len(body.get("token_ids", []))
+
+        return {
+            "choices": [
+                {"request_id": "dummy", "token_ids": [i, i + 1, i + 2], "finish_reason": "stop"}
+                for i in range(num_prompts)
             ]
         }
 
@@ -60,8 +69,8 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
 
     # Control plane endpoints
     @app.post("/pause")
-    async def pause(request: Request):
-        return {"status": "paused", "server_id": server_id}
+    async def pause(request: Request, mode: str = "abort", clear_cache: str = "true"):
+        return {"status": "paused", "server_id": server_id, "mode": mode, "clear_cache": clear_cache}
 
     @app.post("/resume")
     async def resume():
@@ -84,16 +93,12 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
     async def reset_prefix_cache(request: Request):
         return {"status": "cache_reset", "server_id": server_id}
 
-    @app.post("/init_weight_transfer")
-    async def init_weight_transfer(request: Request):
+    @app.post("/init_weight_transfer_engine")
+    async def init_weight_transfer_engine(request: Request):
         return {"status": "ok", "server_id": server_id}
 
     @app.post("/update_weights")
     async def update_weights(request: Request):
-        return {"status": "ok", "server_id": server_id}
-
-    @app.post("/finalize_weight_update")
-    async def finalize_weight_update(request: Request):
         return {"status": "ok", "server_id": server_id}
 
     return app
@@ -250,29 +255,50 @@ class TestControlPlane:
     """Test control plane methods (fan-out to all servers)."""
 
     @pytest.mark.asyncio
+    async def test_pause_keep_mode(self, client):
+        """Test pause with KEEP mode (default) sends mode=keep and clear_cache=false."""
+        result = await client.pause(mode=PauseMode.KEEP)
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
+            assert response["body"]["status"] == "paused"
+            assert response["body"]["mode"] == "keep"
+            assert response["body"]["clear_cache"] == "false"
+
+    @pytest.mark.asyncio
     async def test_pause_abort_mode(self, client):
-        """Test pause with ABORT mode (default) fans out to all servers."""
+        """Test pause with ABORT mode fans out to all servers with mode=abort."""
         result = await client.pause(mode=PauseMode.ABORT)
         assert len(result) == 2
         for url, response in result.items():
             assert response["status"] == 200
             assert response["body"]["status"] == "paused"
+            assert response["body"]["mode"] == "abort"
 
     @pytest.mark.asyncio
-    async def test_pause_finish_mode(self, client):
-        """Test pause with FINISH mode fans out to all servers."""
-        result = await client.pause(mode=PauseMode.FINISH)
+    async def test_pause_wait_mode(self, client):
+        """Test pause with WAIT mode fans out to all servers with mode=wait."""
+        result = await client.pause(mode=PauseMode.WAIT)
         assert len(result) == 2
         for url, response in result.items():
             assert response["status"] == 200
+            assert response["body"]["mode"] == "wait"
+
+    @pytest.mark.asyncio
+    async def test_pause_generation_uses_keep_mode(self, client):
+        """Test that pause_generation() alias uses KEEP mode."""
+        result = await client.pause_generation()
+        assert len(result) == 2
+        for url, response in result.items():
+            assert response["status"] == 200
+            assert response["body"]["mode"] == "keep"
+            assert response["body"]["clear_cache"] == "false"
 
     @pytest.mark.asyncio
     async def test_resume(self, client):
         """Test resume fans out to all servers."""
-        # Pause first
         await client.pause()
 
-        # Resume
         result = await client.resume()
         assert len(result) == 2
         for url, response in result.items():
@@ -302,39 +328,30 @@ class TestWeightSync:
 
     @pytest.mark.asyncio
     async def test_init_weight_update_communicator(self, client):
-        """Test init_weight_update_communicator fans out to all servers."""
-        from skyrl.backends.skyrl_train.weight_sync import BroadcastInitInfo
+        """Test init_weight_update_communicator expands init_info and fans out to all servers."""
 
-        init_info = BroadcastInitInfo(
-            master_addr="127.0.0.1",
-            master_port=29500,
-            rank_offset=1,
-            world_size=5,
-            group_name="test",
-            backend="nccl",
-            model_dtype_str="torch.bfloat16",
-            override_existing_receiver=True,
-        )
-        result = await client.init_weight_update_communicator(init_info)
+        class MockInitInfo:
+            """Lightweight mock satisfying the for_servers / to_api_payload protocol."""
+
+            def for_servers(self, world_size_per_server, num_servers):
+                return [self] * num_servers
+
+            def to_api_payload(self):
+                return {"master_address": "127.0.0.1", "master_port": 29500, "rank_offset": 1, "world_size": 5}
+
+        result = await client.init_weight_update_communicator(MockInitInfo())
         assert len(result) == 2
 
     @pytest.mark.asyncio
     async def test_update_named_weights(self, client):
         """Test update_weights fans out to all servers."""
-        from skyrl.backends.skyrl_train.weight_sync import BroadcastWeightUpdateRequest
-
-        request = BroadcastWeightUpdateRequest(
-            names=["layer.weight"],
-            dtypes=["torch.bfloat16"],
-            shapes=[[1024, 1024]],
-        )
-        result = await client.update_named_weights(request)
-        assert len(result) == 2
-
-    @pytest.mark.asyncio
-    async def test_finalize_weight_update(self, client):
-        """Test finalize_weight_update fans out to all servers."""
-        result = await client.finalize_weight_update()
+        update_info = {
+            "names": ["layer.weight"],
+            "dtype_names": ["bfloat16"],
+            "shapes": [[1024, 1024]],
+            "packed": True,
+        }
+        result = await client.update_named_weights(update_info)
         assert len(result) == 2
 
 
@@ -345,13 +362,14 @@ class TestServerInfo:
     async def test_get_world_size(self, client):
         """Test world_size fetching and caching."""
         # First call fetches from all servers and sums
-        world_size = await client.get_world_size()
+        total_world_size, world_size_per_server = await client.get_world_size()
         # Each mock server reports world_size=2, we have 2 servers = 4
-        assert world_size == 4
+        assert total_world_size == 4
+        assert world_size_per_server == 2
 
         # Second call returns cached value
-        world_size2 = await client.get_world_size()
-        assert world_size2 == 4
+        total_world_size2, _ = await client.get_world_size()
+        assert total_world_size2 == 4
 
 
 class TestContextManager:
@@ -372,92 +390,3 @@ class TestContextManager:
 
         # Session should be closed after exiting context
         assert client._session is None or client._session.closed
-
-
-class TestRetryOnAbort:
-    """Test retry on abort functionality."""
-
-    @pytest.fixture
-    def abort_mock_server(self):
-        """Create a mock server that returns abort on first call, then stop."""
-        app = FastAPI()
-        call_count = {"completions": 0}
-
-        @app.get("/health")
-        async def health():
-            return {"status": "ok"}
-
-        @app.post("/v1/completions")
-        async def completions(request: Request):
-            call_count["completions"] += 1
-            await request.json()  # Consume body
-
-            # First call returns abort with partial response
-            if call_count["completions"] == 1:
-                return {"choices": [{"index": 0, "text": "Partial ", "finish_reason": "abort"}]}
-            # Second call returns complete response
-            else:
-                return {"choices": [{"index": 0, "text": "response complete", "finish_reason": "stop"}]}
-
-        @app.post("/tokenize")
-        async def tokenize(request: Request):
-            body = await request.json()
-            prompt = body.get("prompt", "")
-            # Simple tokenization: one token per word
-            tokens = [hash(word) % 10000 for word in prompt.split()]
-            return {"tokens": tokens}
-
-        @app.get("/get_server_info")
-        async def get_server_info():
-            return {"world_size": 1}
-
-        @app.get("/is_paused")
-        async def is_paused():
-            # Not paused - allows retry to proceed immediately
-            return {"is_paused": False}
-
-        # Start server in background thread
-        port = get_open_port()
-        config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="warning")
-        server = uvicorn.Server(config)
-        thread = threading.Thread(target=server.run, daemon=True)
-        thread.start()
-
-        # Wait for server to be ready
-        for _ in range(100):
-            try:
-                httpx.get(f"http://127.0.0.1:{port}/health", timeout=0.1)
-                break
-            except Exception:
-                time.sleep(0.05)
-
-        yield f"http://127.0.0.1:{port}", call_count
-
-        server.should_exit = True
-        thread.join(timeout=1)
-
-    @pytest.mark.asyncio
-    async def test_retry_on_abort(self, abort_mock_server):
-        """Test that retry on abort is always active (built-in behavior)."""
-        url, call_count = abort_mock_server
-        client = RemoteInferenceClient(
-            proxy_url=url,
-            server_urls=[url],
-        )
-
-        try:
-            result = await client.generate(
-                {
-                    "prompt_token_ids": [[1, 2, 3]],
-                    "sampling_params": {"max_tokens": 100},
-                }
-            )
-
-            # Should get complete response after retry
-            assert result["stop_reasons"][0] == "stop"
-            assert result["responses"][0] == "Partial response complete"
-            assert call_count["completions"] == 2
-            # Should have response_ids from tokenization
-            assert len(result["response_ids"][0]) > 0
-        finally:
-            await client.teardown()

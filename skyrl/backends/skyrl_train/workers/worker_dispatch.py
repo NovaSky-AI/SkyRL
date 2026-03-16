@@ -9,18 +9,24 @@ The trainer interacts with the worker dispatch if all models are always on GPU.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import ray
 from ray import ObjectRef
 
-from omegaconf import DictConfig
-from skyrl.train.config import SkyRLConfig
-from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    MeshDispatch,
+    concatenate_outputs_after_mesh_dispatch,
+)
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
+from skyrl.backends.skyrl_train.training_batch import (
+    TrainingInputBatch,
+    TrainingOutputBatch,
+)
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.backends.skyrl_train.distributed.dispatch import MeshDispatch
+from skyrl.train.config import SkyRLTrainConfig
 
 
 @dataclass
@@ -40,7 +46,7 @@ class WorkerDispatch:
 
     def __init__(
         self,
-        cfg: Union[SkyRLConfig, DictConfig],
+        cfg: SkyRLTrainConfig,
         policy_actor_group: PPORayActorGroup,
         critic_actor_group: Optional[PPORayActorGroup] = None,
         ref_actor_group: Optional[PPORayActorGroup] = None,
@@ -350,7 +356,10 @@ class WorkerDispatch:
         """Initialize weight sync state for policy model."""
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
-                "pass_through", "init_weight_sync_state", inference_engine_client
+                "pass_through",
+                "init_weight_sync_state",
+                inference_engine_client,
+                self.cfg.generator.inference_engine,
             )
         )
 
@@ -358,7 +367,10 @@ class WorkerDispatch:
         """Broadcast policy weights to inference engines."""
         ray.get(
             self._actor_groups["policy"].async_run_ray_method(
-                "pass_through", "broadcast_to_inference_engines", inference_engine_client
+                "pass_through",
+                "broadcast_to_inference_engines",
+                inference_engine_client,
+                self.cfg.generator.inference_engine,
             )
         )
 
@@ -394,10 +406,18 @@ class WorkerDispatch:
         self.prepare_for_weight_sync()
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-        self.broadcast_to_inference_engines(self._inference_engine_client)
-        self.finish_weight_sync()
-        if self.colocate_all:
+            self.broadcast_to_inference_engines(self._inference_engine_client)
+            self.finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
+        else:
+            # Non-colocated: pause generation to prevent in-flight requests from
+            # reading partially-updated weights during the NCCL broadcast.
+            await self._inference_engine_client.pause_generation()
+            try:
+                self.broadcast_to_inference_engines(self._inference_engine_client)
+                self.finish_weight_sync()
+            finally:
+                await self._inference_engine_client.resume_generation()
 
     def set_inference_engine_client(self, inference_engine_client: InferenceEngineClient) -> None:
         """Set the inference engine client for weight sync.
