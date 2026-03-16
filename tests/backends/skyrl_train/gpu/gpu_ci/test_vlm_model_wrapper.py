@@ -6,8 +6,10 @@ Requires a GPU and the Qwen3-VL-2B-Instruct model weights.
 source .venv/bin/activate && python -m pytest tests/backends/skyrl_train/gpu/gpu_ci/test_vlm_model_wrapper.py -v
 """
 
+import numpy as np
 import pytest
 import torch
+from PIL import Image
 from transformers import AutoProcessor
 
 from skyrl.backends.skyrl_train.training_batch import TensorList
@@ -36,6 +38,57 @@ def processor():
     return AutoProcessor.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
 
+def make_solid_color_image(color_rgb, size=28):
+    """Return a solid-color PIL Image of the given (R, G, B) tuple."""
+    arr = np.full((size, size, 3), color_rgb, dtype=np.uint8)
+    return Image.fromarray(arr)
+
+
+def build_vlm_inputs(processor, prompt_text, response_text, image=None, device="cuda"):
+    """Build tokenized VLM inputs and compute num_actions dynamically.
+
+    Returns a dict with keys:
+        input_ids, attention_mask (on device)
+        num_actions (int)
+        pixel_values, image_grid_thw (TensorList, on device) — only when image is provided
+    """
+    # Build user content
+    user_content = []
+    if image is not None:
+        user_content.append({"type": "image", "image": image, "resized_height": 28, "resized_width": 28})
+    user_content.append({"type": "text", "text": prompt_text})
+
+    # Full messages (prompt + response)
+    full_messages = [
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": [{"type": "text", "text": response_text}]},
+    ]
+    full_text = processor.apply_chat_template(full_messages, tokenize=False, add_generation_prompt=False)
+
+    # Prompt-only messages (to compute num_actions)
+    prompt_messages = [{"role": "user", "content": user_content}]
+    prompt_text_only = processor.apply_chat_template(prompt_messages, tokenize=False, add_generation_prompt=True)
+
+    # Tokenize
+    images_list = [image] if image is not None else None
+    full_inputs = processor(text=[full_text], images=images_list, return_tensors="pt", padding=True)
+    prompt_inputs = processor(text=[prompt_text_only], images=images_list, return_tensors="pt", padding=True)
+
+    num_actions = full_inputs["input_ids"].shape[1] - prompt_inputs["input_ids"].shape[1]
+
+    result = {
+        "input_ids": full_inputs["input_ids"].to(device),
+        "attention_mask": full_inputs["attention_mask"].to(device),
+        "num_actions": num_actions,
+    }
+
+    if image is not None:
+        result["pixel_values"] = TensorList([full_inputs["pixel_values"].to(device)])
+        result["image_grid_thw"] = TensorList([full_inputs["image_grid_thw"].to(device)])
+
+    return result
+
+
 def test_vlm_model_loading(vlm_model):
     """VLM model should load with is_vlm=True and correct model class."""
     assert vlm_model.is_vlm is True
@@ -46,81 +99,185 @@ def test_vlm_model_loading(vlm_model):
 
 def test_vlm_forward_with_vision_data(vlm_model, processor):
     """Forward pass with dummy vision data should produce correct output shapes."""
-    # Build a simple prompt with an image placeholder
+    image = make_solid_color_image((128, 64, 200))
+    inputs = build_vlm_inputs(processor, "Describe this image.", "A test response here", image=image)
+
     batch_size = 1
-    num_actions = 4
-
-    # Create a dummy image (3x28x28 — small for testing)
-    import numpy as np
-    from PIL import Image
-
-    dummy_image = Image.fromarray(np.random.randint(0, 255, (28, 28, 3), dtype=np.uint8))
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": dummy_image, "resized_height": 28, "resized_width": 28},
-                {"type": "text", "text": "Describe this image."},
-            ],
-        },
-        {
-            "role": "assistant",
-            "content": [{"type": "text", "text": "A test response here"}],
-        },
-    ]
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    inputs = processor(text=[text], images=[dummy_image], return_tensors="pt", padding=True)
-
-    input_ids = inputs["input_ids"].to("cuda")  # (1, seq_len)
-    attention_mask = inputs["attention_mask"].to("cuda")  # (1, seq_len)
-    pixel_values_raw = inputs["pixel_values"].to("cuda")  # (num_patches, dim)
-    image_grid_thw_raw = inputs["image_grid_thw"].to("cuda")  # (num_images, 3)
-
-    # Wrap in TensorList (one entry per batch element)
-    pixel_values = TensorList([pixel_values_raw])
-    image_grid_thw = TensorList([image_grid_thw_raw])
+    num_actions = inputs["num_actions"]
 
     with torch.no_grad():
         action_log_probs = vlm_model(
-            input_ids,
+            inputs["input_ids"],
             num_actions,
-            attention_mask,
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
+            inputs["attention_mask"],
+            pixel_values=inputs["pixel_values"],
+            image_grid_thw=inputs["image_grid_thw"],
         )
 
     assert action_log_probs.shape == (
         batch_size,
         num_actions,
     ), f"Expected shape ({batch_size}, {num_actions}), got {action_log_probs.shape}"
-    # Log probs should be finite and negative
     assert torch.isfinite(action_log_probs).all(), "action_log_probs contains non-finite values"
     assert (action_log_probs <= 0).all(), "Log probabilities should be <= 0"
 
 
 def test_vlm_forward_text_only(vlm_model, processor):
     """Forward pass without vision kwargs should still produce valid output (text-only fallback)."""
+    inputs = build_vlm_inputs(processor, "Hello, world!", "Hi there!")
+
     batch_size = 1
-    num_actions = 3
-
-    messages = [
-        {"role": "user", "content": [{"type": "text", "text": "Hello, world!"}]},
-        {"role": "assistant", "content": [{"type": "text", "text": "Hi there!"}]},
-    ]
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    inputs = processor(text=[text], return_tensors="pt", padding=True)
-
-    input_ids = inputs["input_ids"].to("cuda")
-    attention_mask = inputs["attention_mask"].to("cuda")
+    num_actions = inputs["num_actions"]
 
     with torch.no_grad():
         action_log_probs = vlm_model(
-            input_ids,
+            inputs["input_ids"],
             num_actions,
-            attention_mask,
+            inputs["attention_mask"],
         )
 
     assert action_log_probs.shape == (batch_size, num_actions)
     assert torch.isfinite(action_log_probs).all()
     assert (action_log_probs <= 0).all()
+
+
+def test_vlm_vision_affects_output(vlm_model, processor):
+    """Providing vision data should change the log probs compared to text-only."""
+    image = make_solid_color_image((255, 0, 0))
+    inputs = build_vlm_inputs(processor, "What color is this image?", "The image is red.", image=image)
+    num_actions = inputs["num_actions"]
+
+    with torch.no_grad():
+        log_probs_with = vlm_model(
+            inputs["input_ids"],
+            num_actions,
+            inputs["attention_mask"],
+            pixel_values=inputs["pixel_values"],
+            image_grid_thw=inputs["image_grid_thw"],
+        )
+
+        log_probs_without = vlm_model(
+            inputs["input_ids"],
+            num_actions,
+            inputs["attention_mask"],
+        )
+
+    assert not torch.allclose(
+        log_probs_with, log_probs_without, atol=1e-3
+    ), "Log probs with and without vision data should differ"
+
+
+def test_vlm_log_probs_match_manual(vlm_model, processor):
+    """Wrapper log probs should match a manual log_softmax + gather computation."""
+    image = make_solid_color_image((0, 255, 0))
+    inputs = build_vlm_inputs(processor, "Describe this image.", "A green square.", image=image)
+    num_actions = inputs["num_actions"]
+
+    input_ids = inputs["input_ids"]
+    attention_mask = inputs["attention_mask"]
+    pv = inputs["pixel_values"]
+    igt = inputs["image_grid_thw"]
+
+    # Wrapper path
+    with torch.no_grad():
+        wrapper_log_probs = vlm_model(
+            input_ids,
+            num_actions,
+            attention_mask,
+            pixel_values=pv,
+            image_grid_thw=igt,
+        )
+
+    # Manual path: run the raw model
+    pv_cat = torch.cat(pv.tensors, dim=0)
+    igt_cat = torch.cat(igt.tensors, dim=0)
+
+    with torch.no_grad():
+        output = vlm_model.model(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=None,
+            pixel_values=pv_cat,
+            image_grid_thw=igt_cat,
+        )
+
+    logits = output["logits"].float()
+    log_probs_full = torch.nn.functional.log_softmax(logits, dim=-1)
+    shifted_labels = torch.roll(input_ids, -1, dims=1)
+    gathered = log_probs_full.gather(dim=-1, index=shifted_labels.unsqueeze(-1)).squeeze(-1)
+    manual_log_probs = gathered[:, -num_actions - 1 : -1]
+
+    torch.testing.assert_close(wrapper_log_probs.float(), manual_log_probs, atol=5e-2, rtol=1e-2)
+
+
+def test_vlm_different_images_diverge(vlm_model, processor):
+    """Different images with the same text should produce different log probs."""
+    red_image = make_solid_color_image((255, 0, 0))
+    blue_image = make_solid_color_image((0, 0, 255))
+
+    prompt = "What color is this image?"
+    response = "It is a solid color."
+
+    inputs_red = build_vlm_inputs(processor, prompt, response, image=red_image)
+    inputs_blue = build_vlm_inputs(processor, prompt, response, image=blue_image)
+
+    num_actions = inputs_red["num_actions"]
+    assert num_actions == inputs_blue["num_actions"], "Tokenization should match for identical text"
+
+    with torch.no_grad():
+        lp_red = vlm_model(
+            inputs_red["input_ids"],
+            num_actions,
+            inputs_red["attention_mask"],
+            pixel_values=inputs_red["pixel_values"],
+            image_grid_thw=inputs_red["image_grid_thw"],
+        )
+        lp_blue = vlm_model(
+            inputs_blue["input_ids"],
+            num_actions,
+            inputs_blue["attention_mask"],
+            pixel_values=inputs_blue["pixel_values"],
+            image_grid_thw=inputs_blue["image_grid_thw"],
+        )
+
+    assert not torch.allclose(lp_red, lp_blue, atol=1e-3), "Red and blue images should produce different log probs"
+
+
+def test_vlm_semantic_color_recognition(vlm_model, processor):
+    """Model should assign highest log P(response | prompt, image) to the correct color name."""
+    colors = {
+        "red": (255, 0, 0),
+        "green": (0, 255, 0),
+        "blue": (0, 0, 255),
+    }
+    responses = {
+        "red": "The color is red",
+        "green": "The color is green",
+        "blue": "The color is blue",
+    }
+    prompt = "What color do you see in this image?"
+
+    for true_color, rgb in colors.items():
+        image = make_solid_color_image(rgb)
+        log_p = {}
+
+        for resp_color, resp_text in responses.items():
+            inputs = build_vlm_inputs(processor, prompt, resp_text, image=image)
+            num_actions = inputs["num_actions"]
+
+            with torch.no_grad():
+                action_lp = vlm_model(
+                    inputs["input_ids"],
+                    num_actions,
+                    inputs["attention_mask"],
+                    pixel_values=inputs["pixel_values"],
+                    image_grid_thw=inputs["image_grid_thw"],
+                )
+
+            log_p[resp_color] = action_lp.sum().item()
+
+        # The correct color should have the highest log probability
+        best = max(log_p, key=log_p.get)
+        assert best == true_color, (
+            f"For {true_color} image, expected highest log P for '{true_color}' " f"but got '{best}'. Scores: {log_p}"
+        )
