@@ -14,6 +14,7 @@ DictType = TypeVar("DictType")
 def _serialize_tensor(value: torch.Tensor) -> dict:
     """Serialize a single tensor for pickle protocol."""
     try:
+        # Fast path: direct memory copy via numpy (works for most dtypes)
         arr = value.numpy()
         return {
             "format": "numpy",
@@ -22,6 +23,7 @@ def _serialize_tensor(value: torch.Tensor) -> dict:
             "dtype": str(arr.dtype),
         }
     except TypeError:
+        # Fallback for dtypes not supported by numpy (e.g., bfloat16)
         buffer = io.BytesIO()
         torch.save(value, buffer)
         return {
@@ -33,9 +35,12 @@ def _serialize_tensor(value: torch.Tensor) -> dict:
 def _deserialize_tensor(value: dict) -> torch.Tensor:
     """Deserialize a single tensor from pickle format."""
     if value.get("format") == "torch":
+        # Fallback path: torch.load for unsupported dtypes
         buffer = io.BytesIO(value["data"])
         return torch.load(buffer, weights_only=True)
     else:
+        # Fast path: reconstruct from numpy bytes
+        # Also handles legacy format without "format" key
         arr = np.frombuffer(value["data"], dtype=np.dtype(value["dtype"]))
         arr = arr.reshape(value["shape"])
         return torch.from_numpy(arr.copy())
@@ -77,6 +82,13 @@ class TensorList:
 
     def repeat_interleave(self, repeats: int):
         return TensorList([t for t in self.tensors for _ in range(repeats)])
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TensorList):
+            return False
+        if len(self) != len(other):
+            return False
+        return all(torch.equal(a, b) for a, b in zip(self.tensors, other.tensors))
 
     @staticmethod
     def cat(lists: list["TensorList"]) -> "TensorList":
@@ -183,10 +195,7 @@ class TensorBatch(dict, Generic[DictType]):
             assert isinstance(
                 value, (torch.Tensor, TensorList)
             ), f"Field {key} must be a tensor or TensorList, got {type(value)}"
-            if isinstance(value, TensorList):
-                self[key] = value.to(device=device, dtype=dtype, non_blocking=non_blocking)
-            else:
-                self[key] = value.to(device, dtype, non_blocking=non_blocking)
+            self[key] = value.to(device=device, dtype=dtype, non_blocking=non_blocking)
         return self
 
     def contiguous(self) -> "TensorBatch":
@@ -401,29 +410,17 @@ class TensorBatch(dict, Generic[DictType]):
             return False
         if self.metadata != other.metadata:
             return False
-        if len(self) != len(other):
-            return False
-        if len(self.items()) != len(other.items()):
+        if set(self.keys()) != set(other.keys()):
             return False
         for k, v in self.items():
             if k not in other:
                 return False
             other_v = other[k]
-            if isinstance(v, TensorList):
-                if not isinstance(other_v, TensorList):
-                    return False
-                if len(v) != len(other_v):
-                    return False
-                if not all(torch.equal(a, b) for a, b in zip(v.tensors, other_v.tensors)):
-                    return False
-            elif isinstance(v, torch.Tensor):
-                if not isinstance(other_v, torch.Tensor):
-                    return False
-                if not torch.equal(v, other_v):
-                    return False
-            elif v != other_v:
+            if isinstance(v, TensorList) and not v == other_v:
                 return False
-        return True
+            elif not torch.equal(v, other[k]):
+                return False
+        return all(self._values_equal(v, other[k]) for k, v in self.items())
 
     def __str__(self) -> str:
         """String representation of the `TensorBatch` object"""
