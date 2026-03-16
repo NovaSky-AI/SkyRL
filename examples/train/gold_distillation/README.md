@@ -17,46 +17,69 @@ This allows meaningful comparison of probability distributions even when vocabul
 ## Files
 
 - `main_gold_distill.py`: Main trainer with `GOLDDistillationTrainer` class
+- `gold_config.py`: GOLD-specific config extensions (subclasses core SkyRL config)
 - `gold_utils.py`: GOLD/ULD utilities (alignment, probability merging, loss computation)
-- `gold_workers.py`: Custom workers that return logits for GOLD computation
+- `gold_workers.py`: Custom workers that load the teacher model and compute GOLD loss inside the policy worker
 - `run_gold_distill_qwen_to_llama.sh`: Example script for Qwen-to-Llama distillation
 - `run_gold_distill_llama_to_qwen.sh`: Example script for Llama-to-Qwen distillation
-- `run_gold_test_modal.sh`: Integration test script for Modal
+- `run_gold_smoke_test.sh`: Minimal smoke test to verify the training loop end-to-end
 
 ## Implementation Details
 
+### Config
+
+GOLD adds distillation-specific fields (temperatures, loss weights, beta) to the algorithm config. These are defined in `gold_config.py` as subclasses of the core SkyRL config, keeping the main `config.py` clean:
+
+- `GOLDAlgorithmConfig` extends `AlgorithmConfig` with GOLD knobs
+- `GOLDTrainerConfig` and `GOLDSkyRLTrainConfig` wire it up
+
 ### Why Custom Workers?
 
-GOLD distillation requires **full logits** (shape `[batch, seq_len, vocab_size]`) to compute sorted probability distributions, but the standard RL training pipeline uses **log probabilities** (shape `[batch, seq_len]`). To support both use cases:
+GOLD computes its loss (JSD on matched tokens + L1 on unmatched tokens) directly inside the policy worker with gradients flowing through the student model. The teacher model is loaded inside the policy worker to avoid passing large teacher logits through the data pipeline. The trainer only prepares teacher tokenization and alignment data, which are small tensors.
 
-- **`GOLDFSDPPolicyWorkerBase`**: Inherits standard `_forward_micro_batch` for RL training (returns log probs), but adds a `forward_logits` method specifically for GOLD reward computation.
-- **`GOLDFSDPRefWorkerBase`**: Overrides `_forward_micro_batch` to always return logits, since the teacher model is only used for GOLD reward computation.
+- **`GOLDFSDPPolicyWorkerBase`**: Loads the teacher model and implements `_gold_forward_backward_micro` which runs both student and teacher forward passes, aligns tokens, and computes the GOLD loss.
+- **`GOLDRefWorker`**: Lightweight ref worker for the teacher model.
 
-This design allows the policy model to participate in both standard RL training (which needs log probs for importance sampling) and GOLD distillation (which needs logits for ULD loss).
+### Training Flow
 
-### Reward Computation Flow
-
-1. **`fwd_logprobs_values_reward`**: Runs standard forward pass for log probs, then re-tokenizes student output with teacher tokenizer and stores in metadata.
-2. **`apply_reward_kl_penalty`**: Calls `forward_logits` on both policy and ref models to get full logits, then computes GOLD rewards via `_compute_gold_rewards`.
-3. **`_compute_gold_rewards`**: For each sample, aligns student/teacher token spans using greedy text matching, merges probabilities, sorts distributions, and computes L1 distance as the reward signal.
+1. **Generation**: Student generates responses via vLLM
+2. **Teacher tokenization**: Trainer re-tokenizes student output with teacher tokenizer and prepares alignment data
+3. **Forward-backward**: Policy worker runs student forward pass, teacher forward pass, aligns token spans, and computes JSD + L1 loss
+4. **Weight sync**: Updated student weights are synced back to vLLM engines
 
 ## Quickstart
 
-To get started, first set up the dataset from the DAPO example:
+### Smoke Test (Modal)
 
 ```bash
-# Run from the `skyrl-train` directory
-bash examples/algorithms/dapo/prepare_dapo_data.sh
+cd examples/train_integrations/modal && \
+MODAL_GPU=A100:1 modal run main.py \
+  --command "cd /root/SkyRL && \
+    uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir /root/data/gsm8k && \
+    bash examples/train/gold_distillation/run_gold_smoke_test.sh"
 ```
 
-The script uses Qwen as teacher and TinyLlama as student by default. You can override the teacher model via command-line arguments:
+### Full Run
+
+First prepare the dataset:
 
 ```bash
-# Use default teacher (Qwen/Qwen2.5-0.5B-Instruct)
-bash examples/gold_distillation/run_gold_distill_qwen_to_llama.sh
+bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+```
 
-# Or specify a custom teacher model
-bash examples/gold_distillation/run_gold_distill_qwen_to_llama.sh trainer.ref.model.path=<YOUR_MODEL_HERE>
+Then run distillation:
+
+```bash
+# Qwen teacher -> Llama student
+bash examples/train/gold_distillation/run_gold_distill_qwen_to_llama.sh
+
+# Llama teacher -> Qwen student
+bash examples/train/gold_distillation/run_gold_distill_llama_to_qwen.sh
+
+# Override models or other config via command-line
+bash examples/train/gold_distillation/run_gold_distill_qwen_to_llama.sh \
+  trainer.ref.model.path=<YOUR_TEACHER> \
+  trainer.policy.model.path=<YOUR_STUDENT>
 ```
 
 ## References
