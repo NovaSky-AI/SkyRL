@@ -103,13 +103,14 @@ class EpisodeLogger:
         # Add rows for each step in the episode
         episode_id = f"{first_instance_id}_rep{first_repetition_id}"
         for step_num, idx in enumerate(episode_indices):
+            true_rewards = [reward for reward in concat_generator_outputs["rewards"][idx] if reward != 0]
             new_table.add_data(
                 global_step,
                 episode_id,
                 step_num,
                 input_prompts[idx],
                 output_responses[idx],
-                concat_generator_outputs["rewards"][idx],
+                true_rewards,
                 concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[idx],
                 concat_generator_outputs["is_last_step"][idx],
             )
