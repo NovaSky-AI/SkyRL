@@ -79,7 +79,6 @@ from skyrl.backends.skyrl_train.inference_engines.base import (
 )
 
 if TYPE_CHECKING:
-    from skyrl.backends.skyrl_train.weight_sync.base import LoraLoadRequest
     from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
         WeightSyncInitInfo,
     )
@@ -600,22 +599,20 @@ class RemoteInferenceClient:
 
     async def update_named_weights(
         self,
-        update_info: Union[Dict[str, Any], "LoraLoadRequest"],
+        update_info: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
         Update weights via vLLM native /update_weights, or load a LoRA adapter from disk.
 
         Args:
-            update_info: Dict with keys expected by vLLM (e.g. names, dtype_names,
-                shapes, packed for NCCL), OR a LoraLoadRequest to load LoRA from disk.
+            update_info: Dict with keys expected by vLLM. For weight sync: names,
+                dtype_names, shapes, packed. For LoRA loading: lora_path.
 
         Returns:
             Dict mapping server_url to response.
         """
-        from skyrl.backends.skyrl_train.weight_sync.base import LoraLoadRequest
-
-        if isinstance(update_info, LoraLoadRequest):
-            return await self.load_lora_adapter(update_info.lora_path)
+        if "lora_path" in update_info:
+            return await self.load_lora_adapter(update_info["lora_path"])
 
         return await self._call_all_servers(
             "/update_weights",

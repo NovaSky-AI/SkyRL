@@ -251,7 +251,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
             # Send LoRA disk loading request to inference engine
             lora_request = LoraLoadRequest(lora_path=lora_sync_path)
-            await inference_engine_client.update_named_weights(lora_request)
+            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+                RemoteInferenceClient,
+            )
+
+            if isinstance(inference_engine_client, RemoteInferenceClient):
+                await inference_engine_client.update_named_weights(asdict(lora_request))
+            else:
+                await inference_engine_client.update_named_weights(lora_request)
 
         torch.distributed.barrier()
 
