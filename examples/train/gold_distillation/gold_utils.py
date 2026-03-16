@@ -8,7 +8,7 @@ This module provides utilities for distilling knowledge between models with diff
 tokenizers by:
 1. Re-tokenizing student-generated text with the teacher's tokenizer
 2. Aligning token spans between student and teacher sequences
-3. Computing a hybrid loss combining GKD (for matching tokens) and ULD (for non-matching tokens)
+3. Computing a hybrid loss combining JSD (for matching tokens) and L1 (for non-matching tokens)
 """
 
 import torch
@@ -200,8 +200,6 @@ def build_alignment_groups_from_ids(
         flush()
     elif s_group or t_group:
         # Handle remaining unmatched tokens by forcing a flush.
-        # This ensures that if one sequence is longer than the other,
-        # the remaining tokens are still captured in a final, possibly misaligned, group.
         s_groups.append(s_group.copy() if s_group else [])
         t_groups.append(t_group.copy() if t_group else [])
 
@@ -218,7 +216,8 @@ def merge_probabilities_with_alignment_groups(
     For multi-token groups, computes softmax(sum of log-probs), which is equivalent to
     normalizing the element-wise product of probability distributions.
 
-    Adapted from TRL's _merge_probabilities_with_alignment_groups.
+    This implementation uses list accumulation + torch.stack() for autograd compatibility,
+    so gradients flow through the student probabilities.
 
     Args:
         probs: Probability tensor [seq_len, vocab_size]
@@ -230,22 +229,226 @@ def merge_probabilities_with_alignment_groups(
     if not alignment_groups:
         return probs
 
-    vocab_size = probs.size(-1)
-    target_len = len(alignment_groups)
-    aligned_probs = torch.zeros(target_len, vocab_size, device=probs.device, dtype=probs.dtype)
-
-    for group_idx, group in enumerate(alignment_groups):
+    eps = 1e-8
+    merged = []
+    for group in alignment_groups:
         if len(group) > 1:
-            # Multiple tokens map to this group - merge via element-wise product + renormalization
-            # This computes: softmax(log(p1) + log(p2) + ...) = normalized(p1 * p2 * ...)
-            eps = 1e-8
-            # Vectorized operation is more efficient than a loop
+            # Multiple tokens → merge via element-wise product + renormalization
             logp = torch.log(probs[group].clamp_min(eps)).sum(dim=0)
-            aligned_probs[group_idx] = torch.softmax(logp, dim=-1)
+            merged.append(torch.softmax(logp, dim=-1))
         elif len(group) == 1:
-            aligned_probs[group_idx] = probs[group[0]]
+            merged.append(probs[group[0]])
         else:
-            # No tokens map to this group
-            aligned_probs[group_idx] = torch.zeros_like(probs[0])
+            merged.append(torch.zeros_like(probs[0]))
 
-    return aligned_probs
+    return torch.stack(merged)
+
+
+def compute_vocabulary_mapping(
+    student_tokenizer: PreTrainedTokenizerBase,
+    teacher_tokenizer: PreTrainedTokenizerBase,
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    """
+    Compute matched/unmatched vocabulary index sets between student and teacher tokenizers.
+
+    Uses Jaccard-style exact string matching on decoded single tokens, following TRL's approach.
+
+    Args:
+        student_tokenizer: Student model tokenizer
+        teacher_tokenizer: Teacher model tokenizer
+
+    Returns:
+        student_matched_indices: Sorted list of student vocab indices that have a match in teacher
+        teacher_matched_indices: Corresponding teacher vocab indices (same order as student_matched)
+        student_unmatched_indices: Student vocab indices with no teacher match
+        teacher_unmatched_indices: Teacher vocab indices with no student match
+    """
+    # Build token string → index mapping for teacher
+    teacher_token_to_idx: dict[str, int] = {}
+    for idx in range(teacher_tokenizer.vocab_size):
+        token_str = teacher_tokenizer.decode([idx], skip_special_tokens=False, clean_up_tokenization_spaces=False)
+        teacher_token_to_idx[token_str] = idx
+
+    student_matched = []
+    teacher_matched = []
+    student_unmatched = []
+
+    for idx in range(student_tokenizer.vocab_size):
+        token_str = student_tokenizer.decode([idx], skip_special_tokens=False, clean_up_tokenization_spaces=False)
+        if token_str in teacher_token_to_idx:
+            student_matched.append(idx)
+            teacher_matched.append(teacher_token_to_idx[token_str])
+        else:
+            student_unmatched.append(idx)
+
+    # Teacher unmatched = all teacher indices not in matched set
+    matched_teacher_set = set(teacher_matched)
+    teacher_unmatched = [idx for idx in range(teacher_tokenizer.vocab_size) if idx not in matched_teacher_set]
+
+    return student_matched, teacher_matched, student_unmatched, teacher_unmatched
+
+
+def compute_jsd_loss(
+    student_probs: torch.Tensor,
+    teacher_probs: torch.Tensor,
+    beta: float = 0.0,
+) -> torch.Tensor:
+    """
+    Compute generalized Jensen-Shannon Divergence loss.
+
+    JSD_beta(P, Q) = beta * KL(P || M) + (1 - beta) * KL(Q || M)
+    where M = beta * P + (1 - beta) * Q.
+
+    Special cases:
+        beta=0.0: Forward KL (KL(teacher || student))
+        beta=1.0: Reverse KL (KL(student || teacher))
+        beta=0.5: Symmetric JSD
+
+    Args:
+        student_probs: Student probability distribution [..., vocab_size] (with grad)
+        teacher_probs: Teacher probability distribution [..., vocab_size] (no grad)
+        beta: Interpolation parameter
+
+    Returns:
+        Scalar JSD loss (mean over all positions)
+    """
+    eps = 1e-8
+
+    if beta == 0.0:
+        # Forward KL: KL(teacher || student) = sum(teacher * log(teacher / student))
+        log_student = torch.log(student_probs.clamp_min(eps))
+        log_teacher = torch.log(teacher_probs.clamp_min(eps))
+        kl = (teacher_probs * (log_teacher - log_student)).sum(dim=-1)
+        return kl.mean()
+    elif beta == 1.0:
+        # Reverse KL: KL(student || teacher) = sum(student * log(student / teacher))
+        log_student = torch.log(student_probs.clamp_min(eps))
+        log_teacher = torch.log(teacher_probs.clamp_min(eps))
+        kl = (student_probs * (log_student - log_teacher)).sum(dim=-1)
+        return kl.mean()
+    else:
+        # General JSD
+        m = beta * student_probs + (1 - beta) * teacher_probs
+        log_m = torch.log(m.clamp_min(eps))
+        log_student = torch.log(student_probs.clamp_min(eps))
+        log_teacher = torch.log(teacher_probs.clamp_min(eps))
+
+        kl_student_m = (student_probs * (log_student - log_m)).sum(dim=-1)
+        kl_teacher_m = (teacher_probs * (log_teacher - log_m)).sum(dim=-1)
+
+        jsd = beta * kl_student_m + (1 - beta) * kl_teacher_m
+        return jsd.mean()
+
+
+def compute_gold_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    student_alignment_groups: list[list[int]],
+    teacher_alignment_groups: list[list[int]],
+    student_matched_indices: torch.Tensor,
+    teacher_matched_indices: torch.Tensor,
+    student_unmatched_indices: torch.Tensor,
+    teacher_unmatched_indices: torch.Tensor,
+    student_labels: torch.Tensor | None = None,
+    student_temperature: float = 1.0,
+    teacher_temperature: float = 1.0,
+    beta: float = 0.0,
+    matched_weight: float = 1.0,
+    unmatched_weight: float = 1.0,
+    distillation_weight: float = 1.0,
+    crossentropy_weight: float = 0.0,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Compute the GOLD loss for a single sequence.
+
+    The loss combines:
+    1. JSD on matched (shared vocabulary) token probabilities
+    2. L1 on sorted unmatched token probabilities
+    3. Optional cross-entropy loss on student predictions
+
+    Args:
+        student_logits: Student logits [num_student_response_tokens, student_vocab_size] (with grad)
+        teacher_logits: Teacher logits [num_teacher_response_tokens, teacher_vocab_size] (no grad)
+        student_alignment_groups: List of student token index groups
+        teacher_alignment_groups: List of teacher token index groups
+        student_matched_indices: Tensor of student vocab indices that match teacher tokens
+        teacher_matched_indices: Corresponding teacher vocab indices
+        student_unmatched_indices: Student vocab indices with no teacher match
+        teacher_unmatched_indices: Teacher vocab indices with no student match
+        student_labels: Optional labels for cross-entropy [num_student_response_tokens]
+        student_temperature: Temperature for student logits
+        teacher_temperature: Temperature for teacher logits
+        beta: JSD interpolation parameter
+        matched_weight: Weight for JSD on matched tokens
+        unmatched_weight: Weight for L1 on unmatched tokens
+        distillation_weight: Weight for the distillation loss
+        crossentropy_weight: Weight for the cross-entropy loss
+
+    Returns:
+        loss: Scalar loss value
+        metrics: Dict of per-component loss values
+    """
+    # Convert logits to probabilities with temperature
+    student_probs = F.softmax(student_logits / student_temperature, dim=-1)
+    teacher_probs = F.softmax(teacher_logits / teacher_temperature, dim=-1)
+
+    # Merge probabilities for aligned groups
+    student_aligned = merge_probabilities_with_alignment_groups(student_probs, student_alignment_groups)
+    teacher_aligned = merge_probabilities_with_alignment_groups(teacher_probs, teacher_alignment_groups)
+
+    num_groups = min(student_aligned.size(0), teacher_aligned.size(0))
+    if num_groups == 0:
+        zero = student_logits.sum() * 0.0  # preserve grad graph
+        return zero, {"jsd_loss": 0.0, "l1_loss": 0.0, "ce_loss": 0.0, "total_loss": 0.0}
+
+    student_aligned = student_aligned[:num_groups]
+    teacher_aligned = teacher_aligned[:num_groups]
+
+    # Split into matched/unmatched vocabulary components
+    # Matched: JSD on shared vocabulary tokens
+    student_matched_probs = student_aligned[:, student_matched_indices]  # [groups, num_matched]
+    teacher_matched_probs = teacher_aligned[:, teacher_matched_indices]  # [groups, num_matched]
+
+    # Renormalize matched probabilities
+    s_matched_sum = student_matched_probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    t_matched_sum = teacher_matched_probs.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    student_matched_normed = student_matched_probs / s_matched_sum
+    teacher_matched_normed = teacher_matched_probs / t_matched_sum
+
+    jsd_loss = compute_jsd_loss(student_matched_normed, teacher_matched_normed, beta=beta)
+
+    # Unmatched: L1 on sorted probability mass
+    student_unmatched_probs = student_aligned[:, student_unmatched_indices]  # [groups, num_s_unmatched]
+    teacher_unmatched_probs = teacher_aligned[:, teacher_unmatched_indices]  # [groups, num_t_unmatched]
+
+    # Sort each in descending order, pad to same length, then L1
+    s_unmatched_sorted = student_unmatched_probs.sort(descending=True, dim=-1).values
+    t_unmatched_sorted = teacher_unmatched_probs.sort(descending=True, dim=-1).values
+
+    max_unmatched = max(s_unmatched_sorted.size(-1), t_unmatched_sorted.size(-1))
+    if s_unmatched_sorted.size(-1) < max_unmatched:
+        s_unmatched_sorted = F.pad(s_unmatched_sorted, (0, max_unmatched - s_unmatched_sorted.size(-1)))
+    if t_unmatched_sorted.size(-1) < max_unmatched:
+        t_unmatched_sorted = F.pad(t_unmatched_sorted, (0, max_unmatched - t_unmatched_sorted.size(-1)))
+
+    l1_loss = F.l1_loss(s_unmatched_sorted, t_unmatched_sorted)
+
+    # Combine distillation losses
+    distill_loss = matched_weight * jsd_loss + unmatched_weight * l1_loss
+    total_loss = distillation_weight * distill_loss
+
+    # Optional cross-entropy loss
+    ce_loss_val = 0.0
+    if crossentropy_weight > 0.0 and student_labels is not None:
+        ce_loss = F.cross_entropy(student_logits, student_labels, ignore_index=-100)
+        total_loss = total_loss + crossentropy_weight * ce_loss
+        ce_loss_val = ce_loss.item()
+
+    metrics = {
+        "jsd_loss": jsd_loss.item(),
+        "l1_loss": l1_loss.item(),
+        "ce_loss": ce_loss_val,
+        "total_loss": total_loss.item(),
+    }
+
+    return total_loss, metrics

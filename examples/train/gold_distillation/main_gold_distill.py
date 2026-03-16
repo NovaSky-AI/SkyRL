@@ -1,9 +1,13 @@
 """
 GOLD (General On-policy Logit Distillation) Trainer for Cross-Tokenizer Distillation.
 
-This example extends the on-policy distillation example (PR #585) to support
-student-teacher pairs with different tokenizers. It loads a separate teacher
-tokenizer and logs cross-tokenizer statistics.
+This implements GOLD as a supervised distillation method where the loss (JSD on matched
+tokens + L1 on sorted unmatched tokens) is computed directly inside the policy worker
+with gradients flowing through the student model.
+
+The teacher model is loaded inside the policy worker to avoid passing ~15GB+ of teacher
+logits through the data pipeline. The trainer prepares teacher tokenization and alignment
+data, which are small tensors that propagate through metadata.
 
 Reference:
 - HuggingFace blog: https://huggingface.co/spaces/HuggingFaceH4/on-policy-distillation
@@ -17,9 +21,9 @@ import sys
 import ray
 from loguru import logger
 from skyrl.train.config import SkyRLTrainConfig
+from .gold_config import GOLDSkyRLTrainConfig
 from transformers import AutoTokenizer
 import torch
-import torch.nn.functional as F
 
 from skyrl.train.entrypoints.main_base import (
     BasePPOExp,
@@ -36,25 +40,22 @@ from skyrl.train.utils import initialize_ray
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     register_advantage_estimator,
 )
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch, TrainingOutputBatch
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import CriticWorker
-from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
 
 from .gold_workers import GOLDPolicyWorker, GOLDRefWorker
-from .gold_utils import (
-    build_teacher_inputs_from_texts,
-    build_alignment_groups_from_ids,
-    merge_probabilities_with_alignment_groups,
-)
+from .gold_utils import build_teacher_inputs_from_texts
 
 
 class GOLDDistillationTrainer(RayPPOTrainer):
     """
-    Custom trainer for GOLD (General On-policy Logit Distillation).
+    Trainer for GOLD supervised distillation.
 
-    Extends OnPolicyDistillationTrainer to support different tokenizers between
-    student and teacher models using GOLD/ULD for cross-tokenizer
-    distillation.
+    Key differences from standard PPO:
+    - Teacher tokenization and alignment are prepared here (small tensors)
+    - Teacher model forward happens inside the policy worker (not here)
+    - Rewards/advantages are zeroed out (GOLD is supervised, not RL)
+    - The custom _forward_backward_micro in GOLDPolicyWorker computes the actual loss
     """
 
     def __init__(
@@ -64,14 +65,10 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         **kwargs,
     ):
         super().__init__(cfg, **kwargs)
-
         self.ref_tokenizer = ref_tokenizer
-        self.gold_temperature = getattr(self.cfg.trainer.algorithm, "gold_temperature", 1.0)
 
     def update_ref_with_policy(self):
-        """
-        We want this to be a no-op for cross-tokenizer distillation.
-        """
+        """No-op: teacher model is frozen, never updated from student."""
         pass
 
     def _decode_sequences_to_texts(
@@ -80,25 +77,11 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         attention_mask: torch.Tensor,
         loss_mask: torch.Tensor,
     ) -> tuple[List[str], List[str]]:
-        """
-        Decode student sequences into prompt and completion texts.
-
-        Args:
-            sequences: Token IDs [batch, seq_len]
-            attention_mask: Attention mask [batch, seq_len]
-            loss_mask: Loss mask indicating response tokens [batch, seq_len]
-
-        Returns:
-            prompt_texts: List of prompt strings
-            completion_texts: List of completion strings
-        """
+        """Decode student sequences into prompt and completion texts."""
         prompt_texts = []
         completion_texts = []
         batch_size = sequences.size(0)
 
-        # loss_mask is response-only [batch, max_output_len], but sequences and
-        # attention_mask are full-sequence [batch, max_input_len + max_output_len].
-        # We need an offset to convert loss_mask indices to full-sequence indices.
         prompt_offset = sequences.size(1) - loss_mask.size(1)
 
         for i in range(batch_size):
@@ -106,17 +89,14 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             attn_mask = attention_mask[i].bool()
             loss_m = loss_mask[i]
 
-            # Find where the response starts (first 1 in loss_mask)
             response_positions = loss_m.nonzero(as_tuple=True)[0]
             if len(response_positions) > 0:
                 response_start = response_positions[0].item()
                 response_end = response_positions[-1].item() + 1
             else:
-                # No response tokens, treat entire sequence as prompt
                 response_start = loss_m.size(0)
                 response_end = loss_m.size(0)
 
-            # Use attention_mask to filter real tokens (exclude padding)
             prompt_ids = seq[: prompt_offset + response_start][attn_mask[: prompt_offset + response_start]].tolist()
             completion_ids = seq[prompt_offset + response_start : prompt_offset + response_end][
                 attn_mask[prompt_offset + response_start : prompt_offset + response_end]
@@ -130,371 +110,31 @@ class GOLDDistillationTrainer(RayPPOTrainer):
 
         return prompt_texts, completion_texts
 
-    def _get_teacher_logits(
-        self,
-        teacher_input_ids: torch.Tensor,
-        teacher_attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Run teacher model forward pass to get logits.
-
-        NOTE: For cross-tokenizer GOLD distillation, the ref model worker must be configured
-        to return full logits (shape [batch, seq_len, vocab_size]) instead of log_probs.
-
-        Args:
-            teacher_input_ids: Teacher-tokenized input IDs [batch, seq_len]
-            teacher_attention_mask: Attention mask [batch, seq_len]
-
-        Returns:
-            Teacher logits [batch, seq_len, vocab_size] or None if unavailable
-        """
-        # Prepare data for ref model forward pass
-        data_fwd_pass = TrainingInputBatch(
-            {
-                "sequences": teacher_input_ids,
-                "attention_mask": teacher_attention_mask,
-            }
-        )
-        # The ref model expects response_length in metadata
-        data_fwd_pass.metadata = {"response_length": teacher_input_ids.size(1)}
-
-        # Run forward pass on ref model
-        if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
-            self.ref_model.backload_to_gpu()
-
-        logits_refs = self.ref_model.async_run_ray_method("mesh", "forward", data=data_fwd_pass)
-        all_rank_outputs: List[TrainingOutputBatch] = ray.get(logits_refs)
-
-        # Collect results
-        ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(
-            self.ref_model.actor_infos, all_rank_outputs
-        )
-
-        if self.cfg.trainer.placement.colocate_policy_ref or self.colocate_all:
-            self.ref_model.offload_to_cpu()
-            ray.get(self.ref_model.async_run_ray_method("pass_through", "empty_cache"))
-
-        output = ret_outputs["output"]
-
-        # Check if we got logits (3D) or log_probs (2D)
-        if output.dim() == 2:
-            # Got log_probs instead of logits - worker not configured for GOLD
-            return None
-        return output
-
-    def _get_student_logits(
-        self,
-        student_input_ids: torch.Tensor,
-        student_attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Run student/policy model forward pass to get logits.
-
-        NOTE: For cross-tokenizer GOLD distillation, the policy model worker must be configured
-        to return full logits (shape [batch, seq_len, vocab_size]) instead of log_probs.
-
-        Args:
-            student_input_ids: Student-tokenized input IDs [batch, seq_len]
-            student_attention_mask: Attention mask [batch, seq_len]
-
-        Returns:
-            Student logits [batch, seq_len, vocab_size] or None if unavailable
-        """
-        # Prepare data for policy model forward pass
-        data_fwd_pass = TrainingInputBatch(
-            {
-                "sequences": student_input_ids,
-                "attention_mask": student_attention_mask,
-            }
-        )
-        data_fwd_pass.metadata = {"response_length": student_input_ids.size(1)}
-
-        # Run forward_logits pass on policy model to get logits (not log probs)
-        if self.colocate_all:
-            self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
-
-        logits_refs = self.policy_model.async_run_ray_method("mesh", "forward_logits", data=data_fwd_pass)
-        all_rank_outputs: List[TrainingOutputBatch] = ray.get(logits_refs)
-
-        # Collect results
-        ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(
-            self.policy_model.actor_infos, all_rank_outputs
-        )
-
-        if self.colocate_all:
-            self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
-
-        output = ret_outputs["output"]
-
-        # Check if we got logits (3D) or log_probs (2D)
-        if output.dim() == 2:
-            # Got log_probs instead of logits - worker not configured for GOLD
-            return None
-        return output
-
-    def _log_alignment_sample(
-        self,
-        student_token_ids: list[int],
-        teacher_token_ids: list[int],
-        student_groups: list[list[int]],
-        teacher_groups: list[list[int]],
-    ):
-        """
-        Log a sample alignment for debugging/visualization.
-
-        Args:
-            student_token_ids: Student token IDs
-            teacher_token_ids: Teacher token IDs
-            student_groups: Student alignment groups
-            teacher_groups: Teacher alignment groups
-        """
-        # Decode tokens
-        student_decoded = [self.tokenizer.decode([tid]) for tid in student_token_ids]
-        teacher_decoded = [self.ref_tokenizer.decode([tid]) for tid in teacher_token_ids]
-
-        logger.info("=" * 60)
-        logger.info("GOLD Alignment Sample:")
-        logger.info(f"Student tokens ({len(student_token_ids)}): {student_decoded}")
-        logger.info(f"Teacher tokens ({len(teacher_token_ids)}): {teacher_decoded}")
-        logger.info(f"Alignment groups ({len(student_groups)}):")
-
-        for i, (s_group, t_group) in enumerate(zip(student_groups, teacher_groups)):
-            s_tokens = [student_decoded[idx] for idx in s_group]
-            t_tokens = [teacher_decoded[idx] for idx in t_group]
-            s_text = "".join(s_tokens)
-            t_text = "".join(t_tokens)
-            logger.info(f"  Group {i}: '{s_text}' ({s_tokens}) ↔ '{t_text}' ({t_tokens})")
-        logger.info("=" * 60)
-
-    def _log_probability_comparison(
-        self,
-        student_probs: torch.Tensor,
-        teacher_probs: torch.Tensor,
-        top_k: int = 5,
-    ):
-        """
-        Log top-k probabilities for student vs teacher.
-
-        Args:
-            student_probs: Student probability distribution [vocab_size]
-            teacher_probs: Teacher probability distribution [vocab_size]
-            top_k: Number of top probabilities to log
-        """
-        s_top_probs, s_top_ids = student_probs.topk(top_k)
-        t_top_probs, t_top_ids = teacher_probs.topk(top_k)
-
-        logger.info("Probability Comparison (first aligned group):")
-        logger.info(f"  Student top-{top_k}: {list(zip(s_top_ids.tolist(), s_top_probs.tolist()))}")
-        logger.info(f"  Teacher top-{top_k}: {list(zip(t_top_ids.tolist(), t_top_probs.tolist()))}")
-
-    def _compute_gold_rewards(
-        self,
-        student_logits: torch.Tensor,
-        teacher_logits: torch.Tensor,
-        student_input_ids: torch.Tensor,
-        teacher_input_ids: torch.Tensor,
-        student_loss_mask: torch.Tensor,
-        teacher_labels: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute per-token GOLD rewards using ULD methodology.
-
-        This aligns token spans between student and teacher, then computes
-        per-token rewards based on how well the student matches the teacher's
-        probability distribution.
-
-        Args:
-            student_logits: Student logits [batch, student_seq_len, student_vocab]
-            teacher_logits: Teacher logits [batch, teacher_seq_len, teacher_vocab]
-            student_input_ids: Student token IDs [batch, student_seq_len]
-            teacher_input_ids: Teacher token IDs [batch, teacher_seq_len]
-            student_loss_mask: Mask for student response tokens [batch, student_seq_len]
-            teacher_labels: Teacher labels with -100 for prompt [batch, teacher_seq_len]
-
-        Returns:
-            Per-token rewards [batch, loss_mask_seq_len] (negative of GOLD loss)
-        """
-        batch_size = student_logits.size(0)
-        # Use loss_mask sequence length for rewards to ensure shape compatibility
-        loss_mask_seq_len = student_loss_mask.size(1)
-        device = student_logits.device
-
-        # Initialize rewards tensor with loss_mask shape for compatibility
-        rewards = torch.zeros(batch_size, loss_mask_seq_len, device=device)
-
-        # Tracking metrics for logging
-        alignment_successes = 0
-        total_student_tokens = 0
-        total_teacher_tokens = 0
-        total_alignment_groups = 0
-        tokens_per_student_group = []
-        tokens_per_teacher_group = []
-        sample_logged = False  # Log only first sample for debugging
-
-        # student_loss_mask is response-only [batch, max_output_len], but student_logits
-        # and student_input_ids are full-sequence [batch, max_input_len + max_output_len, ...].
-        # We need an offset to convert loss_mask indices to full-sequence indices.
-        prompt_offset = student_logits.size(1) - student_loss_mask.size(1)
-
-        for i in range(batch_size):
-            # Get student response region (indices are response-relative)
-            student_mask = student_loss_mask[i].bool()
-            if not student_mask.any():
-                continue
-
-            student_positions = student_mask.nonzero(as_tuple=True)[0]
-            student_start = student_positions[0].item()
-            student_end = student_positions[-1].item() + 1
-
-            # Get teacher response region (non -100 labels)
-            teacher_mask = teacher_labels[i].ne(-100)
-            if not teacher_mask.any():
-                continue
-
-            teacher_positions = teacher_mask.nonzero(as_tuple=True)[0]
-            teacher_start = teacher_positions[0].item()
-            teacher_end = teacher_positions[-1].item() + 1
-
-            # Extract response logits
-            # student_start/end are response-relative, add prompt_offset for full-sequence indexing
-            student_resp_logits = student_logits[i, prompt_offset + student_start : prompt_offset + student_end]
-            teacher_resp_logits = teacher_logits[i, teacher_start:teacher_end]
-
-            # Convert to probabilities with temperature
-            student_probs = F.softmax(student_resp_logits / self.gold_temperature, dim=-1)
-            teacher_probs = F.softmax(teacher_resp_logits / self.gold_temperature, dim=-1)
-
-            # Get token IDs for alignment
-            # student_input_ids is full-sequence, so also needs prompt_offset
-            student_token_ids = student_input_ids[
-                i, prompt_offset + student_start : prompt_offset + student_end
-            ].tolist()
-            teacher_token_ids = teacher_input_ids[i, teacher_start:teacher_end].tolist()
-
-            # Track token counts
-            total_student_tokens += len(student_token_ids)
-            total_teacher_tokens += len(teacher_token_ids)
-
-            if len(student_token_ids) > 0 and len(teacher_token_ids) > 0:
-                # Build alignment groups using greedy text matching
-                student_groups, teacher_groups = build_alignment_groups_from_ids(
-                    self.tokenizer, self.ref_tokenizer, student_token_ids, teacher_token_ids
-                )
-
-                if student_groups and teacher_groups:
-                    # Track successful alignment
-                    alignment_successes += 1
-                    total_alignment_groups += len(student_groups)
-
-                    # Track tokens per group
-                    for s_group in student_groups:
-                        tokens_per_student_group.append(len(s_group))
-                    for t_group in teacher_groups:
-                        tokens_per_teacher_group.append(len(t_group))
-
-                    # Log sample alignment for first batch item (debugging)
-                    if not sample_logged and i == 0:
-                        self._log_alignment_sample(student_token_ids, teacher_token_ids, student_groups, teacher_groups)
-
-                    # Merge probabilities for aligned spans
-                    student_aligned = merge_probabilities_with_alignment_groups(student_probs, student_groups)
-                    teacher_aligned = merge_probabilities_with_alignment_groups(teacher_probs, teacher_groups)
-
-                    # Log probability comparison for first group of first sample
-                    if not sample_logged and i == 0 and len(student_aligned) > 0:
-                        self._log_probability_comparison(student_aligned[0], teacher_aligned[0])
-                        sample_logged = True
-
-                    # Compute per-group L1 loss and distribute to student tokens
-                    min_groups = min(student_aligned.size(0), teacher_aligned.size(0))
-                    for g in range(min_groups):
-                        # Sort probabilities (ULD approach)
-                        s_sorted = student_aligned[g].sort(descending=True).values
-                        t_sorted = teacher_aligned[g].sort(descending=True).values
-
-                        # Pad to same vocabulary size
-                        max_vocab = max(s_sorted.size(0), t_sorted.size(0))
-                        if s_sorted.size(0) < max_vocab:
-                            s_sorted = F.pad(s_sorted, (0, max_vocab - s_sorted.size(0)))
-                        if t_sorted.size(0) < max_vocab:
-                            t_sorted = F.pad(t_sorted, (0, max_vocab - t_sorted.size(0)))
-
-                        # Compute L1 loss for this group
-                        group_loss = F.l1_loss(s_sorted, t_sorted, reduction="sum")
-
-                        # Distribute loss to student tokens in this group as negative reward
-                        # Lower loss = better match = higher reward
-                        if g < len(student_groups):
-                            for tok_idx in student_groups[g]:
-                                abs_idx = student_start + tok_idx
-                                if tok_idx < (student_end - student_start) and abs_idx < loss_mask_seq_len:
-                                    rewards[i, abs_idx] = -group_loss / len(student_groups[g])
-                else:
-                    # Alignment failed - leave rewards as zeros for this sample
-                    logger.warning(
-                        f"GOLD alignment failed for batch {i}: empty alignment groups. "
-                        f"Student tokens: {len(student_token_ids)}, Teacher tokens: {len(teacher_token_ids)}. "
-                        "Rewards will be zero for this sample."
-                    )
-            else:
-                # Should not happen due to earlier guards, but log if it does
-                logger.warning(
-                    f"GOLD alignment skipped for batch {i}: empty token IDs. "
-                    f"Student tokens: {len(student_token_ids)}, Teacher tokens: {len(teacher_token_ids)}. "
-                    "Rewards will be zero for this sample."
-                )
-
-        # Log alignment statistics
-        if batch_size > 0:
-            alignment_success_rate = alignment_successes / batch_size
-            avg_student_tokens = total_student_tokens / batch_size
-            avg_teacher_tokens = total_teacher_tokens / batch_size
-            tokenizer_ratio = avg_teacher_tokens / avg_student_tokens if avg_student_tokens > 0 else 0.0
-            avg_alignment_groups = total_alignment_groups / alignment_successes if alignment_successes > 0 else 0
-            avg_tokens_per_student_group = (
-                sum(tokens_per_student_group) / len(tokens_per_student_group) if tokens_per_student_group else 0
-            )
-            avg_tokens_per_teacher_group = (
-                sum(tokens_per_teacher_group) / len(tokens_per_teacher_group) if tokens_per_teacher_group else 0
-            )
-
-            self.all_metrics.update(
-                {
-                    "gold/alignment_success_rate": alignment_success_rate,
-                    "gold/avg_student_tokens": avg_student_tokens,
-                    "gold/avg_teacher_tokens": avg_teacher_tokens,
-                    "gold/tokenizer_ratio": tokenizer_ratio,
-                    "gold/avg_alignment_groups": avg_alignment_groups,
-                    "gold/avg_tokens_per_student_group": avg_tokens_per_student_group,
-                    "gold/avg_tokens_per_teacher_group": avg_tokens_per_teacher_group,
-                }
-            )
-
-        return rewards
-
     @torch.no_grad()
     def fwd_logprobs_values_reward(
         self,
         training_input: TrainingInputBatch,
     ):
         """
-        Calculate values, log probs, and prepare for GOLD reward computation.
+        Prepare data for GOLD supervised distillation.
 
-        This override skips the ref model forward pass from the parent implementation
-        because GOLD computes teacher logits separately in apply_reward_kl_penalty with
-        proper teacher tokenization. Computing ref log_probs here would waste computation
-        since apply_reward_kl_penalty never uses them.
+        Instead of running ref model forward to get base log probs, this method:
+        1. Computes student action_log_probs (for logging/metrics)
+        2. Decodes student sequences to text
+        3. Re-tokenizes with teacher tokenizer
+        4. Stores teacher tokenization as tensors in the TrainingInputBatch dict
+           (so they auto-chunk per micro-batch alongside student data)
 
-        For cross-tokenizer distillation, this method also:
-        1. Decodes student sequences to text
-        2. Re-tokenizes with teacher tokenizer
-        3. Stores necessary data for GOLD reward computation in apply_reward_kl_penalty
-
-        For same-tokenizer case, uses the standard approach.
+        The actual teacher forward and loss computation happen inside the policy worker's
+        custom _gold_forward_backward_micro.
         """
+        from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
+
         data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
 
         def collect_results(actor_infos, results, key):
+            from skyrl.backends.skyrl_train.training_batch import TrainingOutputBatch
+
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)
             return ret_outputs[key]
 
@@ -512,11 +152,7 @@ class GOLDDistillationTrainer(RayPPOTrainer):
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
                 self.critic_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
-        # NOTE: Skipping ref model forward pass here - GOLD computes teacher logits
-        # separately in apply_reward_kl_penalty using _get_teacher_logits with proper
-        # teacher tokenization. The base_action_log_probs output is never used.
-
-        # calculate action log probs
+        # Calculate student action log probs (for metrics/logging only)
         if self.colocate_all:
             self.policy_model.backload_to_gpu(backload_optimizer=False, backload_model=True)
 
@@ -526,18 +162,12 @@ class GOLDDistillationTrainer(RayPPOTrainer):
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
             self.policy_model.offload_to_cpu(offload_optimizer=False, offload_model=True)
 
-        # Wait for all models to finish (if not colocated)
+        # Wait for non-colocated results
         if not self.colocate_all:
-            if not self.cfg.trainer.placement.colocate_policy_ref:
-                if self.critic_model is not None:
-                    all_rank_values = ray.get(value_refs)
-                    values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
-
-            elif self.critic_model is not None:
+            if self.critic_model is not None:
                 all_rank_values = ray.get(value_refs)
                 values = collect_results(self.critic_model.actor_infos, all_rank_values, key="output")
 
-            # Always wait for policy results in non-colocated case
             all_rank_action_log_probs: List[TrainingOutputBatch] = ray.get(action_log_probs_refs)
             action_log_probs = collect_results(self.policy_model.actor_infos, all_rank_action_log_probs, key="output")
 
@@ -552,54 +182,29 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         action_log_probs = action_log_probs[: len(sequences_all)]
         values = values[: len(sequences_all)] if values is not None else None
 
-        # Set base_action_log_probs to None (not used by GOLD)
+        # Set base_action_log_probs to None (GOLD doesn't use ref log probs for RL)
         training_input["base_action_log_probs"] = None
         training_input["action_log_probs"] = action_log_probs
         training_input["values"] = values
 
-        # Logprobs difference tracking (if enabled)
-        if self.cfg.generator.sampling_params.logprobs is not None:
-            logprobs_diff = (
-                training_input["rollout_logprobs"][training_input["loss_mask"] > 0]
-                - action_log_probs[training_input["loss_mask"] > 0]
-            )
-            prob_diff = logprobs_diff.exp().abs()
-            prob_diff_mean = prob_diff.mean().item()
-            prob_diff_std = prob_diff.std().item()
-            self.all_metrics.update(
-                {
-                    "policy/rollout_train_prob_diff_mean": prob_diff_mean,
-                    "policy/rollout_train_prob_diff_std": prob_diff_std,
-                }
-            )
-
-        # GOLD-specific: Prepare teacher tokenization for cross-tokenizer distillation
+        # Prepare teacher tokenization data and store as proper tensors in the batch dict
+        # so they get auto-chunked alongside student data during micro-batching.
         sequences = training_input["sequences"]
         attention_mask = training_input["attention_mask"]
         loss_mask = training_input["loss_mask"]
 
-        # Decode student sequences to prompt and completion texts
         prompt_texts, completion_texts = self._decode_sequences_to_texts(sequences, attention_mask, loss_mask)
 
-        # Re-tokenize with teacher tokenizer
-        (
-            teacher_input_ids,
-            teacher_labels,
-            teacher_attention_mask,
-            teacher_prompt_length,
-        ) = build_teacher_inputs_from_texts(
+        teacher_input_ids, teacher_labels, teacher_attention_mask, _ = build_teacher_inputs_from_texts(
             self.ref_tokenizer,
             prompt_texts,
             completion_texts,
         )
 
-        # Store teacher tokenization in metadata for use in apply_reward_kl_penalty
-        if training_input.metadata is None:
-            training_input.metadata = {}
-
-        training_input.metadata["gold_teacher_input_ids"] = teacher_input_ids
-        training_input.metadata["gold_teacher_labels"] = teacher_labels
-        training_input.metadata["gold_teacher_attention_mask"] = teacher_attention_mask
+        # Store as tensors in the dict (NOT metadata) so they auto-chunk per micro-batch
+        training_input["gold_teacher_input_ids"] = teacher_input_ids
+        training_input["gold_teacher_labels"] = teacher_labels
+        training_input["gold_teacher_attention_mask"] = teacher_attention_mask.long()
 
         return training_input
 
@@ -608,112 +213,17 @@ class GOLDDistillationTrainer(RayPPOTrainer):
         data: TrainingInputBatch,
     ) -> TrainingInputBatch:
         """
-        Computes rewards for distillation.
-
-        For cross-tokenizer distillation (GOLD/ULD methodology):
-        - Gets student and teacher logits
-        - Aligns token spans between different tokenizations
-        - Computes per-token rewards based on sorted probability matching
-
-        For same-tokenizer distillation:
-        - Uses standard KL penalty approach
-
-        NOTE: For cross-tokenizer GOLD distillation to work properly, the model workers
-        must be configured to return full logits instead of log_probs. If logits are
-        not available, falls back to KL-based approach with a warning.
+        Return zero rewards. GOLD is supervised distillation — the actual loss is
+        computed in the policy worker's _forward_backward_micro, not through rewards.
         """
-        loss_masks_all: torch.Tensor = data["loss_mask"]
-
-        # Get stored teacher tokenization from metadata
-        teacher_input_ids = data.metadata["gold_teacher_input_ids"]
-        teacher_labels = data.metadata["gold_teacher_labels"]
-        teacher_attention_mask = data.metadata["gold_teacher_attention_mask"]
-
-        # Move to appropriate device
-        device = data["sequences"].device
-        teacher_input_ids = teacher_input_ids.to(device)
-        teacher_labels = teacher_labels.to(device)
-        teacher_attention_mask = teacher_attention_mask.to(device)
-
-        # Get student logits
-        student_logits = self._get_student_logits(
-            data["sequences"],
-            data["attention_mask"],
-        )
-
-        # Get teacher logits on teacher-tokenized inputs
-        teacher_logits = self._get_teacher_logits(
-            teacher_input_ids,
-            teacher_attention_mask,
-        )
-
-        # Check if we got full logits (required for GOLD/ULD)
-        if student_logits is None or teacher_logits is None:
-            raise RuntimeError(
-                "GOLD distillation requires model workers to return full logits. "
-                "Ensure you're using GOLDPolicyWorker and GOLDRefWorker. "
-                "See gold_workers.py for reference."
-            )
-        else:
-            # Proper GOLD/ULD methodology with full logits
-            self.all_metrics.update({"gold/using_logits": 1.0})
-
-            # Compute GOLD rewards
-            rewards = self._compute_gold_rewards(
-                student_logits=student_logits,
-                teacher_logits=teacher_logits,
-                student_input_ids=data["sequences"],
-                teacher_input_ids=teacher_input_ids,
-                student_loss_mask=loss_masks_all,
-                teacher_labels=teacher_labels,
-            )
-
-            # Apply loss mask
-            rewards = rewards * loss_masks_all
-
-        # Log metrics
-        if (loss_masks_all > 0).any():
-            valid_rewards = rewards[loss_masks_all > 0]
-            avg_reward = valid_rewards.mean().item()
-            min_reward = valid_rewards.min().item()
-            max_reward = valid_rewards.max().item()
-            reward_std = valid_rewards.std().item()
-
-            # Compute percentiles for reward distribution
-            reward_percentile_25 = torch.quantile(valid_rewards, 0.25).item()
-            reward_percentile_75 = torch.quantile(valid_rewards, 0.75).item()
-
-            self.all_metrics.update(
-                {
-                    "gold/avg_reward": avg_reward,
-                    "gold/min_reward": min_reward,
-                    "gold/max_reward": max_reward,
-                    "gold/reward_std": reward_std,
-                    "gold/reward_percentile_25": reward_percentile_25,
-                    "gold/reward_percentile_75": reward_percentile_75,
-                }
-            )
-        else:
-            self.all_metrics.update(
-                {
-                    "gold/avg_reward": 0.0,
-                    "gold/min_reward": 0.0,
-                    "gold/max_reward": 0.0,
-                    "gold/reward_std": 0.0,
-                    "gold/reward_percentile_25": 0.0,
-                    "gold/reward_percentile_75": 0.0,
-                }
-            )
-
-        data["rewards"] = rewards
-
+        loss_mask = data["loss_mask"]
+        data["rewards"] = torch.zeros_like(loss_mask, dtype=torch.float32)
         return data
 
 
-# TODO: Is this accurate for GOLD? Taken from on-policy distillation example.
 @register_advantage_estimator("no_op")
 def compute_no_op_advantage(token_level_rewards: torch.Tensor, **kwargs):
-    # just pass through the rewards
+    """Pass through zero rewards as zero advantages."""
     return token_level_rewards, token_level_rewards
 
 
@@ -726,7 +236,6 @@ class GOLDDistillationExp(BasePPOExp):
         return GOLDDistillationTrainer(*args, **kwargs)
 
     def get_tokenizer(self, padding_side="left", model_path=None):
-        """Same as get_tokenizer in BasePPOExp, but allows for a different model path"""
         if model_path is None:
             model_path = self.cfg.trainer.policy.model.path
 
@@ -743,19 +252,18 @@ class GOLDDistillationExp(BasePPOExp):
 
     def _setup_trainer(self):
         """
-        Largely a copy of _setup_trainer in BasePPOExp, but creates a separate tokenizer
-        for the ref model (teacher) to support cross-tokenizer distillation.
+        Set up the GOLD distillation trainer.
+
+        Builds models with GOLDPolicyWorker (which loads teacher model internally)
+        and GOLDRefWorker (kept for pipeline compatibility).
         """
         logger.info(self.get_cfg_as_str(self.cfg))
         os.makedirs(self.cfg.trainer.export_path, exist_ok=True)
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
         if self.cfg.trainer.strategy == "megatron":
-            # Megatron support would require another worker like GOLDRefWorker and GOLDPolicyWorker for FSDP
-            raise NotImplementedError("Megatron not supported in this implementation")
+            raise NotImplementedError("Megatron not supported for GOLD distillation")
 
-        # NOTE (sumanthrh): Instantiate tracker before trainer init.
-        # We have custom validation before this step to give better error messages.
         tracker = self.get_tracker()
 
         tokenizer = self.tokenizer
@@ -787,7 +295,7 @@ class GOLDDistillationExp(BasePPOExp):
             colocate_pg=self.colocate_pg,
         )
 
-        # Build the models with GOLD-specific workers that return logits
+        # Build models: GOLDPolicyWorker loads teacher internally, CriticWorker optional
         trainer.build_models(GOLDPolicyWorker, CriticWorker, GOLDRefWorker)
         return trainer
 
@@ -799,7 +307,7 @@ def skyrl_entrypoint(cfg: SkyRLTrainConfig):
 
 
 def main() -> None:
-    cfg = SkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
+    cfg = GOLDSkyRLTrainConfig.from_cli_overrides(sys.argv[1:])
     validate_cfg(cfg)
     initialize_ray(cfg)
     ray.get(skyrl_entrypoint.remote(cfg))
