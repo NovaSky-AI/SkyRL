@@ -784,19 +784,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
-        # Initialize weight extractor
-        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
-        # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
-
-        enable_bucketing = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        # Initialize weight extractor with bucketing enabled for all strategies
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
-            enable_bucketing=enable_bucketing,
-            bucket_size_threshold_GB=(
-                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if enable_bucketing else 0.0
-            ),
+            enable_bucketing=True,
+            bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
         )
 

@@ -16,7 +16,6 @@ from loguru import logger
 from omegaconf import OmegaConf
 from ray import ObjectRef
 from ray.util.placement_group import (
-    PlacementGroup,
     PlacementGroupSchedulingStrategy,
     placement_group,
     placement_group_table,
@@ -63,9 +62,9 @@ from skyrl.env_vars import (
 from skyrl.train.config import TrainerConfig
 from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
     configure_ray_worker_logging,
     get_ray_pg_ready_with_timeout,
-    get_reordered_bundle_indices,
     ray_noset_visible_devices,
 )
 
@@ -406,7 +405,7 @@ class PPORayActorGroup:
         num_nodes (int): Number of nodes for this actor group.
         num_gpus_per_node (int): Number of gpus for this actor group.
         ray_actor_type (Type[Worker]): PPO model type that this actor group serve on.
-        pg (Optional[PlacementGroup]): Placement group to schedule actor on.
+        pg (ResolvedPlacementGroup, optional): Placement group to schedule actor on.
             If none, create new placement group automatically. Defaults to None.
         num_gpus_per_actor (float, optional): Number of gpus allocated for each actor.
             If < 1.0, multiple models can share same gpu. Defaults to 1.
@@ -418,7 +417,7 @@ class PPORayActorGroup:
         num_nodes,
         num_gpus_per_node,
         ray_actor_type: Type[Worker],
-        pg: Optional[PlacementGroup] = None,
+        pg: Optional[ResolvedPlacementGroup] = None,
         num_gpus_per_actor: float = 1.0,
         resources: Optional[Dict[str, float]] = None,
         num_resources_per_node: Optional[int] = None,
@@ -445,7 +444,7 @@ class PPORayActorGroup:
         self.record_memory = record_memory
         self._initiate_actors(pg, num_gpus_per_actor)
 
-    def _initiate_actors(self, pg: Optional[PlacementGroup], num_gpus_per_actor: float):
+    def _initiate_actors(self, pg: Optional[ResolvedPlacementGroup], num_gpus_per_actor: float):
         """Initialize Ray actors in the worker group.
 
         Args:
@@ -454,45 +453,48 @@ class PPORayActorGroup:
         """
         world_size = self._num_nodes * self._num_gpus_per_node
 
+        # Extract raw Ray PlacementGroup and pre-computed reordered indices from ResolvedPlacementGroup.
+        # Only use reordered indices when the PG has one bundle per GPU (single-GPU bundles),
+        # i.e. the bundle count matches world_size. Multi-GPU bundles (whole-node bundles)
+        # don't need reordering since each bundle already represents a full node.
+        reordered_bundle_indices = []
+        raw_pg = None
+        if pg is not None:
+            assert isinstance(pg, ResolvedPlacementGroup), f"pg must be a `ResolvedPlacementGroup` got {type(pg)}."
+            raw_pg = pg.pg
+            if len(placement_group_table(raw_pg)["bundles"]) == world_size:
+                reordered_bundle_indices = pg.reordered_bundle_indices
+
         if self.colocate_all:
             assert (
-                pg is not None
+                raw_pg is not None
             ), "if colocate_all is True, the shared placement group must be provided to PPORayActorGroup"
-            pg_data = placement_group_table(pg)
+            pg_data = placement_group_table(raw_pg)
             assert len(pg_data["bundles"]) == world_size, (
                 f"if colocate_all is True, the number of bundles in the placement group "
                 f"must match world_size. Got {len(pg_data['bundles'])} bundles but world_size={world_size}"
             )
 
-        # Build rank → bundle_index assignments sorted by (node_id, gpu_id)
-        # for deterministic ordering.
-        reordered_bundle_indices = []
-        if pg is not None:
-            pg_data = placement_group_table(pg)
-            if len(pg_data["bundles"]) == world_size:
-                reordered_bundle_indices = get_reordered_bundle_indices(pg)
-
         # If no PG provided, create one internally
-        if pg is None and self._num_gpus_per_node > 1:
+        if raw_pg is None and self._num_gpus_per_node > 1:
             bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
                 resources_name = list(self._resources.keys())[0]
                 for i in range(len(bundles)):
                     bundles[i][resources_name] = self._num_resources_per_node
 
-            internal_pg = placement_group(bundles, strategy="PACK")
-            get_ray_pg_ready_with_timeout(internal_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
-            pg = internal_pg
+            raw_pg = placement_group(bundles, strategy="PACK")
+            get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
 
         def _scheduling_strategy_for_rank(rank):
             if reordered_bundle_indices:
                 return PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
+                    placement_group=raw_pg,
                     placement_group_bundle_index=reordered_bundle_indices[rank],
                 )
-            elif pg is not None:
+            elif raw_pg is not None:
                 return PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
+                    placement_group=raw_pg,
                     placement_group_bundle_index=rank // self._num_gpus_per_node,
                 )
             # else we are in the single gpu case per node case in which case we don't need to set

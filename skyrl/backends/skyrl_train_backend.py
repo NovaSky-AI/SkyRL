@@ -12,7 +12,7 @@ import tempfile
 import ray
 import torch
 from pydantic import BaseModel
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.backend import AbstractBackend
@@ -28,7 +28,11 @@ from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
-from skyrl.train.utils.utils import get_ray_pg_ready_with_timeout, initialize_ray
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    get_ray_pg_ready_with_timeout,
+    initialize_ray,
+)
 from skyrl.utils.log import logger
 from skyrl.utils.tok import get_tokenizer
 
@@ -248,7 +252,7 @@ class SkyRLTrainBackend(AbstractBackend):
         get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
         logger.info("Placement group ready!")
 
-        return pg
+        return ResolvedPlacementGroup(pg)
 
     def delete_model(self, model_id: str) -> None:
         if self._model_id != model_id:
@@ -713,7 +717,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg: PlacementGroup | None, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainConfig, colocate_pg: ResolvedPlacementGroup | None, tokenizer: PreTrainedTokenizerBase
 ):
     engine_kwargs = {
         "num_inference_engines": cfg.generator.inference_engine.num_engines,

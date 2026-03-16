@@ -74,7 +74,8 @@ class RemoteWeightLoader(WeightLoader):
         """Load weights via HTTP to the remote inference server.
 
         Remote engines only support broadcast weight updates (no IPC).
-        Each request should contain a single weight to update.
+        Requests may contain multiple named weights (packed into a single
+        broadcast buffer) when bucketing is enabled.
 
         Args:
             request: Weight update request.
@@ -252,10 +253,6 @@ class RemoteInferenceEngine(InferenceEngineInterface):
             raise ValueError(
                 "Remote inference engines do not support CUDA IPC weight updates. Only local engines support IPC."
             )
-
-        assert (
-            len(request) == 1
-        ), f"Remote inference engines support only requests with a single named weight at a time, got request with {len(request)} entries"
 
         return await self._weight_loader.load_weights(request)
 
