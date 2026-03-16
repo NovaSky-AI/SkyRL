@@ -67,7 +67,7 @@ uv run --isolated --extra fsdp -m examples.train.gold_distillation.main_gold_dis
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
-  trainer.algorithm.gold_beta=0.0 \
+  trainer.algorithm.gold_beta=0.5 \
   trainer.algorithm.gold_distillation_weight=1.0 \
   trainer.algorithm.gold_matched_weight=1.0 \
   trainer.algorithm.gold_unmatched_weight=1.0 \
@@ -80,7 +80,8 @@ uv run --isolated --extra fsdp -m examples.train.gold_distillation.main_gold_dis
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
-  generator.inference_engine.gpu_memory_utilization=0.5 \
+  generator.inference_engine.gpu_memory_utilization=0.7 \
+  generator.inference_engine.engine_init_kwargs.max_model_len=2048 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gold_distillation" \
   trainer.run_name="gold_smoke_test" \

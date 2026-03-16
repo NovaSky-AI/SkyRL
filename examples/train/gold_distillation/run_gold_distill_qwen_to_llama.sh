@@ -74,7 +74,7 @@ uv run --isolated --extra fsdp -m examples.train.gold_distillation.main_gold_dis
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.use_kl_in_reward=$USE_KL_IN_REWARD \
-  trainer.algorithm.gold_beta=0.0 \
+  trainer.algorithm.gold_beta=0.5 \
   trainer.algorithm.gold_distillation_weight=1.0 \
   trainer.algorithm.gold_matched_weight=1.0 \
   trainer.algorithm.gold_unmatched_weight=1.0 \

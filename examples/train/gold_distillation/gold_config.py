@@ -32,7 +32,7 @@ class GOLDAlgorithmConfig(AlgorithmConfig):
     """Weight for the JSD loss on matched (shared vocabulary) tokens."""
     gold_unmatched_weight: float = 1.0
     """Weight for the L1 loss on unmatched (disjoint vocabulary) tokens."""
-    gold_beta: float = 0.0
+    gold_beta: float = 0.5
     """JSD interpolation parameter: 0=forward KL, 1=reverse KL, 0.5=symmetric JSD."""
 
 
