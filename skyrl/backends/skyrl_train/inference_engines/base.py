@@ -31,6 +31,7 @@ class InferenceEngineOutput(TypedDict):
     response_ids: List[List[int]]
     stop_reasons: List[str]
     response_logprobs: Optional[List[List[float]]]
+    rollout_expert_indices: Optional[List[List[List[int]]]]  # [seq_len, layer_num, topk]
 
 
 class InferenceEngineInterface(ABC):
@@ -65,6 +66,7 @@ class InferenceEngineInterface(ABC):
         all_responses = []
         all_stop_reasons = []
         all_response_logprobs = []
+        all_rollout_expert_indices = []
 
         for _ in range(num_samples):
             input_batch: InferenceEngineInput = {
@@ -81,12 +83,15 @@ class InferenceEngineInterface(ABC):
             all_stop_reasons.append(output["stop_reasons"][0])
             if output.get("response_logprobs") is not None:
                 all_response_logprobs.append(output["response_logprobs"][0])
+            if output.get("rollout_expert_indices") is not None:
+                all_rollout_expert_indices.append(output["rollout_expert_indices"][0])
 
         return {
             "response_ids": all_response_ids,
             "responses": all_responses,
             "stop_reasons": all_stop_reasons,
             "response_logprobs": all_response_logprobs if all_response_logprobs else None,
+            "rollout_expert_indices": all_rollout_expert_indices if all_rollout_expert_indices else None,
         }
 
     @abstractmethod
@@ -144,6 +149,16 @@ class InferenceEngineInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def pause_generation(self) -> None:
+        """Pause generation, freezing in-flight requests so they can be resumed later."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def resume_generation(self) -> None:
+        """Resume generation after a pause, continuing any frozen in-flight requests."""
+        raise NotImplementedError
+
+    @abstractmethod
     def tp_size(self) -> int:
         """Return the tensor parallel size of this inference engine."""
         raise NotImplementedError
@@ -156,13 +171,4 @@ class InferenceEngineInterface(ABC):
     @abstractmethod
     def dp_size(self) -> int:
         """Return the data parallel size of this inference engine."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def abort_generation(self) -> None:
-        """
-        Abort all running and waiting requests, which make the ongoing requests return the
-        already-generated tokens with a stop_reason of "abort". If the request was waiting,
-        it returns a response with zero completion tokens.
-        """
         raise NotImplementedError

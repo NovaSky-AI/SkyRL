@@ -1,3 +1,4 @@
+import functools
 import ipaddress
 import logging
 import math
@@ -200,6 +201,17 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         version = flash_attn.__version__
         if version > "2.8.1":
             logger.warning("flash_attn > 2.8.1 is not supported for using the megatron backend with flash_attn")
+
+    if cfg.trainer.policy.megatron_config.moe_enable_routing_replay:
+        assert (
+            cfg.generator.inference_engine.enable_return_routed_experts
+        ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
+        assert (
+            cfg.trainer.policy.megatron_config.pipeline_model_parallel_size == 1
+        ), "pipeline parallel is not yet supported for router replay (r3) with megatron"
+        assert (
+            cfg.trainer.policy.megatron_config.context_parallel_size == 1
+        ), "context parallel is not yet supported for router replay (r3) with megatron"
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -440,6 +452,17 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
+    if ie_cfg.enable_return_routed_experts:
+        assert (
+            ie_cfg.distributed_executor_backend == "mp"
+        ), "rollout router replay (r3) can hang with the ray backend - use the vLLM mp backend instead"
+        assert (
+            cfg.trainer.strategy == "megatron"
+        ), "rollout router replay (r3) is only supported with Megatron training backend"
+        assert (
+            cfg.trainer.policy.megatron_config.moe_enable_routing_replay
+        ), "moe_enable_routing_replay must be True to consume rollout expert indices"
+
     pp_size = ie_cfg.pipeline_parallel_size
     tp_pp_size = tp_size * pp_size
     num_gpus_per_node = cfg.trainer.placement.policy_num_gpus_per_node
@@ -495,6 +518,11 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
     if cfg.generator.inference_engine.distributed_executor_backend == "mp":
         raise ValueError(
             "the mp backend for vLLM is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/1309. Use the ray backend instead."
+        )
+
+    if cfg.generator.inference_engine.enable_return_routed_experts:
+        raise ValueError(
+            "rollout router replay (r3) is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/815."
         )
 
 
@@ -751,11 +779,11 @@ class InfoActor:
         return ray.get_gpu_ids()[0]
 
 
-def get_reordered_bundle_indices(pg):
-    """Get reordered bundle indices for a placement group.
+def _probe_bundle_placement(pg):
+    """Probe every bundle in a placement group to get (bundle_idx, node_id, gpu_id) tuples.
 
-    Probes every bundle in the PG, sorts by (node_id, gpu_id), and returns
-    a list of bundle indices in deterministic order.
+    Spawns a lightweight InfoActor per bundle to discover physical GPU assignments,
+    then returns the tuples sorted by (node_id, gpu_id) for deterministic ordering.
     """
     pg_data = placement_group_table(pg)
     num_bundles = len(pg_data["bundles"])
@@ -780,28 +808,57 @@ def get_reordered_bundle_indices(pg):
         ray.kill(actor)
 
     bundle_infos = [(i, bundle_to_node_ids[i], gpu_ids[i]) for i in range(num_bundles)]
-    return [info[0] for info in sorted(bundle_infos, key=lambda x: (x[1], x[2]))]
+    return sorted(bundle_infos, key=lambda x: (x[1], x[2]))
 
 
-def get_gpu_ids_for_pg_bundles(pg, bundle_indices):
-    """Get the physical GPU IDs for specific bundles in a placement group."""
-    info_actors = []
-    for idx in bundle_indices:
-        info_actors.append(
-            InfoActor.options(
-                num_cpus=0.01,
-                num_gpus=0.01,
-                resources=None,
-                scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
-                    placement_group_bundle_index=idx,
-                ),
-            ).remote()
-        )
-    gpu_ids = ray.get([actor.get_gpu_id.remote() for actor in info_actors])
-    for actor in info_actors:
-        ray.kill(actor)
-    return gpu_ids
+class ResolvedPlacementGroup:
+    """Wrapper around Ray PlacementGroup that resolves physical ordering of bundles and stores reordered bundle indices.
+
+    Ray placement groups don't guarantee bundle ordering (bundles on the same node
+    may not have consecutive indices). This wrapper probes the PG once on first access
+    and caches the full (bundle_idx, node_id, gpu_id) mapping sorted by (node_id, gpu_id).
+
+    All attributes are lazy and computed on first access.
+    Use ``.pg`` to access the underlying Ray PlacementGroup for Ray APIs.
+
+    Attributes:
+        reordered_bundle_indices: Raw bundle indices sorted by (node_id, gpu_id).
+        bundle_node_ids: Node ID for each reordered bundle index.
+        bundle_gpu_ids: Physical GPU ID for each reordered bundle index.
+        num_nodes: Number of distinct nodes in the placement group.
+        num_gpus_per_node: Number of GPUs per node (assumes uniform distribution).
+    """
+
+    def __init__(self, pg: PlacementGroup):
+        self.pg = pg
+        self._bundle_placement = None
+
+    def _get_bundle_placement(self):
+        if self._bundle_placement is None:
+            self._bundle_placement = _probe_bundle_placement(self.pg)
+        return self._bundle_placement
+
+    @functools.cached_property
+    def reordered_bundle_indices(self):
+        return [info[0] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def bundle_node_ids(self):
+        """Node ID for each reordered bundle index."""
+        return [info[1] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def bundle_gpu_ids(self):
+        """Physical GPU ID for each reordered bundle index."""
+        return [info[2] for info in self._get_bundle_placement()]
+
+    @functools.cached_property
+    def num_nodes(self):
+        return len(set(self.bundle_node_ids))
+
+    @functools.cached_property
+    def num_gpus_per_node(self):
+        return len(self._get_bundle_placement()) // self.num_nodes
 
 
 def torch_dtype_to_str(dtype: torch.dtype) -> str:

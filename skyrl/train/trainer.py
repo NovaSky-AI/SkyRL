@@ -13,7 +13,7 @@ import torch
 from jaxtyping import Float
 from loguru import logger
 from ray import ObjectRef
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -76,7 +76,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
-from skyrl.train.utils.utils import configure_ray_worker_logging
+from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
 
 
 class RayPPOTrainer:
@@ -88,7 +88,7 @@ class RayPPOTrainer:
         train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
         generator: GeneratorInterface,
-        colocate_pg: Optional[PlacementGroup] = None,
+        colocate_pg: Optional[ResolvedPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
     ):
         self.cfg = cfg
@@ -466,8 +466,9 @@ class RayPPOTrainer:
                     }
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                raw_pg = placement_group(bundles, strategy="PACK")
+                get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                pg = ResolvedPlacementGroup(raw_pg)
 
             policy_model = PPORayActorGroup(
                 cfg.trainer,
@@ -609,6 +610,9 @@ class RayPPOTrainer:
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
+            "rollout_expert_indices", None
+        )
 
         (
             sequences_tensor,
@@ -617,6 +621,7 @@ class RayPPOTrainer:
             rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
+            rollout_expert_indices_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
@@ -624,6 +629,7 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
+            rollout_expert_indices,
         )
 
         # sanity check for off_policy_correction
@@ -644,6 +650,7 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "rollout_expert_indices": rollout_expert_indices_tensor,
                 "is_last_step": (
                     torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
                     if generator_output.get("is_last_step", None) is not None
@@ -933,7 +940,10 @@ class RayPPOTrainer:
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
-        data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
+        fwd_keys = ["sequences", "attention_mask"]
+        if training_input.get("rollout_expert_indices") is not None:
+            fwd_keys.append("rollout_expert_indices")
+        data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
 
         values = None
         base_log_probs = None

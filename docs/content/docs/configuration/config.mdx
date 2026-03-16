@@ -164,6 +164,8 @@ megatron_config:
   expert_model_parallel_size: 1
   expert_tensor_parallel_size: null
 
+  moe_enable_routing_replay: False
+
   ddp_config: # pass-through config to Megatron's `DistributedDataParallelConfig` object
     # https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/distributed/distributed_data_parallel_config.py#L8
     ...
@@ -202,6 +204,8 @@ Some rules for configuring these parameters:
 - `dp_size = world_size / model_size`
 - `world_size % (pp_size * ep_size * etp_size) == 0`
     - This means that `ep_size * etp_size` can scale independently of `tp_size * cp_size`, and can go across data parallel ranks.
+
+- `moe_enable_routing_replay`: Whether to enable Megatron router replay. Used together with `generator.inference_engine.enable_return_routed_experts` to enable R3.
 
 <Callout type="warn">
 `optimizer_config_kwargs.use_precision_aware_optimizer=true` can cause checkpointing to fail. See: https://github.com/nvidia/megatron-lm/issues/1820. We recommend leaving this setting to `false`.
@@ -631,6 +635,7 @@ generator:
     max_num_seqs: 1024
     vllm_v1_disable_multiproc: true
     remote_urls: []
+    enable_return_routed_experts: false
     distributed_executor_backend: "ray"  # "mp", "ray"
     engine_init_kwargs: {}
     override_existing_update_group: "auto" # "auto", "enable", "disable"
@@ -709,6 +714,7 @@ For more details on how different placement options work, please refer to the [p
 - `generator.inference_engine.max_num_batched_tokens`: Continous batching parameter for vLLM. Maximum number of tokens to pack into a batch.
 - `generator.inference_engine.enforce_eager`: Whether to disable CUDA graphs. Default is `true` for stability. Set to `false` for higher performance, but this may affect convergence for long-running or long-context training jobs.
 - `generator.inference_engine.enable_ray_prometheus_stats`: Whether to enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only). When enabled, uses `vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger`.
+- `generator.inference_engine.enable_return_routed_experts`: Whether to return per-layer expert routing indices to use for rollout router replay (R3) if training an MoE model. Used together with `trainer.policy.megatron_config.moe_enable_routing_replay` to enable R3.
 - `generator.inference_engine.distributed_executor_backend`: The distributed executor backend to use for the vLLM engine. Options are either `mp` or `ray`.
 - `generator.inference_engine.engine_init_kwargs`: Inference engine arguments passed directly to the vLLM engine. If duplicate kwargs are passed or kwargs clash with existing inference engine arguments (e.g., `tensor_parallel_size`), an error is raised.
 

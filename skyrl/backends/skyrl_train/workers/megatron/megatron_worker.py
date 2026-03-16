@@ -319,13 +319,11 @@ class MegatronWorker:
         override_config_kwargs.update(model_config_kwargs.get("model_config", {}))
         update_model_config(hf_config, override_config_kwargs=override_config_kwargs)
 
-        # if flash_attn is enabled, we use flash attention backend, otherwise fall back to fused attention backend
         transformer_config_kwargs = (
             transformer_config_kwargs
             if isinstance(transformer_config_kwargs, dict)
             else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         )
-        transformer_config_kwargs["attention_backend"] = "flash" if flash_attn else "fused"
 
         if not self.cfg.gradient_checkpointing:
             for key in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
@@ -353,6 +351,7 @@ class MegatronWorker:
             provider.moe_router_score_function = megatron_config.moe_router_score_function
         if megatron_config.moe_router_enable_expert_bias is not None:
             provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
+        provider.moe_enable_routing_replay = megatron_config.moe_enable_routing_replay
 
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
@@ -364,6 +363,7 @@ class MegatronWorker:
 
         self.strategy.hf_config = hf_config
         self.tokenizer = tokenizer
+        self.enable_router_replay = megatron_config.moe_enable_routing_replay
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
         if lora_type == "lora":
@@ -445,6 +445,8 @@ class MegatronWorker:
         """
         Override `Worker.forward` to support passing the full mini batch to the MegatronModelWrapper.forward method.
         """
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
         # Run in micro batches grouped into a single mini-batch
         micro_bsz = self.cfg.micro_forward_batch_size_per_gpu
         micro_batches = data.chunk(micro_bsz)
@@ -465,6 +467,9 @@ class MegatronWorker:
                     "attention_mask": attention_mask,
                     "position_ids": position_ids,
                     "num_actions": num_actions,
+                    "rollout_expert_indices": (
+                        micro.get("rollout_expert_indices") if self.enable_router_replay else None
+                    ),
                 }
             )
 
@@ -482,6 +487,7 @@ class MegatronWorker:
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch({"output": log_probs})
         output.metadata = data.metadata
+        clear_router_replay()
         return output
 
     def save_hf_model(self, export_dir: str, tokenizer):
@@ -571,6 +577,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             flash_attn=self.cfg.flash_attn,
         )
 
+        if self.enable_router_replay:
+            from skyrl.backends.skyrl_train.utils.replay_utils import (
+                patch_topk_router_layer_number,
+            )
+
+            patch_topk_router_layer_number()
+
         # wrap with DDP for training
         self.actor_module = self.make_megatron_module(
             wrap_with_ddp=True,
@@ -637,6 +650,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         Returns:
             Aggregated metrics dict across all micro batches
         """
+        from skyrl.backends.skyrl_train.utils.replay_utils import clear_router_replay
+
         self.model.train()
         for chunk in self.actor_module:
             # if use distributed optimizer, zero grad buffer will be handled by optimizer
@@ -668,6 +683,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "loss_mask": experience.loss_mask,
                     "rollout_action_logprobs": experience.rollout_logprobs,
                     "action_mask": experience.action_mask,
+                    "rollout_expert_indices": experience.rollout_expert_indices if self.enable_router_replay else None,
                 }
             )
 
@@ -709,6 +725,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Add loss_fn_outputs back (not reduced, kept as list)
         if all_loss_fn_outputs:
             status["loss_fn_outputs"] = all_loss_fn_outputs
+
+        clear_router_replay()
 
         return status
 
@@ -766,19 +784,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # Call super first to set _transfer_strategy_cls and create sender/receivers
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
-        # Initialize weight extractor
-        # TODO(haochen): Now bucketing is only enabled for the CUDA IPC
-        # transfer strategy, we can enable it for other strategies as well.
-        from skyrl.backends.skyrl_train.weight_sync import CudaIpcTransferStrategy
-
-        enable_bucketing = self._transfer_strategy_cls is CudaIpcTransferStrategy
+        # Initialize weight extractor with bucketing enabled for all strategies
         self.weight_extractor = MegatronWeightExtractor(
             bridge=self.bridge,
             actor_module=self.actor_module,
-            enable_bucketing=enable_bucketing,
-            bucket_size_threshold_GB=(
-                inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB if enable_bucketing else 0.0
-            ),
+            enable_bucketing=True,
+            bucket_size_threshold_GB=inference_engine_cfg.weight_transfer_threshold_cuda_ipc_GB,
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
         )
 

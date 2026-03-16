@@ -20,6 +20,7 @@ from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
+    _ensure_chat_template,
     get_test_generator_input,
 )
 
@@ -37,6 +38,7 @@ def get_test_config(
     is_step_wise,
     temperature,
     get_logprobs,
+    enable_return_routed_experts,
 ):
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = model
@@ -57,7 +59,7 @@ def get_test_config(
     cfg.generator.inference_engine.http_endpoint_host = "127.0.0.1"
     cfg.generator.inference_engine.http_endpoint_port = 8000
     cfg.generator.step_wise_trajectories = is_step_wise
-
+    cfg.generator.inference_engine.enable_return_routed_experts = enable_return_routed_experts
     cfg.environment.skyrl_gym.search.log_requests = True
     cfg.environment.skyrl_gym.search.search_url = "http://127.0.0.1:8000/retrieve"
     cfg.environment.skyrl_gym.max_env_workers = max_env_workers
@@ -116,11 +118,13 @@ async def run_generator_end_to_end(
     is_step_wise: bool = False,
     temperature=1.0,
     get_logprobs: bool = False,
+    enable_return_routed_experts: bool = False,
 ):
     """
     End to end generator test - requires minimum 2 GPUs
     """
     tokenizer = AutoTokenizer.from_pretrained(model)
+    _ensure_chat_template(tokenizer)
 
     cfg = get_test_config(
         max_generate_length,
@@ -133,6 +137,7 @@ async def run_generator_end_to_end(
         is_step_wise,
         temperature,
         get_logprobs,
+        enable_return_routed_experts,
     )
 
     # Use InferenceEngineState to support both legacy and new inference backends
@@ -193,6 +198,11 @@ async def run_generator_end_to_end(
                 "loss_mask": generator_output["loss_masks"][i],
                 "rollout_logprobs": (
                     generator_output["rollout_logprobs"][i] if generator_output["rollout_logprobs"] else None
+                ),
+                "rollout_expert_indices": (
+                    generator_output["rollout_expert_indices"][i]
+                    if generator_output["rollout_expert_indices"]
+                    else None
                 ),
             }
             for i in range(len(generator_output["response_ids"]))
@@ -458,3 +468,43 @@ async def test_generator_multi_turn_gsm8k_step_wise(ray_init_fixture):
     assert isinstance(generator_output["is_last_step"], list) and isinstance(generator_output["is_last_step"][0], bool)
     # Expect atleast one response with more than one turn
     assert sum(generator_output["is_last_step"]) != len(generator_output["is_last_step"])
+
+
+@pytest.mark.asyncio
+async def test_generator_multi_turn_gsm8k_router_replay(ray_init_fixture):
+    """
+    Test the generator with the multi-turn GSM8K environment for router replay
+    """
+    num_prompts = 5
+    n_samples_per_prompt = 2
+    max_input_length = 4096
+    generator_output: GeneratorOutput = await run_generator_end_to_end(
+        use_async_engine=True,
+        batched=False,
+        n_samples_per_prompt=n_samples_per_prompt,
+        num_inference_engines=2,
+        tensor_parallel_size=2,
+        model="allenai/OLMoE-1B-7B-0924",
+        max_prompt_length=2048,
+        max_input_length=max_input_length,
+        max_generate_length=1000,
+        data_path=os.path.expanduser("/mnt/cluster_storage/data/gsm8k/validation.parquet"),
+        env_class="gsm8k_multi_turn",
+        num_prompts=num_prompts,
+        max_turns=2,
+        use_conversation_multi_turn=True,
+        max_env_workers=0,
+        is_step_wise=False,
+        temperature=0,
+        enable_return_routed_experts=True,
+    )
+    assert generator_output["rollout_expert_indices"] is not None
+
+    # check that the rollout expert indices are non-zero, and that the shape is (bs, seq_len, layer_num, topk)
+    rollout_expert_indices = generator_output["rollout_expert_indices"]
+    total_batch_size = num_prompts * n_samples_per_prompt
+
+    assert len(rollout_expert_indices) == total_batch_size
+    assert len(rollout_expert_indices[0]) < max_input_length
+    assert len(rollout_expert_indices[0][0]) == 16  # 16 layers in OLMoE-1B-7B-0924
+    assert len(rollout_expert_indices[0][0][0]) == 8  # 8 topk for each layer

@@ -158,6 +158,7 @@ class MegatronConfig(BaseConfig):
     moe_grouped_gemm: bool = True
     moe_router_score_function: Optional[str] = None
     moe_router_enable_expert_bias: Optional[bool] = None
+    moe_enable_routing_replay: bool = False
     ddp_config: MegatronDDPConfig = field(default_factory=MegatronDDPConfig)
     torch_profiler_config: MegatronTorchProfilerConfig = field(default_factory=MegatronTorchProfilerConfig)
     lora_config: MegatronLoraConfig = field(default_factory=MegatronLoraConfig)
@@ -444,6 +445,7 @@ class InferenceEngineConfig(BaseConfig):
     """Sets ``VLLM_ENABLE_V1_MULTIPROCESSING=0`` for reproducibility."""
     enable_prefix_caching: bool = True
     enable_chunked_prefill: bool = True
+    enable_return_routed_experts: bool = False
     max_num_batched_tokens: int = 8192
     enforce_eager: bool = True
     """Disable CUDA graphs for stability. Set to ``False`` for higher performance,

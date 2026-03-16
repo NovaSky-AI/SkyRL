@@ -76,8 +76,11 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
     async def completion(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         return await self.inference_engine_actor.completion.remote(request_payload)
 
-    async def abort_generation(self) -> None:
-        return await self.inference_engine_actor.abort_generation.remote()
+    async def pause_generation(self) -> None:
+        return await self.inference_engine_actor.pause_generation.remote()
+
+    async def resume_generation(self) -> None:
+        return await self.inference_engine_actor.resume_generation.remote()
 
 
 def create_ray_wrapped_inference_engines(
@@ -109,6 +112,7 @@ def create_ray_wrapped_inference_engines(
     rope_scaling: Dict[str, Any] = {},
     rope_theta: float | None = None,
     enable_ray_prometheus_stats: bool = False,
+    enable_return_routed_experts: bool = False,
     served_model_name: str | None = None,
     distributed_executor_backend: str = "ray",
 ) -> List[InferenceEngineInterface]:
@@ -124,8 +128,8 @@ def create_ray_wrapped_inference_engines(
     """
     from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
     from skyrl.train.utils.utils import (
+        ResolvedPlacementGroup,
         get_all_env_variables,
-        get_gpu_ids_for_pg_bundles,
         get_ray_pg_ready_with_timeout,
         ray_noset_visible_devices,
     )
@@ -163,24 +167,41 @@ def create_ray_wrapped_inference_engines(
     # Both mp and ray backends use a single shared PG with per-GPU bundles.
     if not use_hybrid_engine:
         bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_inference_engines * per_engine_gpu_count)]
-        shared_pg = placement_group(bundles, strategy="PACK")
-        get_ray_pg_ready_with_timeout(shared_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        raw_pg = placement_group(bundles, strategy="PACK")
+        get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+        shared_pg = ResolvedPlacementGroup(raw_pg)
+
+    assert isinstance(
+        shared_pg, ResolvedPlacementGroup
+    ), f"shared_pg must be a `ResolvedPlacementGroup` got {type(shared_pg)}."
+
+    # Use reordered bundle indices to ensure GPU-aware ordering.
+    # Ray placement groups don't guarantee bundle order, so bundles on the same node
+    # may not have consecutive indices. The reordered indices map logical positions
+    # to physical bundle indices sorted by (node_id, gpu_id).
+    reordered = shared_pg.reordered_bundle_indices
+    raw_pg = shared_pg.pg
 
     # Pre-compute GPU IDs per (engine, dp_rank) so we can set
     # CUDA_VISIBLE_DEVICES for the mp-spawned workers to see only the
     # TP*PP GPUs allocated to that DP rank.
+    # Since reordered indices are sorted by (node_id, gpu_id), the physical
+    # GPU IDs are directly available from shared_pg.bundle_gpu_ids.
     engine_gpu_ids_map = {}
     if use_mp_backend:
+        all_gpu_ids = shared_pg.bundle_gpu_ids
         tp_pp_size = tensor_parallel_size * pipeline_parallel_size
         for engine_idx in range(num_inference_engines):
             for dp_rank in range(data_parallel_size):
-                base = engine_idx * per_engine_gpu_count + dp_rank * tp_pp_size
-                bundle_indices = list(range(base, base + tp_pp_size))
-                engine_gpu_ids_map[(engine_idx, dp_rank)] = get_gpu_ids_for_pg_bundles(shared_pg, bundle_indices)
+                logical_base = engine_idx * per_engine_gpu_count + dp_rank * tp_pp_size
+                engine_gpu_ids_map[(engine_idx, dp_rank)] = [all_gpu_ids[logical_base + k] for k in range(tp_pp_size)]
 
     for i in range(num_inference_engines):
-        base_pg_index = i * per_engine_gpu_count
-        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(shared_pg, base_pg_index)
+        logical_base = i * per_engine_gpu_count
+        base_pg_index = reordered[logical_base]
+
+        # Get DP group rendezvous (addr, port) on the same node as DP rank 0 for this engine.
+        data_parallel_address, data_parallel_rpc_port = get_rendezvous_addr_port(raw_pg, base_pg_index)
 
         if backend == "vllm":
             if async_engine:
@@ -221,7 +242,8 @@ def create_ray_wrapped_inference_engines(
 
                 # Contiguous TP*PP slice reserved for a single DP rank.
                 tp_pp_size = tensor_parallel_size * pipeline_parallel_size
-                base_dp_pg_index = base_pg_index + dp_rank * tp_pp_size
+                logical_dp_base = logical_base + dp_rank * tp_pp_size
+                base_dp_pg_index = reordered[logical_dp_base]
 
                 if use_mp_backend:
                     dp_rank_bundles = None
@@ -229,12 +251,12 @@ def create_ray_wrapped_inference_engines(
                     mp_gpu_ids_str = ",".join(str(g) for g in mp_gpu_ids) if mp_gpu_ids is not None else None
                 else:
                     dp_rank_bundles = (
-                        list(range(base_dp_pg_index, base_dp_pg_index + tp_pp_size)) if tp_pp_size > 1 else None
+                        [reordered[logical_dp_base + k] for k in range(tp_pp_size)] if tp_pp_size > 1 else None
                     )
                     mp_gpu_ids_str = None
 
                 dp_rank_sched = PlacementGroupSchedulingStrategy(
-                    placement_group=shared_pg,
+                    placement_group=raw_pg,
                     placement_group_capture_child_tasks=True,
                     placement_group_bundle_index=base_dp_pg_index,
                 )
@@ -281,6 +303,7 @@ def create_ray_wrapped_inference_engines(
                     max_num_seqs=max_num_seqs,
                     max_logprobs=1,  # only need chosen-token logprobs
                     enable_ray_prometheus_stats=enable_ray_prometheus_stats,
+                    enable_return_routed_experts=enable_return_routed_experts,
                     **dp_kwargs,
                     **engine_init_kwargs,
                     **lora_kwargs,

@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from argparse import Namespace
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import httpx
 import uvicorn
@@ -26,11 +26,12 @@ from vllm.utils.system_utils import set_ulimit
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     ServerInfo,
+    find_and_reserve_port,
     get_node_ip,
-    get_open_port,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.env_vars import (
+    SKYRL_HTTP_CONNECTION_LIMIT,
     SKYRL_VLLM_DP_PORT_OFFSET,
     SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S,
 )
@@ -71,11 +72,9 @@ class VLLMServerActor(ServerActorProtocol):
         num_gpus_per_server: int,
         **kwargs,
     ) -> dict:
-        if kwargs.get("distributed_executor_backend") == "mp":
-            from skyrl.train.utils.utils import get_gpu_ids_for_pg_bundles
-
-            bundle_indices = list(range(start_bundle_idx, start_bundle_idx + num_gpus_per_server))
-            gpu_ids = get_gpu_ids_for_pg_bundles(pg, bundle_indices)
+        # _gpu_ids is passed by ServerGroup from the cached ResolvedPlacementGroup.bundle_gpu_ids.
+        gpu_ids = kwargs.pop("_gpu_ids", None)
+        if kwargs.get("distributed_executor_backend") == "mp" and gpu_ids is not None:
             kwargs["mp_cuda_visible_devices"] = ",".join(str(g) for g in gpu_ids)
         return kwargs
 
@@ -84,7 +83,7 @@ class VLLMServerActor(ServerActorProtocol):
         vllm_cli_args: Namespace,
         start_port: int = 8000,
         server_idx: int = 0,
-        start_bundle_idx: int = 0,
+        bundle_indices: Optional[List[int]] = None,
         dp_size: int = -1,
         dp_master_address: Optional[str] = None,
         dp_rpc_port: Optional[int] = None,
@@ -104,7 +103,8 @@ class VLLMServerActor(ServerActorProtocol):
                 Optional: uvicorn_log_level, ssl_*, disable_uvicorn_access_log, kv_transfer_config.
             start_port: Base port to start searching for free port
             server_idx: Index of this server in the group
-            start_bundle_idx: Starting bundle index in the placement group for this server's workers
+            bundle_indices: Bundle indices in the placement group for this server's workers.
+                If None, defaults to [0, 1, ..., num_gpus_per_server - 1].
             dp_size: Data parallel size (-1 to disable)
             dp_master_address: DP master address (for non-rank-0 servers)
             dp_rpc_port: DP RPC port (for non-rank-0 servers)
@@ -122,7 +122,7 @@ class VLLMServerActor(ServerActorProtocol):
         """
         self._cli_args = vllm_cli_args
         self._ip = get_node_ip()
-        self._port = get_open_port(start_port)
+        self._port, self._port_reservation = find_and_reserve_port(start_port)
         self._server_idx = server_idx
         self._num_gpus_per_server = self.compute_num_gpus_per_server(vllm_cli_args)
         self._use_mp_backend = distributed_executor_backend == "mp"
@@ -171,7 +171,13 @@ class VLLMServerActor(ServerActorProtocol):
         if self._use_mp_backend:
             self._setup_mp_gpu_visibility(mp_cuda_visible_devices)
         else:
-            bundle_indices = list(range(start_bundle_idx, start_bundle_idx + self._num_gpus_per_server))
+            # Set bundle indices for this server's TP/PP workers in the placement group.
+            # NOTE: This assumes single-GPU-per-bundle placement groups.
+            if bundle_indices is None:
+                bundle_indices = list(range(self._num_gpus_per_server))
+            assert (
+                len(bundle_indices) == self._num_gpus_per_server
+            ), f"Expected {self._num_gpus_per_server} bundle indices (one per GPU), got {len(bundle_indices)}"
             os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
             logger.info(f"Server {server_idx}: using bundle indices {bundle_indices}")
 
@@ -281,6 +287,11 @@ class VLLMServerActor(ServerActorProtocol):
 
     async def _run_server(self) -> None:
         """Internal method to run the HTTP server."""
+        # Release the port reservation right before vLLM rebinds.
+        if self._port_reservation is not None:
+            self._port_reservation.close()
+            self._port_reservation = None
+
         sock_addr = (self._cli_args.host, self._cli_args.port)
         sock = create_server_socket(sock_addr)
         app = build_app(self._cli_args)
@@ -305,6 +316,7 @@ class VLLMServerActor(ServerActorProtocol):
             port=self._cli_args.port,
             log_level=self._cli_args.uvicorn_log_level,
             timeout_keep_alive=envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE,
+            backlog=SKYRL_HTTP_CONNECTION_LIMIT,
             ssl_keyfile=self._cli_args.ssl_keyfile,
             ssl_certfile=self._cli_args.ssl_certfile,
             ssl_ca_certs=self._cli_args.ssl_ca_certs,

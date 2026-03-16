@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple
 
 import torch
-from jaxtyping import Float
+from jaxtyping import Float, Integer
 from transformers import AutoTokenizer
 
 
@@ -33,6 +33,7 @@ def convert_prompts_responses_to_batch_tensors(
     rewards: List[List[float]],
     loss_masks: List[List[int]],
     logprobs: Optional[List[List[float]]] = None,
+    rollout_expert_indices: Optional[List[List[List[List[int]]]]] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -40,6 +41,7 @@ def convert_prompts_responses_to_batch_tensors(
     Float[torch.Tensor, "batch response_len"],
     Float[torch.Tensor, "batch response_len"],
     Optional[Float[torch.Tensor, "batch response_len"]],
+    Optional[Integer[torch.Tensor, "batch seq_len layer_num topk"]],
 ]:
     """
     Convert prompts and responses to batch tensors for training.
@@ -130,4 +132,27 @@ def convert_prompts_responses_to_batch_tensors(
         ]
         logprobs_tensor = torch.tensor(padded_logprobs, dtype=torch.float)
 
-    return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor
+    rollout_expert_indices_tensor = None
+    if rollout_expert_indices:
+        first_non_empty = next((x for x in rollout_expert_indices if x), None)
+        if first_non_empty:
+            total_seq_len = max_input_len + max_output_len
+            num_layers = len(first_non_empty[0])
+            topk = len(first_non_empty[0][0]) if num_layers > 0 else 0
+            padded = torch.zeros(len(rollout_expert_indices), total_seq_len, num_layers, topk, dtype=torch.int32)
+            for i, sample_indices in enumerate(rollout_expert_indices):
+                if sample_indices:
+                    left_pad = max_input_len - prompt_token_lens[i]
+                    n = min(len(sample_indices), total_seq_len - left_pad)
+                    padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.int32)
+            rollout_expert_indices_tensor = padded
+
+    return (
+        sequences,
+        attention_mask,
+        action_mask,
+        ret_rewards,
+        ret_loss_masks,
+        logprobs_tensor,
+        rollout_expert_indices_tensor,
+    )
