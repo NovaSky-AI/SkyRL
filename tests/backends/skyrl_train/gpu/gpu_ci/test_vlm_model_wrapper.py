@@ -279,52 +279,65 @@ def test_vlm_semantic_color_recognition(vlm_model, processor):
         )
 
 
+def _build_batched_vlm_inputs(processor, prompt, response, images, device="cuda"):
+    """Build batched model inputs from a list of images with shared prompt/response text."""
+    per_sample = [build_vlm_inputs(processor, prompt, response, image=img, device=device) for img in images]
+    num_actions = per_sample[0]["num_actions"]
+    return {
+        "input_ids": torch.cat([inp["input_ids"] for inp in per_sample], dim=0),
+        "attention_mask": torch.cat([inp["attention_mask"] for inp in per_sample], dim=0),
+        "num_actions": num_actions,
+        "pixel_values": TensorList([inp["pixel_values"].tensors[0] for inp in per_sample]),
+        "image_grid_thw": TensorList([inp["image_grid_thw"].tensors[0] for inp in per_sample]),
+    }
+
+
 def test_vlm_forward_batched_vision(vlm_model, processor):
-    """Batched forward with different images should match per-sample results."""
-    images = [
-        make_solid_color_image((255, 0, 0)),  # red
-        make_solid_color_image((0, 0, 255)),  # blue
-    ]
+    """Batched forward with permuted image order should produce correspondingly permuted outputs.
+
+    Compares batched-vs-batched (not batched-vs-unbatched) to avoid numerical
+    differences from the vision encoder's varlen flash attention when the number
+    of packed sequences differs.
+    """
+    red = make_solid_color_image((255, 0, 0))
+    blue = make_solid_color_image((0, 0, 255))
     prompt = "Describe this image."
     response = "A solid color square."
 
-    # 1. Run each sample individually
-    per_sample_lps = []
-    per_sample_inputs = []
-    for img in images:
-        inp = build_vlm_inputs(processor, prompt, response, image=img)
-        per_sample_inputs.append(inp)
-        with torch.no_grad():
-            lp = vlm_model(
-                inp["input_ids"],
-                inp["num_actions"],
-                inp["attention_mask"],
-                pixel_values=inp["pixel_values"],
-                image_grid_thw=inp["image_grid_thw"],
-            )
-        per_sample_lps.append(lp)
+    # 1. Run batch in original order [red, blue]
+    fwd = _build_batched_vlm_inputs(processor, prompt, response, [red, blue])
+    num_actions = fwd["num_actions"]
 
-    # 2. Build batched input
-    num_actions = per_sample_inputs[0]["num_actions"]
-    # Same text → same seq length → simple cat along batch dim
-    input_ids = torch.cat([inp["input_ids"] for inp in per_sample_inputs], dim=0)
-    attention_mask = torch.cat([inp["attention_mask"] for inp in per_sample_inputs], dim=0)
-    # TensorList with one tensor per sample
-    pixel_values = TensorList([inp["pixel_values"].tensors[0] for inp in per_sample_inputs])
-    image_grid_thw = TensorList([inp["image_grid_thw"].tensors[0] for inp in per_sample_inputs])
-
-    # 3. Run batched forward
     with torch.no_grad():
-        batched_lps = vlm_model(
-            input_ids,
+        lps_orig = vlm_model(
+            fwd["input_ids"],
             num_actions,
-            attention_mask,
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
+            fwd["attention_mask"],
+            pixel_values=fwd["pixel_values"],
+            image_grid_thw=fwd["image_grid_thw"],
         )
 
-    # 4. Validate
-    batch_size = len(images)
-    assert batched_lps.shape == (batch_size, num_actions)
-    for i, single_lp in enumerate(per_sample_lps):
-        torch.testing.assert_close(batched_lps[i : i + 1], single_lp, atol=5e-2, rtol=1e-2)
+    # 2. Run batch in reversed order [blue, red]
+    rev = _build_batched_vlm_inputs(processor, prompt, response, [blue, red])
+
+    with torch.no_grad():
+        lps_rev = vlm_model(
+            rev["input_ids"],
+            num_actions,
+            rev["attention_mask"],
+            pixel_values=rev["pixel_values"],
+            image_grid_thw=rev["image_grid_thw"],
+        )
+
+    # 3. Basic shape / sanity checks
+    assert lps_orig.shape == (2, num_actions)
+    assert lps_rev.shape == (2, num_actions)
+    assert torch.isfinite(lps_orig).all()
+    assert (lps_orig <= 0).all()
+
+    # 4. Different images should produce different log probs within each batch
+    assert not torch.allclose(lps_orig[0], lps_orig[1], atol=1e-3)
+
+    # 5. Permuted inputs → permuted outputs (validates TensorList piping)
+    torch.testing.assert_close(lps_orig[0], lps_rev[1], atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(lps_orig[1], lps_rev[0], atol=1e-4, rtol=1e-4)
