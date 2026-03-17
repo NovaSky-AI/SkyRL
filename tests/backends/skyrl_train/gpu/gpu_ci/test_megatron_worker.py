@@ -91,7 +91,9 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     pad_token_id = tokenizer.pad_token_id
     pad_before = [4, 0, 1, 6] * num_repeats
     pad_after = [max_seq_length - len(seq) - pad_before[i] for i, seq in enumerate(sequences)]
-    loss_masks = torch.stack([torch.cat([torch.ones(num_actions - pad_after[i]), torch.zeros(pad_after[i])]) for i in range(batch_size)])
+    loss_masks = torch.stack(
+        [torch.cat([torch.ones(num_actions - pad_after[i]), torch.zeros(pad_after[i])]) for i in range(batch_size)]
+    )
 
     for i, (pad_before, pad_after) in enumerate(zip(pad_before, pad_after)):
         sequences[i] = [pad_token_id] * pad_before + sequences[i] + [pad_token_id] * pad_after
