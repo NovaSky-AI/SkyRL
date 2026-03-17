@@ -103,9 +103,11 @@ def _remove_left_padding_from_indices(
 
     seq_lens = attention_mask.sum(dim=1)
     effective_seq_len = seq_lens.max().item()
-    sp_world_size = mpu.get_tensor_model_parallel_world_size()
-    if sp_world_size > 1:
-        pad_size = (sp_world_size - effective_seq_len % sp_world_size) % sp_world_size
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    cp_size = mpu.get_context_parallel_world_size()
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    if align_size > 1:
+        pad_size = (align_size - effective_seq_len % align_size) % align_size
         effective_seq_len += pad_size
 
     batch_size = rollout_expert_indices.shape[0]
@@ -123,131 +125,152 @@ def _remove_left_padding_from_indices(
     return new_rii
 
 
-def _pack_replay_indices(
-    rollout_expert_indices: torch.Tensor,
-    attention_mask: torch.Tensor,
-) -> torch.Tensor:
-    """Pack routing indices to match the token layout produced by preprocess_packed_seqs.
+def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
+    """Return the current PP rank's transformer-layer range.
 
-    With sample packing, Megatron concatenates all sequences into one packed
-    sequence with per-sample alignment padding.  The MoE router sees tokens in
-    this packed order, so replay indices must follow the same layout.
-
-    Returns:
-        [1, total_packed_len, layers, topk] matching the packed model input.
+    Prefer Megatron's own helpers so replay indexing stays aligned with the
+    actual model partition, including embedding/loss pipeline accounting.
     """
     import megatron.core.parallel_state as mpu
+    from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
+    from megatron.core.transformer.transformer_block import get_num_layers_to_build
 
-    batch_size = rollout_expert_indices.shape[0]
-    num_layers = rollout_expert_indices.shape[2]
-    topk = rollout_expert_indices.shape[3]
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
 
-    seq_lens = attention_mask.sum(dim=-1, dtype=torch.int32)
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    cp_size = mpu.get_context_parallel_world_size()
-    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+    if get_num_layers_to_build is not None:
+        return get_transformer_layer_offset(model_config), get_num_layers_to_build(model_config, pp_rank=pp_rank)
 
-    pad_sizes = (align_size - seq_lens % align_size) % align_size
-    seqlens_padded = seq_lens + pad_sizes
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
 
-    total_packed_len = int(seqlens_padded.sum().item())
-    if cp_size > 1:
-        total_packed_len = total_packed_len // cp_size
+    total_layers = model_config.num_layers
+    first_stage_layers = getattr(model_config, "num_layers_in_first_pipeline_stage", None)
+    last_stage_layers = getattr(model_config, "num_layers_in_last_pipeline_stage", None)
 
-    packed = torch.zeros(
-        total_packed_len,
-        num_layers,
-        topk,
-        dtype=rollout_expert_indices.dtype,
-        device=rollout_expert_indices.device,
-    )
+    if pp_size <= 1:
+        return 0, total_layers
 
-    seq_lens_cpu = seq_lens.tolist()
-    seqlens_padded_cpu = seqlens_padded.tolist()
-    if cp_size > 1:
-        cp_rank = mpu.get_context_parallel_rank()
-    offset = 0
-    for i in range(batch_size):
-        n = seq_lens_cpu[i]
-        mask = attention_mask[i].bool()
-        d = rollout_expert_indices[i, mask]
-        if cp_size > 1:
-            chunk_size = seqlens_padded_cpu[i] // cp_size
-            start = cp_rank * chunk_size
-            end = min(start + chunk_size, n)
-            valid_len = max(0, end - start)
-            if valid_len > 0:
-                packed[offset : offset + valid_len] = d[start:end]
-            offset += chunk_size
+    if first_stage_layers is None and last_stage_layers is None:
+        assert total_layers % pp_size == 0, (
+            "For even pipelineing, num_layers should be divisible by pipeline_model_parallel_size"
+        )
+        pp_layers = total_layers // pp_size
+        return pp_rank * pp_layers, pp_layers
+
+    next_n_pp_layers = total_layers
+    next_n_pp_stages = pp_size
+
+    if first_stage_layers is not None:
+        next_n_pp_layers -= first_stage_layers
+        next_n_pp_stages -= 1
+
+    if last_stage_layers is not None:
+        next_n_pp_layers -= last_stage_layers
+        next_n_pp_stages -= 1
+
+    if next_n_pp_stages > 0:
+        assert next_n_pp_layers % next_n_pp_stages == 0, (
+            "Uneven pipelineing, not divisible by remaining pipeline stages"
+        )
+        next_n_pp_layers = next_n_pp_layers // next_n_pp_stages
+    else:
+        next_n_pp_layers = 0
+
+    if pp_rank == 0 and first_stage_layers is not None:
+        return 0, first_stage_layers
+
+    if pp_rank == pp_size - 1 and last_stage_layers is not None:
+        if first_stage_layers is not None:
+            start = first_stage_layers + (next_n_pp_layers * (pp_size - 2))
         else:
-            packed[offset : offset + n] = d
-            offset += seqlens_padded_cpu[i]
+            start = next_n_pp_layers * (pp_size - 1)
+        return start, last_stage_layers
 
-    return packed.unsqueeze(0)  # [1, total_packed_len, layers, topk]
+    if first_stage_layers is not None:
+        return first_stage_layers + (next_n_pp_layers * (pp_rank - 1)), next_n_pp_layers
+    return next_n_pp_layers * pp_rank, next_n_pp_layers
 
 
 def setup_per_microbatch_replay_forward(
     rollout_expert_indices: torch.Tensor,
     attention_mask: torch.Tensor,
-    use_sample_packing: bool = False,
+    model_config,
 ) -> None:
     """Set up RouterReplay for a single micro-batch, aligning indices
-    with the token layout that the MoE layer sees.
+    with the left-padding-removed token layout that the MoE layer sees.
+
+    Handles context parallelism: when CP > 1, the sequence is split into
+    2*cp_size chunks with each CP rank receiving a front chunk and a back
+    chunk (for causal-mask load balancing). Replay indices are split using 
+    the same pattern so they stay aligned with the tokens each rank sees.
 
     Handles sequence parallelism: when TP > 1, the sequence is split across
     TP ranks, so each rank's MoE router only sees its local chunk of tokens.
 
-    Handles sample packing: when use_sample_packing is True, sequences are
-    concatenated into one packed sequence with per-sample alignment padding.
-    The replay indices must follow this same packed layout.
-
     Handles dense-layer mismatch: DeepSeek V3-style models have dense FFN
-    layers before the MoE layers.  vLLM reports routing indices for ALL
+    layers before the MoE layers. vLLM reports routing indices for ALL
     transformer layers, but Megatron only has RouterReplay instances for MoE
-    layers.  We use each instance's global layer_number (set by the patched
+    layers. We use each instance's global layer_number (set by the patched
     TopKRouter.set_layer_number) to index into the correct slice of the data.
+
+    Handles pipeline parallelism: when PP > 1, the sequence is split across
+    PP ranks, so each rank only sees its local RouterReplay instances. In cases
+    where the number of local RouterReplay instances does not match the local 
+    layer count, indicating that the model has dense layers before MoE layers, 
+    we use the global layer_number to index into the correct slice of the data.
+
     """
     import megatron.core.parallel_state as mpu
-    from megatron.core.transformer.moe.router_replay import (
-        RouterReplay,
-        RouterReplayAction,
-    )
+    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
 
     _patch_alltoall_dispatcher_for_replay()
 
-    if use_sample_packing:
-        aligned = _pack_replay_indices(rollout_expert_indices, attention_mask)
-    else:
-        aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)
+    aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)
 
+    # CP splitting: mirror the front+back chunking from preprocess_packed_seqs
+    cp_size = mpu.get_context_parallel_world_size()
+    if cp_size > 1:
+        cp_rank = mpu.get_context_parallel_rank()
+        seq_len = aligned.shape[1]
+        seqlen_per_cp = seq_len // cp_size
+        half = seqlen_per_cp // 2 # we do *2 for causal masking, so get half of the sequence length per CP rank
+        front = aligned[:, half * cp_rank : half * (cp_rank + 1), :, :]
+        back_start = seq_len - half * (cp_rank + 1)
+        back_end = seq_len - half * cp_rank
+        back = aligned[:, back_start:back_end, :, :]
+        aligned = torch.cat([front, back], dim=1)
+
+    # TP splitting: sequence parallelism across the tensor model parallel region
     tp_size = mpu.get_tensor_model_parallel_world_size()
     if tp_size > 1:
         tp_rank = mpu.get_tensor_model_parallel_rank()
         seq_len = aligned.shape[1]
         chunk_size = seq_len // tp_size
         aligned = aligned[:, tp_rank * chunk_size : (tp_rank + 1) * chunk_size, :, :]
-
+   
     per_layer_data = _split_replay_indices(aligned)
-    num_layers_in_data = len(per_layer_data)
+    global_num_layers_in_data = len(per_layer_data)
     instances = RouterReplay.global_router_replay_instances
     num_instances = len(instances)
 
-    if num_layers_in_data == num_instances:
-        RouterReplay.set_replay_data(per_layer_data)
+    local_layer_offset, local_num_layers = _get_current_pp_stage_layer_range(model_config)
+
+    if local_num_layers == num_instances:
+        local_per_layer_data = per_layer_data[local_layer_offset : local_layer_offset + local_num_layers]
+        RouterReplay.set_replay_data(local_per_layer_data)
     else:
         # Dense-layer mismatch: map each MoE router to its global layer index.
         # Prefer the patched layer_number; fall back to offset-based mapping
         # (assumes dense layers precede MoE layers).
-        for i, router_instance in enumerate(instances):
+        for local_router_idx, router_instance in enumerate(instances):
             layer_number = getattr(router_instance, "layer_number", None)
             if layer_number is not None:
                 layer_idx = layer_number - 1  # layer_number is 1-based
             else:
-                layer_idx = i + (num_layers_in_data - num_instances)
-            if layer_idx < 0 or layer_idx >= num_layers_in_data:
+                layer_idx = local_layer_offset + local_router_idx
+            if layer_idx < 0 or layer_idx >= global_num_layers_in_data:
                 raise ValueError(
                     f"Router replay layer index {layer_idx} out of range "
-                    f"for data with {num_layers_in_data} layers "
+                    f"for data with {global_num_layers_in_data} layers "
                     f"({num_instances} router instances)"
                 )
             router_instance.set_target_indices(per_layer_data[layer_idx])
