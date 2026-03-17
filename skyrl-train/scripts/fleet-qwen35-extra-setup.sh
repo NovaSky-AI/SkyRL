@@ -4,11 +4,12 @@
 # Installs: transformers upgrade, flash-attn 2.8.3 wheel, CUDA toolkit (nvcc)
 # Writes: $HOME/.cuda_env (sourced at run time for FlashInfer JIT)
 
-# Upgrade transformers for full Qwen3.5-MoE support.
-# NOTE: Do NOT install from git main — main branch (unreleased) renamed
-# layer_type_validation to validate_layer_type(), breaking vLLM 0.17.0's
-# qwen3_5_moe config. Stable releases (including 5.x) are fine.
-uv pip install -U "transformers==5.1.0"
+# Upgrade transformers to 5.3.0 for Qwen3.5-MoE (model_type=qwen3_5_moe).
+# - Qwen3.5 launched Feb 2026; all 4.x releases predate it.
+# - 5.1.0 doesn't register qwen3_5_moe in AUTO_CONFIG_MAPPING.
+# - 5.3.0 is the first stable release with full qwen3_5_moe support.
+# - Do NOT install from git main (renamed layer_type_validation, breaks vLLM 0.17).
+uv pip install -U "transformers==5.3.0"
 
 # flash-attn 2.8.3 prebuilt wheel for torch 2.10 + CUDA 12 (training forward/backward)
 uv pip install "https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
