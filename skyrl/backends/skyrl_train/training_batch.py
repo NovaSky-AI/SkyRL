@@ -418,7 +418,9 @@ class TensorBatch(dict, Generic[DictType]):
             other_v = other[k]
             if isinstance(v, TensorList) and not v == other_v:
                 return False
-            elif not torch.equal(v, other[k]):
+            elif isinstance(v, torch.Tensor) and isinstance(other_v, torch.Tensor) and not torch.equal(v, other_v):
+                return False
+            elif isinstance(v, torch.Tensor) and isinstance(other_v, TensorList):
                 return False
         return True
 
