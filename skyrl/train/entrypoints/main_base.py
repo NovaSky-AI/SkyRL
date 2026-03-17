@@ -34,6 +34,10 @@ from skyrl.train.utils.utils import (
     initialize_ray,
 )
 from skyrl.utils.tok import get_tokenizer
+from skyrl.utils.worker_setup import worker_setup_fn
+
+# Run setup function to ensure driver process has consistent setup as Ray workers
+worker_setup_fn()
 
 config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
