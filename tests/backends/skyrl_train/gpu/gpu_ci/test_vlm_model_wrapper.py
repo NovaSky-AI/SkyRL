@@ -277,3 +277,54 @@ def test_vlm_semantic_color_recognition(vlm_model, processor):
         assert best == true_color, (
             f"For {true_color} image, expected highest log P for '{true_color}' " f"but got '{best}'. Scores: {log_p}"
         )
+
+
+def test_vlm_forward_batched_vision(vlm_model, processor):
+    """Batched forward with different images should match per-sample results."""
+    images = [
+        make_solid_color_image((255, 0, 0)),  # red
+        make_solid_color_image((0, 0, 255)),  # blue
+    ]
+    prompt = "Describe this image."
+    response = "A solid color square."
+
+    # 1. Run each sample individually
+    per_sample_lps = []
+    per_sample_inputs = []
+    for img in images:
+        inp = build_vlm_inputs(processor, prompt, response, image=img)
+        per_sample_inputs.append(inp)
+        with torch.no_grad():
+            lp = vlm_model(
+                inp["input_ids"],
+                inp["num_actions"],
+                inp["attention_mask"],
+                pixel_values=inp["pixel_values"],
+                image_grid_thw=inp["image_grid_thw"],
+            )
+        per_sample_lps.append(lp)
+
+    # 2. Build batched input
+    num_actions = per_sample_inputs[0]["num_actions"]
+    # Same text → same seq length → simple cat along batch dim
+    input_ids = torch.cat([inp["input_ids"] for inp in per_sample_inputs], dim=0)
+    attention_mask = torch.cat([inp["attention_mask"] for inp in per_sample_inputs], dim=0)
+    # TensorList with one tensor per sample
+    pixel_values = TensorList([inp["pixel_values"].tensors[0] for inp in per_sample_inputs])
+    image_grid_thw = TensorList([inp["image_grid_thw"].tensors[0] for inp in per_sample_inputs])
+
+    # 3. Run batched forward
+    with torch.no_grad():
+        batched_lps = vlm_model(
+            input_ids,
+            num_actions,
+            attention_mask,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+        )
+
+    # 4. Validate
+    batch_size = len(images)
+    assert batched_lps.shape == (batch_size, num_actions)
+    for i, single_lp in enumerate(per_sample_lps):
+        torch.testing.assert_close(batched_lps[i : i + 1], single_lp, atol=5e-2, rtol=1e-2)
