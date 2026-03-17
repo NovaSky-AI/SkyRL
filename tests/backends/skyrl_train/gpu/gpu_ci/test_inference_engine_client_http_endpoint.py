@@ -8,40 +8,51 @@ To run:
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_inference_engine_client_http_endpoint.py
 """
 
-import json
-import pytest
 import asyncio
-from http import HTTPStatus
-from typing import Any, Dict, List, Union, Tuple
-from pathlib import Path
-from unittest.mock import patch
-import ray
+import json
+import logging
 import threading
-import requests
+from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
+from pathlib import Path
+from typing import Any, Dict, List, Tuple, Union
+from unittest.mock import patch
+
 import aiohttp
-from pydantic import BaseModel
 import litellm
-from litellm import completion as litellm_completion
+import pytest
+import ray
+import requests
 from litellm import acompletion as litellm_async_completion
 from litellm import atext_completion as litellm_async_text_completion
-import logging
+from litellm import completion as litellm_completion
+from pydantic import BaseModel
+from transformers import AutoTokenizer
 
-from skyrl.train.config import SkyRLTrainConfig
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
-from tests.backends.skyrl_train.gpu.utils import init_worker_with_type, get_test_prompts, InferenceEngineState
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 import skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint as http_endpoint_module
+import skyrl.train.utils
+from skyrl.backends.skyrl_train.inference_engines.base import ConversationType
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client_http_endpoint import (
     serve,
-    wait_for_server_ready,
     shutdown_server,
+    wait_for_server_ready,
 )
-from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import init_remote_inference_servers
-from concurrent.futures import ThreadPoolExecutor
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
 from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-import skyrl.train.utils
-from transformers import AutoTokenizer
+from skyrl.train.config import SkyRLTrainConfig
+from tests.backends.skyrl_train.gpu.gpu_ci.test_engine_generation import (
+    init_remote_inference_servers,
+)
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    get_test_prompts,
+    init_worker_with_type,
+)
 
 MODEL_QWEN2_5 = "Qwen/Qwen2.5-0.5B-Instruct"
 MODEL_QWEN3 = "Qwen/Qwen3-0.6B"
@@ -137,7 +148,9 @@ def _check_chat_completions_outputs(outputs, test_type, num_samples, backend: st
         if test_type != "litellm":
             # Cannot check for litellm because it returns it has its own pydantic object
             if backend == "vllm":
-                from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
+                from vllm.entrypoints.openai.chat_completion.protocol import (
+                    ChatCompletionResponse,
+                )
 
                 ChatCompletionResponse.model_validate(response_data)  # will raise error if invalid
             else:
@@ -189,7 +202,9 @@ def _check_completions_outputs(prompts, outputs, test_type, backend: str = "vllm
 
         if test_type != "litellm":
             if backend == "vllm":
-                from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+                from vllm.entrypoints.openai.completion.protocol import (
+                    CompletionResponse,
+                )
 
                 CompletionResponse.model_validate(response_data)
             else:

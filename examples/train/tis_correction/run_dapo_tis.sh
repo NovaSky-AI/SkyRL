@@ -53,6 +53,7 @@ uv run --isolated --extra fsdp -m examples.train.tis_correction.main_tis_dapo \
   generator.sampling_params.top_p=$TOP_P \
   generator.sampling_params.logprobs=$LOGPROBS \
   generator.eval_sampling_params.top_p=$EVAL_TOP_P \
+  generator.eval_sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_TYPE \

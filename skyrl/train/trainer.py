@@ -13,20 +13,39 @@ import torch
 from jaxtyping import Float
 from loguru import logger
 from ray import ObjectRef
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    ActorInfo,
+    MeshRank,
+)
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils import ppo_utils
+from skyrl.backends.skyrl_train.utils.io import io
+from skyrl.backends.skyrl_train.utils.ppo_utils import (
+    AdaptiveKLController,
+    FixedKLController,
+    compute_approx_kl,
+    get_kl_controller,
+)
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
+from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
 )
-from skyrl.backends.skyrl_train.distributed.dispatch import (
-    ActorInfo,
-    MeshRank,
-)
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.evaluate import evaluate, evaluate_step_wise
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -37,24 +56,12 @@ from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
     prepare_generator_input,
 )
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.utils import (
     Timer,
     get_ray_pg_ready_with_timeout,
+    trainer_utils,
 )
-from skyrl.backends.skyrl_train.utils import ppo_utils
-from skyrl.train.utils import trainer_utils
-from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.train.utils.logging_utils import log_example
-from skyrl.backends.skyrl_train.utils.ppo_utils import (
-    AdaptiveKLController,
-    FixedKLController,
-    compute_approx_kl,
-    get_kl_controller,
-)
-from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
     GLOBAL_STEP_PREFIX,
@@ -68,10 +75,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
-from skyrl.train.utils.utils import configure_ray_worker_logging
-from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
-from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
+from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
 
 
 class RayPPOTrainer:
@@ -83,7 +87,7 @@ class RayPPOTrainer:
         train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
         generator: GeneratorInterface,
-        colocate_pg: Optional[PlacementGroup] = None,
+        colocate_pg: Optional[ResolvedPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
     ):
         self.cfg = cfg
@@ -458,8 +462,9 @@ class RayPPOTrainer:
                     }
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                raw_pg = placement_group(bundles, strategy="PACK")
+                get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                pg = ResolvedPlacementGroup(raw_pg)
 
             policy_model = PPORayActorGroup(
                 cfg.trainer,
@@ -601,6 +606,9 @@ class RayPPOTrainer:
         loss_masks: List[List[int]] = generator_output["loss_masks"]
 
         logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
+        rollout_expert_indices: Optional[List[List[List[List[int]]]]] = generator_output.get(
+            "rollout_expert_indices", None
+        )
 
         (
             sequences_tensor,
@@ -609,6 +617,7 @@ class RayPPOTrainer:
             rewards_tensor,
             loss_masks_tensor,
             rollout_logprobs_tensor,
+            rollout_expert_indices_tensor,
         ) = convert_prompts_responses_to_batch_tensors(
             self.tokenizer,
             prompt_ids,
@@ -616,6 +625,7 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
+            rollout_expert_indices,
         )
 
         # sanity check for off_policy_correction
@@ -636,6 +646,7 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "rollout_expert_indices": rollout_expert_indices_tensor,
                 "is_last_step": (
                     torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
                     if generator_output.get("is_last_step", None) is not None
@@ -925,7 +936,10 @@ class RayPPOTrainer:
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
-        data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
+        fwd_keys = ["sequences", "attention_mask"]
+        if training_input.get("rollout_expert_indices") is not None:
+            fwd_keys.append("rollout_expert_indices")
+        data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
 
         values = None
         base_log_probs = None

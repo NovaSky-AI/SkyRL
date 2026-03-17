@@ -18,20 +18,28 @@ Run with:
 """
 
 import asyncio
+
+import pytest
 import ray
 import torch
 import torch.distributed as dist
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from skyrl.train.config import SkyRLTrainConfig
 from skyrl.backends.skyrl_train.weight_sync import (
-    WeightChunk,
-    CudaIpcTransferStrategy,
     BroadcastTransferStrategy,
+    CudaIpcTransferStrategy,
+    WeightChunk,
     WeightSyncInitInfo,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import get_free_port, str_to_torch_dtype
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from ray.util.placement_group import placement_group
+
+pytestmark = pytest.mark.skipif(
+    _SKYRL_USE_NEW_INFERENCE,
+    reason="Transfer strategy e2e tests use legacy receiver which is incompatible with new inference path",
+)
 
 
 def make_cfg(

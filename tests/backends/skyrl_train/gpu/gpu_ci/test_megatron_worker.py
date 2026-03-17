@@ -3,31 +3,37 @@ Run with:
 uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_megatron_worker.py
 """
 
-import ray
-import pytest
-import torch
 import asyncio
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    ray_init_for_tests,
-    get_rank_0_memory,
-    InferenceEngineState,
-    run_inference,
-    get_test_prompts,
-    Timer,
+
+import pytest
+import ray
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+from skyrl.backends.skyrl_train.distributed.dispatch import (
+    concatenate_outputs_after_mesh_dispatch,
+)
+from skyrl.backends.skyrl_train.inference_engines.utils import (
+    get_sampling_params_for_backend,
+)
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.config import (
+    MegatronTorchProfilerConfig,
+    SkyRLLoraConfig,
+    SkyRLTrainConfig,
 )
 from skyrl.train.utils.utils import print_mem, validate_cfg
-from skyrl.train.config import (
-    SkyRLTrainConfig,
-    SkyRLLoraConfig,
-    MegatronTorchProfilerConfig,
+from tests.backends.skyrl_train.gpu.utils import (
+    InferenceEngineState,
+    Timer,
+    get_rank_0_memory,
+    get_test_prompts,
+    init_worker_with_type,
+    ray_init_for_tests,
+    run_inference,
 )
-from skyrl.backends.skyrl_train.distributed.dispatch import concatenate_outputs_after_mesh_dispatch
-from skyrl.backends.skyrl_train.utils.torch_utils import logprobs_from_logits
-from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.inference_engines.utils import get_sampling_params_for_backend
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
 
 _skip_new_inference = pytest.mark.skipif(_SKYRL_USE_NEW_INFERENCE, reason="Not yet supported on new inference path")
 

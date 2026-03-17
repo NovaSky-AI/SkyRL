@@ -7,7 +7,7 @@ from training workers to inference engines using NCCL/Gloo broadcast operations.
 import asyncio
 import socket
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
@@ -16,16 +16,18 @@ import ray
 import torch
 
 from skyrl.backends.skyrl_train.distributed.utils import init_custom_process_group
-from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.train.utils.utils import get_tcp_url
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
 from skyrl.backends.skyrl_train.weight_sync.base import WeightChunk, WeightUpdateRequest
 from skyrl.backends.skyrl_train.weight_sync.transfer_strategy import (
     WeightSyncInitInfo,
-    WeightTransferStrategy,
-    WeightTransferSender,
     WeightTransferReceiver,
+    WeightTransferSender,
+    WeightTransferStrategy,
 )
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
+from skyrl.train.utils.utils import get_tcp_url
 
 
 @dataclass
@@ -100,10 +102,12 @@ class BroadcastInitInfo(WeightSyncInitInfo):
 class BroadcastWeightUpdateRequest(WeightUpdateRequest):
     """Request for broadcast-based weight transfer.
 
-    Contains only metadata - actual tensor data is sent via torch.distributed.broadcast.
+    When sizes is provided, tensors are packed into a single contiguous buffer
+    and broadcast as one NCCL operation per chunk. The receiver uses sizes to unpack.
+    When sizes is None, falls back to per-tensor broadcast (backward compatible).
     """
 
-    pass
+    sizes: Optional[List[int]] = None
 
 
 class BroadcastWeightTransferSender(WeightTransferSender):
@@ -172,7 +176,9 @@ class BroadcastWeightTransferSender(WeightTransferSender):
                 yield from zip(chunk.names, chunk.tensors)
 
         if torch.distributed.get_rank() == 0:
-            from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+            from vllm.distributed.weight_transfer.nccl_engine import (
+                NCCLWeightTransferEngine,
+            )
 
             update_info = {**weight_metadata, "packed": True}
             update_task = asyncio.create_task(self._inference_client.update_named_weights(update_info))
@@ -193,39 +199,47 @@ class BroadcastWeightTransferSender(WeightTransferSender):
         torch.distributed.barrier()
 
     async def _send_chunks_legacy(self, chunks: Iterable[WeightChunk]) -> None:
-        """Per-chunk HTTP + torch.distributed.broadcast (legacy path)."""
+        """Per-chunk packed broadcast (legacy path).
+
+        Packs all tensors in each chunk into a single contiguous buffer and
+        broadcasts it in one NCCL operation, reducing per-tensor broadcast overhead.
+        """
         rank = torch.distributed.get_rank()
 
         # Rank 0 must have a process group to broadcast to inference engines
         if rank == 0:
             assert self._model_update_group is not None, "Rank 0 must have model_update_group"
 
-        # Only rank 0 sends request to inference engines
         # All ranks iterate through chunks (weight extraction may involve collective ops)
         for chunk in chunks:
-            assert len(chunk) == 1, f"Broadcast strategy expects single-parameter chunks, got {len(chunk)}"
-
-            name = chunk.names[0]
-            tensor = chunk.tensors[0]
-            shape = chunk.shapes[0]
-
             # Only rank 0 sends request to inference engines
+            sizes = [t.numel() for t in chunk.tensors]
+
             if rank == 0:
+                from skyrl.train.utils.utils import str_to_torch_dtype
+
+                dtype = str_to_torch_dtype(self._init_info.model_dtype_str)
+                device = torch.cuda.current_device()
+
+                total_numel = sum(sizes)
+                packed_tensor = torch.empty(total_numel, device=device, dtype=dtype, requires_grad=False)
+                offset = 0
+                for tensor, size in zip(chunk.tensors, sizes):
+                    packed_tensor[offset : offset + size].copy_(tensor.detach().view(-1))
+                    offset += size
+
                 request = BroadcastWeightUpdateRequest(
-                    names=[name],
-                    dtypes=[self._init_info.model_dtype_str],
-                    shapes=[shape],
+                    names=chunk.names,
+                    dtypes=[self._init_info.model_dtype_str] * len(chunk),
+                    shapes=chunk.shapes,
+                    sizes=sizes,
                 )
                 update_weight_task = asyncio.create_task(self._inference_client.update_named_weights(request))
 
-            # Broadcast tensor from rank 0 to inference engines (no-op on other training ranks)
-            def broadcast_tensor(t: torch.Tensor) -> None:
-                if rank == 0 and self._model_update_group is not None:
-                    torch.distributed.broadcast(t.data, 0, group=self._model_update_group)
+                def broadcast_packed(t, group):
+                    torch.distributed.broadcast(t.data, 0, group=group)
 
-            await asyncio.to_thread(broadcast_tensor, tensor)
-
-            if rank == 0:
+                await asyncio.to_thread(broadcast_packed, packed_tensor, self._model_update_group)
                 await update_weight_task
 
             torch.distributed.barrier()
@@ -262,6 +276,10 @@ class BroadcastWeightTransferReceiver(WeightTransferReceiver):
     def receive_weights(self, request: BroadcastWeightUpdateRequest) -> Iterator[Tuple[str, torch.Tensor]]:
         """Receive weights via broadcast.
 
+        When request.sizes is set (packed mode), receives a single contiguous
+        buffer and unpacks into individual tensors. Otherwise falls back to
+        per-tensor broadcast for backward compatibility.
+
         Args:
             request: Broadcast weight update request with names, dtypes, shapes.
 
@@ -270,14 +288,29 @@ class BroadcastWeightTransferReceiver(WeightTransferReceiver):
         """
         from skyrl.train.utils.utils import str_to_torch_dtype
 
-        for name, dtype_str, shape in zip(request.names, request.dtypes, request.shapes):
-            dtype = str_to_torch_dtype(dtype_str)
+        if request.sizes is not None:
+            if not request.sizes:
+                return
+
+            assert len(request.sizes) == len(request), "sizes must match number of parameters"
+            dtype = str_to_torch_dtype(request.dtypes[0])
             assert dtype == self._model_dtype, f"dtype mismatch: request {dtype}, model {self._model_dtype}"
 
-            # Allocate tensor and receive via broadcast
-            weight = torch.empty(shape, dtype=dtype, device="cuda")
-            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
-            yield name, weight
+            total_numel = sum(request.sizes)
+            packed = torch.empty(total_numel, dtype=dtype, device="cuda")
+            torch.distributed.broadcast(packed, 0, group=self._model_update_group)
+
+            offset = 0
+            for name, shape, size in zip(request.names, request.shapes, request.sizes):
+                yield name, packed[offset : offset + size].view(*shape)
+                offset += size
+        else:
+            for name, dtype_str, shape in zip(request.names, request.dtypes, request.shapes):
+                dtype = str_to_torch_dtype(dtype_str)
+                assert dtype == self._model_dtype, f"dtype mismatch: request {dtype}, model {self._model_dtype}"
+                weight = torch.empty(shape, dtype=dtype, device="cuda")
+                torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+                yield name, weight
 
     def teardown(self) -> None:
         """Destroy the process group used for weight transfer."""
@@ -357,7 +390,9 @@ class BroadcastTransferStrategy(WeightTransferStrategy):
 
         if rank == 0:
             if _SKYRL_USE_NEW_INFERENCE:
-                from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
+                from vllm.distributed.weight_transfer.nccl_engine import (
+                    NCCLWeightTransferEngine,
+                )
 
                 model_update_group = NCCLWeightTransferEngine.trainer_init(
                     dict(

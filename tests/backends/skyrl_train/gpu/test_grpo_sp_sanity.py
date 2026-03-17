@@ -2,18 +2,17 @@
 uv run --isolated --extra fsdp --extra dev -- pytest -s -vvv tests/backends/skyrl_train/gpu/test_grpo_sp_sanity.py
 """
 
-from loguru import logger
+import asyncio
+
 import numpy as np
-from skyrl.train.entrypoints.main_base import BasePPOExp
-from skyrl.train.trainer import RayPPOTrainer
 import ray
+from loguru import logger
 from tqdm import tqdm
 
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.entrypoints.main_base import BasePPOExp
+from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
-
-
-import asyncio
 
 
 class TestExp(BasePPOExp):

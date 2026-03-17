@@ -3,13 +3,15 @@ Run with:
 uv run --isolated --extra dev -- pytest tests/backends/skyrl_train/gpu/gpu_ci/test_training_step.py
 """
 
-import ray
 import pytest
+import ray
 
-from tests.backends.skyrl_train.gpu.utils import init_worker_with_type, make_dummy_training_batch
-from skyrl.train.utils.utils import print_mem, validate_cfg
 from skyrl.train.config import SkyRLTrainConfig
-
+from skyrl.train.utils.utils import print_mem, validate_cfg
+from tests.backends.skyrl_train.gpu.utils import (
+    init_worker_with_type,
+    make_dummy_training_batch,
+)
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 MOE_MODEL_NAME = "Qwen/Qwen3-30B-A3B"

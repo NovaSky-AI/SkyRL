@@ -11,17 +11,19 @@ Run:
     uv run pytest tests/backends/skyrl_train/gpu/gpu_ci/inference_servers/test_inference_server_group.py -v -s
 """
 
+import argparse
 import asyncio
 import time
 
 import httpx
 import pytest
-import argparse
 
 from skyrl.backends.skyrl_train.inference_servers.common import get_open_port
+from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+    RemoteInferenceClient,
+)
 from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
 from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
-from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 

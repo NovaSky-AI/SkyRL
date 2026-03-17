@@ -2,31 +2,39 @@
 Main entrypoint for training.
 """
 
-from ray.util.placement_group import placement_group, PlacementGroup
-
-from transformers import PreTrainedTokenizerBase
-from skyrl.train.dataset import PromptDataset
-from skyrl.train.utils import validate_cfg
-
-from skyrl.train.trainer import RayPPOTrainer
-from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
-from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
-from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import create_remote_inference_engines
-from skyrl.train.utils.utils import initialize_ray, get_ray_pg_ready_with_timeout
-from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
-from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S, _SKYRL_USE_NEW_INFERENCE
-from skyrl.train.generators.base import GeneratorInterface
-from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
-from pathlib import Path
-import ray
-import sys
-
-import os
-from loguru import logger
-from skyrl.train.utils.tracking import Tracking
-from skyrl.utils.tok import get_tokenizer
-import multiprocessing as mp
 import asyncio
+import multiprocessing as mp
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+import ray
+from loguru import logger
+from ray.util.placement_group import placement_group
+from transformers import PreTrainedTokenizerBase
+
+from skyrl.backends.skyrl_train.inference_engines.base import InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
+    InferenceEngineClient,
+)
+from skyrl.backends.skyrl_train.inference_engines.remote_inference_engine import (
+    create_remote_inference_engines,
+)
+from skyrl.backends.skyrl_train.inference_servers.utils import build_vllm_cli_args
+from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE, SKYRL_RAY_PG_TIMEOUT_IN_S
+from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.train.dataset import PromptDataset
+from skyrl.train.generators.base import GeneratorInterface
+from skyrl.train.trainer import RayPPOTrainer
+from skyrl.train.utils import validate_cfg
+from skyrl.train.utils.tracking import Tracking
+from skyrl.train.utils.utils import (
+    ResolvedPlacementGroup,
+    get_ray_pg_ready_with_timeout,
+    initialize_ray,
+)
+from skyrl.utils.tok import get_tokenizer
 
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
@@ -39,7 +47,9 @@ __all__ = ["BasePPOExp", "config_dir"]
 
 
 def create_ray_wrapped_inference_engines_from_config(
-    cfg: SkyRLTrainConfig, colocate_pg, tokenizer: PreTrainedTokenizerBase
+    cfg: SkyRLTrainConfig,
+    colocate_pg: Optional[ResolvedPlacementGroup],
+    tokenizer: PreTrainedTokenizerBase,
 ):
     from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
         create_ray_wrapped_inference_engines,
@@ -68,6 +78,8 @@ def create_ray_wrapped_inference_engines_from_config(
         "backend": ie_cfg.backend,
         "engine_init_kwargs": ie_cfg.engine_init_kwargs,
         "enable_ray_prometheus_stats": ie_cfg.enable_ray_prometheus_stats,
+        "enable_return_routed_experts": ie_cfg.enable_return_routed_experts,
+        "distributed_executor_backend": ie_cfg.distributed_executor_backend,
     }
 
     # Conditionally add LoRA parameters if LoRA is enabled
@@ -175,31 +187,31 @@ class BasePPOExp:
             return prompts_dataset
         return None
 
-    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> PlacementGroup:
+    def get_colocate_pg(self, timeout: int = SKYRL_RAY_PG_TIMEOUT_IN_S) -> Optional[ResolvedPlacementGroup]:
         """Initializes a placement group for colocated training.
 
-        A single placement group that packs all the inference engines together is created.
+        Creates a single placement group with per-GPU bundles for all inference
+        engines. The returned wrapper computes GPU-aware bundle ordering at init time.
 
         Args:
             timeout (int): The timeout for the placement group to be ready.
 
         Returns:
-            PlacementGroup: The placement group for colocated training.
+            ResolvedPlacementGroup: The placement group wrapper for colocated training, or None.
         """
-        if self.cfg.trainer.placement.colocate_all:
-            ie_cfg = self.cfg.generator.inference_engine
-            pg = placement_group(
-                [{"GPU": 1, "CPU": 1}]
-                * ie_cfg.num_engines
-                * ie_cfg.tensor_parallel_size
-                * ie_cfg.pipeline_parallel_size
-                * ie_cfg.data_parallel_size,
-                strategy="PACK",
-            )
-            get_ray_pg_ready_with_timeout(pg, timeout=timeout)
-            return pg
-        else:
+        if not self.cfg.trainer.placement.colocate_all:
             return None
+
+        ie_cfg = self.cfg.generator.inference_engine
+        per_engine_gpu_count = ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
+        total_gpu_slots = ie_cfg.num_engines * per_engine_gpu_count
+
+        pg = placement_group(
+            [{"GPU": 1, "CPU": 1}] * total_gpu_slots,
+            strategy="PACK",
+        )
+        get_ray_pg_ready_with_timeout(pg, timeout=timeout)
+        return ResolvedPlacementGroup(pg)
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         """Initializes the generator.
@@ -301,9 +313,13 @@ class BasePPOExp:
         Returns:
             RemoteInferenceClient: The new inference client.
         """
-        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import RemoteInferenceClient
+        from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+            RemoteInferenceClient,
+        )
         from skyrl.backends.skyrl_train.inference_servers.router import InferenceRouter
-        from skyrl.backends.skyrl_train.inference_servers.server_group import ServerGroup
+        from skyrl.backends.skyrl_train.inference_servers.server_group import (
+            ServerGroup,
+        )
 
         ie_cfg = self.cfg.generator.inference_engine
         is_colocated = self.cfg.trainer.placement.colocate_all
@@ -348,6 +364,7 @@ class BasePPOExp:
                 num_servers=ie_cfg.num_engines,
                 placement_group=self.colocate_pg if is_colocated else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
+                distributed_executor_backend=ie_cfg.distributed_executor_backend,
             )
             server_infos = self._server_group.start()
             server_urls = [info.url for info in server_infos]
@@ -378,11 +395,15 @@ class BasePPOExp:
         os.makedirs(self.cfg.trainer.ckpt_path, exist_ok=True)
 
         if self.cfg.trainer.strategy in ("fsdp", "fsdp2"):
-            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import PolicyWorker, CriticWorker, RefWorker
+            from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                CriticWorker,
+                PolicyWorker,
+                RefWorker,
+            )
         elif self.cfg.trainer.strategy == "megatron":
             from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                PolicyWorker,
                 CriticWorker,
+                PolicyWorker,
                 RefWorker,
             )
         else:
