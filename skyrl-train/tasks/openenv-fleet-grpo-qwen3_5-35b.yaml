@@ -113,6 +113,7 @@ run: |
     generator.use_conversation_multi_turn=true \
     generator.n_samples_per_prompt=8 \
     generator.eval_n_samples_per_prompt=3 \
+    generator.enforce_eager=false \
     generator.gpu_memory_utilization=0.65 \
     trainer.logger="$LOGGER" \
     trainer.project_name="fleet-task-grpo" \
