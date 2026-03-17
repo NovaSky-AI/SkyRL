@@ -237,9 +237,9 @@ class MegatronWeightExtractor(WeightExtractor):
         """Lazily initialize param buckets on first use (model must be on GPU)."""
         if self._buckets_initialized:
             return
-        self._buckets_initialized = True
         if self.enable_bucketing:
             self._init_param_buckets()
+        self._buckets_initialized = True
 
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from Megatron model.
