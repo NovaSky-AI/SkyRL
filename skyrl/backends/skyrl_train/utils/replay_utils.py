@@ -132,8 +132,8 @@ def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
     actual model partition, including embedding/loss pipeline accounting.
     """
     import megatron.core.parallel_state as mpu
-    from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
     from megatron.core.transformer.transformer_block import get_num_layers_to_build
+    from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
     pp_rank = mpu.get_pipeline_model_parallel_rank()
 
@@ -150,9 +150,9 @@ def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
         return 0, total_layers
 
     if first_stage_layers is None and last_stage_layers is None:
-        assert total_layers % pp_size == 0, (
-            "For even pipelineing, num_layers should be divisible by pipeline_model_parallel_size"
-        )
+        assert (
+            total_layers % pp_size == 0
+        ), "For even pipelineing, num_layers should be divisible by pipeline_model_parallel_size"
         pp_layers = total_layers // pp_size
         return pp_rank * pp_layers, pp_layers
 
@@ -168,9 +168,9 @@ def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
         next_n_pp_stages -= 1
 
     if next_n_pp_stages > 0:
-        assert next_n_pp_layers % next_n_pp_stages == 0, (
-            "Uneven pipelineing, not divisible by remaining pipeline stages"
-        )
+        assert (
+            next_n_pp_layers % next_n_pp_stages == 0
+        ), "Uneven pipelineing, not divisible by remaining pipeline stages"
         next_n_pp_layers = next_n_pp_layers // next_n_pp_stages
     else:
         next_n_pp_layers = 0
@@ -200,7 +200,7 @@ def setup_per_microbatch_replay_forward(
 
     Handles context parallelism: when CP > 1, the sequence is split into
     2*cp_size chunks with each CP rank receiving a front chunk and a back
-    chunk (for causal-mask load balancing). Replay indices are split using 
+    chunk (for causal-mask load balancing). Replay indices are split using
     the same pattern so they stay aligned with the tokens each rank sees.
 
     Handles sequence parallelism: when TP > 1, the sequence is split across
@@ -214,13 +214,16 @@ def setup_per_microbatch_replay_forward(
 
     Handles pipeline parallelism: when PP > 1, the sequence is split across
     PP ranks, so each rank only sees its local RouterReplay instances. In cases
-    where the number of local RouterReplay instances does not match the local 
-    layer count, indicating that the model has dense layers before MoE layers, 
+    where the number of local RouterReplay instances does not match the local
+    layer count, indicating that the model has dense layers before MoE layers,
     we use the global layer_number to index into the correct slice of the data.
 
     """
     import megatron.core.parallel_state as mpu
-    from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
+    from megatron.core.transformer.moe.router_replay import (
+        RouterReplay,
+        RouterReplayAction,
+    )
 
     _patch_alltoall_dispatcher_for_replay()
 
@@ -232,7 +235,7 @@ def setup_per_microbatch_replay_forward(
         cp_rank = mpu.get_context_parallel_rank()
         seq_len = aligned.shape[1]
         seqlen_per_cp = seq_len // cp_size
-        half = seqlen_per_cp // 2 # we do *2 for causal masking, so get half of the sequence length per CP rank
+        half = seqlen_per_cp // 2  # we do *2 for causal masking, so get half of the sequence length per CP rank
         front = aligned[:, half * cp_rank : half * (cp_rank + 1), :, :]
         back_start = seq_len - half * (cp_rank + 1)
         back_end = seq_len - half * cp_rank
@@ -246,7 +249,7 @@ def setup_per_microbatch_replay_forward(
         seq_len = aligned.shape[1]
         chunk_size = seq_len // tp_size
         aligned = aligned[:, tp_rank * chunk_size : (tp_rank + 1) * chunk_size, :, :]
-   
+
     per_layer_data = _split_replay_indices(aligned)
     global_num_layers_in_data = len(per_layer_data)
     instances = RouterReplay.global_router_replay_instances
