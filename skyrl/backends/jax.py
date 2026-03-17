@@ -787,12 +787,13 @@ class JaxBackendImpl(AbstractBackend):
             logger.warning(f"No accumulated gradients for model {model_id}; applying step with zero gradients")
 
         # Update hyperparameters from the request
+        # Use direct .value assignment instead of [...] indexing to avoid MPS zero-sized tensor issues
         hp = optimizer.opt_state.hyperparams
-        hp["learning_rate"][...] = learning_rate
-        hp["b1"][...] = request_data.adam_params.beta1
-        hp["b2"][...] = request_data.adam_params.beta2
-        hp["eps"][...] = request_data.adam_params.eps
-        hp["weight_decay"][...] = request_data.adam_params.weight_decay
+        hp["learning_rate"].value = jnp.asarray(learning_rate, dtype=hp["learning_rate"].value.dtype)
+        hp["b1"].value = jnp.asarray(request_data.adam_params.beta1, dtype=hp["b1"].value.dtype)
+        hp["b2"].value = jnp.asarray(request_data.adam_params.beta2, dtype=hp["b2"].value.dtype)
+        hp["eps"].value = jnp.asarray(request_data.adam_params.eps, dtype=hp["eps"].value.dtype)
+        hp["weight_decay"].value = jnp.asarray(request_data.adam_params.weight_decay, dtype=hp["weight_decay"].value.dtype)
 
         # JIT-compiled: compute full gradients, apply optimizer update, and reset accumulated grads
         with jax.set_mesh(self.mesh):
