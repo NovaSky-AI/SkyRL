@@ -448,7 +448,7 @@ async def test_megatron_lora_forward(ray_init_fixture, tp, pp, cp, ep, etp, gpus
         ("policy", 4, 1, 1, 4, 1, 4, True, False, True),
     ],
     ids=[
-        "x",
+        "tp2_pp2_policy_seq_packing",
         "tp2_pp2_policy_seq_packing_with_entropy_loss",
         "tp2_pp2_policy_lora",
         "tp2_pp2_policy_unpacked",

@@ -20,6 +20,8 @@ def reduce_metrics(metrics: Dict[str, List[float]]) -> Dict[str, float]:
             reduced_metrics[k] = max(v)
         elif k.endswith("_min"):
             reduced_metrics[k] = min(v)
+        elif k.endswith("_loss"):
+            reduced_metrics[k] = sum(v)
         else:
             reduced_metrics[k] = sum(v) / len(v)
     return reduced_metrics
