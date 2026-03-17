@@ -1,23 +1,19 @@
-# Fleet Task GRPO Training via SkyPilot - Qwen3.5-9B (Text-Only / Tool Use)
-# Usage: sky launch tasks/openenv-fleet-grpo-qwen3_5-9b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
+# Fleet Task GRPO Training via SkyPilot - Qwen3.5-35B-A3B (MoE, Multi-Node)
+# Usage: sky launch tasks/openenv-fleet-grpo-qwen3_5-35b.yaml --env FLEET_API_KEY=<key> --env WANDB_API_KEY=<key>
 #
-# Text-only (tool_use) training — replaces Qwen3-8B as the default.
+# MoE: 35B total, 3B active (256 experts, 9 active/token). GatedDeltaNet architecture.
+# 262K native context. All 35B params in memory (~70GB fp16), optimizer ~140GB, gradients ~70GB.
 #
-# Model: Qwen/Qwen3.5-9B (9B parameters, natively multimodal, early fusion + GatedDeltaNet)
-# GPUs: 8x B200/H200 (RunPod, Lambda, Vast, Nebius, GCP)
-#
+# Multi-node (2-node default, 16 GPUs total): 8x B200/H200 per node
 # NOTE: Requires vLLM >= 0.17.0 for native Qwen3.5/GDN support + FlashAttention 4
-#
-# v0.1: Initial Qwen3.5-9B tool_use config adapted from CU version
-# v0.2: Refactored to use shared scripts (fleet-common-setup/run.sh)
 
-name: fleet-task-grpo-qwen3-5-9b
+name: fleet-task-grpo-qwen3-5-35b
 
 resources:
   disk_size: 750
+  memory: 1500+
   ports: 6479
   any_of:
-    # 8x GPUs (matching VL branch config)
     - accelerators: H200-SXM:8
       cloud: runpod
     - accelerators: B200:8
@@ -30,7 +26,6 @@ resources:
       cloud: nebius
     - accelerators: H200-SXM:8
       cloud: nebius
-    # GCP spot fallback
     - accelerators: B200:8
       cloud: gcp
       use_spot: true
@@ -40,7 +35,7 @@ resources:
       use_spot: true
       image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
 
-num_nodes: 1
+num_nodes: 2
 
 workdir:
   url: https://github.com/fleet-ai/SkyRL.git
@@ -51,26 +46,20 @@ envs:
   FLEET_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
-  # Dataset version: "v54" (v53 with 12 cross-contaminated verifiers patched)
   DATA_VERSION: "v54"
-  # Task selection: env_keys to filter (comma-separated, e.g., "github,booking,reddit")
   ENV_KEYS: ""
-  # Difficulty filter: 1=easy, 2=medium, 3=hard (comma-separated, e.g., "1,2" for easy+medium)
   DIFFICULTY: ""
-  # Modality: text-only tool use
   MODALITY: "tool_use"
-  # Training parameters
   MAX_TURNS: 50
   MAX_INPUT_LENGTH: 64000
   MAX_GENERATE_LENGTH: 4096
   NUM_EPOCHS: 20
   RUN_ID: ""
   MAX_TASKS: ""
-  # AWS credentials (required for S3 dataset download, optional for checkpoint upload)
+  RESUME_RUN_NAME: ""
   AWS_ACCESS_KEY_ID: ""
   AWS_SECRET_ACCESS_KEY: ""
   AWS_REGION: "us-east-1"
-  # S3 buckets
   S3_DATASET_BUCKET: "fleet-internal-datasets"
   S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
   S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
@@ -78,34 +67,34 @@ envs:
 setup: |
   bash skyrl-train/scripts/fleet-common-setup.sh \
     --openenv-branch deniz/fleet_client \
-    --extra-setup skyrl-train/scripts/fleet-qwen35-extra-setup.sh \
-    --data-root /workspace --skip-uv-isolated
+    --extra-setup skyrl-train/scripts/fleet-qwen35-extra-setup.sh
 
 run: |
   bash skyrl-train/scripts/fleet-common-run.sh \
-    --data-root /workspace --ckpt-root /workspace \
     --use-python-direct --cuda-env "$HOME/.cuda_env" \
-    --set-ulimit --no-pytorch-alloc-conf -- \
+    --set-ulimit --no-pytorch-alloc-conf \
+    --nccl-heartbeat 1800 -- \
     environment.skyrl_gym.fleet_task.ttl_seconds=900 \
     trainer.algorithm.advantage_estimator=grpo \
-    trainer.policy.model.path="Qwen/Qwen3.5-9B" \
+    trainer.policy.model.path="Qwen/Qwen3.5-35B-A3B" \
     trainer.flash_attn=true \
     trainer.loss_chunk_size=4096 \
     trainer.use_sample_packing=false \
     +generator.chat_template_kwargs='{enable_thinking:true}' \
     generator.inference_engine_tensor_parallel_size=1 \
     trainer.epochs=${NUM_EPOCHS} \
-    trainer.eval_batch_size=12 \
+    trainer.eval_batch_size=8 \
     trainer.eval_before_train=true \
     trainer.eval_interval=20 \
     trainer.update_epochs_per_batch=1 \
-    trainer.train_batch_size=24 \
+    trainer.train_batch_size=16 \
     trainer.use_hybrid_env_sampling=true \
     trainer.min_samples_per_env=1 \
-    trainer.policy_mini_batch_size=24 \
+    trainer.policy_mini_batch_size=16 \
     trainer.micro_forward_batch_size_per_gpu=1 \
     trainer.micro_train_batch_size_per_gpu=1 \
     trainer.ckpt_interval=10 \
+    trainer.max_ckpts_to_keep=1 \
     trainer.max_prompt_length=2048 \
     generator.max_input_length=$MAX_INPUT_LENGTH \
     generator.sampling_params.max_generate_length=$MAX_GENERATE_LENGTH \
@@ -113,7 +102,7 @@ run: |
     generator.sampling_params.top_p=0.95 \
     'generator.sampling_params.stop=["</tool_call>"]' \
     'generator.eval_sampling_params.stop=["</tool_call>"]' \
-    trainer.policy.optimizer_config.lr=1.0e-6 \
+    trainer.policy.optimizer_config.lr=5.0e-7 \
     trainer.algorithm.use_kl_loss=true \
     generator.max_turns=$MAX_TURNS \
     generator.backend=$INFERENCE_BACKEND \
@@ -122,13 +111,13 @@ run: |
     generator.async_engine=true \
     generator.batched=false \
     generator.use_conversation_multi_turn=true \
-    generator.n_samples_per_prompt=4 \
+    generator.n_samples_per_prompt=8 \
     generator.eval_n_samples_per_prompt=3 \
-    generator.gpu_memory_utilization=0.85 \
+    generator.gpu_memory_utilization=0.65 \
     trainer.logger="$LOGGER" \
     trainer.project_name="fleet-task-grpo" \
-    trainer.run_name="fleet_qwen35_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
+    trainer.run_name="fleet_qwen35_35b_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
     trainer.resume_mode=latest \
-    trainer.ckpt_path="/workspace/ckpts/fleet_qwen35_${MODALITY}" \
-    trainer.export_path="/workspace/exports" \
+    trainer.ckpt_path="$HOME/ckpts/fleet_qwen35_35b_${MODALITY}" \
+    trainer.export_path="$HOME/exports" \
     trainer.dump_data_batch=true

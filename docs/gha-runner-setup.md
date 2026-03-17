@@ -81,6 +81,29 @@ aws ec2 describe-instance-status --instance-ids i-04a15158610df980f i-0f80c70329
 sudo systemctl restart actions.runner.fleet-ai-SkyRL.*
 ```
 
+**Zombie Runner.Listener processes (checkout failures with "Missing file at path" or "file already exists"):**
+
+The default `KillMode=process` in the runner's systemd service only kills the parent `runsvc.sh` on restart, leaving `RunnerService.js` and `Runner.Listener` children orphaned. Multiple listeners fight over `_work/_temp/_runner_file_commands/`, causing checkout to fail.
+
+Fix: ensure `KillMode=control-group` is set in the override (the setup script does this automatically for new runners):
+```bash
+# Check current KillMode
+grep KillMode /etc/systemd/system/actions.runner.fleet-ai-SkyRL.*.service
+
+# Fix if it says KillMode=process
+sudo sed -i 's/KillMode=process/KillMode=control-group/' /etc/systemd/system/actions.runner.fleet-ai-SkyRL.*.service
+
+# Kill orphaned processes, clean state, restart
+sudo pkill -9 -f 'actions-runner/bin/Runner.Listener'
+sudo pkill -9 -f 'actions-runner/externals/node.*RunnerService'
+rm -rf ~/actions-runner/_diag/pages/* ~/actions-runner/_work/_temp/*
+sudo systemctl daemon-reload
+sudo systemctl restart actions.runner.fleet-ai-SkyRL.*
+
+# Verify: should show exactly 1 listener
+ps aux | grep Runner.Listener | grep -v grep | wc -l
+```
+
 **SkyPilot or RunPod not found (`sky: command not found` or `runpod: command not found`):**
 
 The setup script installs tools to `~/.local/bin/` and creates symlinks at `/usr/local/bin/`. If symlinks are missing, the GHA service can't find them:

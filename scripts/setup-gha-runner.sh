@@ -176,6 +176,7 @@ if [ -n "$SERVICE_NAME" ]; then
     sudo mkdir -p "$OVERRIDE_DIR"
     sudo tee "$OVERRIDE_DIR/override.conf" > /dev/null << 'WATCHDOG_EOF'
 [Service]
+KillMode=control-group
 Restart=always
 RestartSec=10
 WatchdogSec=300

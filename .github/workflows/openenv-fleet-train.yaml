@@ -38,11 +38,7 @@ on:
         type: choice
         options:
           - openenv-fleet-grpo-qwen3_5-9b
-          - openenv-fleet-grpo-qwen3-8b
-          - openenv-fleet-grpo-qwen3-32b
-          - openenv-fleet-grpo-qwen3-8b-step-wise
-          - openenv-fleet-grpo-qwen3-vl-8b
-          - harbor-grpo-qwen3-8b
+          - openenv-fleet-grpo-qwen3_5-35b
         default: "openenv-fleet-grpo-qwen3_5-9b"
       data_version:
         description: "Dataset version in S3 (v3=20,557 tasks, v4=15,169 tasks, v52=latest curated)"
@@ -52,6 +48,14 @@ on:
         description: "Resume from S3 checkpoint (W&B run name, e.g., fleet_tool_use_32b_d7167c1c)"
         type: string
         default: ""
+      num_nodes:
+        description: "Number of nodes (multi-node training)"
+        type: choice
+        options:
+          - "1"
+          - "2"
+          - "4"
+        default: "1"
       disable_slack:
         description: "Disable Slack notifications (for debugging)"
         type: boolean
@@ -78,6 +82,11 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
     steps:
+      - name: Clean runner state
+        run: |
+          rm -rf ~/actions-runner/_diag/pages/* 2>/dev/null || true
+          rm -rf ~/actions-runner/_work/_temp/* 2>/dev/null || true
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -126,7 +135,12 @@ jobs:
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           MODALITY=$(grep -E '^\s+MODALITY:' skyrl-train/tasks/${{ inputs.task_name }}.yaml | awk -F'"' '{print $2}')
           echo "modality=$MODALITY" >> $GITHUB_OUTPUT
-          CLUSTER_NAME="fleet-${MODALITY}-${SHORT_SHA}-${TIMESTAMP}"
+          NUM_NODES="${{ inputs.num_nodes }}"
+          if [ "$NUM_NODES" != "1" ]; then
+            CLUSTER_NAME="fleet-${MODALITY}-${NUM_NODES}n-${SHORT_SHA}-${TIMESTAMP}"
+          else
+            CLUSTER_NAME="fleet-${MODALITY}-${SHORT_SHA}-${TIMESTAMP}"
+          fi
           CLUSTER_NAME=$(echo "$CLUSTER_NAME" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
           echo "name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
           RUN_ID=$(head -c 4 /dev/urandom | xxd -p)
@@ -183,6 +197,8 @@ jobs:
           [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
           [ -n "${{ inputs.resume_run_name }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env RESUME_RUN_NAME=${{ inputs.resume_run_name }}"
           LAUNCH_CMD="$LAUNCH_CMD --env RUN_ID=${{ steps.cluster.outputs.run_id }}"
+          [ "${{ inputs.num_nodes }}" != "1" ] && LAUNCH_CMD="$LAUNCH_CMD --num-nodes ${{ inputs.num_nodes }}"
+          [ "${{ inputs.cloud }}" != "any" ] && LAUNCH_CMD="$LAUNCH_CMD --cloud ${{ inputs.cloud }}"
           LAUNCH_CMD="$LAUNCH_CMD --retry-until-up -y"  # Retry until GPUs available, run attached
 
           echo "Command: $LAUNCH_CMD"

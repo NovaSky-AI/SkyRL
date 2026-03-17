@@ -160,6 +160,118 @@ jobs:
           # Write details to file (too large for output variable)
           echo "$UNHEALTHY_DETAILS" > /tmp/unhealthy_details.json
 
+      - name: Fix runner process health (KillMode + zombie listeners)
+        if: steps.ec2.outputs.healthy != '0'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          GHA_RUNNER_SSH_KEY: ${{ secrets.GHA_RUNNER_SSH_KEY }}
+        run: |
+          set +e
+          if [ -z "$GHA_RUNNER_SSH_KEY" ]; then
+            echo "GHA_RUNNER_SSH_KEY secret not set, skipping process health check"
+            exit 0
+          fi
+
+          # Write SSH key to temp file
+          SSH_KEY=$(mktemp)
+          echo "$GHA_RUNNER_SSH_KEY" > "$SSH_KEY"
+          chmod 600 "$SSH_KEY"
+          SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes -i $SSH_KEY"
+
+          RUNNERS="i-04a15158610df980f:fleet-runner-1 i-0f80c703294413a4c:fleet-runner-2 i-09321b67952c1a208:fleet-runner-3 i-0f2ccaa840ef29450:fleet-runner-4 i-05ecd98e74949dc87:fleet-runner-5"
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Process Health" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner | KillMode | Listeners | Action |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|----------|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          for entry in $RUNNERS; do
+            INSTANCE_ID=$(echo $entry | cut -d: -f1)
+            NAME=$(echo $entry | cut -d: -f2)
+
+            # Get public IP
+            IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null)
+            if [ -z "$IP" ] || [ "$IP" = "None" ]; then
+              echo "| $NAME | - | - | Skipped (no IP) |" >> $GITHUB_STEP_SUMMARY
+              continue
+            fi
+
+            # SSH in and check/fix
+            RESULT=$(ssh $SSH_OPTS ubuntu@$IP bash <<'REMOTE_SCRIPT'
+          SVCFILE=$(ls /etc/systemd/system/actions.runner.fleet-ai-SkyRL.*.service 2>/dev/null | head -1)
+          if [ -z "$SVCFILE" ]; then echo "NO_SERVICE"; exit 0; fi
+          SVCNAME=$(basename "$SVCFILE" .service)
+
+          # Check KillMode
+          KILLMODE=$(grep -o 'KillMode=.*' "$SVCFILE" | head -1)
+          FIXED_KILLMODE=false
+          if [ "$KILLMODE" != "KillMode=control-group" ]; then
+            sudo sed -i 's/KillMode=.*/KillMode=control-group/' "$SVCFILE"
+            sudo systemctl daemon-reload
+            FIXED_KILLMODE=true
+          fi
+
+          # Count listeners (only from actions-runner/, not harbor)
+          LISTENER_COUNT=$(ps aux | grep '/home/ubuntu/actions-runner/bin/Runner.Listener' | grep -v grep | wc -l)
+
+          # Kill orphans if more than 1 listener
+          KILLED_ORPHANS=false
+          if [ "$LISTENER_COUNT" -gt 1 ]; then
+            # Find the real runsvc.sh PID and its node child
+            REAL_RUNSVC=$(pgrep -f '/home/ubuntu/actions-runner/runsvc.sh' | head -1)
+            REAL_NODE=""
+            if [ -n "$REAL_RUNSVC" ]; then
+              REAL_NODE=$(pgrep -P "$REAL_RUNSVC" -f RunnerService 2>/dev/null)
+            fi
+            # Kill orphaned RunnerService.js (not the one under runsvc.sh)
+            for pid in $(pgrep -f './bin/RunnerService.js'); do
+              CWD=$(readlink /proc/$pid/cwd 2>/dev/null)
+              if [ "$CWD" = "/home/ubuntu/actions-runner" ] && [ "$pid" != "$REAL_NODE" ]; then
+                kill -9 "$pid" 2>/dev/null
+              fi
+            done
+            # Kill orphaned Runner.Listener not under the real node
+            REAL_LISTENER=""
+            if [ -n "$REAL_NODE" ]; then
+              REAL_LISTENER=$(pgrep -P "$REAL_NODE" -f Runner.Listener 2>/dev/null)
+            fi
+            for pid in $(pgrep -f '/home/ubuntu/actions-runner/bin/Runner.Listener'); do
+              if [ "$pid" != "$REAL_LISTENER" ]; then
+                kill -9 "$pid" 2>/dev/null
+              fi
+            done
+            sleep 2
+            LISTENER_COUNT=$(ps aux | grep '/home/ubuntu/actions-runner/bin/Runner.Listener' | grep -v grep | wc -l)
+            KILLED_ORPHANS=true
+          fi
+
+          # Clean stale diag pages
+          rm -rf ~/actions-runner/_diag/pages/* 2>/dev/null
+
+          echo "KILLMODE=$KILLMODE FIXED=$FIXED_KILLMODE LISTENERS=$LISTENER_COUNT KILLED=$KILLED_ORPHANS"
+          REMOTE_SCRIPT
+            2>&1)
+
+            if echo "$RESULT" | grep -q "NO_SERVICE"; then
+              echo "| $NAME | - | - | No runner service |" >> $GITHUB_STEP_SUMMARY
+            elif echo "$RESULT" | grep -q "KILLMODE="; then
+              KILLMODE=$(echo "$RESULT" | grep -o 'KILLMODE=[^ ]*' | cut -d= -f2)
+              FIXED=$(echo "$RESULT" | grep -o 'FIXED=[^ ]*' | cut -d= -f2)
+              LISTENERS=$(echo "$RESULT" | grep -o 'LISTENERS=[^ ]*' | cut -d= -f2)
+              KILLED=$(echo "$RESULT" | grep -o 'KILLED=[^ ]*' | cut -d= -f2)
+              ACTION="OK"
+              if [ "$FIXED" = "true" ]; then ACTION="Fixed KillMode"; fi
+              if [ "$KILLED" = "true" ]; then ACTION="$ACTION, killed orphans"; fi
+              echo "| $NAME | $KILLMODE | $LISTENERS | $ACTION |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| $NAME | ? | ? | SSH failed |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          rm -f "$SSH_KEY"
+
       - name: Auto-recover unhealthy instances
         id: recover
         if: steps.ec2.outputs.unhealthy_count != '0'
