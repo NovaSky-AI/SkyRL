@@ -151,11 +151,13 @@ class MegatronWeightExtractor(WeightExtractor):
         self.bucket_size_threshold_GB = bucket_size_threshold_GB
         self.training_dtype = training_dtype
 
-        # Initialize bucketing if enabled
-        if enable_bucketing:
-            self._init_param_buckets()
-        else:
-            self.param_buckets = None
+        # Defer bucket init to first extract_weights call.
+        # At __init__ time the model may be CPU-offloaded (colocate_all),
+        # so param.numel()==0 and bucketing collapses to a single bucket.
+        # By the time extract_weights runs, the dispatch has already
+        # called prepare_for_weight_sync → _ensure_on_gpu.
+        self.param_buckets = None
+        self._buckets_initialized = False
 
     def _init_param_buckets(self):
         """Initialize parameter buckets for packing."""
@@ -231,6 +233,14 @@ class MegatronWeightExtractor(WeightExtractor):
         self._weight_metadata_cache = {"names": names, "dtype_names": dtype_names, "shapes": shapes}
         return self._weight_metadata_cache
 
+    def _ensure_buckets_initialized(self):
+        """Lazily initialize param buckets on first use (model must be on GPU)."""
+        if self._buckets_initialized:
+            return
+        self._buckets_initialized = True
+        if self.enable_bucketing:
+            self._init_param_buckets()
+
     def extract_weights(self, dtype: torch.dtype):
         """Extract weights from Megatron model.
 
@@ -240,6 +250,7 @@ class MegatronWeightExtractor(WeightExtractor):
         Yields:
             WeightChunk objects (one per parameter, or one per bucket if bucketing enabled)
         """
+        self._ensure_buckets_initialized()
         device = torch.cuda.current_device()
 
         if not self.enable_bucketing:
@@ -425,7 +436,6 @@ class MegatronWorker:
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
                 self.lora_cls.set_params_to_save(lora_model)
-
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
@@ -436,6 +446,7 @@ class MegatronWorker:
         if ddp_config is not None:
             for k, v in get_config_as_dict(ddp_config).items():
                 setattr(default_ddp_config, k, v)
+
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
