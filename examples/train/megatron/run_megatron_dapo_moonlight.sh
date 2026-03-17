@@ -1,12 +1,12 @@
 set -x
 
-# Colocated DAPO training+generation for Qwen3-30B-A3B-Base on DAPO with Megatron and LoRA.
+# Colocated DAPO training+generation for Moonlight-16B-A3B on DAPO with Megatron.
 # Should run on 2 node of 8xH100s
 
-# bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_lora.sh
+# bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+# bash examples/train/megatron/run_megatron_dapo_moonlight.sh
 
-MODEL_NAME="Qwen/Qwen3-30B-A3B-Base"
+MODEL_NAME="moonshotai/Moonlight-16B-A3B-Instruct"
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
@@ -15,6 +15,9 @@ NUM_GPUS_PER_NODE=8
 NUM_INFERENCE_ENGINES=1
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="wandb"  # change to "console" to print to stdout
+
+# flash attention off
+FLASH_ATTN=false
 
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
@@ -36,12 +39,12 @@ MAX_PROMPT_LENGTH=$((1024 * 2))
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 
 # repro run parameters
-TRAIN_BATCH_SIZE=512
+TRAIN_BATCH_SIZE=128
 MINI_BATCH_SIZE=32
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
-LR=1e-5 # 10x compared to full finetuning
+LR=1e-6
 
 # megatron config
 MEGATRON_TP=4
@@ -50,15 +53,15 @@ MEGATRON_CP=1
 MEGATRON_EP=8
 MEGATRON_ETP=1
 
-# lora config
-LORA_RANK=128
-LORA_ALPHA=128
 
-# rollout correction parameters
-TIS_RATIO_TYPE="token"
+# TIS parameters
 TIS_IMP_RATIO_CAP=2.0
+USE_TIS=true
 
-uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
+# SKYRL_LD_LIBRARY_PATH_EXPORT=1
+# LD_LIBRARY_PATH=/opt/amazon/efa/lib:$LD_LIBRARY_PATH
+
+SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \
   data.val_data="['$TEST_FILE']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -87,21 +90,19 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
   trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
   trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
-  trainer.policy.model.lora.rank=$LORA_RANK \
-  trainer.policy.model.lora.alpha=$LORA_ALPHA \
-  trainer.algorithm.off_policy_correction.tis_ratio_type=$TIS_RATIO_TYPE \
-  trainer.algorithm.off_policy_correction.token_tis_ratio_clip_high=$TIS_IMP_RATIO_CAP \
+  trainer.algorithm.use_tis=$USE_TIS \
+  trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
   trainer.epochs=20 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
   trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=true \
+  trainer.eval_before_train=false \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=4 \
-  trainer.micro_train_batch_size_per_gpu=4 \
+  trainer.micro_train_batch_size_per_gpu=2 \
   trainer.ckpt_interval=10 \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \
@@ -109,6 +110,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.optimizer_config.num_warmup_steps=160 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
+  trainer.flash_attn=$FLASH_ATTN \
   generator.inference_engine.backend=vllm \
   generator.inference_engine.run_engines_locally=true \
   generator.inference_engine.weight_sync_backend=nccl \
@@ -120,10 +122,10 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.inference_engine.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
   trainer.project_name="test" \
-  trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
-  trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
+  trainer.run_name="dapo_moonlight_16b_a3b_megatron_baseline_train" \
+  trainer.export_path="$HOME/exports/dapo_moonlight_16b_a3b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   trainer.hf_save_interval=300 \
   trainer.resume_mode=latest \
   trainer.max_ckpts_to_keep=3 \
-  trainer.ckpt_path="$HOME/ckpts/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
+  trainer.ckpt_path="$HOME/ckpts/dapo_moonlight_16b_a3b_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}" \
   $@

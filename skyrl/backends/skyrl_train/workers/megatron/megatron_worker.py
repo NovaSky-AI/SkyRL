@@ -436,6 +436,7 @@ class MegatronWorker:
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
                 self.lora_cls.set_params_to_save(lora_model)
+
                 return lora_model
 
             self.provider.register_pre_wrap_hook(lora_pre_wrap_hook)
@@ -446,7 +447,6 @@ class MegatronWorker:
         if ddp_config is not None:
             for k, v in get_config_as_dict(ddp_config).items():
                 setattr(default_ddp_config, k, v)
-
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
