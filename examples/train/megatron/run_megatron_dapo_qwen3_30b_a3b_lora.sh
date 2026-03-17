@@ -4,15 +4,15 @@ set -x
 # Should run on 2 node of 8xH100s
 
 # bash examples/algorithms/dapo/prepare_dapo_data.sh
-# bash examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_lora.sh
+# bash examples/megatron/run_megatron_dapo_qwen3_30b_a3b_lora.sh
 
 MODEL_NAME="Qwen/Qwen3-30B-A3B-Base"
 DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
-NUM_NODES=1
+NUM_NODES=2
 NUM_GPUS_PER_NODE=8
-NUM_INFERENCE_ENGINES=1
+NUM_INFERENCE_ENGINES=2
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=8
 LOGGER="wandb"  # change to "console" to print to stdout
 
@@ -119,7 +119,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   generator.eval_n_samples_per_prompt=$EVAL_N_SAMPLES_PER_PROMPT \
   generator.inference_engine.gpu_memory_utilization=0.7 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="test" \
+  trainer.project_name="dapo_aime" \
   trainer.run_name="dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
   trainer.export_path="$HOME/exports/dapo_qwen3_30b_a3b_base_megatron_tp${MEGATRON_TP}_pp${MEGATRON_PP}_cp${MEGATRON_CP}_ep${MEGATRON_EP}_etp${MEGATRON_ETP}_lora_rank${LORA_RANK}_alpha${LORA_ALPHA}" \
   trainer.hf_save_interval=300 \
