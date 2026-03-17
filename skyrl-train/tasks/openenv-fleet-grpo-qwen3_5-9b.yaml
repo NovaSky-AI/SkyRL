@@ -44,7 +44,7 @@ num_nodes: 1
 
 workdir:
   url: https://github.com/fleet-ai/SkyRL.git
-  ref: deniz/shared-scripts-multinode
+  ref: main
 
 envs:
   WANDB_API_KEY: ""
