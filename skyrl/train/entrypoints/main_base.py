@@ -3,7 +3,6 @@ Main entrypoint for training.
 """
 
 import asyncio
-import multiprocessing as mp
 import os
 import sys
 from pathlib import Path
@@ -35,12 +34,6 @@ from skyrl.train.utils.utils import (
     initialize_ray,
 )
 from skyrl.utils.tok import get_tokenizer
-
-# NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
-# forking within ray leads to undefined behaviour and often causes hard to debug
-# memory leaks.  See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html
-# A common culprit is Pytorch dataloaders which use `fork` by default.
-mp.set_start_method("spawn", force=True)
 
 config_dir = str(Path(__file__).parent.parent / "config")
 __all__ = ["BasePPOExp", "config_dir"]
