@@ -116,7 +116,6 @@ class MegatronModelWrapper:
                 setup_per_microbatch_replay_forward(
                     rollout_expert_indices,
                     batch["attention_mask"],
-                    use_sample_packing=self.use_sample_packing,
                     model_config=get_model_config(model),
                 )
 
@@ -377,7 +376,6 @@ class MegatronModelWrapper:
                 setup_per_microbatch_replay_forward(
                     rollout_expert_indices,
                     batch["attention_mask"],
-                    use_sample_packing=self.use_sample_packing,
                     model_config=get_model_config(model),
                 )
 
