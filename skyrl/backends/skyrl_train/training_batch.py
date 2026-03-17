@@ -420,7 +420,7 @@ class TensorBatch(dict, Generic[DictType]):
                 return False
             elif not torch.equal(v, other[k]):
                 return False
-        return all(self._values_equal(v, other[k]) for k, v in self.items())
+        return True
 
     def __str__(self) -> str:
         """String representation of the `TensorBatch` object"""
