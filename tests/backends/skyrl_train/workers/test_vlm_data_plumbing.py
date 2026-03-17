@@ -3,8 +3,6 @@ CPU-only tests for VLM (vision-language model) data plumbing.
 
 Verifies that pixel_values / image_grid_thw fields flow correctly through
 batch_to_experience and Experience.to_device.
-
-source .venv/bin/activate && python -m pytest tests/backends/skyrl_train/workers/test_vlm_data_plumbing.py -v
 """
 
 import torch

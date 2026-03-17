@@ -307,6 +307,9 @@ class HFModelWrapper(nn.Module):
     ) -> torch.Tensor:
         """Returns action log probs"""
         if self.is_vlm:
+            # VLMs use model specific 3D positional IDs, meaning sequence packing can not be supported.
+            # Sequence packing requires computing position IDs, but position IDs for VLMs are 3D and require
+            # model specific logic to compute.
             assert not self.use_sample_packing, "Sample packing is not supported with VLM vision inputs"
             assert self.sequence_parallel_size == 1, "Sequence parallelism is not supported with VLM vision inputs"
 
@@ -350,7 +353,6 @@ class HFModelWrapper(nn.Module):
             )
 
         if self.is_vlm:
-            # VLMs use model specific 3D positional IDs
             output = self.model(
                 sequences_fwd,
                 attention_mask=attention_mask_fwd,

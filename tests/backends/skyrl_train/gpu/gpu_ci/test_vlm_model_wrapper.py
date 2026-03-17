@@ -1,9 +1,5 @@
 """
 GPU tests for VLM (vision-language model) loading and forward pass via HFModelWrapper.
-
-Requires a GPU and the Qwen3-VL-2B-Instruct model weights.
-
-source .venv/bin/activate && python -m pytest tests/backends/skyrl_train/gpu/gpu_ci/test_vlm_model_wrapper.py -v
 """
 
 import numpy as np
