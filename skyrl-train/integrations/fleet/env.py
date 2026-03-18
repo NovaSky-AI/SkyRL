@@ -5,6 +5,7 @@ This module provides a SkyRL-compatible environment wrapper for Fleet-hosted tas
 It uses OpenEnv's FleetTaskEnv as the abstraction layer for Fleet environments.
 """
 
+import ast
 import asyncio
 import json
 import logging
@@ -196,6 +197,9 @@ class FleetTaskEnv(BaseTextEnv):
         # Partial reward: use verifier accumulator counts instead of binary 0/1
         self.partial_reward = env_config.get("partial_reward", False)
 
+        # Hint config
+        self.enable_hints = env_config.get("enable_hints", False)
+
         # Environment state (initialized on init())
         self.openenv_task_env: Optional[OpenEnvFleetTaskEnv] = None
         self.chat_history: ConversationType = []
@@ -204,6 +208,11 @@ class FleetTaskEnv(BaseTextEnv):
         self.tool_errors = 0
         self.last_reward: Optional[float] = None
         self.tools: List[Dict[str, Any]] = []
+
+        # Verifier feedback (captured at close time for hint generation)
+        self._verifier_stdout: Optional[str] = None
+        self._verifier_error: Optional[str] = None
+        self._tool_error_messages: List[str] = []
 
         # Context management (uses OpenEnv's ContextManager)
         # Read from env_config (Hydra config) not extras (per-sample dataset config)
@@ -278,6 +287,11 @@ class FleetTaskEnv(BaseTextEnv):
 
         # Build initial prompt with task instruction
         task_prompt = self.task_config.get("prompt", "")
+
+        # Inject hint from previous failed attempt if provided
+        hint = self.extras.get("hint")
+        if hint:
+            task_prompt = f"{task_prompt}\n\nHere is feedback from a previous attempt to help you:\n{hint}"
 
         # Build system prompt with tool definitions
         tools_json = json.dumps(self.tools, indent=2)
@@ -529,6 +543,13 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
         """
         return asyncio.run(self.step_async(action))
 
+    def _capture_verifier_feedback(self):
+        """Capture verifier feedback from OpenEnv before nulling the env instance."""
+        if self.openenv_task_env:
+            self._verifier_stdout = getattr(self.openenv_task_env, "verifier_stdout", None)
+            self._verifier_error = getattr(self.openenv_task_env, "verifier_error", None)
+            self._tool_error_messages = getattr(self.openenv_task_env, "tool_errors_list", [])
+
     def close(self):
         """Close the Fleet environment and cleanup resources."""
         if self.openenv_task_env:
@@ -536,6 +557,7 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
                 self.openenv_task_env.close()
                 if self.openenv_task_env.final_reward is not None:
                     self.last_reward = self.openenv_task_env.final_reward
+                self._capture_verifier_feedback()
             except Exception as e:
                 print(f"Warning: Failed to close Fleet environment: {e}")
             self.openenv_task_env = None
@@ -551,6 +573,7 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
                 await self.openenv_task_env.close_async()
                 if self.openenv_task_env.final_reward is not None:
                     self.last_reward = self.openenv_task_env.final_reward
+                self._capture_verifier_feedback()
             except Exception as e:
                 print(f"Warning: Failed to close Fleet environment: {e}")
             self.openenv_task_env = None
@@ -563,10 +586,62 @@ If the task is complete, provide your answer then say <done>. Otherwise, make a 
             "turns": self.turns,
             "tool_calls": self.tool_calls,
             "tool_errors": self.tool_errors,
+            "is_hinted": bool(self.extras.get("hint")),
         }
         if self.last_reward is not None:
             metrics["final_reward"] = self.last_reward
+        # Include verifier feedback for hint generation
+        if self._verifier_stdout is not None:
+            metrics["verifier_stdout"] = self._verifier_stdout
+        if self._verifier_error is not None:
+            metrics["verifier_error"] = self._verifier_error
+        if self._tool_error_messages:
+            metrics["tool_error_messages"] = self._tool_error_messages
         return metrics
+
+    @staticmethod
+    def build_hint_text(
+        verifier_stdout: Optional[str],
+        verifier_error: Optional[str],
+        tool_error_messages: Optional[List[str]],
+    ) -> str:
+        """Build hint text from verifier feedback. No LLM call.
+
+        Parses ERROR_ACCUMULATOR / SUCCESS_ACCUMULATOR from verifier stdout
+        and formats tool errors into structured feedback for the next attempt.
+        """
+        parts = []
+
+        if verifier_stdout:
+            err_match = re.search(
+                r">>> ERROR_ACCUMULATOR >>>\n(.+?)\n<<< ERROR_ACCUMULATOR <<<",
+                verifier_stdout,
+                re.DOTALL,
+            )
+            suc_match = re.search(
+                r">>> SUCCESS_ACCUMULATOR >>>\n(.+?)\n<<< SUCCESS_ACCUMULATOR <<<",
+                verifier_stdout,
+                re.DOTALL,
+            )
+            if err_match or suc_match:
+                try:
+                    errors = ast.literal_eval(err_match.group(1)) if err_match else []
+                    successes = ast.literal_eval(suc_match.group(1)) if suc_match else []
+                except Exception:
+                    errors, successes = [], []
+                if successes:
+                    parts.append(f"Checks passed ({len(successes)}): " + ", ".join(str(s)[:100] for s in successes[:5]))
+                if errors:
+                    parts.append(f"Checks failed ({len(errors)}): " + ", ".join(str(e)[:100] for e in errors[:5]))
+
+        if verifier_error:
+            parts.append(f"Verifier: {verifier_error}")
+
+        if tool_error_messages:
+            unique = list(dict.fromkeys(tool_error_messages))[:5]
+            parts.append("Tool errors: " + "; ".join(e[:200] for e in unique))
+
+        return "\n".join(parts) if parts else "The previous attempt failed. Try a different approach."
 
     @staticmethod
     def aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:

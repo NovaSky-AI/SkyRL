@@ -250,10 +250,10 @@ class RayPPOTrainer:
                     with Timer("generate", self.all_timings):
                         generator_output: GeneratorOutput = await self.generate(generator_input)
 
-                    if self.cfg.generator.step_wise_trajectories:
-                        # NOTE: We use instance_ids from `trajectory_ids` here instead of re-using `uids`
-                        # this is because in step-wise training, len(uids) != len(generator_output["response_ids"])
-                        uids = [trajectory_id.instance_id for trajectory_id in generator_output["trajectory_ids"]]
+                    if self.cfg.generator.step_wise_trajectories or len(generator_output["response_ids"]) != len(uids):
+                        # Re-derive uids from trajectory_ids when output size differs from input
+                        # (step-wise training expands per-step, hint augmentation adds extra rollouts)
+                        uids = [tid.instance_id for tid in generator_output["trajectory_ids"]]
 
                     # dynamic sampling
                     if self.cfg.trainer.algorithm.dynamic_sampling.type is not None:
@@ -664,6 +664,9 @@ class RayPPOTrainer:
             },
         )
         training_input.metadata = {"uids": uids}
+        # Track which samples are hint-augmented for first-turn baseline
+        if generator_output.get("is_hinted") is not None:
+            training_input.metadata["is_hinted"] = generator_output["is_hinted"]
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self.cfg.generator.step_wise_trajectories:
@@ -816,6 +819,10 @@ class RayPPOTrainer:
         """
         token_level_rewards = data["rewards"]
 
+        # Convert is_hinted metadata to numpy array for advantage computation
+        is_hinted_list = data.metadata.get("is_hinted")
+        is_hinted = np.array(is_hinted_list) if is_hinted_list is not None else None
+
         if self.cfg.generator.step_wise_trajectories:
             is_last_step = data["is_last_step"].bool()
             response_mask = data["response_mask"]
@@ -827,6 +834,7 @@ class RayPPOTrainer:
             lambd = self.cfg.trainer.algorithm.lambd
             grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
             last_step_rewards = token_level_rewards[is_last_step]
+            last_step_is_hinted = is_hinted[is_last_step.cpu().numpy()] if is_hinted is not None else None
             # compatible with any advantage estimator
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=last_step_rewards,
@@ -838,6 +846,7 @@ class RayPPOTrainer:
                 gamma=gamma,
                 lambd=lambd,
                 grpo_norm_by_std=grpo_norm_by_std,
+                is_hinted=last_step_is_hinted,
             )
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
@@ -859,6 +868,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                is_hinted=is_hinted,
             )
         data["returns"] = returns
         data["advantages"] = advantages
@@ -943,8 +953,10 @@ class RayPPOTrainer:
             new_training_input.metadata["trajectory_ids"] = training_input.metadata["trajectory_ids"] + [
                 f"pad{i}" for i in range(pad_size)
             ]
+        if "is_hinted" in training_input.metadata:
+            new_training_input.metadata["is_hinted"] = training_input.metadata["is_hinted"] + [False] * pad_size
         for key, value in training_input.metadata.items():
-            if key not in ["uids", "trajectory_ids"]:
+            if key not in ["uids", "trajectory_ids", "is_hinted"]:
                 new_training_input.metadata[key] = copy.deepcopy(value)
         return new_training_input
 

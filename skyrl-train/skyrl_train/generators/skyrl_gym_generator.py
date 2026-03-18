@@ -8,6 +8,7 @@ For details, see https://skyrl.readthedocs.io/en/latest/tutorials/skyrl_gym_gene
 import asyncio
 import copy
 import time
+from collections import defaultdict
 from uuid import uuid4
 import skyrl_gym
 from typing import List, Dict, Any, Optional, Union, Tuple
@@ -840,6 +841,123 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         return generator_output
 
+    async def _run_hint_augmentation(
+        self,
+        all_outputs: List[TrajectoryOutput],
+        prompts: List[ConversationType],
+        env_classes: List[str],
+        env_extras: List[Dict[str, Any]],
+        trajectory_ids: List[TrajectoryID],
+        max_tokens: int,
+        max_input_length: int,
+        sampling_params: Optional[Dict[str, Any]],
+        hint_cfg: DictConfig,
+    ) -> Tuple[List[TrajectoryOutput], List[TrajectoryID], List[str]]:
+        """Run hinted rollouts for prompts where all raw samples failed.
+
+        Groups raw outputs by instance_id, identifies groups where max_reward < threshold,
+        builds hint text from verifier feedback, and launches additional hinted rollouts.
+
+        Returns:
+            Tuple of (hinted_outputs, hinted_trajectory_ids, hinted_env_classes)
+        """
+        from integrations.fleet.env import FleetTaskEnv
+
+        # 1. Group outputs by instance_id
+        groups: Dict[str, List[Tuple[int, TrajectoryOutput]]] = defaultdict(list)
+        for i, output in enumerate(all_outputs):
+            iid = trajectory_ids[i].instance_id
+            groups[iid].append((i, output))
+
+        # 2. Identify prompts needing hints
+        hint_tasks = []
+        hint_tids = []
+        hint_envs = []
+        orig_prompt_ids = []  # unhinted prompt_ids for RLTF-SD
+        prompts_hinted = 0
+
+        for iid, items in groups.items():
+            rewards = []
+            for _, output in items:
+                r = output.reward
+                rewards.append(r if isinstance(r, (int, float)) else sum(r))
+            max_reward = max(rewards)
+
+            if max_reward > hint_cfg.hint_reward_threshold:
+                continue  # at least one raw sample has signal
+
+            # Find best raw rollout (highest partial reward) for feedback
+            best_idx = max(range(len(items)), key=lambda j: rewards[j])
+            best_orig_idx, best_output = items[best_idx]
+            metrics = best_output.env_metrics
+
+            # Build hint from verifier feedback
+            hint_text = FleetTaskEnv.build_hint_text(
+                verifier_stdout=metrics.get("verifier_stdout"),
+                verifier_error=metrics.get("verifier_error"),
+                tool_error_messages=metrics.get("tool_error_messages"),
+            )
+            if not hint_text:
+                continue
+
+            logger.info(
+                f"Hint for instance {iid} (best_reward={rewards[best_idx]:.3f}, "
+                f"verifier_stdout={bool(metrics.get('verifier_stdout'))}, "
+                f"verifier_error={bool(metrics.get('verifier_error'))}):\n{hint_text}"
+            )
+            prompts_hinted += 1
+
+            # Create hinted agent_loop tasks (new env instances)
+            base_rep_id = max(item[0] for item in items) + 1
+            n_hint = hint_cfg.get("n_hint_samples", 2)
+            for h in range(n_hint):
+                hinted_extras = dict(env_extras[best_orig_idx])
+                hinted_extras["hint"] = hint_text
+                hinted_extras["is_hinted"] = True
+                tid = TrajectoryID(instance_id=iid, repetition_id=base_rep_id + h)
+                hint_tasks.append(
+                    self.agent_loop(
+                        prompts[best_orig_idx],
+                        env_classes[best_orig_idx],
+                        hinted_extras,
+                        max_tokens,
+                        max_input_length,
+                        sampling_params=sampling_params,
+                        trajectory_id=tid,
+                    )
+                )
+                hint_tids.append(tid)
+                hint_envs.append(env_classes[best_orig_idx])
+                orig_prompt_ids.append(best_output.prompt_ids)
+
+        # 3. Run all hinted rollouts in parallel
+        if hint_tasks:
+            logger.info(
+                f"Hint augmentation: {prompts_hinted} prompts need hints, "
+                f"launching {len(hint_tasks)} hinted rollouts"
+            )
+            hint_outputs = await tqdm.gather(
+                *hint_tasks,
+                desc="Hinted Rollouts",
+                miniters=1,
+                mininterval=5,
+            )
+            # RLTF-SD: strip hint from training prompt. Replace hinted prompt_ids
+            # with the original unhinted prompt_ids so the model learns to produce
+            # hint-quality outputs conditioned on the original prompt alone:
+            # ∇θ log π(y_hint | x_0) instead of ∇θ log π(y_hint | x_0 + hint)
+            hint_outputs = list(hint_outputs)
+            for i, output in enumerate(hint_outputs):
+                hinted_len = len(output.prompt_ids)
+                output.prompt_ids = orig_prompt_ids[i]
+                logger.debug(
+                    f"RLTF-SD: replaced hinted prompt ({hinted_len} tokens) "
+                    f"with original prompt ({len(output.prompt_ids)} tokens)"
+                )
+            return hint_outputs, hint_tids, hint_envs
+
+        return [], [], []
+
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
         """
         Generate trajectories for the input batch.
@@ -887,6 +1005,46 @@ class SkyRLGymGenerator(GeneratorInterface):
             disable=disable_tqdm,
         )
 
+        # --- Hint augmentation: rescue GRPO signal on dead prompts ---
+        # Only during training; eval should not run hints.
+        n_raw = len(all_outputs)
+        batch_metadata = input_batch.get("batch_metadata")
+        is_training = batch_metadata is not None and batch_metadata.training_phase == "train"
+        hint_cfg = self.skyrl_gym_cfg.get("fleet_task", DictConfig({}))
+        if (
+            hint_cfg.get("enable_hints", False)
+            and not self.generator_cfg.step_wise_trajectories
+            and trajectory_ids is not None
+            and is_training
+        ):
+            hint_outputs, hint_tids, hint_env_classes = await self._run_hint_augmentation(
+                all_outputs=list(all_outputs),
+                prompts=prompts,
+                env_classes=env_classes,
+                env_extras=env_extras,
+                trajectory_ids=trajectory_ids,
+                max_tokens=max_tokens,
+                max_input_length=max_input_length,
+                sampling_params=sampling_params,
+                hint_cfg=hint_cfg,
+            )
+            if hint_outputs:
+                all_outputs = list(all_outputs) + hint_outputs
+                # Extend in-place so input_batch references are updated (trainer reads these)
+                trajectory_ids.extend(hint_tids)
+                env_classes.extend(hint_env_classes)
+                # Also extend prompts and env_extras arrays to stay aligned
+                for tid in hint_tids:
+                    # Find original prompt index for this instance_id
+                    for orig_i, orig_tid in enumerate(input_batch.get("trajectory_ids", [])):
+                        if orig_tid.instance_id == tid.instance_id:
+                            prompts.append(prompts[orig_i])
+                            env_extras.append(env_extras[orig_i])
+                            break
+
+        # Build is_hinted array: raw samples are False, hint-augmented samples are True
+        is_hinted = [False] * n_raw + [True] * (len(all_outputs) - n_raw)
+
         if self.generator_cfg.step_wise_trajectories:
             responses = []
             rewards = []
@@ -897,6 +1055,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             is_last_step = []
             out_trajectory_ids = []
             out_env_classes = []
+            out_is_hinted = []
             for i, output in enumerate(all_outputs):
                 for j, step_output in enumerate(output.step_outputs):
                     responses.append(step_output.response_ids)
@@ -908,7 +1067,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                     is_last_step.append(j == len(output.step_outputs) - 1)
                     out_trajectory_ids.append(trajectory_ids[i])
                     out_env_classes.append(env_classes[i])
+                    out_is_hinted.append(is_hinted[i])
             env_classes = out_env_classes
+            is_hinted = out_is_hinted
         else:
             responses = [output.response_ids for output in all_outputs]
             rewards = [output.reward for output in all_outputs]
@@ -917,7 +1078,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             prompt_token_ids = [output.prompt_ids for output in all_outputs]
             env_metrics = [output.env_metrics for output in all_outputs]
             is_last_step = None
-            out_trajectory_ids = None
+            out_trajectory_ids = trajectory_ids
 
         if sampling_params is not None:
             # sampling params will be a dict in the format of the inference engine backend
@@ -938,6 +1099,35 @@ class SkyRLGymGenerator(GeneratorInterface):
             rollout_logprobs = None
 
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
+
+        # Log hint augmentation metrics
+        hinted_metrics = [m for m in env_metrics if isinstance(m, dict) and m.get("is_hinted")]
+        if hinted_metrics:
+            n_hinted = len(hinted_metrics)
+            hinted_rewards = []
+            for m in hinted_metrics:
+                r = m.get("final_reward", 0.0)
+                hinted_rewards.append(r if r is not None else 0.0)
+            n_success = sum(1 for r in hinted_rewards if r > 0)
+            rollout_metrics["hint/total_hinted_rollouts"] = n_hinted
+            rollout_metrics["hint/hint_success_rate"] = n_success / n_hinted if n_hinted > 0 else 0.0
+            # Count unique prompts that were hinted (by instance_id)
+            hinted_iids = set()
+            for i, m in enumerate(env_metrics):
+                if m.get("is_hinted") and trajectory_ids is not None and i < len(trajectory_ids):
+                    hinted_iids.add(trajectory_ids[i].instance_id)
+            rollout_metrics["hint/prompts_hinted"] = len(hinted_iids)
+            # Signal rescued: prompts where at least 1 hinted sample scored > 0
+            rescued = 0
+            for iid in hinted_iids:
+                for j, m in enumerate(env_metrics):
+                    if m.get("is_hinted") and trajectory_ids is not None and j < len(trajectory_ids):
+                        if trajectory_ids[j].instance_id == iid:
+                            r = m.get("final_reward", 0.0)
+                            if r is not None and r > 0:
+                                rescued += 1
+                                break
+            rollout_metrics["hint/signal_rescued"] = rescued / len(hinted_iids) if hinted_iids else 0.0
 
         # Log count of failed env inits by environment
         env_init_failures = sum(1 for sr in stop_reasons if sr == "env_init_failed")
@@ -994,6 +1184,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
             "is_last_step": is_last_step,
+            "is_hinted": is_hinted,
         }
 
         return generator_output

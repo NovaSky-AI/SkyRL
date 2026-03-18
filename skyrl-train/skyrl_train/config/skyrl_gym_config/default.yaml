@@ -21,3 +21,6 @@ fleet_task:
   ttl_seconds: 900  # TTL for Fleet environment instances (15 min headroom for retries)
   enable_context_tools: false  # Enable context management tools (check_context, manage_context, etc.)
   partial_reward: false  # Compute partial scores from verifier accumulators instead of binary 0/1
+  enable_hints: false  # Run hinted rollouts when all raw samples fail (rescue GRPO signal)
+  hint_reward_threshold: 0.0  # Generate hint when max_reward < this (0.0 = only when ALL raw fail)
+  n_hint_samples: 2  # Number of hinted rollouts per prompt when triggered

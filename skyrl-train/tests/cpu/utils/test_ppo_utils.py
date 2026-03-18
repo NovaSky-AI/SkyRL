@@ -555,3 +555,128 @@ def test_registry_reset_after_ray_shutdown():
 
     finally:
         ray.shutdown()
+
+
+# ── First-turn baseline tests ──────────────────────────────────────────────
+
+
+def test_grpo_first_turn_baseline_with_hints():
+    """First-turn baseline: baseline = mean of raw samples only.
+
+    Setup: 1 group with 4 raw (reward=0) + 2 hinted (rewards 0.6 and 0.0).
+    Raw-only mean = 0.0, so:
+      - raw advantages = 0 - 0 = 0
+      - hinted sample with 0.6 → advantage = 0.6
+      - hinted sample with 0.0 → advantage = 0.0
+    """
+    # 6 samples, 1 token each (outcome reward)
+    token_level_rewards = torch.tensor([[0.0], [0.0], [0.0], [0.0], [0.6], [0.0]])
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["p0", "p0", "p0", "p0", "p0", "p0"])
+    is_hinted = np.array([False, False, False, False, True, True])
+
+    adv, ret = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=False,
+        is_hinted=is_hinted,
+    )
+
+    expected = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.6, 0.0]).unsqueeze(-1) * response_mask
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+    assert torch.allclose(adv, ret), "Advantages and returns should be equal"
+
+
+def test_grpo_first_turn_baseline_no_hints_unchanged():
+    """When is_hinted is all False, behavior is identical to standard GRPO."""
+    token_level_rewards = torch.tensor(
+        [
+            [1.0, 2.0, 3.0],  # sum = 6.0, group 0
+            [1.0, 1.0, 1.0],  # sum = 3.0, group 0
+            [3.0, 3.0, 3.0],  # sum = 9.0, group 1
+            [4.0, 4.0, 4.0],  # sum = 12.0, group 1
+        ]
+    )
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array([0, 0, 1, 1])
+    is_hinted = np.array([False, False, False, False])
+
+    adv_with, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=False,
+        is_hinted=is_hinted,
+    )
+
+    adv_without, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards.clone(),
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=False,
+    )
+
+    assert torch.allclose(
+        adv_with, adv_without, atol=1e-5
+    ), f"All-False is_hinted should match no is_hinted. Got {adv_with} vs {adv_without}"
+
+
+def test_grpo_first_turn_baseline_mixed_groups():
+    """Two groups: group A has hints, group B has no hints.
+
+    Group A: 2 raw (rewards 0, 0) + 1 hinted (reward 0.8)
+      raw mean = 0.0, advantages: [0, 0, 0.8]
+    Group B: 2 raw (rewards 3, 5), no hints
+      raw mean = 4.0, advantages: [-1, 1]
+    """
+    token_level_rewards = torch.tensor([[0.0], [0.0], [0.8], [3.0], [5.0]])
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["a", "a", "a", "b", "b"])
+    is_hinted = np.array([False, False, True, False, False])
+
+    adv, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=False,
+        is_hinted=is_hinted,
+    )
+
+    expected = torch.tensor([0.0, 0.0, 0.8, -1.0, 1.0]).unsqueeze(-1) * response_mask
+    assert torch.allclose(adv, expected, atol=1e-5), f"Expected {expected}, got {adv}"
+
+
+def test_grpo_first_turn_baseline_with_std_norm():
+    """First-turn baseline with std normalization from raw samples only.
+
+    Group: 3 raw (rewards 2, 4, 6) + 1 hinted (reward 10).
+    Raw mean = 4.0, raw std = std([2, 4, 6]) = 2.0.
+    Advantages (before mask):
+      raw: (2-4)/2 = -1, (4-4)/2 = 0, (6-4)/2 = 1
+      hinted: (10-4)/2 = 3
+    """
+    token_level_rewards = torch.tensor([[2.0], [4.0], [6.0], [10.0]])
+    response_mask = torch.ones_like(token_level_rewards)
+    index = np.array(["g", "g", "g", "g"])
+    is_hinted = np.array([False, False, False, True])
+
+    adv, _ = compute_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        grpo_norm_by_std=True,
+        is_hinted=is_hinted,
+    )
+
+    raw_scores = torch.tensor([2.0, 4.0, 6.0])
+    raw_mean = raw_scores.mean()  # 4.0
+    raw_std = raw_scores.std()  # 2.0
+    epsilon = 1e-6
+
+    expected_vals = []
+    for r in [2.0, 4.0, 6.0, 10.0]:
+        expected_vals.append((r - raw_mean.item()) / (raw_std.item() + epsilon))
+    expected = torch.tensor(expected_vals).unsqueeze(-1) * response_mask
+
+    assert torch.allclose(adv, expected, atol=1e-4), f"Expected {expected}, got {adv}"
