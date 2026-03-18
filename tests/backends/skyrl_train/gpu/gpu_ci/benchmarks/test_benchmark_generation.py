@@ -14,8 +14,10 @@ Run:
 
 import asyncio
 import os
+from typing import List
 
-from transformers import AutoTokenizer
+import numpy as np
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.skyrl_train.inference_engines.utils import (
     get_sampling_params_for_backend,
@@ -33,9 +35,6 @@ from skyrl.benchmarks.benchmark_new_inference import (
     run_multi_turn_benchmark,
 )
 from skyrl.train.config import SkyRLTrainConfig
-from tests.backends.skyrl_train.gpu.gpu_ci.benchmarks.benchmark_utils import (
-    generate_synthetic_prompt_token_ids,
-)
 
 MODEL = "Qwen/Qwen2.5-0.5B"
 
@@ -77,7 +76,7 @@ SCENARIOS = {
 
 
 # ---------------------------------------------------------------------------
-# Config helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -93,6 +92,29 @@ def _make_config(output_len: int, max_model_len: int) -> SkyRLTrainConfig:
     cfg.generator.inference_engine.data_parallel_size = 1
     cfg.generator.engine_init_kwargs = {"max_model_len": max_model_len}
     return cfg
+
+
+def generate_synthetic_prompt_token_ids(
+    tokenizer: PreTrainedTokenizerBase,
+    input_len: int,
+    batch_size: int,
+    seed: int = 42,
+) -> List[List[int]]:
+    """
+    Generate reproducible synthetic prompt token IDs for benchmarking.
+
+    Randomly samples from non-special tokens, similar to vLLM RandomDataset.
+    """
+    rng = np.random.default_rng(seed)
+    vocab_size = tokenizer.vocab_size
+    prohibited = set(tokenizer.all_special_ids)
+    allowed = np.array([i for i in range(vocab_size) if i not in prohibited])
+
+    if len(allowed) == 0:
+        raise ValueError("No allowed tokens (vocab has only special tokens)")
+
+    indices = rng.integers(0, len(allowed), size=(batch_size, input_len))
+    return allowed[indices].tolist()
 
 
 # ---------------------------------------------------------------------------

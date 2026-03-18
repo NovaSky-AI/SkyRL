@@ -393,7 +393,7 @@ async def _run_conversation(
             msg = chat_messages[i]
 
             if msg["role"] == "user":
-                # Simulate environment delay before all turns after the first
+                # Simulate environment delay after assistant response
                 if turn_idx > 0 and mean_env_delay > 0:
                     delay = np.random.exponential(scale=mean_env_delay)
                     await asyncio.sleep(delay)
@@ -852,7 +852,7 @@ def parse_args() -> argparse.Namespace:
 
     # Test mode
     parser.add_argument(
-        "--test",
+        "--type",
         type=str,
         default="single-turn",
         choices=["single-turn", "multi-turn"],
@@ -978,7 +978,7 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.test == "multi-turn":
+    if args.type == "multi-turn":
         run_multi_turn_entrypoint(args)
     else:
         run_single_turn_entrypoint(args)

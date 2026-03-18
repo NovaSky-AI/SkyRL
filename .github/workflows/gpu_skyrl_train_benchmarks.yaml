@@ -1,0 +1,40 @@
+name: SkyRL-Train-GPU-Benchmarks
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'skyrl/backends/skyrl_train/**'
+      - 'skyrl/benchmarks/**'
+      - 'skyrl/train/**'
+      - 'tests/backends/skyrl_train/**'
+      - 'pyproject.toml'
+      - '.github/workflows/gpu_skyrl_train_benchmarks.yaml'
+      - '!docs/**'
+      - '!examples/**'
+  workflow_dispatch:
+
+permissions:
+  checks: write
+  contents: read
+
+jobs:
+  benchmark_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+      - run: uv pip install anyscale==0.24.79 typer==0.9.0
+      - name: Run GPU benchmarks
+        env:
+          ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
+          ANYSCALE_HOST: https://console.anyscale.com
+        run: |
+          anyscale job submit -f ci/anyscale_gpu_ci_skyrl_train_benchmarks.yaml --timeout 10000
+          anyscale job wait --cloud sky-anyscale-aws-us-east-1 --name skyrl-train-gpu-benchmarks --timeout 10000

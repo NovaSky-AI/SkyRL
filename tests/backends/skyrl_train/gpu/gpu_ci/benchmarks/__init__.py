@@ -1,1 +1,1 @@
-"""Batched generation benchmark tests for old vs new inference codepaths."""
+"""Benchmark tests for the SkyRL-Train backend"""
