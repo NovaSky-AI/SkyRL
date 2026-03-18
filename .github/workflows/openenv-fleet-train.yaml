@@ -109,9 +109,10 @@ jobs:
 
       - name: Verify Cloud Credentials
         run: |
+          pip install "skypilot[kubernetes]" 2>/dev/null || true
           sky api stop || true
           sky api start || true
-          sky check lambda runpod vast primeintellect nebius gcp || true
+          sky check lambda runpod vast primeintellect nebius gcp kubernetes || true
 
       - name: Validate data version
         run: |
