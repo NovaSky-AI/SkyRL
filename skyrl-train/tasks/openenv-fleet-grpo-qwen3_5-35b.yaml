@@ -14,6 +14,15 @@ resources:
   memory: 1500+
   ports: 6479
   any_of:
+    # GKE with GPUDirect-RDMA (fleet-rdma cluster, 3200 Gbps inter-node, spot)
+    - accelerators: H200:8
+      cloud: kubernetes
+      network_tier: best
+      use_spot: true
+    - accelerators: B200:8
+      cloud: kubernetes
+      network_tier: best
+      use_spot: true
     - accelerators: H200-SXM:8
       cloud: runpod
     - accelerators: B200:8

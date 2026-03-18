@@ -85,12 +85,112 @@ export TMPDIR="$TMP_DIR"
 TASKS_FILE="${DATA_ROOT}/data/fleet/tasks_${MODALITY}.json"
 DATA_DIR="${DATA_ROOT}/data/fleet/${MODALITY}"
 
+# --- System diagnostics ---
+echo "=== System Diagnostics ==="
+free -h
+nvidia-smi --query-gpu=name,driver_version,memory.total,memory.free --format=csv 2>/dev/null || true
+echo "--- /dev/shm ---"
+df -h /dev/shm 2>/dev/null || echo "/dev/shm not mounted"
+ls -la /dev/shm/ 2>/dev/null | head -5 || true
+echo "--- GPU Topology ---"
+nvidia-smi topo -m 2>/dev/null || true
+echo "--- cgroup memory limits ---"
+cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo "No cgroup memory limit found"
+echo "--- ulimits ---"
+ulimit -a 2>/dev/null || true
+echo "--- NCCL env vars ---"
+env | grep -i NCCL || echo "No NCCL env vars set"
+echo "--- kernel overcommit ---"
+cat /proc/sys/vm/overcommit_memory 2>/dev/null || true
+echo "=== End Diagnostics ==="
+
 # --- wandb login ---
 python3 -c "import wandb; wandb.login(relogin=True, key='$WANDB_API_KEY')"
+
+# --- Fabric Manager check (NVSwitch GPUs: B200, H200 SXM) ---
+# On non-GCP clouds (RunPod, Lambda, etc.), Fabric Manager is required for NVLink
+# P2P on NVSwitch systems. Without it, dist.broadcast() in FSDP causes SIGKILL.
+#
+# On GCP, NVSwitch is managed at the HOST level — the guest VM does not have
+# NVSwitch devices, so FM reports "NV_WARN_NOTHING_TO_DO" and cannot start.
+# This is EXPECTED. NVLink P2P works through GCP's host-managed fabric without FM.
+# GCP also provides a custom NCCL shim (gIB) that manages all NCCL configuration.
+# Do NOT set NCCL_P2P_DISABLE, NCCL_NVLS_ENABLE, or NCCL_CUMEM_ENABLE on GCP —
+# the shim's "Guest Config Checker" expects these to be unset.
+ON_GCP=false
+if [ -d "/usr/local/gib" ]; then
+  ON_GCP=true
+elif [ -f "/sys/class/dmi/id/product_name" ] && grep -qi "google" /sys/class/dmi/id/product_name 2>/dev/null; then
+  ON_GCP=true
+fi
+
+FM_STATUS=$(systemctl is-active nvidia-fabricmanager 2>/dev/null || echo "unknown")
+echo "Fabric Manager status: $FM_STATUS"
+echo "On GCP: $ON_GCP"
+
+if [ "$ON_GCP" = true ]; then
+  echo "GCP detected — skipping Fabric Manager restart (host manages NVSwitch)"
+
+  # GCP's deep learning images install /etc/profile.d/nccl_env.sh which auto-sources
+  # /usr/local/gib/scripts/set_nccl_env.sh and adds /usr/local/gib/lib64 to LD_LIBRARY_PATH.
+  # This sets NCCL_NET=gIB, forcing the gIB network plugin for RDMA/InfiniBand.
+  #
+  # Problem: gIB requires RDMA hardware (ConnectX NICs + multiple GPUDirect VPC networks).
+  # SkyPilot provisions VMs with a single management NIC — no RDMA networking.
+  # When NCCL_NET=gIB is forced but gIB can't init, NCCL fails with
+  # "Failed to initialize any NET plugin" → SIGKILL during dist.broadcast().
+  #
+  # Fix: check for RDMA devices. If absent, strip gIB so NCCL falls back to
+  # NVLink P2P for intra-node communication. Multi-node uses GKE with RDMA.
+  if [ -d "/sys/class/infiniband" ] && [ "$(ls /sys/class/infiniband/ 2>/dev/null)" ]; then
+    echo "RDMA devices found — keeping gIB for GPUDirect RDMA"
+  else
+    echo "No RDMA devices — disabling gIB"
+    # Remove gIB from LD_LIBRARY_PATH (set by /etc/profile.d/nccl_env.sh)
+    export LD_LIBRARY_PATH=$(echo "$LD_LIBRARY_PATH" | sed 's|/usr/local/gib/lib64:||g; s|:/usr/local/gib/lib64||g; s|/usr/local/gib/lib64||g')
+    # Unset NCCL_NET=gIB so NCCL can fall back to NVLink P2P
+    unset NCCL_NET
+    # Clear gIB-specific vars set by set_nccl_env.sh
+    unset NCCL_CROSS_NIC NCCL_NET_GDR_LEVEL NCCL_P2P_NET_CHUNKSIZE NCCL_NVLS_CHUNKSIZE
+    unset NCCL_IB_ADAPTIVE_ROUTING NCCL_IB_QPS_PER_CONNECTION NCCL_IB_TC NCCL_IB_FIFO_TC
+    unset NCCL_TUNER_CONFIG_PATH
+    echo "Cleared gIB NCCL env vars. Using NVLink P2P (intra-node)."
+  fi
+  echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+  echo "NCCL vars:"
+  env | grep -i NCCL || echo "  (none)"
+
+  # Ensure /dev/shm is large enough for NCCL IPC (some GCP images have small default)
+  SHM_SIZE=$(df --output=size /dev/shm 2>/dev/null | tail -1 | tr -d ' ')
+  echo "Current /dev/shm size: ${SHM_SIZE}K"
+  if [ -n "$SHM_SIZE" ] && [ "$SHM_SIZE" -lt 16777216 ]; then
+    echo "WARNING: /dev/shm is only ${SHM_SIZE}K — remounting to 16G for NCCL"
+    sudo mount -o remount,size=16G /dev/shm 2>&1 || echo "Failed to remount /dev/shm"
+    df -h /dev/shm
+  fi
+elif [ "$FM_STATUS" != "active" ]; then
+  echo "WARNING: Fabric Manager not active. Attempting restart..."
+  sudo nvidia-smi -pm 1 2>&1 || true
+  sudo systemctl stop nvidia-fabricmanager 2>&1 || true
+  sleep 1
+  sudo systemctl start nvidia-fabricmanager 2>&1 || true
+  sleep 5
+  FM_STATUS=$(systemctl is-active nvidia-fabricmanager 2>/dev/null || echo "unknown")
+  echo "Fabric Manager status after restart: $FM_STATUS"
+  if [ "$FM_STATUS" != "active" ]; then
+    echo "=== WARNING: Fabric Manager failed to start ==="
+    echo "Training may fail if this system has NVSwitch GPUs."
+    sudo journalctl -u nvidia-fabricmanager --no-pager -n 10 2>&1 || true
+  fi
+fi
 
 # --- Ray cluster setup (multi-node aware) ---
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 export RAY_object_store_memory=10000000000
+# Disable Ray's memory monitor to prevent spurious worker kills
+export RAY_DISABLE_MEMORY_MONITOR=1
+# NOTE: On GCP VMs without RDMA, gIB NCCL vars are stripped above.
+# On GKE with RDMA, gIB is preserved for inter-node GPUDirect.
 
 read -r head_ip _ <<< "$SKYPILOT_NODE_IPS"
 
@@ -147,8 +247,31 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
     CMD_ARGS+=("${HYDRA_OVERRIDES[@]}")
   fi
 
+  export HYDRA_FULL_ERROR=1
   echo "=== Launching Training ==="
-  exec "${CMD_ARGS[@]}"
+  set +e
+  "${CMD_ARGS[@]}"
+  EXIT_CODE=$?
+  set -e
+
+  if [ $EXIT_CODE -ne 0 ]; then
+    echo "=== Training failed (exit code $EXIT_CODE) ==="
+    echo "--- dmesg (last 50 lines, unfiltered) ---"
+    sudo dmesg -T 2>/dev/null | tail -50 || true
+    echo "--- dmesg (OOM/kill/segfault) ---"
+    sudo dmesg -T 2>/dev/null | grep -iE "oom|kill|out of memory|segfault|sigsegv|general protection|cgroup" | tail -20 || true
+    echo "--- memory ---"
+    free -h
+    echo "--- GPU memory ---"
+    nvidia-smi --query-gpu=memory.used,memory.free --format=csv 2>/dev/null || true
+    echo "--- /dev/shm after crash ---"
+    df -h /dev/shm 2>/dev/null || true
+    echo "--- cgroup memory events ---"
+    cat /sys/fs/cgroup/memory.events 2>/dev/null || cat /sys/fs/cgroup/memory/memory.oom_control 2>/dev/null || true
+    echo "--- Ray worker logs (last errors) ---"
+    grep -r "SIGKILL\|SIGABRT\|SIGSEGV\|SYSTEM_ERROR\|RuntimeError\|NCCL" /tmp/ray/session_latest/logs/ 2>/dev/null | tail -30 || true
+    exit $EXIT_CODE
+  fi
 
 else
   # === Worker node: join Ray cluster and wait ===

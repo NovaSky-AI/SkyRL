@@ -17,6 +17,13 @@ resources:
   disk_size: 750
   ports: 6479
   any_of:
+    # GKE (fleet-rdma cluster, GPUDirect-RDMA for multi-node, spot)
+    - accelerators: H200:8
+      cloud: kubernetes
+      use_spot: true
+    - accelerators: B200:8
+      cloud: kubernetes
+      use_spot: true
     # 8x GPUs (matching VL branch config)
     - accelerators: H200-SXM:8
       cloud: runpod
@@ -30,7 +37,7 @@ resources:
       cloud: nebius
     - accelerators: H200-SXM:8
       cloud: nebius
-    # GCP spot fallback
+    # GCP (spot first, on-demand fallback)
     - accelerators: B200:8
       cloud: gcp
       use_spot: true
@@ -38,6 +45,12 @@ resources:
     - accelerators: H200:8
       cloud: gcp
       use_spot: true
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    - accelerators: B200:8
+      cloud: gcp
+      image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
+    - accelerators: H200:8
+      cloud: gcp
       image_id: projects/deeplearning-platform-release/global/images/common-cu128-ubuntu-2204-nvidia-570-v20260305
 
 num_nodes: 1
@@ -129,4 +142,6 @@ run: |
     trainer.project_name="fleet-task-grpo" \
     trainer.run_name="fleet_qwen35_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
     trainer.resume_mode=latest \
+    trainer.ckpt_path="$HOME/ckpts/fleet_qwen35_${MODALITY}" \
+    trainer.export_path="$HOME/exports" \
     trainer.dump_data_batch=true

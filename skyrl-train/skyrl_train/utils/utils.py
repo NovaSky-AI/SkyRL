@@ -523,8 +523,39 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     # NOTE (charlie): See https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
     # and https://docs.vllm.ai/en/v0.9.2/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
     # Same for SGLang as we set `NCCL_CUMEM_ENABLE` to 0 in `sglang_engine.py`'s _patched_set_envs_and_config
-    if cfg.generator.weight_sync_backend == "nccl":
+    #
+    # Skip on GCP: GCP provides a custom NCCL shim + gIB plugin that manages all
+    # NCCL configuration. The shim's "Guest Config Checker" expects NCCL_CUMEM_ENABLE,
+    # NCCL_P2P_DISABLE, and NCCL_NVLS_ENABLE to be UNSET. Setting any of these
+    # conflicts with the shim and causes FSDP workers to crash during dist.broadcast().
+    # On GCP, NVSwitch is managed at the host level (FM reports "nothing to do"),
+    # and NVLink P2P works through the host-managed fabric without Fabric Manager.
+    _on_gcp = os.path.exists("/usr/local/gib")
+    if not _on_gcp:
+        try:
+            _dmi_product = open("/sys/class/dmi/id/product_name").read().strip()
+            _on_gcp = "Google" in _dmi_product
+        except (FileNotFoundError, PermissionError):
+            pass
+    if cfg.generator.weight_sync_backend == "nccl" and not _on_gcp:
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
+        logger.info("Setting NCCL_CUMEM_ENABLE=0 (not on GCP)")
+    elif cfg.generator.weight_sync_backend == "nccl" and _on_gcp:
+        # GCP deep learning images auto-load gIB (NCCL_NET=gIB) via /etc/profile.d/nccl_env.sh.
+        # gIB requires RDMA hardware (ConnectX NICs + GPUDirect VPC networks).
+        # SkyPilot provisions VMs with a single management NIC — no RDMA networking.
+        # Without RDMA devices (/sys/class/infiniband), gIB can't init and SIGKILL's workers.
+        # The shell script (fleet-common-run.sh) detects RDMA absence and strips gIB vars +
+        # LD_LIBRARY_PATH before starting Ray, so workers inherit the correct env.
+        # NCCL falls back to NVLink P2P (intra-node) + Socket/TCP (inter-node).
+        _has_rdma = os.path.isdir("/sys/class/infiniband") and bool(os.listdir("/sys/class/infiniband"))
+        _num_nodes = getattr(getattr(cfg.trainer, "placement", None), "policy_num_nodes", 1)
+        if _has_rdma:
+            logger.info(f"On GCP ({_num_nodes} node(s)): RDMA devices found, gIB enabled for GPUDirect RDMA")
+        else:
+            logger.info(
+                f"On GCP ({_num_nodes} node(s)): no RDMA — gIB stripped by shell script, using NVLink P2P + Socket"
+            )
 
     if cfg.trainer.strategy == "megatron":
         # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core

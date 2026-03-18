@@ -48,14 +48,6 @@ on:
         description: "Resume from S3 checkpoint (W&B run name, e.g., fleet_tool_use_32b_d7167c1c)"
         type: string
         default: ""
-      num_nodes:
-        description: "Number of nodes (multi-node training)"
-        type: choice
-        options:
-          - "1"
-          - "2"
-          - "4"
-        default: "1"
       disable_slack:
         description: "Disable Slack notifications (for debugging)"
         type: boolean
@@ -135,8 +127,8 @@ jobs:
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           MODALITY=$(grep -E '^\s+MODALITY:' skyrl-train/tasks/${{ inputs.task_name }}.yaml | awk -F'"' '{print $2}')
           echo "modality=$MODALITY" >> $GITHUB_OUTPUT
-          NUM_NODES="${{ inputs.num_nodes }}"
-          if [ "$NUM_NODES" != "1" ]; then
+          NUM_NODES=$(grep -E '^\s*num_nodes:' skyrl-train/tasks/${{ inputs.task_name }}.yaml | awk '{print $2}')
+          if [ -n "$NUM_NODES" ] && [ "$NUM_NODES" != "1" ]; then
             CLUSTER_NAME="fleet-${MODALITY}-${NUM_NODES}n-${SHORT_SHA}-${TIMESTAMP}"
           else
             CLUSTER_NAME="fleet-${MODALITY}-${SHORT_SHA}-${TIMESTAMP}"
@@ -197,7 +189,6 @@ jobs:
           [ -n "${{ inputs.max_tasks }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env MAX_TASKS=${{ inputs.max_tasks }}"
           [ -n "${{ inputs.resume_run_name }}" ] && LAUNCH_CMD="$LAUNCH_CMD --env RESUME_RUN_NAME=${{ inputs.resume_run_name }}"
           LAUNCH_CMD="$LAUNCH_CMD --env RUN_ID=${{ steps.cluster.outputs.run_id }}"
-          [ "${{ inputs.num_nodes }}" != "1" ] && LAUNCH_CMD="$LAUNCH_CMD --num-nodes ${{ inputs.num_nodes }}"
           [ "${{ inputs.cloud }}" != "any" ] && LAUNCH_CMD="$LAUNCH_CMD --cloud ${{ inputs.cloud }}"
           LAUNCH_CMD="$LAUNCH_CMD --retry-until-up -y"  # Retry until GPUs available, run attached
 
