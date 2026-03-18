@@ -1,28 +1,26 @@
 """Unit tests for benchmark_new_inference pure functions.
 
-These tests cover metrics calculation, request translation, and dataset loading
-without requiring GPU or inference servers.
-"""
+These tests cover request translation, and dataset loading"""
 
 import argparse
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
-import numpy as np
 import pytest
 from transformers import AutoTokenizer
 from vllm.benchmarks.datasets import SampleRequest
 
 from skyrl.benchmarks.benchmark_new_inference import (
-    BenchmarkResult,
-    RequestResult,
-    calculate_results,
+    ConversationResult,
+    _conversation_to_chat_messages,
+    calculate_multi_turn_results,
     get_sample_requests,
-    print_results,
+    load_sharegpt_conversations,
     run_benchmark,
+    run_multi_turn_benchmark,
     sample_request_to_engine_input,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -41,25 +39,6 @@ def sample_request():
         prompt_len=5,
         expected_output_len=32,
     )
-
-
-@pytest.fixture
-def successful_results():
-    return [
-        RequestResult(success=True, latency=0.5, prompt_len=100, output_len=50),
-        RequestResult(success=True, latency=1.0, prompt_len=200, output_len=100),
-        RequestResult(success=True, latency=1.5, prompt_len=150, output_len=75),
-        RequestResult(success=True, latency=2.0, prompt_len=300, output_len=120),
-    ]
-
-
-@pytest.fixture
-def mixed_results():
-    return [
-        RequestResult(success=True, latency=0.5, prompt_len=100, output_len=50),
-        RequestResult(success=False, latency=0.1, prompt_len=100, output_len=0, error="timeout"),
-        RequestResult(success=True, latency=1.0, prompt_len=200, output_len=100),
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -87,79 +66,6 @@ class TestSampleRequestToEngineInput:
         request = SampleRequest(prompt="test", prompt_len=1, expected_output_len=256)
         engine_input = sample_request_to_engine_input(request, tokenizer)
         assert engine_input["sampling_params"]["max_tokens"] == 256
-
-
-# ---------------------------------------------------------------------------
-# calculate_results
-# ---------------------------------------------------------------------------
-
-
-class TestCalculateResults:
-    def test_all_successful(self, successful_results):
-        result = calculate_results(successful_results, duration=5.0)
-
-        assert result.completed == 4
-        assert result.failed == 0
-        assert result.total_input_tokens == 750  # 100+200+150+300
-        assert result.total_output_tokens == 345  # 50+100+75+120
-        assert result.duration_s == 5.0
-        assert result.request_throughput == pytest.approx(0.8)  # 4/5
-        assert result.output_throughput == pytest.approx(69.0)  # 345/5
-        assert result.total_token_throughput == pytest.approx(219.0)  # 1095/5
-
-    def test_latency_statistics(self, successful_results):
-        result = calculate_results(successful_results, duration=5.0)
-        latencies = [0.5, 1.0, 1.5, 2.0]
-
-        assert result.mean_e2el_ms == pytest.approx(np.mean(latencies) * 1000)
-        assert result.median_e2el_ms == pytest.approx(np.median(latencies) * 1000)
-        assert result.std_e2el_ms == pytest.approx(np.std(latencies) * 1000)
-
-    def test_percentiles(self, successful_results):
-        result = calculate_results(successful_results, duration=5.0, percentiles=[50, 99])
-        assert len(result.percentiles_e2el_ms) == 2
-        assert result.percentiles_e2el_ms[0][0] == 50
-        assert result.percentiles_e2el_ms[1][0] == 99
-
-    def test_mixed_success_failure(self, mixed_results):
-        result = calculate_results(mixed_results, duration=3.0)
-
-        assert result.completed == 2
-        assert result.failed == 1
-        assert result.total_input_tokens == 300  # only successful
-        assert result.total_output_tokens == 150
-
-    def test_all_failed(self):
-        results = [
-            RequestResult(success=False, latency=0.1, prompt_len=100, output_len=0, error="err"),
-            RequestResult(success=False, latency=0.2, prompt_len=100, output_len=0, error="err"),
-        ]
-        result = calculate_results(results, duration=1.0)
-
-        assert result.completed == 0
-        assert result.failed == 2
-        assert result.request_throughput == 0.0
-        assert result.mean_e2el_ms == 0.0
-        assert result.percentiles_e2el_ms == []
-
-    def test_empty_results(self):
-        result = calculate_results([], duration=1.0)
-        assert result.completed == 0
-        assert result.failed == 0
-
-    def test_single_result(self):
-        results = [RequestResult(success=True, latency=0.5, prompt_len=100, output_len=50)]
-        result = calculate_results(results, duration=1.0)
-        assert result.completed == 1
-        assert result.mean_e2el_ms == pytest.approx(500.0)
-        assert result.std_e2el_ms == pytest.approx(0.0)
-
-    def test_default_percentiles(self, successful_results):
-        result = calculate_results(successful_results, duration=5.0)
-        # Default percentiles: [50, 75, 90, 95, 99]
-        assert len(result.percentiles_e2el_ms) == 5
-        percentile_labels = [p for p, _ in result.percentiles_e2el_ms]
-        assert percentile_labels == [50, 75, 90, 95, 99]
 
 
 # ---------------------------------------------------------------------------
@@ -229,27 +135,6 @@ class TestGetSampleRequests:
         args = argparse.Namespace(dataset_name="nonexistent")
         with pytest.raises(ValueError, match="Unknown dataset"):
             get_sample_requests(args, tokenizer)
-
-
-# ---------------------------------------------------------------------------
-# print_results (smoke test)
-# ---------------------------------------------------------------------------
-
-
-class TestPrintResults:
-    def test_print_does_not_raise(self, successful_results, capsys):
-        result = calculate_results(successful_results, duration=5.0)
-        print_results(result)
-        captured = capsys.readouterr()
-        assert "Benchmark Results" in captured.out
-        assert "Request throughput" in captured.out
-        assert "Mean E2EL" in captured.out
-
-    def test_print_all_failed(self, capsys):
-        result = calculate_results([], duration=1.0)
-        print_results(result)
-        captured = capsys.readouterr()
-        assert "Completed requests:        0" in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -353,34 +238,276 @@ class TestRunBenchmark:
 
 
 # ---------------------------------------------------------------------------
-# RequestResult / BenchmarkResult dataclass sanity
+# Multi-turn: conversation loading and conversion
 # ---------------------------------------------------------------------------
 
 
-class TestDataclasses:
-    def test_request_result_defaults(self):
-        r = RequestResult(success=True, latency=1.0, prompt_len=10, output_len=5)
-        assert r.error == ""
+class TestConversationToChat:
+    def test_basic_conversion(self):
+        turns = [
+            {"from": "human", "value": "Hello"},
+            {"from": "gpt", "value": "Hi there"},
+            {"from": "human", "value": "How are you?"},
+        ]
+        messages = _conversation_to_chat_messages(turns)
+        assert len(messages) == 3
+        assert messages[0] == {"role": "user", "content": "Hello"}
+        assert messages[1] == {"role": "assistant", "content": "Hi there"}
+        assert messages[2] == {"role": "user", "content": "How are you?"}
 
-    def test_request_result_with_error(self):
-        r = RequestResult(success=False, latency=0.1, prompt_len=10, output_len=0, error="boom")
-        assert r.error == "boom"
-        assert not r.success
+    def test_empty_conversation(self):
+        assert _conversation_to_chat_messages([]) == []
 
-    def test_benchmark_result_fields(self):
-        r = BenchmarkResult(
-            completed=10,
-            failed=2,
-            total_input_tokens=1000,
-            total_output_tokens=500,
-            duration_s=5.0,
-            request_throughput=2.0,
-            output_throughput=100.0,
-            total_token_throughput=300.0,
-            mean_e2el_ms=250.0,
-            median_e2el_ms=240.0,
-            std_e2el_ms=30.0,
-            percentiles_e2el_ms=[(50, 240.0), (99, 490.0)],
+
+class TestLoadSharegptConversations:
+    def test_load_from_file(self, tmp_path):
+        data = [
+            {
+                "conversations": [
+                    {"from": "human", "value": "Q1"},
+                    {"from": "gpt", "value": "A1"},
+                    {"from": "human", "value": "Q2"},
+                    {"from": "gpt", "value": "A2"},
+                ]
+            },
+            {
+                "conversations": [
+                    {"from": "human", "value": "Q3"},
+                    {"from": "gpt", "value": "A3"},
+                ]
+            },
+            {"conversations": [{"from": "human", "value": "short"}]},  # only 1 turn, filtered
+        ]
+        path = tmp_path / "sharegpt.json"
+        path.write_text(json.dumps(data))
+
+        convos = load_sharegpt_conversations(str(path), num_conversations=10, min_turns=2)
+        assert len(convos) == 2  # third entry has only 1 turn
+
+    def test_num_conversations_limit(self, tmp_path):
+        data = [
+            {"conversations": [{"from": "human", "value": f"Q{i}"}, {"from": "gpt", "value": f"A{i}"}]}
+            for i in range(20)
+        ]
+        path = tmp_path / "sharegpt.json"
+        path.write_text(json.dumps(data))
+
+        convos = load_sharegpt_conversations(str(path), num_conversations=5)
+        assert len(convos) == 5
+
+    def test_deterministic_with_seed(self, tmp_path):
+        data = [
+            {"conversations": [{"from": "human", "value": f"Q{i}"}, {"from": "gpt", "value": f"A{i}"}]}
+            for i in range(10)
+        ]
+        path = tmp_path / "sharegpt.json"
+        path.write_text(json.dumps(data))
+
+        c1 = load_sharegpt_conversations(str(path), num_conversations=5, seed=42)
+        c2 = load_sharegpt_conversations(str(path), num_conversations=5, seed=42)
+        assert c1 == c2
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn: calculate_multi_turn_results
+# ---------------------------------------------------------------------------
+
+
+class TestCalculateMultiTurnResults:
+    def test_all_successful(self):
+        results = [
+            ConversationResult(
+                success=True,
+                num_turns=3,
+                total_latency=1.5,
+                per_turn_latencies=[0.3, 0.5, 0.7],
+                total_input_tokens=300,
+                total_output_tokens=150,
+            ),
+            ConversationResult(
+                success=True,
+                num_turns=2,
+                total_latency=1.0,
+                per_turn_latencies=[0.4, 0.6],
+                total_input_tokens=200,
+                total_output_tokens=100,
+            ),
+        ]
+        result = calculate_multi_turn_results(results, duration=2.0)
+
+        assert result.completed == 2
+        assert result.failed == 0
+        assert result.total_input_tokens == 500
+        assert result.total_output_tokens == 250
+        assert result.request_throughput == pytest.approx(1.0)  # 2/2
+        assert result.output_throughput == pytest.approx(125.0)  # 250/2
+
+    def test_with_failures(self):
+        results = [
+            ConversationResult(
+                success=True,
+                num_turns=2,
+                total_latency=1.0,
+                per_turn_latencies=[0.5, 0.5],
+                total_input_tokens=200,
+                total_output_tokens=100,
+            ),
+            ConversationResult(
+                success=False,
+                num_turns=0,
+                total_latency=0.1,
+                per_turn_latencies=[],
+                total_input_tokens=0,
+                total_output_tokens=0,
+                error="failed",
+            ),
+        ]
+        result = calculate_multi_turn_results(results, duration=1.5)
+
+        assert result.completed == 1
+        assert result.failed == 1
+
+    def test_all_failed(self):
+        results = [
+            ConversationResult(
+                success=False,
+                num_turns=0,
+                total_latency=0.1,
+                per_turn_latencies=[],
+                total_input_tokens=0,
+                total_output_tokens=0,
+                error="err",
+            ),
+        ]
+        result = calculate_multi_turn_results(results, duration=1.0)
+        assert result.completed == 0
+        assert result.failed == 1
+        assert result.percentiles_e2el_ms == []
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn: run_multi_turn_benchmark (with mocked client)
+# ---------------------------------------------------------------------------
+
+
+class TestRunMultiTurnBenchmark:
+    def test_basic_two_turn_conversation(self, tokenizer):
+        """Two-turn conversation: user->assistant->user->assistant."""
+        mock_client = AsyncMock()
+        mock_client.generate.return_value = {
+            "responses": ["Sure, I can help."],
+            "response_ids": [[1, 2, 3, 4]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": None,
+        }
+
+        conversations = [
+            [
+                {"from": "human", "value": "Hello"},
+                {"from": "gpt", "value": "Hi"},
+                {"from": "human", "value": "How are you?"},
+                {"from": "gpt", "value": "Good"},
+            ]
+        ]
+
+        results, duration = asyncio.run(
+            run_multi_turn_benchmark(
+                client=mock_client,
+                conversations=conversations,
+                tokenizer=tokenizer,
+                max_tokens_per_turn=64,
+            )
         )
-        assert r.completed == 10
-        assert r.percentiles_e2el_ms[1] == (99, 490.0)
+
+        assert len(results) == 1
+        assert results[0].success
+        assert results[0].num_turns == 2  # 2 user turns
+        assert len(results[0].per_turn_latencies) == 2
+        assert results[0].total_output_tokens == 8  # 4 tokens * 2 turns
+        assert mock_client.generate.call_count == 2
+
+    def test_conversation_with_failure(self, tokenizer):
+        """Exception on second turn is captured."""
+        mock_client = AsyncMock()
+        mock_client.generate.side_effect = [
+            {
+                "responses": ["First response"],
+                "response_ids": [[1, 2]],
+                "stop_reasons": ["stop"],
+                "response_logprobs": None,
+            },
+            RuntimeError("connection lost"),
+        ]
+
+        conversations = [
+            [
+                {"from": "human", "value": "Turn 1"},
+                {"from": "gpt", "value": "..."},
+                {"from": "human", "value": "Turn 2"},
+                {"from": "gpt", "value": "..."},
+            ]
+        ]
+
+        results, duration = asyncio.run(
+            run_multi_turn_benchmark(
+                client=mock_client,
+                conversations=conversations,
+                tokenizer=tokenizer,
+                max_tokens_per_turn=32,
+            )
+        )
+
+        assert len(results) == 1
+        assert not results[0].success
+        assert results[0].num_turns == 1  # only first turn succeeded
+        assert "connection lost" in results[0].error
+
+    def test_concurrent_conversations(self, tokenizer):
+        """Multiple conversations running concurrently."""
+        mock_client = AsyncMock()
+        mock_client.generate.return_value = {
+            "responses": ["Response"],
+            "response_ids": [[10, 20]],
+            "stop_reasons": ["stop"],
+            "response_logprobs": None,
+        }
+
+        conversations = [[{"from": "human", "value": f"Q{i}"}, {"from": "gpt", "value": f"A{i}"}] for i in range(3)]
+
+        results, duration = asyncio.run(
+            run_multi_turn_benchmark(
+                client=mock_client,
+                conversations=conversations,
+                tokenizer=tokenizer,
+                max_tokens_per_turn=32,
+                concurrency=3,
+            )
+        )
+
+        assert len(results) == 3
+        assert all(r.success for r in results)
+        assert all(r.num_turns == 1 for r in results)
+
+    def test_no_user_turns(self, tokenizer):
+        """Conversation with only assistant turns returns failure."""
+        mock_client = AsyncMock()
+
+        conversations = [
+            [
+                {"from": "gpt", "value": "I'm an assistant"},
+            ]
+        ]
+
+        results, duration = asyncio.run(
+            run_multi_turn_benchmark(
+                client=mock_client,
+                conversations=conversations,
+                tokenizer=tokenizer,
+                max_tokens_per_turn=32,
+            )
+        )
+
+        assert len(results) == 1
+        assert not results[0].success
+        assert "No user turns" in results[0].error
+        assert mock_client.generate.call_count == 0
