@@ -690,6 +690,10 @@ def build_dataloader(
         num_workers=0 if cfg.generator.inference_engine.enable_http_endpoint else 8,
         drop_last=True if is_train else False,
         generator=seeded_generator,
+        # NOTE (sumanthrh): We use ray and thus use `spawn` start method.
+        # forking within ray leads to undefined behaviour and often causes hard to debug
+        # memory leaks.  See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html
+        multiprocessing_context="spawn",
     )
     if is_train:
         if not is_fully_async:
