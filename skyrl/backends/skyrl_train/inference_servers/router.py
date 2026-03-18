@@ -15,7 +15,7 @@ import itertools
 import logging
 import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import httpx
 import uvicorn
@@ -76,6 +76,9 @@ class InferenceRouter:
         self._server: Optional[uvicorn.Server] = None
         self._server_thread: Optional[threading.Thread] = None
 
+        self._timing_total: Dict[str, float] = {}  # endpoint -> cumulative seconds
+        self._timing_count: Dict[str, int] = {}  # endpoint -> call count
+
         logger.info(f"InferenceRouter: {len(server_urls)} servers, port={port}")
 
     def _hash_session_id(self, session_id: str) -> int:
@@ -125,6 +128,15 @@ class InferenceRouter:
             """Return list of server URLs."""
             return {"servers": self._server_urls}
 
+        @app.get("/metrics")
+        async def metrics():
+            result = {}
+            for endpoint, total in self._timing_total.items():
+                count = self._timing_count[endpoint]
+                result[f"avg_time_{endpoint}"] = total / count if count > 0 else 0.0
+                result[f"num_calls_{endpoint}"] = count
+            return result
+
         # Catch-all: proxy everything else to backends
         @app.api_route(
             "/{path:path}",
@@ -162,12 +174,16 @@ class InferenceRouter:
         last_exc = None
         for attempt in range(_PROXY_RETRIES):
             try:
+                t0 = time.perf_counter()
                 response = await self._client.request(
                     method=request.method,
                     url=url,
                     headers=headers,
                     content=body,
                 )
+                elapsed = time.perf_counter() - t0
+                self._timing_total[path] = self._timing_total.get(path, 0.0) + elapsed
+                self._timing_count[path] = self._timing_count.get(path, 0) + 1
                 return Response(
                     content=response.content,
                     status_code=response.status_code,

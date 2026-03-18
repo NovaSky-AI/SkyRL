@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
@@ -127,6 +128,8 @@ class RemoteInferenceClient:
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
+    _timing_total: Dict[str, float] = field(default_factory=dict, repr=False)
+    _timing_count: Dict[str, int] = field(default_factory=dict, repr=False)
 
     # ---------------------------
     # Session Management
@@ -168,9 +171,14 @@ class RemoteInferenceClient:
         last_exc: Optional[Exception] = None
         for attempt in range(_DATA_PLANE_RETRIES):
             try:
+                endpoint = url.removeprefix(self.proxy_url)
+                t0 = time.perf_counter()
                 async with session.post(url, json=json, headers=headers) as resp:
                     body = await resp.json()
                     raise_for_status(resp, body)
+                    elapsed = time.perf_counter() - t0
+                    self._timing_total[endpoint] = self._timing_total.get(endpoint, 0.0) + elapsed
+                    self._timing_count[endpoint] = self._timing_count.get(endpoint, 0) + 1
                     return body
             except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
                 last_exc = e
@@ -644,6 +652,57 @@ class RemoteInferenceClient:
         return self._world_size
 
     # ---------------------------
+    # Timing Metrics
+    # ---------------------------
+
+    async def get_timing_metrics(self) -> Dict[str, Any]:
+        """Fetch combined timing metrics from client and router.
+
+        Returns a dict with:
+        - avg_time_router_{endpoint}: client -> router round-trip average
+        - num_calls_router_{endpoint}: client-side call count
+        - avg_time_server_{endpoint}: router -> vLLM server average
+        - num_calls_server_{endpoint}: router-side call count
+        - overhead_{endpoint}: client avg - server avg (proxy overhead)
+        """
+        # 1. Compute client-side averages (client -> router round-trip)
+        client_metrics: Dict[str, Any] = {}
+        for endpoint, total in self._timing_total.items():
+            count = self._timing_count[endpoint]
+            client_metrics[f"avg_time_router_{endpoint}"] = total / count if count > 0 else 0.0
+            client_metrics[f"num_calls_router_{endpoint}"] = count
+
+        # 2. Fetch router-side metrics (router -> vLLM server)
+        session = await self._get_session()
+        async with session.get(f"{self.proxy_url}/metrics") as resp:
+            router_metrics_raw = await resp.json()
+
+        # 3. Rename router metrics: avg_time_{ep} -> avg_time_server_{ep}
+        server_metrics: Dict[str, Any] = {}
+        for key, value in router_metrics_raw.items():
+            if key.startswith("avg_time_"):
+                ep = key.removeprefix("avg_time_")
+                server_metrics[f"avg_time_server_{ep}"] = value
+            elif key.startswith("num_calls_"):
+                ep = key.removeprefix("num_calls_")
+                server_metrics[f"num_calls_server_{ep}"] = value
+
+        # 4. Compute overhead (client - server) for matching endpoints
+        overhead_metrics: Dict[str, float] = {}
+        for endpoint in self._timing_total:
+            router_key = f"avg_time_router_{endpoint}"
+            server_key = f"avg_time_server_{endpoint}"
+            if router_key in client_metrics and server_key in server_metrics:
+                overhead_metrics[f"overhead_{endpoint}"] = client_metrics[router_key] - server_metrics[server_key]
+
+        # 5. Combine all
+        combined: Dict[str, Any] = {}
+        combined.update(client_metrics)
+        combined.update(server_metrics)
+        combined.update(overhead_metrics)
+        return combined
+
+    # ---------------------------
     # Lifecycle
     # ---------------------------
 
@@ -669,12 +728,16 @@ class RemoteInferenceClient:
         """Exclude non-serializable fields from pickle."""
         state = self.__dict__.copy()
         state["_session"] = None
+        state["_timing_total"] = {}
+        state["_timing_count"] = {}
         return state
 
     def __setstate__(self, state: dict) -> None:
         """Restore state after unpickling."""
         self.__dict__.update(state)
         self._session = None
+        self._timing_total = {}
+        self._timing_count = {}
 
 
 def raise_for_status(resp: aiohttp.ClientResponse, body: Optional[Any] = None) -> None:

@@ -634,6 +634,19 @@ def print_results(result: BenchmarkResult) -> None:
     print("=" * 60 + "\n")
 
 
+def print_timing_metrics(metrics: dict) -> None:
+    """Print timing metrics from router and client instrumentation."""
+    print("\n" + "=" * 60)
+    print("Timing Metrics (seconds)")
+    print("=" * 60)
+    for key, value in sorted(metrics.items()):
+        if isinstance(value, float):
+            print(f"  {key}: {value:.6f}")
+        else:
+            print(f"  {key}: {value}")
+    print("=" * 60 + "\n")
+
+
 def save_results(result: BenchmarkResult, args: argparse.Namespace) -> None:
     """Save benchmark results to JSON."""
     if not args.save_result:
@@ -769,7 +782,7 @@ def run_single_turn_entrypoint(args: argparse.Namespace) -> None:
     requests = get_sample_requests(args, tokenizer)
     client, _server_group, _router = get_inference_client(args)
 
-    async def _run() -> Tuple[list[RequestResult], float]:
+    async def _run() -> Tuple[list[RequestResult], float, Optional[dict]]:
         # Warmup
         if args.num_warmup > 0:
             warmup_reqs = requests[: args.num_warmup]
@@ -779,7 +792,7 @@ def run_single_turn_entrypoint(args: argparse.Namespace) -> None:
             logger.info("Warmup complete.")
 
         # Benchmark
-        return await run_benchmark(
+        results, duration = await run_benchmark(
             client=client,
             requests=requests,
             tokenizer=tokenizer,
@@ -787,9 +800,17 @@ def run_single_turn_entrypoint(args: argparse.Namespace) -> None:
             burstiness=args.burstiness,
         )
 
-    results, duration = asyncio.run(_run())
+        # Fetch timing metrics from client/router
+        timing_metrics = None
+        if isinstance(client, RemoteInferenceClient):
+            timing_metrics = await client.get_timing_metrics()
+        return results, duration, timing_metrics
+
+    results, duration, timing_metrics = asyncio.run(_run())
     bench_result = calculate_results(results, duration)
     print_results(bench_result)
+    if timing_metrics:
+        print_timing_metrics(timing_metrics)
     save_results(bench_result, args)
 
 
@@ -812,8 +833,8 @@ def run_multi_turn_entrypoint(args: argparse.Namespace) -> None:
 
     client, _server_group, _router = get_inference_client(args)
 
-    async def _run() -> Tuple[list[ConversationResult], float]:
-        return await run_multi_turn_benchmark(
+    async def _run() -> Tuple[list[ConversationResult], float, Optional[dict]]:
+        results, duration = await run_multi_turn_benchmark(
             client=client,
             conversations=conversations,
             tokenizer=tokenizer,
@@ -822,9 +843,17 @@ def run_multi_turn_entrypoint(args: argparse.Namespace) -> None:
             mean_env_delay=args.mean_env_delay,
         )
 
-    results, duration = asyncio.run(_run())
+        # Fetch timing metrics from client/router
+        timing_metrics = None
+        if isinstance(client, RemoteInferenceClient):
+            timing_metrics = await client.get_timing_metrics()
+        return results, duration, timing_metrics
+
+    results, duration, timing_metrics = asyncio.run(_run())
     bench_result = calculate_multi_turn_results(results, duration)
     print_results(bench_result)
+    if timing_metrics:
+        print_timing_metrics(timing_metrics)
 
     # Print multi-turn specific stats
     successful = [r for r in results if r.success]
