@@ -132,6 +132,36 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
     return prefix + ".".join(map(str, path))
 
 
+def get_fused_qkv_keys(path: tuple, prefix: str = "") -> tuple[str, str, str]:
+    "Get HF-compatible q_proj/k_proj/v_proj keys for a fused qkv_proj weight path."
+    q_path = (*path[:-2], "q_proj", path[-1])
+    k_path = (*path[:-2], "k_proj", path[-1])
+    v_path = (*path[:-2], "v_proj", path[-1])
+    return (
+        get_param_key(q_path, prefix=prefix),
+        get_param_key(k_path, prefix=prefix),
+        get_param_key(v_path, prefix=prefix),
+    )
+
+
+def get_qkv_split_sizes(config: ModelConfig) -> tuple[int, int, int]:
+    "Return flattened q/k/v projection output sizes."
+    base_config = config.get_config()
+    num_heads = base_config.num_attention_heads
+    num_kv_heads = getattr(base_config, "num_key_value_heads", num_heads)
+    head_dim = getattr(base_config, "head_dim", None) or base_config.hidden_size // num_heads
+    q_size = num_heads * head_dim
+    kv_size = num_kv_heads * head_dim
+    return q_size, kv_size, kv_size
+
+
+def get_fused_gate_up_keys(path: tuple, prefix: str = "") -> tuple[str, str]:
+    "Get HF-compatible gate_proj/up_proj keys for a fused gate_up_proj weight path."
+    gate_path = (*path[:-2], "gate_proj", path[-1])
+    up_path = (*path[:-2], "up_proj", path[-1])
+    return get_param_key(gate_path, prefix=prefix), get_param_key(up_path, prefix=prefix)
+
+
 def get_expert_key(path: tuple, expert_idx: int) -> str:
     "Get the safetensors key for an expert weight model path."
     path = tuple(s if s != "experts" else f"experts.{expert_idx}" for s in path)
@@ -181,9 +211,24 @@ def load_safetensors(
                 raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
             tensor = np.stack([tensors[expert_key].T for expert_key in expert_keys], axis=0)
         else:
-            if key not in tensors:
+            if path[-2] == "qkv_proj":
+                q_key, k_key, v_key = get_fused_qkv_keys(path)
+                missing_keys = [fused_key for fused_key in (q_key, k_key, v_key) if fused_key not in tensors]
+                if missing_keys:
+                    raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+                tensor = np.concatenate((tensors[q_key].T, tensors[k_key].T, tensors[v_key].T), axis=-1)
+            elif path[-2] == "gate_up_proj":
+                gate_key, up_key = get_fused_gate_up_keys(path)
+                missing_keys = [fused_key for fused_key in (gate_key, up_key) if fused_key not in tensors]
+                if missing_keys:
+                    raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+                gate = tensors[gate_key].T
+                up = tensors[up_key].T
+                tensor = np.stack((gate, up), axis=-1).reshape(gate.shape[0], -1)
+            elif key not in tensors:
                 raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
-            tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
+            else:
+                tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
         adapter_idx = get_adapter_slice(path, adapter_index, rank)
         if adapter_idx is not None:
             # Load into specific adapter slot via ArrayRef write-through
@@ -234,6 +279,22 @@ def save_safetensors(
             param = param.reshape(param.shape[0], -1)
         elif "o_proj" in path:
             param = param.reshape(-1, param.shape[-1])
+        elif "qkv_proj" in path:
+            q_size, k_size, _ = get_qkv_split_sizes(config)
+            q_key, k_key, v_key = get_fused_qkv_keys(path, prefix=prefix)
+            q_param, k_param, v_param = np.split(param, [q_size, q_size + k_size], axis=-1)
+            tensors[q_key] = q_param.T
+            tensors[k_key] = k_param.T
+            tensors[v_key] = v_param.T
+            continue
+        elif "gate_up_proj" in path:
+            gate_key, up_key = get_fused_gate_up_keys(path, prefix=prefix)
+            gate_up = param.reshape(param.shape[0], -1, 2)
+            gate_param = gate_up[..., 0]
+            up_param = gate_up[..., 1]
+            tensors[gate_key] = gate_param.T
+            tensors[up_key] = up_param.T
+            continue
         tensors[key] = param if "embed_tokens" in path else param.T
 
     # In multi-host mode, gather all shards and only save from rank 0
