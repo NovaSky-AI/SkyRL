@@ -103,6 +103,9 @@ jobs:
             gcloud auth activate-service-account --key-file=$HOME/.config/gcloud/application_default_credentials.json
             echo "GOOGLE_APPLICATION_CREDENTIALS=$HOME/.config/gcloud/application_default_credentials.json" >> $GITHUB_ENV
             pip3 install google-api-python-client google-cloud-storage 2>/dev/null || true
+            # Set up kubeconfig for GKE RDMA cluster (enables cloud: kubernetes)
+            gcloud components install gke-gcloud-auth-plugin --quiet 2>/dev/null || true
+            gcloud container clusters get-credentials fleet-rdma --region=us-central1 --project=fleet-compute-489000 || true
           else
             echo "WARNING: GCP_SERVICE_ACCOUNT_KEY secret not set — GCP clouds will be unavailable"
           fi
