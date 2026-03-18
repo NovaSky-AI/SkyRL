@@ -535,10 +535,16 @@ class RemoteInferenceClient:
         """
         Wake up all backends (load weights back to GPU).
 
+        Recreates the HTTP session to discard stale keep-alive connections
+        that the server may have closed during sleep.
+
         Args:
             tags: Optional list of tags to wake up specific resources.
                 Common tags: ["weights"], ["kv_cache"], or None for all.
         """
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
         body = {"tags": tags} if tags else {}
         return await self._call_all_servers("/wake_up", body)
 
@@ -638,6 +644,7 @@ class RemoteInferenceClient:
         payload = {
             "lora_name": lora_name,
             "lora_path": lora_path,
+            "load_inplace": True,
         }
 
         # Call /v1/load_lora_adapter on all servers directly.
