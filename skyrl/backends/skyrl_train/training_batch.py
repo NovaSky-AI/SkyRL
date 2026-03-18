@@ -416,11 +416,15 @@ class TensorBatch(dict, Generic[DictType]):
             if k not in other:
                 return False
             other_v = other[k]
+            if v is None and other_v is None:
+                continue
+            if v is None or other_v is None:
+                return False
             if isinstance(v, TensorList) and not v == other_v:
                 return False
             elif isinstance(v, torch.Tensor) and isinstance(other_v, torch.Tensor) and not torch.equal(v, other_v):
                 return False
-            elif isinstance(v, torch.Tensor) and isinstance(other_v, TensorList):
+            elif type(v) is not type(other_v):
                 return False
         return True
 
