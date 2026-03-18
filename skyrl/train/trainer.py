@@ -260,7 +260,6 @@ class RayPPOTrainer:
                     # 3. Convert GeneratorOutput to TrainingInputBatch
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
-                        logger.info(f"Number of sequences: {len(training_input['sequences'])}")
 
                     # 4. Inference and calculate values, log probs, rewards, kl divergence
                     with Timer("fwd_logprobs_values_reward", self.all_timings):
@@ -630,6 +629,7 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
             rollout_expert_indices,
+            max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
 
         # sanity check for off_policy_correction
@@ -661,6 +661,14 @@ class RayPPOTrainer:
         training_input.metadata = {"uids": uids}
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
+        batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
+        logger.info(f"batch_num_seq: {batch_num_seq}, batch_padded_seq_len: {batch_padded_seq_len}")
+        self.all_metrics.update(
+            {
+                "generate/batch_num_seq": batch_num_seq,
+                "generate/batch_padded_seq_len": batch_padded_seq_len,
+            }
+        )
         if self.cfg.generator.step_wise_trajectories:
             assert (
                 "trajectory_ids" in generator_output
