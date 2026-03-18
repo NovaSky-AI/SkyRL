@@ -3,7 +3,6 @@
 #
 # Usage (from SkyPilot YAML run block):
 #   bash skyrl-train/scripts/fleet-common-run.sh \
-#     --data-root /workspace --ckpt-root /workspace \
 #     --use-python-direct --cuda-env "$HOME/.cuda_env" \
 #     --set-ulimit --no-pytorch-alloc-conf -- \
 #     trainer.policy.model.path="Qwen/Qwen3.5-9B" \
@@ -19,8 +18,8 @@
 set -euo pipefail
 
 # Defaults
-DATA_ROOT="$HOME"
-CKPT_ROOT="$HOME"
+DATA_ROOT=""
+CKPT_ROOT=""
 USE_PYTHON_DIRECT=false
 CUDA_ENV=""
 SET_ULIMIT=false
@@ -42,6 +41,22 @@ while [[ $# -gt 0 ]]; do
     *) echo "ERROR: Unknown arg: $1"; exit 1 ;;
   esac
 done
+
+# Auto-detect data/ckpt root: /workspace if writable (RunPod), else $HOME (GCP, Lambda, etc.)
+if [ -z "$DATA_ROOT" ]; then
+  if [ -d "/workspace" ] && [ -w "/workspace" ]; then
+    DATA_ROOT="/workspace"
+  else
+    DATA_ROOT="$HOME"
+  fi
+fi
+if [ -z "$CKPT_ROOT" ]; then
+  CKPT_ROOT="$DATA_ROOT"
+fi
+
+echo "=== Fleet Common Run ==="
+echo "Data root: $DATA_ROOT"
+echo "Ckpt root: $CKPT_ROOT"
 
 cd skyrl-train
 source .venv/bin/activate
@@ -110,7 +125,7 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
     CMD_ARGS=(uv run --isolated --extra "$INFERENCE_BACKEND" -m integrations.fleet.entrypoints.main_fleet)
   fi
 
-  # Common hydra overrides (data paths, placement, strategy)
+  # Common hydra overrides (data paths, placement, strategy, checkpoints)
   CMD_ARGS+=(
     "data.train_data=['${DATA_DIR}/train.parquet']"
     "data.val_data=['${DATA_DIR}/validation.parquet']"
@@ -123,6 +138,8 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
     "trainer.placement.policy_num_nodes=${SKYPILOT_NUM_NODES:-1}"
     "trainer.placement.ref_num_nodes=${SKYPILOT_NUM_NODES:-1}"
     "generator.num_inference_engines=$TOTAL_GPUS"
+    "trainer.ckpt_path=${CKPT_ROOT}/ckpts"
+    "trainer.export_path=${CKPT_ROOT}/exports"
   )
 
   # Append model-specific hydra overrides (passed after --)

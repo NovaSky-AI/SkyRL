@@ -4,8 +4,7 @@
 # Usage (from SkyPilot YAML setup block):
 #   bash skyrl-train/scripts/fleet-common-setup.sh \
 #     --openenv-branch deniz/fleet_client \
-#     --extra-setup skyrl-train/scripts/fleet-qwen35-extra-setup.sh \
-#     --data-root /workspace
+#     --extra-setup skyrl-train/scripts/fleet-qwen35-extra-setup.sh
 #
 # Required env vars: FLEET_API_KEY, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
 #   MODALITY, DATA_VERSION, S3_DATASET_BUCKET
@@ -15,7 +14,7 @@ set -euo pipefail
 # Defaults
 OPENENV_BRANCH="deniz/fleet_client"
 EXTRA_SETUP=""
-DATA_ROOT="$HOME"
+DATA_ROOT=""
 SKIP_UV_ISOLATED=false
 
 # Parse args
@@ -28,6 +27,15 @@ while [[ $# -gt 0 ]]; do
     *) echo "ERROR: Unknown arg: $1"; exit 1 ;;
   esac
 done
+
+# Auto-detect data root: /workspace if writable (RunPod), else $HOME (GCP, Lambda, etc.)
+if [ -z "$DATA_ROOT" ]; then
+  if [ -d "/workspace" ] && [ -w "/workspace" ]; then
+    DATA_ROOT="/workspace"
+  else
+    DATA_ROOT="$HOME"
+  fi
+fi
 
 # Resolve extra-setup path to absolute before cd (it's relative to repo root)
 if [ -n "$EXTRA_SETUP" ]; then

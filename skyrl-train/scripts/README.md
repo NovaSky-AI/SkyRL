@@ -18,17 +18,17 @@ Shared scripts for Fleet GRPO training via SkyPilot. These replace the inline sh
 setup: |
   bash skyrl-train/scripts/fleet-common-setup.sh \
     --openenv-branch deniz/fleet_client \
-    --extra-setup skyrl-train/scripts/fleet-qwen35-extra-setup.sh \
-    --data-root /workspace
+    --extra-setup skyrl-train/scripts/fleet-qwen35-extra-setup.sh
 
 run: |
   bash skyrl-train/scripts/fleet-common-run.sh \
-    --data-root /workspace --ckpt-root /workspace \
     --use-python-direct --cuda-env "$HOME/.cuda_env" \
     --set-ulimit --no-pytorch-alloc-conf -- \
     trainer.policy.model.path="Qwen/Qwen3.5-9B" \
     trainer.epochs=20 ...
 ```
+
+Data root is auto-detected: `/workspace` if writable (RunPod), otherwise `$HOME` (GCP, Lambda, etc.). Override with `--data-root DIR`.
 
 ### Multi-node (e.g., 35B on 2 nodes)
 
@@ -44,15 +44,15 @@ No changes needed in the run block — multi-node works automatically.
 |------|---------|-------------|
 | `--openenv-branch BRANCH` | `deniz/fleet_client` | OpenEnv git ref to install |
 | `--extra-setup SCRIPT` | *(none)* | Script to source after `uv sync` (model-specific deps) |
-| `--data-root DIR` | `$HOME` | Root for dataset download (`DIR/data/fleet/`) |
+| `--data-root DIR` | auto-detect | Root for dataset download (`DIR/data/fleet/`). Uses `/workspace` if writable, else `$HOME` |
 | `--skip-uv-isolated` | `false` | Flag for configs that use `python` directly |
 
 ## Run Script Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--data-root DIR` | `$HOME` | Root for dataset files |
-| `--ckpt-root DIR` | `$HOME` | Root for checkpoints and tmp dir |
+| `--data-root DIR` | auto-detect | Root for dataset files. Uses `/workspace` if writable, else `$HOME` |
+| `--ckpt-root DIR` | same as data-root | Root for checkpoints, exports, and tmp dir |
 | `--use-python-direct` | `false` | Use `python -m` instead of `uv run --isolated` |
 | `--cuda-env FILE` | *(none)* | Source this file for CUDA_HOME (e.g., `$HOME/.cuda_env`) |
 | `--set-ulimit` | `false` | Set `ulimit -n 65536` (needed for Ray+vLLM) |

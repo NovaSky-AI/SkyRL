@@ -79,11 +79,10 @@ setup: |
   bash skyrl-train/scripts/fleet-common-setup.sh \
     --openenv-branch deniz/fleet_client \
     --extra-setup skyrl-train/scripts/fleet-qwen35-extra-setup.sh \
-    --data-root /workspace --skip-uv-isolated
+    --skip-uv-isolated
 
 run: |
   bash skyrl-train/scripts/fleet-common-run.sh \
-    --data-root /workspace --ckpt-root /workspace \
     --use-python-direct --cuda-env "$HOME/.cuda_env" \
     --set-ulimit --no-pytorch-alloc-conf -- \
     environment.skyrl_gym.fleet_task.ttl_seconds=900 \
@@ -130,6 +129,4 @@ run: |
     trainer.project_name="fleet-task-grpo" \
     trainer.run_name="fleet_qwen35_${MODALITY}_${RUN_ID:-$(head -c 4 /dev/urandom | xxd -p)}" \
     trainer.resume_mode=latest \
-    trainer.ckpt_path="/workspace/ckpts/fleet_qwen35_${MODALITY}" \
-    trainer.export_path="/workspace/exports" \
     trainer.dump_data_batch=true
