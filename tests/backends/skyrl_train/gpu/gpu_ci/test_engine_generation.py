@@ -25,10 +25,10 @@ MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 MOE_MODEL = "Qwen/Qwen1.5-MoE-A2.7B"
 
 
-def get_test_actor_config() -> SkyRLTrainConfig:
+def get_test_actor_config(model: str = MODEL) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
     cfg = SkyRLTrainConfig()
-    cfg.trainer.policy.model.path = MODEL
+    cfg.trainer.policy.model.path = model
 
     cfg.generator.sampling_params.temperature = 0.0
     cfg.generator.sampling_params.top_p = 1
@@ -102,7 +102,7 @@ def test_inference_engines_generation(ray_init_fixture, tp_size: int, pp_size: i
     """
     Tests generation with both remote and ray-wrapped engines.
     """
-    cfg = get_test_actor_config()
+    cfg = get_test_actor_config(model)
 
     prompts = get_test_prompts(model)
     tokenizer = AutoTokenizer.from_pretrained(model)
@@ -210,8 +210,7 @@ def test_token_based_generation(
 ):
     """Test generation using prompt_token_ids."""
 
-    cfg = get_test_actor_config()
-    cfg.trainer.policy.model.path = model
+    cfg = get_test_actor_config(model)
 
     prompts = get_test_prompts(model, 3)
     tokenizer = AutoTokenizer.from_pretrained(model)
