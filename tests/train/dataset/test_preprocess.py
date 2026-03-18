@@ -191,7 +191,7 @@ def test_unified_left_padding_layout(tokenizer):
     rewards = [[0.0] * 3, [0.0] * 2]
     loss_masks = [[1] * 3, [1] * 2]
 
-    seq, attn, action, rew, lm, _ = convert_prompts_responses_to_batch_tensors(
+    seq, attn, action, rew, lm, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer,
         prompts,
         responses,
@@ -221,7 +221,7 @@ def test_right_aligned_response_data(tokenizer):
     prompts_copy = [p[:] for p in prompts]
     responses_copy = [r[:] for r in responses]
 
-    seq, attn, action, rew, lm, lp = convert_prompts_responses_to_batch_tensors(
+    seq, attn, action, rew, lm, lp, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer,
         prompts,
         responses,
@@ -256,7 +256,7 @@ def test_max_seq_len_warns_but_does_not_truncate(tokenizer):
     rewards = [[0.0] * 10, [0.0] * 50]
     loss_masks = [[1] * 10, [1] * 50]
 
-    seq, _, action, _, _, _ = convert_prompts_responses_to_batch_tensors(
+    seq, _, action, _, _, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer,
         prompts,
         responses,
@@ -270,6 +270,75 @@ def test_max_seq_len_warns_but_does_not_truncate(tokenizer):
     assert action.shape == (2, 50)
 
 
+# ---------------------------------------------------------------------------
+# R3 (Router Replay) — rollout_expert_indices padding tests
+# ---------------------------------------------------------------------------
+
+
+def test_rollout_expert_indices_shape_padding_and_alignment(tokenizer):
+    """rollout_expert_indices tensor should have shape [batch, max_total, layers, topk]
+    with left-padding aligned to the attention_mask."""
+    # Sample 0: prompt=2, response=3  → total=5
+    # Sample 1: prompt=4, response=2  → total=6
+    # max_total=6
+    prompts = [[1, 2], [3, 4, 5, 6]]
+    responses = [[10, 11, 12], [20, 21]]
+    rewards = [[0.0] * 3, [0.0] * 2]
+    loss_masks = [[1] * 3, [1] * 2]
+
+    num_layers = 2
+    topk = 2
+    # rollout_expert_indices[i] has shape [prompt_len_i + response_len_i, num_layers, topk]
+    # Sample 0: 5 tokens, sample 1: 6 tokens
+    rei_0 = [[[1, 2]] * num_layers for _ in range(5)]  # 5 tokens
+    rei_1 = [[[3, 4]] * num_layers for _ in range(6)]  # 6 tokens
+
+    seq, attn, action, rew, lm, lp, rei_tensor = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts,
+        responses,
+        rewards,
+        loss_masks,
+        rollout_expert_indices=[rei_0, rei_1],
+    )
+
+    assert rei_tensor is not None
+    # Shape: [batch=2, max_total=6, layers=2, topk=2]
+    assert rei_tensor.shape == (2, 6, num_layers, topk)
+
+    # Sample 0 has total=5, so 1 left-pad position → first position should be zeros
+    assert rei_tensor[0, 0].tolist() == [[0, 0]] * num_layers  # padding
+    assert rei_tensor[0, 1].tolist() == [[1, 2]] * num_layers  # first real token
+
+    # Sample 1 has total=6, no padding
+    assert rei_tensor[1, 0].tolist() == [[3, 4]] * num_layers  # first real token
+
+    # Non-zero positions in rei_tensor align exactly with attention_mask==1
+    for i in range(2):
+        for pos in range(6):
+            if attn[i, pos] == 0:
+                assert rei_tensor[i, pos].tolist() == [[0, 0]] * num_layers
+            else:
+                assert rei_tensor[i, pos].tolist() != [[0, 0]] * num_layers
+
+
+def test_rollout_expert_indices_none_when_not_provided(tokenizer):
+    """When rollout_expert_indices is not provided, the returned tensor should be None."""
+    prompts = [[1, 2], [3, 4]]
+    responses = [[10], [20]]
+    rewards = [[0.0], [0.0]]
+    loss_masks = [[1], [1]]
+
+    *_, rei_tensor = convert_prompts_responses_to_batch_tensors(
+        tokenizer,
+        prompts,
+        responses,
+        rewards,
+        loss_masks,
+    )
+    assert rei_tensor is None
+
+
 def test_stepwise_anti_correlation_no_inflation(tokenizer):
     """Step-wise anti-correlated prompt/response lengths: seq_len = max(prompt_i + response_i),
     NOT max(prompt_i) + max(response_i)."""
@@ -280,7 +349,7 @@ def test_stepwise_anti_correlation_no_inflation(tokenizer):
     rewards = [[0.0] * 90, [0.0] * 10]
     loss_masks = [[1] * 90, [1] * 10]
 
-    seq, attn, action, rew, lm, _ = convert_prompts_responses_to_batch_tensors(
+    seq, attn, action, rew, lm, _, _ = convert_prompts_responses_to_batch_tensors(
         tokenizer,
         prompts,
         responses,

@@ -1,9 +1,9 @@
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
+
 import torch
 from jaxtyping import Float, Integer
 from transformers import AutoTokenizer
-
 
 logger = logging.getLogger(__name__)
 
@@ -159,19 +159,17 @@ def convert_prompts_responses_to_batch_tensors(
             lp = torch.tensor(sample_logprobs, dtype=torch.float)
             logprobs_tensor[i, max_response - len(sample_logprobs) :] = lp
 
-    # TODO(Charlie): fix padding for R3
     rollout_expert_indices_tensor = None
     if rollout_expert_indices:
         first_non_empty = next((x for x in rollout_expert_indices if x), None)
         if first_non_empty:
-            total_seq_len = max_input_len + max_output_len
             num_layers = len(first_non_empty[0])
             topk = len(first_non_empty[0][0]) if num_layers > 0 else 0
-            padded = torch.zeros(len(rollout_expert_indices), total_seq_len, num_layers, topk, dtype=torch.int32)
+            padded = torch.zeros(len(rollout_expert_indices), max_total, num_layers, topk, dtype=torch.int32)
             for i, sample_indices in enumerate(rollout_expert_indices):
                 if sample_indices:
-                    left_pad = max_input_len - prompt_token_lens[i]
-                    n = min(len(sample_indices), total_seq_len - left_pad)
+                    left_pad = max_total - (prompt_token_lens[i] + response_token_lens[i])
+                    n = min(len(sample_indices), max_total - left_pad)
                     padded[i, left_pad : left_pad + n] = torch.tensor(sample_indices[:n], dtype=torch.int32)
             rollout_expert_indices_tensor = padded
 
