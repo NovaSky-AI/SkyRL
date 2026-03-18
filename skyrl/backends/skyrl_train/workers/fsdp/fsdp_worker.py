@@ -49,8 +49,6 @@ from skyrl.backends.skyrl_train.workers.worker import (
 )
 from skyrl.train.utils.utils import str_to_torch_dtype
 
-# Fixed LoRA adapter name used across all sync steps so the trainer-side
-# RemoteInferenceClient can be updated after broadcast_to_inference_engines returns.
 _SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 
 if TYPE_CHECKING:
@@ -227,12 +225,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         )
 
     async def _save_lora_adapters_and_sync(self, peft_model, lora_sync_path, inference_engine_client):
-        """Collect LoRA parameters, save and call inference engine to load.
-
-        Returns:
-            The LoRA adapter name used for loading (same fixed name each step so the
-            caller can set _active_lora_name on the trainer-side client).
-        """
+        """Collect LoRA parameters, save and call inference engine to load."""
         import json
         import os
         from dataclasses import asdict
@@ -259,7 +252,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
             # Send LoRA disk loading request to inference engine.
-            # Use a fixed adapter name so the trainer-side client can be updated after sync.
             from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
                 RemoteInferenceClient,
             )
@@ -271,7 +263,6 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 await inference_engine_client.update_named_weights(lora_request)
 
         torch.distributed.barrier()
-        return _SKYRL_LORA_ADAPTER_NAME
 
     async def broadcast_to_inference_engines(self, inference_engine_client, inference_engine_cfg):
         use_prefix_cache = inference_engine_cfg.enable_prefix_caching
@@ -291,12 +282,12 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
 
             # assume base model is already synced, sync LoRA adapters
             lora_sync_path = self.cfg.policy.model.lora.lora_sync_path
-            lora_name = await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
+            await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
             if cache_reset_task is not None:
                 await cache_reset_task
             torch.cuda.empty_cache()
             torch.distributed.barrier()
-            return lora_name
+            return
 
         # Extract and send weights using the sender created at init time
         weight_iterator = self.weight_extractor.extract_weights(generator_dtype)

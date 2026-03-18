@@ -363,14 +363,9 @@ class WorkerDispatch:
             )
         )
 
-    def broadcast_to_inference_engines(self, inference_engine_client) -> Optional[str]:
-        """Broadcast policy weights to inference engines.
-
-        Returns:
-            The LoRA adapter name if a LoRA sync was performed, else None.
-            Rank 0's return value is used (index 0 of the worker results).
-        """
-        results = ray.get(
+    def broadcast_to_inference_engines(self, inference_engine_client) -> None:
+        """Broadcast policy weights to inference engines."""
+        ray.get(
             self._actor_groups["policy"].async_run_ray_method(
                 "pass_through",
                 "broadcast_to_inference_engines",
@@ -378,7 +373,6 @@ class WorkerDispatch:
                 self.cfg.generator.inference_engine,
             )
         )
-        return results[0] if results else None
 
     def prepare_for_weight_sync(self) -> None:
         """Prepare for weight sync: ensure policy model is on GPU, offload optimizer."""
@@ -412,7 +406,7 @@ class WorkerDispatch:
         self.prepare_for_weight_sync()
         if self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
-            lora_name = self.broadcast_to_inference_engines(self._inference_engine_client)
+            self.broadcast_to_inference_engines(self._inference_engine_client)
             self.finish_weight_sync()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
         else:
@@ -420,21 +414,10 @@ class WorkerDispatch:
             # reading partially-updated weights during the NCCL broadcast.
             await self._inference_engine_client.pause_generation()
             try:
-                lora_name = self.broadcast_to_inference_engines(self._inference_engine_client)
+                self.broadcast_to_inference_engines(self._inference_engine_client)
                 self.finish_weight_sync()
             finally:
                 await self._inference_engine_client.resume_generation()
-
-        # Propagate the LoRA adapter name to the trainer-side client.
-        # broadcast_to_inference_engines passes inference_engine_client via Ray, so any
-        # mutations (e.g. _active_lora_name) on the worker-side copy don't propagate back.
-        if lora_name is not None:
-            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
-                RemoteInferenceClient,
-            )
-
-            if isinstance(self._inference_engine_client, RemoteInferenceClient):
-                self._inference_engine_client._active_lora_name = lora_name
 
     def set_inference_engine_client(self, inference_engine_client: InferenceEngineClient) -> None:
         """Set the inference engine client for weight sync.
