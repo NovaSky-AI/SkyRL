@@ -668,10 +668,7 @@ class RemoteInferenceClient:
             async with session.post(url, json=payload) as resp:
                 # vLLM returns 200 with text body on success, or JSON ErrorResponse on failure
                 if resp.status >= 400:
-                    try:
-                        body = await resp.json()
-                    except Exception:
-                        body = {"error": {"message": await resp.text()}}
+                    body = await resp.json()
                     raise_for_status(resp, body)
                 return server_url, {"status": resp.status, "body": await resp.text()}
 
