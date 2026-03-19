@@ -181,7 +181,7 @@ async def evaluate_step_wise(
             concat_all_envs.append(traj_id_to_input[traj_id.instance_id]["env_class"])
             concat_env_extras.append(traj_id_to_input[traj_id.instance_id]["env_extras"])
             concat_uids.append(traj_id.instance_id)
-        # validate_generator_output(generator_input, generator_output)
+        validate_generator_output(generator_input, generator_output, step_wise=True)
         generator_outputs.append(generator_output)
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
 

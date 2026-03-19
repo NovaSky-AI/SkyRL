@@ -593,20 +593,25 @@ def zero_variance_filter(rewards: List[float], uids: List[str]) -> List[int]:
     return [i for i, uid in enumerate(uids) if uid in kept_uids_set]
 
 
-def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput):
+def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput, step_wise: bool = False):
     """Validate the generator output.
 
     Args:
         num_prompts: Number of input prompts used to produce this output.
         generator_output: The generated output batch to validate.
+        step_wise: If True, validate step-wise specific fields (is_last_step, trajectory_ids,
+            contiguous ordering). In step-wise mode, num_responses may exceed num_prompts
+            because each trajectory is expanded into multiple per-turn samples.
     """
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
 
-    # check that input prompts, response ids, and prompt token ids are all the same length
     num_responses = len(generator_output["response_ids"])
     num_prompt_tokens = len(generator_output["prompt_token_ids"])
-    assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
+
+    if not step_wise:
+        assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
+
     assert (
         num_responses == num_prompt_tokens
     ), f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
@@ -660,6 +665,84 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
             not isinstance(reward, list) for reward in rewards
         ), "rewards must be `List[float]` or `List[List[float]]`"
 
+    if step_wise:
+        _validate_step_wise_fields(generator_output, num_responses)
+
+
+def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses: int):
+    """Validate step-wise specific fields in the generator output.
+
+    Checks that is_last_step and trajectory_ids are present, correctly sized,
+    contiguously ordered, and that is_last_step boundaries align with trajectory_id changes.
+
+    The contiguity check is critical: the trainer's advantage broadcast uses
+    ``cumsum(shifted_is_last_step)`` to map each step to its trajectory, which
+    silently produces wrong results if steps from the same trajectory are interleaved
+    with steps from other trajectories.
+
+    For more, see https://docs.skyrl.ai/docs/tutorials/step-wise-training#generatoroutput-format
+    """
+    assert (
+        generator_output.get("is_last_step") is not None
+    ), "step_wise=True but `is_last_step` is missing from generator output"
+    assert (
+        generator_output.get("trajectory_ids") is not None
+    ), "step_wise=True but `trajectory_ids` is missing from generator output"
+
+    is_last_step = generator_output["is_last_step"]
+    trajectory_ids = generator_output["trajectory_ids"]
+
+    assert (
+        len(is_last_step) == num_responses
+    ), f"is_last_step length ({len(is_last_step)}) must equal response_ids length ({num_responses})"
+    assert (
+        len(trajectory_ids) == num_responses
+    ), f"trajectory_ids length ({len(trajectory_ids)}) must equal response_ids length ({num_responses})"
+
+    assert (
+        is_last_step[-1] is True
+    ), "is_last_step[-1] must be True (the last sample must be the final step of a trajectory)"
+
+    num_trajectories = sum(1 for x in is_last_step if x)
+    assert num_trajectories >= 1, "is_last_step must contain at least one True value"
+
+    # Validate contiguous ordering: all steps of the same trajectory must be adjacent.
+    seen_trajectory_ids = set()
+    prev_tid = None
+    for i, tid in enumerate(trajectory_ids):
+        tid_key = tid.to_string() if hasattr(tid, "to_string") else str(tid)
+        if tid_key != prev_tid:
+            assert tid_key not in seen_trajectory_ids, (
+                f"Non-contiguous trajectory at index {i}: trajectory '{tid_key}' appeared before "
+                f"(at earlier indices), then a different trajectory, then again here. "
+                f"Step-wise training requires all steps of the same trajectory to be adjacent."
+            )
+            if prev_tid is not None:
+                seen_trajectory_ids.add(prev_tid)
+            prev_tid = tid_key
+    if prev_tid is not None:
+        seen_trajectory_ids.add(prev_tid)
+
+    # Validate is_last_step aligns with trajectory boundaries (both directions)
+    for i in range(num_responses - 1):
+        tid_cur = trajectory_ids[i].to_string() if hasattr(trajectory_ids[i], "to_string") else str(trajectory_ids[i])
+        tid_next = (
+            trajectory_ids[i + 1].to_string()
+            if hasattr(trajectory_ids[i + 1], "to_string")
+            else str(trajectory_ids[i + 1])
+        )
+        if tid_cur != tid_next:
+            assert is_last_step[i] is True, (
+                f"Trajectory boundary at index {i} ('{tid_cur}' → '{tid_next}') "
+                f"but is_last_step[{i}] is False. Must be True at trajectory boundaries."
+            )
+        else:
+            assert is_last_step[i] is not True, (
+                f"is_last_step[{i}] is True but trajectory continues "
+                f"(trajectory '{tid_cur}' at index {i} and {i+1}). "
+                f"is_last_step must only be True at the final step of a trajectory."
+            )
+
 
 def build_dataloader(
     cfg: SkyRLTrainConfig, dataset: PromptDataset, is_train=True, is_fully_async=False
@@ -690,6 +773,10 @@ def build_dataloader(
         num_workers=0 if cfg.generator.inference_engine.enable_http_endpoint else 8,
         drop_last=True if is_train else False,
         generator=seeded_generator,
+        # NOTE (sumanthrh): We use ray and thus use `spawn` start method.
+        # forking within ray leads to undefined behaviour and often causes hard to debug
+        # memory leaks.  See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html
+        multiprocessing_context="spawn" if not cfg.generator.inference_engine.enable_http_endpoint else None,
     )
     if is_train:
         if not is_fully_async:
