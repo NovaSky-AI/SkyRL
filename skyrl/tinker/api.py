@@ -14,7 +14,14 @@ import fastapi
 import psutil
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
-from pydantic import BaseModel, Discriminator, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Discriminator,
+    Field,
+    Tag,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -348,9 +355,24 @@ class ImageAssetPointerChunk(BaseModel):
         )
 
 
+def _get_model_chunk_type(v: Any) -> str:
+    if isinstance(v, dict):
+        if "type" in v:
+            return v["type"]
+        if "tokens" in v:
+            return "encoded_text"
+        if "location" in v:
+            return "image_asset_pointer"
+        if "data" in v:
+            return "image"
+    return getattr(v, "type", "encoded_text")
+
+
 ModelInputChunk = Annotated[
-    EncodedTextChunk | ImageAssetPointerChunk | ImageChunk,
-    Discriminator("type"),
+    Annotated[EncodedTextChunk, Tag("encoded_text")]
+    | Annotated[ImageAssetPointerChunk, Tag("image_asset_pointer")]
+    | Annotated[ImageChunk, Tag("image")],
+    Discriminator(_get_model_chunk_type),
 ]
 
 

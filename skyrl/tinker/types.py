@@ -111,6 +111,28 @@ class ImageAssetPointerChunk(BaseModel):
     expected_tokens: int | None = None
 
 
+# MM TYPES
+""" Only in case we need a more involved discriminator.
+def _get_chunk_type(v: Any) -> str:
+    if isinstance(v, dict):
+        if "type" in v:
+            return v["type"]
+        if "tokens" in v:
+            return "encoded_text"
+        if "location" in v:
+            return "image_asset_pointer"
+        if "data" in v:
+            return "image"
+    return getattr(v, "type", "encoded_text")
+
+    ModelInputChunk = Annotated[
+    Annotated[EncodedTextChunk, Tag("encoded_text")]
+    | Annotated[ImageAssetPointerChunk, Tag("image_asset_pointer")]
+    | Annotated[ImageChunk, Tag("image")],
+    Discriminator(_get_chunk_type),
+]
+"""
+
 ModelInputChunk = Annotated[
     EncodedTextChunk | ImageAssetPointerChunk | ImageChunk,
     Discriminator("type"),
