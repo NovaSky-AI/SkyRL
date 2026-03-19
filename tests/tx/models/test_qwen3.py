@@ -15,7 +15,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 from skyrl.tx.layers.lora import LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
-from skyrl.tx.utils.models import get_qkv_split_sizes, pack_fused_qkv
+from skyrl.tx.utils.models import get_qkv_group_sizes, pack_fused
 from tests.tx.models.conftest import load_model
 
 
@@ -131,24 +131,28 @@ def get_fused_qkv_lora_weights(config: Qwen3Config, hf_attn) -> tuple[np.ndarray
     k_B = get_hf_lora_B(hf_attn.k_proj)
     v_B = get_hf_lora_B(hf_attn.v_proj)
 
-    q_size, k_size, v_size = get_qkv_split_sizes(config)
-    q_block = pack_fused_qkv(
-        config,
+    group_sizes = get_qkv_group_sizes(config)
+    base = config.get_config()
+    num_kv_heads = getattr(base, "num_key_value_heads", base.num_attention_heads)
+    q_size, k_size, v_size = [g * num_kv_heads for g in group_sizes]
+
+    q_block = pack_fused(
         q_B,
         np.zeros((q_B.shape[0], k_size), dtype=q_B.dtype),
         np.zeros((q_B.shape[0], v_size), dtype=q_B.dtype),
+        group_sizes=group_sizes,
     )
-    k_block = pack_fused_qkv(
-        config,
+    k_block = pack_fused(
         np.zeros((k_B.shape[0], q_size), dtype=k_B.dtype),
         k_B,
         np.zeros((k_B.shape[0], v_size), dtype=k_B.dtype),
+        group_sizes=group_sizes,
     )
-    v_block = pack_fused_qkv(
-        config,
+    v_block = pack_fused(
         np.zeros((v_B.shape[0], q_size), dtype=v_B.dtype),
         np.zeros((v_B.shape[0], k_size), dtype=v_B.dtype),
         v_B,
+        group_sizes=group_sizes,
     )
     return np.concatenate((q_A, k_A, v_A), axis=-1), np.concatenate((q_block, k_block, v_block), axis=0)
 

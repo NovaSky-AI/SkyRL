@@ -132,63 +132,43 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
     return prefix + ".".join(map(str, path))
 
 
-def get_fused_qkv_keys(path: tuple, prefix: str = "") -> tuple[str, str, str]:
-    "Get HF-compatible q_proj/k_proj/v_proj keys for a fused qkv_proj weight path."
-    q_path = (*path[:-2], "q_proj", path[-1])
-    k_path = (*path[:-2], "k_proj", path[-1])
-    v_path = (*path[:-2], "v_proj", path[-1])
-    return (
-        get_param_key(q_path, prefix=prefix),
-        get_param_key(k_path, prefix=prefix),
-        get_param_key(v_path, prefix=prefix),
-    )
+QKV_COMPONENTS = ("q_proj", "k_proj", "v_proj")
+GATE_UP_COMPONENTS = ("gate_proj", "up_proj")
 
 
-def get_qkv_split_sizes(config: ModelConfig) -> tuple[int, int, int]:
-    "Return flattened q/k/v projection output sizes."
-    base_config = config.get_config()
-    num_heads = base_config.num_attention_heads
-    num_kv_heads = getattr(base_config, "num_key_value_heads", num_heads)
-    head_dim = getattr(base_config, "head_dim", None) or base_config.hidden_size // num_heads
-    q_size = num_heads * head_dim
-    kv_size = num_kv_heads * head_dim
-    return q_size, kv_size, kv_size
+def get_fused_keys(path: tuple, components: tuple[str, ...], prefix: str = "") -> tuple[str, ...]:
+    """Get HF-compatible keys for components of a fused weight path."""
+    return tuple(get_param_key((*path[:-2], name, path[-1]), prefix=prefix) for name in components)
 
 
-def pack_fused_qkv(config: ModelConfig, q: np.ndarray, k: np.ndarray, v: np.ndarray) -> np.ndarray:
-    "Pack q/k/v weights into grouped-query order: [q..., k, v] per KV head group."
-    base_config = config.get_config()
-    num_heads = base_config.num_attention_heads
-    num_kv_heads = getattr(base_config, "num_key_value_heads", num_heads)
-    head_dim = getattr(base_config, "head_dim", None) or base_config.hidden_size // num_heads
-    q_per_kv_head = num_heads // num_kv_heads
-
-    q = q.reshape(q.shape[0], num_kv_heads, q_per_kv_head, head_dim)
-    k = k.reshape(k.shape[0], num_kv_heads, 1, head_dim)
-    v = v.reshape(v.shape[0], num_kv_heads, 1, head_dim)
-    return np.concatenate((q, k, v), axis=2).reshape(q.shape[0], -1)
+def get_qkv_group_sizes(config: ModelConfig) -> tuple[int, int, int]:
+    """Return per-KV-group sizes for (Q, K, V) projections."""
+    base = config.get_config()
+    num_heads = base.num_attention_heads
+    num_kv_heads = getattr(base, "num_key_value_heads", num_heads)
+    head_dim = getattr(base, "head_dim", None) or base.hidden_size // num_heads
+    q_per_kv = num_heads // num_kv_heads
+    return (q_per_kv * head_dim, head_dim, head_dim)
 
 
-def unpack_fused_qkv(config: ModelConfig, qkv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    "Unpack grouped-query fused qkv weights into separate q/k/v matrices."
-    base_config = config.get_config()
-    num_heads = base_config.num_attention_heads
-    num_kv_heads = getattr(base_config, "num_key_value_heads", num_heads)
-    head_dim = getattr(base_config, "head_dim", None) or base_config.hidden_size // num_heads
-    q_per_kv_head = num_heads // num_kv_heads
-
-    qkv = qkv.reshape(qkv.shape[0], num_kv_heads, q_per_kv_head + 2, head_dim)
-    q = qkv[:, :, :q_per_kv_head, :].reshape(qkv.shape[0], num_heads * head_dim)
-    k = qkv[:, :, q_per_kv_head, :].reshape(qkv.shape[0], num_kv_heads * head_dim)
-    v = qkv[:, :, q_per_kv_head + 1, :].reshape(qkv.shape[0], num_kv_heads * head_dim)
-    return q, k, v
+def pack_fused(*arrays: np.ndarray, group_sizes: tuple[int, ...]) -> np.ndarray:
+    """Pack weight arrays by interleaving groups."""
+    in_features = arrays[0].shape[0]
+    num_groups = arrays[0].shape[-1] // group_sizes[0]
+    reshaped = [arr.reshape(in_features, num_groups, g) for arr, g in zip(arrays, group_sizes)]
+    return np.concatenate(reshaped, axis=2).reshape(in_features, -1)
 
 
-def get_fused_gate_up_keys(path: tuple, prefix: str = "") -> tuple[str, str]:
-    "Get HF-compatible gate_proj/up_proj keys for a fused gate_up_proj weight path."
-    gate_path = (*path[:-2], "gate_proj", path[-1])
-    up_path = (*path[:-2], "up_proj", path[-1])
-    return get_param_key(gate_path, prefix=prefix), get_param_key(up_path, prefix=prefix)
+def unpack_fused(array: np.ndarray, group_sizes: tuple[int, ...]) -> tuple[np.ndarray, ...]:
+    """Unpack a fused tensor by de-interleaving groups."""
+    in_features = array.shape[0]
+    num_groups = array.shape[-1] // sum(group_sizes)
+    reshaped = array.reshape(in_features, num_groups, sum(group_sizes))
+    results, offset = [], 0
+    for g in group_sizes:
+        results.append(reshaped[:, :, offset : offset + g].reshape(in_features, -1))
+        offset += g
+    return tuple(results)
 
 
 def get_shared_lora_A(
@@ -261,31 +241,28 @@ def load_safetensors(
             if missing_keys:
                 raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
             tensor = np.stack([tensors[expert_key].T for expert_key in expert_keys], axis=0)
-        else:
-            if path[-2] == "qkv_proj":
-                q_key, k_key, v_key = get_fused_qkv_keys(path)
-                if path[-1] == "lora_A":
-                    tensor = get_shared_lora_A(tensors, (q_key, k_key, v_key), checkpoint_dir)
-                else:
-                    missing_keys = [fused_key for fused_key in (q_key, k_key, v_key) if fused_key not in tensors]
-                    if missing_keys:
-                        raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-                    tensor = pack_fused_qkv(config, tensors[q_key].T, tensors[k_key].T, tensors[v_key].T)
-            elif path[-2] == "gate_up_proj":
-                gate_key, up_key = get_fused_gate_up_keys(path)
-                if path[-1] == "lora_A":
-                    tensor = get_shared_lora_A(tensors, (gate_key, up_key), checkpoint_dir)
-                else:
-                    missing_keys = [fused_key for fused_key in (gate_key, up_key) if fused_key not in tensors]
-                    if missing_keys:
-                        raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-                    gate = tensors[gate_key].T
-                    up = tensors[up_key].T
-                    tensor = np.stack((gate, up), axis=-1).reshape(gate.shape[0], -1)
-            elif key not in tensors:
-                raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
+        elif path[-2] == "qkv_proj":
+            keys = get_fused_keys(path, QKV_COMPONENTS)
+            if path[-1] == "lora_A":
+                tensor = get_shared_lora_A(tensors, keys, checkpoint_dir)
             else:
-                tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
+                missing_keys = [k for k in keys if k not in tensors]
+                if missing_keys:
+                    raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+                tensor = pack_fused(*[tensors[k].T for k in keys], group_sizes=get_qkv_group_sizes(config))
+        elif path[-2] == "gate_up_proj":
+            keys = get_fused_keys(path, GATE_UP_COMPONENTS)
+            if path[-1] == "lora_A":
+                tensor = get_shared_lora_A(tensors, keys, checkpoint_dir)
+            else:
+                missing_keys = [k for k in keys if k not in tensors]
+                if missing_keys:
+                    raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+                tensor = pack_fused(*[tensors[k].T for k in keys], group_sizes=(1, 1))
+        elif key not in tensors:
+            raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
+        else:
+            tensor = tensors[key] if "embed_tokens" in key else tensors[key].T
         adapter_idx = get_adapter_slice(path, adapter_index, rank)
         if adapter_idx is not None:
             # Load into specific adapter slot via ArrayRef write-through
@@ -337,28 +314,22 @@ def save_safetensors(
         elif "o_proj" in path:
             param = param.reshape(-1, param.shape[-1])
         elif "qkv_proj" in path:
-            q_key, k_key, v_key = get_fused_qkv_keys(path, prefix=prefix)
+            keys = get_fused_keys(path, QKV_COMPONENTS, prefix=prefix)
             if path[-1] == "lora_A":
-                tensors[q_key] = param.T
-                tensors[k_key] = param.T
-                tensors[v_key] = param.T
+                for k in keys:
+                    tensors[k] = param.T
             else:
-                q_param, k_param, v_param = unpack_fused_qkv(config, param)
-                tensors[q_key] = q_param.T
-                tensors[k_key] = k_param.T
-                tensors[v_key] = v_param.T
+                for k, p in zip(keys, unpack_fused(param, group_sizes=get_qkv_group_sizes(config))):
+                    tensors[k] = p.T
             continue
         elif "gate_up_proj" in path:
-            gate_key, up_key = get_fused_gate_up_keys(path, prefix=prefix)
+            keys = get_fused_keys(path, GATE_UP_COMPONENTS, prefix=prefix)
             if path[-1] == "lora_A":
-                tensors[gate_key] = param.T
-                tensors[up_key] = param.T
+                for k in keys:
+                    tensors[k] = param.T
             else:
-                gate_up = param.reshape(param.shape[0], -1, 2)
-                gate_param = gate_up[..., 0]
-                up_param = gate_up[..., 1]
-                tensors[gate_key] = gate_param.T
-                tensors[up_key] = up_param.T
+                for k, p in zip(keys, unpack_fused(param, group_sizes=(1, 1))):
+                    tensors[k] = p.T
             continue
         tensors[key] = param if "embed_tokens" in path else param.T
 
