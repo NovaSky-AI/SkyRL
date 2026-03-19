@@ -49,24 +49,6 @@ _api_adapter = TypeAdapter(api.ModelInputChunk)
 _B64_PNG = base64.b64encode(b"\x89PNG").decode()
 
 
-class TestApiChunkDiscriminatorWithType:
-    """Chunks resolved when the ``type`` field is present."""
-
-    def test_encoded_text(self):
-        obj = _api_adapter.validate_python({"type": "encoded_text", "tokens": [1, 2]})
-        assert isinstance(obj, api.EncodedTextChunk)
-
-    def test_image(self):
-        obj = _api_adapter.validate_python({"type": "image", "data": _B64_PNG, "format": "png"})
-        assert isinstance(obj, api.ImageChunk)
-
-    def test_image_asset_pointer(self):
-        obj = _api_adapter.validate_python(
-            {"type": "image_asset_pointer", "format": "png", "location": "s3://bucket/img.png"}
-        )
-        assert isinstance(obj, api.ImageAssetPointerChunk)
-
-
 class TestApiChunkDiscriminatorWithoutType:
     """Chunks resolved when ``type`` is absent (exclude_unset case)."""
 

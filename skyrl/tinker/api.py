@@ -313,7 +313,7 @@ class EncodedTextChunk(BaseModel):
 
 class ImageChunk(BaseModel):
     type: Literal["image"] = "image"
-    data: str  # base64-encoded on the wire
+    data: str  # base64-encoded
     format: Literal["png", "jpeg"]
     expected_tokens: int | None = None
 
