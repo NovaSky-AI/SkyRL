@@ -49,8 +49,6 @@ from skyrl.backends.skyrl_train.workers.worker import (
 )
 from skyrl.train.utils.utils import str_to_torch_dtype
 
-_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
-
 if TYPE_CHECKING:
     from skyrl.train.config.config import InferenceEngineConfig
 
@@ -257,7 +255,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             )
 
             if isinstance(inference_engine_client, RemoteInferenceClient):
-                await inference_engine_client.load_lora_adapter(lora_sync_path, lora_name=_SKYRL_LORA_ADAPTER_NAME)
+                await inference_engine_client.load_lora_adapter(lora_sync_path)
             else:
                 lora_request = LoraLoadRequest(lora_path=lora_sync_path)
                 await inference_engine_client.update_named_weights(lora_request)

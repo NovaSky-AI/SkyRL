@@ -517,6 +517,8 @@ class InferenceEngineState:
             cli_args = build_vllm_cli_args(cfg)
             if enable_lora:
                 cli_args.enable_lora = True
+                if active_lora_name is None:
+                    active_lora_name = "skyrl-lora"
             server_group = ServerGroup(
                 cli_args=cli_args,
                 num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,

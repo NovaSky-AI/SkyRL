@@ -632,26 +632,27 @@ class RemoteInferenceClient:
     async def load_lora_adapter(
         self,
         lora_path: str,
-        lora_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Load a LoRA adapter from disk on all backend servers via /v1/load_lora_adapter.
+
+        Always loads under self.active_lora_name so the same slot is reused across
+        weight syncs (vLLM is configured with max_loras=1; loading under a different
+        name each time would leak adapters).
 
         After loading, generation requests will automatically use the LoRA adapter
         by setting the model name to the LoRA adapter name.
 
         Args:
             lora_path: Path to the LoRA adapter on disk (must be accessible from servers).
-            lora_name: Name for the LoRA adapter. If None, a unique name is generated.
 
         Returns:
             Dict mapping server_url to response.
         """
-        import time
+        if self.active_lora_name is None:
+            raise ValueError("active_lora_name must be set on RemoteInferenceClient before loading a LoRA adapter.")
 
-        if lora_name is None:
-            lora_name = f"skyrl-lora-{int(time.time_ns() % 0x7FFFFFFF)}"
-
+        lora_name = self.active_lora_name
         payload = {
             "lora_name": lora_name,
             "lora_path": lora_path,
@@ -677,8 +678,6 @@ class RemoteInferenceClient:
 
         results = await asyncio.gather(*[_load_on_server(url) for url in self.server_urls])
 
-        # Track the active LoRA name so generate() can use it
-        self.active_lora_name = lora_name
         logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
 
         return {url: resp for url, resp in results}
