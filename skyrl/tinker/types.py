@@ -120,18 +120,6 @@ ModelInputChunk = Annotated[
 class ModelInput(BaseModel):
     chunks: list[ModelInputChunk]
 
-    def to_token_list(self) -> list[int]:
-        """Concatenate text tokens from all EncodedTextChunk entries.
-
-        Non-text chunks (images, etc.) are skipped — multi-modal inputs
-        are passed to backends via the full ModelInput.chunks list.
-        """
-        tokens = []
-        for chunk in self.chunks:
-            if isinstance(chunk, EncodedTextChunk):
-                tokens.extend(chunk.tokens)
-        return tokens
-
 
 class TensorData(BaseModel):
     data: list[int] | list[float]

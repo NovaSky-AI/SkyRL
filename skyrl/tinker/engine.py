@@ -26,6 +26,19 @@ from skyrl.tinker.db_models import (
 from skyrl.utils.log import logger
 
 
+def input_to_text_tokens(model_input: types.ModelInput) -> list[int]:
+    """Concatenate text tokens from all EncodedTextChunk entries.
+
+    Non-text chunks (images, etc.) are skipped — multi-modal inputs
+    are passed to backends via the full ModelInput.chunks list.
+    """
+    tokens = []
+    for chunk in model_input.chunks:
+        if isinstance(chunk, types.EncodedTextChunk):
+            tokens.extend(chunk.tokens)
+    return tokens
+
+
 def _model_not_found_error(model_id: str) -> types.ErrorResponse:
     """Log and return an ErrorResponse for a request targeting a model that isn't loaded."""
     logger.info(
@@ -68,7 +81,7 @@ def prepare_sample_batch(
         request_start = len(all_prompts)
 
         # Expand requests for num_samples
-        prompt_tokens = request_data.prompt.to_token_list()
+        prompt_tokens = input_to_text_tokens(request_data.prompt)
         checkpoint_path = ""
         if model_id and request_data.checkpoint_id and checkpoints_base:
             checkpoint_path = str(
@@ -135,7 +148,7 @@ def prepare_model_pass_batch(
             )
         request_start = len(all_input_ids)
         for item in request_data.data:
-            tokens = item.model_input.to_token_list()
+            tokens = input_to_text_tokens(item.model_input)
             all_input_ids.append(tokens)
             all_prompt_inputs.append(item.model_input)
             loss_fn_inputs = item.loss_fn_inputs

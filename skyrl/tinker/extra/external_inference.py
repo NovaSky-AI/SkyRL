@@ -9,6 +9,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, RequestStatus
+from skyrl.tinker.engine import input_to_text_tokens
 from skyrl.utils.log import logger
 from skyrl.utils.storage import download_and_unpack
 
@@ -91,7 +92,7 @@ class ExternalInferenceClient:
 
         For base model sampling (no LoRA), the request is sent directly using the base model name.
         """
-        prompt_tokens = request.prompt.to_types().to_token_list()
+        prompt_tokens = input_to_text_tokens(request.prompt.to_types())
 
         if base_model:
             # Base model sampling: use the model name directly, no LoRA checkpoint needed
