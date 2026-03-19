@@ -52,11 +52,11 @@ There are roughly three ways to integrate an agent, each with different trade-of
 For each trajectory, record a `chat_history: List[Dict[str, str]]`, re-tokenize it with the chat template, and construct `loss_mask` based on roles. You can use the helper method [`get_response_ids_and_loss_mask_from_messages()`](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/generators/utils.py) to construct `prompt_token_ids`, `response_ids`, and `loss_masks`.
 
 **Pros:**
-- Simplest approach — works almost out of the box for most agent harnesses. Despite re-tokenization drift, open-source recipes like DeepSWE were trained this way.
+- Simplest approach — works almost out of the box for most agent harnesses. Despite re-tokenization drift, some successful open-source recipes were trained this way.
 
 **Cons:**
 - **Re-tokenization drift** — what the model actually generated may not match what you end up tokenizing (and hence training on). This means:
-  - You cannot do rollout correction like TIS reliably, so you cannot do fully async training with proper algorithmic correction (you can still do it, just without the correction).
+  - You cannot do rollout correction like TIS reliably, so you cannot do fully async training with proper staleness correction.
   - The chat history must be strictly appending (no context management like summarization).
 
 ### 2. Make the agent harness Token-In-Token-Out

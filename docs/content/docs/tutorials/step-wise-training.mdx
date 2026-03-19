@@ -2,7 +2,7 @@
 title: "Step-Wise Training"
 ---
 
-As described in [Agent Integration](agent-integration), there are multiple ways to integrate a custom agent with SkyRL. The simplest — re-tokenization — works out of the box for many agent harnesses and has been used successfully in open-source recipes like DeepSWE.
+As described in [Agent Integration](agent-integration), there are multiple ways to integrate a custom agent with SkyRL. The simplest — re-tokenization — works out of the box for many agent harnesses and has been used successfully in open-source recipes.
 
 However, re-tokenization has two fundamental limitations:
 
@@ -150,7 +150,7 @@ response = await litellm.acompletion(
         "logprobs": True,
     },
 )
-# Access: response.choices[0].token_ids, response.choices[0].prompt_token_ids, response.cohices[0].logprobs
+# Access: response.choices[0].token_ids, response.choices[0].prompt_token_ids, response.choices[0].logprobs
 ```
 
 ### 2. Set Loss Masks
