@@ -277,7 +277,7 @@ class RemoteInferenceClient:
         session_id: Optional[Any],
     ) -> Dict[str, Any]:
         """
-        Generate completion for a single prompt. Does not detokenize.
+        Generate completion for a single prompt.
 
         With keep-mode pause, in-flight requests are frozen by the vLLM
         scheduler and resume where they left off after /resume. No retry
@@ -637,8 +637,7 @@ class RemoteInferenceClient:
         Load a LoRA adapter from disk on all backend servers via /v1/load_lora_adapter.
 
         Always loads under self.active_lora_name so the same slot is reused across
-        weight syncs (vLLM is configured with max_loras=1; loading under a different
-        name each time would leak adapters).
+        weight syncs.
 
         After loading, generation requests will automatically use the LoRA adapter
         by setting the model name to the LoRA adapter name.
