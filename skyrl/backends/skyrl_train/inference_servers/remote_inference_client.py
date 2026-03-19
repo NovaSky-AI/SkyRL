@@ -124,10 +124,12 @@ class RemoteInferenceClient:
     model_name: str = "default"
     """Model name for OpenAI-compatible API calls."""
 
+    active_lora_name: Optional[str] = None
+    """Name of the active LoRA adapter. If set, generation requests use this adapter instead of the base model."""
+
     # Private fields excluded from repr for cleaner output
     _session: Optional[aiohttp.ClientSession] = field(default=None, repr=False)
     _world_size: Optional[Tuple[int, int]] = field(default=None, repr=False)
-    _active_lora_name: Optional[str] = field(default=None, repr=False)
 
     # ---------------------------
     # Session Management
@@ -287,7 +289,7 @@ class RemoteInferenceClient:
         url = f"{self.proxy_url}/inference/v1/generate"
 
         # Use LoRA adapter name if one is active, otherwise use base model name
-        effective_model = self._active_lora_name if self._active_lora_name else self.model_name
+        effective_model = self.active_lora_name if self.active_lora_name else self.model_name
 
         payload = {
             "sampling_params": sampling_params,
@@ -676,7 +678,7 @@ class RemoteInferenceClient:
         results = await asyncio.gather(*[_load_on_server(url) for url in self.server_urls])
 
         # Track the active LoRA name so generate() can use it
-        self._active_lora_name = lora_name
+        self.active_lora_name = lora_name
         logger.info(f"Loaded LoRA adapter '{lora_name}' from {lora_path}")
 
         return {url: resp for url, resp in results}
