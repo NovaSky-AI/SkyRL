@@ -693,7 +693,7 @@ def build_dataloader(
         # NOTE (sumanthrh): We use ray and thus use `spawn` start method.
         # forking within ray leads to undefined behaviour and often causes hard to debug
         # memory leaks.  See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html
-        multiprocessing_context="spawn",
+        multiprocessing_context="spawn" if not cfg.generator.inference_engine.enable_http_endpoint else None,
     )
     if is_train:
         if not is_fully_async:
