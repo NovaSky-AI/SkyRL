@@ -28,7 +28,7 @@ uv run --isolated --extra fsdp -m skyrl.train.entrypoints.main_base \
   generator.inference_engine.tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
-  trainer.eval_before_train=false \
+  trainer.eval_before_train=true \
   trainer.eval_interval=5 \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=256 \

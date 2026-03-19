@@ -5,6 +5,8 @@
     "one_step_off_async",
     "fully_async",
     "tools_guide",
-    "skyrl_gym_generator"
+    "skyrl_gym_generator",
+    "agent-integration",
+    "step-wise-training"
   ]
 }
