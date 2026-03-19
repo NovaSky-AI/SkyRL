@@ -47,6 +47,8 @@ class GeneratorConfig(BaseConfig):
 
 ## GeneratorOutput Format
 
+Normally, each element in `GeneratorOutput` (i.e. `response_ids[i]`, `prompt_token_ids[i]`, `rewards[i]`, etc.) represents a single trajectory. With step-wise training, each element instead represents a single **step** (one LLM turn within a trajectory). A trajectory with 3 turns produces 3 elements rather than 1.
+
 The `GeneratorOutput` TypedDict is defined in [skyrl/train/generators/base.py](https://github.com/NovaSky-AI/SkyRL/blob/main/skyrl/train/generators/base.py):
 
 ```python
