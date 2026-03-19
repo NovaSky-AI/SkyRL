@@ -147,7 +147,7 @@ if [ "$ON_GCP" = true ]; then
   else
     echo "No RDMA devices — disabling gIB"
     # Remove gIB from LD_LIBRARY_PATH (set by /etc/profile.d/nccl_env.sh)
-    export LD_LIBRARY_PATH=$(echo "$LD_LIBRARY_PATH" | sed 's|/usr/local/gib/lib64:||g; s|:/usr/local/gib/lib64||g; s|/usr/local/gib/lib64||g')
+    export LD_LIBRARY_PATH=$(echo "${LD_LIBRARY_PATH:-}" | sed 's|/usr/local/gib/lib64:||g; s|:/usr/local/gib/lib64||g; s|/usr/local/gib/lib64||g')
     # Unset NCCL_NET=gIB so NCCL can fall back to NVLink P2P
     unset NCCL_NET
     # Clear gIB-specific vars set by set_nccl_env.sh
@@ -215,7 +215,9 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
 
   TOTAL_GPUS=$((SKYPILOT_NUM_GPUS_PER_NODE * ${SKYPILOT_NUM_NODES:-1}))
   export TOTAL_GPUS
-  echo "=== Head node: $TOTAL_GPUS GPUs across ${SKYPILOT_NUM_NODES:-1} node(s) ==="
+  # NUM_INFERENCE_ENGINES can be overridden via env var for TP>1 (engines = GPUs / TP)
+  NUM_INFERENCE_ENGINES=${NUM_INFERENCE_ENGINES:-$TOTAL_GPUS}
+  echo "=== Head node: $TOTAL_GPUS GPUs across ${SKYPILOT_NUM_NODES:-1} node(s), $NUM_INFERENCE_ENGINES inference engines ==="
 
   # Build training command
   CMD_ARGS=()
@@ -237,7 +239,7 @@ if [ "${SKYPILOT_NODE_RANK:-0}" = "0" ]; then
     "trainer.placement.ref_num_gpus_per_node=$SKYPILOT_NUM_GPUS_PER_NODE"
     "trainer.placement.policy_num_nodes=${SKYPILOT_NUM_NODES:-1}"
     "trainer.placement.ref_num_nodes=${SKYPILOT_NUM_NODES:-1}"
-    "generator.num_inference_engines=$TOTAL_GPUS"
+    "generator.num_inference_engines=$NUM_INFERENCE_ENGINES"
     "trainer.ckpt_path=${CKPT_ROOT}/ckpts"
     "trainer.export_path=${CKPT_ROOT}/exports"
   )

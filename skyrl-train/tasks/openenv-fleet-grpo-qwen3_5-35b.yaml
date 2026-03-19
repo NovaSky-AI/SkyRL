@@ -72,6 +72,8 @@ envs:
   S3_DATASET_BUCKET: "fleet-internal-datasets"
   S3_CHECKPOINT_BUCKET: "skyrl-checkpoints"
   S3_TRAJECTORY_BUCKET: "skyrl-trajectories"
+  # TP=2 → 8 engines (each uses 2 GPUs) to match 16 policy GPUs with colocate_all
+  NUM_INFERENCE_ENGINES: 8
 
 setup: |
   bash skyrl-train/scripts/fleet-common-setup.sh \
