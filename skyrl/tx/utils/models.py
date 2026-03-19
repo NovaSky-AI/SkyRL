@@ -191,6 +191,28 @@ def get_fused_gate_up_keys(path: tuple, prefix: str = "") -> tuple[str, str]:
     return get_param_key(gate_path, prefix=prefix), get_param_key(up_path, prefix=prefix)
 
 
+def get_shared_lora_A(
+    tensors: dict[str, np.ndarray], keys: tuple[str, ...], checkpoint_dir: str | os.PathLike
+) -> np.ndarray:
+    """Return a shared LoRA A matrix for fused projections.
+
+    Fused LoRA layers can only be represented as separate HF modules when all split
+    branches share the same A matrix. Checkpoints saved by SkyRL satisfy this by
+    construction; arbitrary external adapters may not.
+    """
+    missing_keys = [key for key in keys if key not in tensors]
+    if missing_keys:
+        raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+    arrays = [tensors[key].T for key in keys]
+    first = arrays[0]
+    if not all(np.allclose(first, arr) for arr in arrays[1:]):
+        raise RuntimeError(
+            "Cannot load split LoRA adapter into fused projection because the source "
+            "branches do not share the same lora_A matrix."
+        )
+    return first
+
+
 def get_expert_key(path: tuple, expert_idx: int) -> str:
     "Get the safetensors key for an expert weight model path."
     path = tuple(s if s != "experts" else f"experts.{expert_idx}" for s in path)
@@ -242,18 +264,24 @@ def load_safetensors(
         else:
             if path[-2] == "qkv_proj":
                 q_key, k_key, v_key = get_fused_qkv_keys(path)
-                missing_keys = [fused_key for fused_key in (q_key, k_key, v_key) if fused_key not in tensors]
-                if missing_keys:
-                    raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-                tensor = pack_fused_qkv(config, tensors[q_key].T, tensors[k_key].T, tensors[v_key].T)
+                if path[-1] == "lora_A":
+                    tensor = get_shared_lora_A(tensors, (q_key, k_key, v_key), checkpoint_dir)
+                else:
+                    missing_keys = [fused_key for fused_key in (q_key, k_key, v_key) if fused_key not in tensors]
+                    if missing_keys:
+                        raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+                    tensor = pack_fused_qkv(config, tensors[q_key].T, tensors[k_key].T, tensors[v_key].T)
             elif path[-2] == "gate_up_proj":
                 gate_key, up_key = get_fused_gate_up_keys(path)
-                missing_keys = [fused_key for fused_key in (gate_key, up_key) if fused_key not in tensors]
-                if missing_keys:
-                    raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-                gate = tensors[gate_key].T
-                up = tensors[up_key].T
-                tensor = np.stack((gate, up), axis=-1).reshape(gate.shape[0], -1)
+                if path[-1] == "lora_A":
+                    tensor = get_shared_lora_A(tensors, (gate_key, up_key), checkpoint_dir)
+                else:
+                    missing_keys = [fused_key for fused_key in (gate_key, up_key) if fused_key not in tensors]
+                    if missing_keys:
+                        raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
+                    gate = tensors[gate_key].T
+                    up = tensors[up_key].T
+                    tensor = np.stack((gate, up), axis=-1).reshape(gate.shape[0], -1)
             elif key not in tensors:
                 raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
             else:
@@ -310,18 +338,27 @@ def save_safetensors(
             param = param.reshape(-1, param.shape[-1])
         elif "qkv_proj" in path:
             q_key, k_key, v_key = get_fused_qkv_keys(path, prefix=prefix)
-            q_param, k_param, v_param = unpack_fused_qkv(config, param)
-            tensors[q_key] = q_param.T
-            tensors[k_key] = k_param.T
-            tensors[v_key] = v_param.T
+            if path[-1] == "lora_A":
+                tensors[q_key] = param.T
+                tensors[k_key] = param.T
+                tensors[v_key] = param.T
+            else:
+                q_param, k_param, v_param = unpack_fused_qkv(config, param)
+                tensors[q_key] = q_param.T
+                tensors[k_key] = k_param.T
+                tensors[v_key] = v_param.T
             continue
         elif "gate_up_proj" in path:
             gate_key, up_key = get_fused_gate_up_keys(path, prefix=prefix)
-            gate_up = param.reshape(param.shape[0], -1, 2)
-            gate_param = gate_up[..., 0]
-            up_param = gate_up[..., 1]
-            tensors[gate_key] = gate_param.T
-            tensors[up_key] = up_param.T
+            if path[-1] == "lora_A":
+                tensors[gate_key] = param.T
+                tensors[up_key] = param.T
+            else:
+                gate_up = param.reshape(param.shape[0], -1, 2)
+                gate_param = gate_up[..., 0]
+                up_param = gate_up[..., 1]
+                tensors[gate_key] = gate_param.T
+                tensors[up_key] = up_param.T
             continue
         tensors[key] = param if "embed_tokens" in path else param.T
 
