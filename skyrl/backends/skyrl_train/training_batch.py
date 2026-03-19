@@ -413,8 +413,9 @@ class TensorBatch(dict, Generic[DictType]):
         if set(self.keys()) != set(other.keys()):
             return False
         for k, v in self.items():
-            if isinstance(v, torch.Tensor) and isinstance(other[k], torch.Tensor) and not torch.equal(v, other[k]):
-                return False
+            if isinstance(v, torch.Tensor) and isinstance(other[k], torch.Tensor):
+                if not torch.equal(v, other[k]):
+                    return False
             elif v != other[k]:
                 return False
         return True
