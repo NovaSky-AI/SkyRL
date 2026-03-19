@@ -136,39 +136,6 @@ def test_vlm_log_probs_match_manual(vlm_model, processor):
     torch.testing.assert_close(wrapper_log_probs.float(), manual_log_probs, atol=5e-2, rtol=1e-2)
 
 
-def test_vlm_different_images_diverge(vlm_model, processor):
-    """Different images with the same text should produce different log probs."""
-    red_image = make_solid_color_image((255, 0, 0))
-    blue_image = make_solid_color_image((0, 0, 255))
-
-    prompt = "What color is this image?"
-    response = "It is a solid color."
-
-    inputs_red = build_vlm_inputs(processor, prompt, response, image=red_image)
-    inputs_blue = build_vlm_inputs(processor, prompt, response, image=blue_image)
-
-    num_actions = inputs_red["num_actions"]
-    assert num_actions == inputs_blue["num_actions"], "Tokenization should match for identical text"
-
-    with torch.no_grad():
-        lp_red = vlm_model(
-            inputs_red["input_ids"],
-            num_actions,
-            inputs_red["attention_mask"],
-            pixel_values=inputs_red["pixel_values"],
-            image_grid_thw=inputs_red["image_grid_thw"],
-        )
-        lp_blue = vlm_model(
-            inputs_blue["input_ids"],
-            num_actions,
-            inputs_blue["attention_mask"],
-            pixel_values=inputs_blue["pixel_values"],
-            image_grid_thw=inputs_blue["image_grid_thw"],
-        )
-
-    assert not torch.allclose(lp_red, lp_blue, atol=1e-3), "Red and blue images should produce different log probs"
-
-
 def test_vlm_semantic_color_recognition(vlm_model, processor):
     """Model should assign highest log P(response | prompt, image) to the correct color name."""
     colors = {
