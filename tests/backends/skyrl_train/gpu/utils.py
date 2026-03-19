@@ -395,6 +395,7 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
             prompts,
             add_generation_prompt=True,
             tokenize=True,
+            return_dict=False,
         )
         engine_input = InferenceEngineInput(prompt_token_ids=prompt_token_ids, sampling_params=sampling_params)
     return await client.generate(engine_input)

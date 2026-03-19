@@ -225,7 +225,9 @@ def test_continue_generation_generate_vllm_engine_generation(ray_init_fixture):
         # 2. Prepare a single ConversationType prompt; each generate() call will be single-request
         messages: List[ConversationType] = get_test_prompts(MODEL, num_samples=1)[0]
         # Convert to prompt_token_ids to work with both InferenceEngineClient and RemoteInferenceClient
-        prompt_token_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        prompt_token_ids = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_dict=False, tokenize=True
+        )
 
         # 3. Fire 6 concurrent client.generate() single-request calls, then pause/resume mid-flight
         async def run_requests_then_pause():
