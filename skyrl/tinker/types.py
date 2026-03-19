@@ -121,15 +121,15 @@ class ModelInput(BaseModel):
     chunks: list[ModelInputChunk]
 
     def to_token_list(self) -> list[int]:
-        """Extract tokens, raising ValueError for non-text chunks."""
+        """Concatenate text tokens from all EncodedTextChunk entries.
+
+        Non-text chunks (images, etc.) are skipped — multi-modal inputs
+        are passed to backends via the full ModelInput.chunks list.
+        """
         tokens = []
         for chunk in self.chunks:
-            if not isinstance(chunk, EncodedTextChunk):
-                # Multi-modal input processing is backend-specific (e.g. VLLM has its
-                # own renderer vs. the JAX backend). This method exists for compatibility
-                # with backend methods that only accept a flat token list.
-                raise ValueError(f"to_token_list() requires EncodedTextChunk, got {type(chunk).__name__}")
-            tokens.extend(chunk.tokens)
+            if isinstance(chunk, EncodedTextChunk):
+                tokens.extend(chunk.tokens)
         return tokens
 
 
