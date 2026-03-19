@@ -18,7 +18,7 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM,
-    AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
     BitsAndBytesConfig,
 )
 
@@ -113,15 +113,14 @@ class HFModelWrapper(nn.Module):
 
             model_config = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True, **model_config_kwargs)
 
-            # Fall back to AutoModelForVision2Seq for VLMs (e.g. Qwen3-VL)
-            # whose config type has no AutoModelForCausalLM mapping.
-            if not use_liger_kernel and type(model_config) not in AutoModelForCausalLM._model_mapping:
+            self.is_vlm = hasattr(model_config, "vision_config") and getattr(model_config, "vision_config") is not None
+            if self.is_vlm:
                 logger.info(
-                    f"[VLM] Config {type(model_config).__name__} not in AutoModelForCausalLM mapping, "
-                    "falling back to AutoModelForVision2Seq"
+                    f"[VLM] Config {type(model_config).__name__} has a vision config, "
+                    "using AutoModelForImageTextToText"
                 )
-                model_class = AutoModelForVision2Seq
-                self.is_vlm = True
+                # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
+                model_class = AutoModelForImageTextToText
 
             rope_scaling_kwargs = {}
             if rope_scaling:
