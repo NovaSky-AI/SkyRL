@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 import torch
 from flax import nnx
+from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, PretrainedConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeSparseMoeBlock as HFQwen3MoeSparseMoeBlock,
@@ -14,6 +15,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 from skyrl.tx.layers.lora import LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
+from skyrl.tx.utils.models import get_qkv_split_sizes, pack_fused_qkv
 from tests.tx.models.conftest import load_model
 
 
@@ -49,8 +51,7 @@ def test_qwen3(tp: int):
     assert outputs.hidden_states is not None
     assert np.allclose(hf_outputs.hidden_states[0], outputs.hidden_states[0], rtol=1e-6)
     assert np.allclose(hf_outputs.hidden_states[1], outputs.hidden_states[1], rtol=1e-3, atol=1e-3)
-    # The final hidden state accumulates modest framework drift beyond the first layer.
-    assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=5e-3, atol=7e-2)
+    assert np.allclose(hf_outputs.hidden_states[-1], outputs.hidden_states[-1], rtol=1e-3, atol=1e-3)
 
 
 def load_moe_base_weights(jax_moe_layer: Qwen3MoeSparseMoeBlock, hf_moe_layer: HFQwen3MoeSparseMoeBlock) -> None:
@@ -100,15 +101,78 @@ def load_lora_weights(
         and jax_module.lora_scaling is not None
         and jax_module.lora_ranks is not None
     )
-    jax_module.lora_A[...] = jax_module.lora_A[...].at[adapter_idx].set(jnp.array(lora_A_weights))
-    jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(lora_B_weights))
+    padded_lora_A = np.zeros(jax_module.lora_A[...].shape[1:], dtype=lora_A_weights.dtype)
+    padded_lora_B = np.zeros(jax_module.lora_B[...].shape[1:], dtype=lora_B_weights.dtype)
+    padded_lora_A[..., : lora_A_weights.shape[-1]] = lora_A_weights
+    rank_axis = padded_lora_B.ndim - 2
+    rank_slice = [slice(None)] * padded_lora_B.ndim
+    rank_slice[rank_axis] = slice(0, lora_B_weights.shape[-2])
+    padded_lora_B[tuple(rank_slice)] = lora_B_weights
+
+    jax_module.lora_A[...] = jax_module.lora_A[...].at[adapter_idx].set(jnp.array(padded_lora_A))
+    jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(padded_lora_B))
     jax_module.lora_scaling[...] = jax_module.lora_scaling[...].at[adapter_idx].set(scaling)
     jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
 
 
+def get_hf_lora_A(hf_module) -> np.ndarray:
+    return hf_module.lora_A["default"].weight.detach().numpy().T
+
+
+def get_hf_lora_B(hf_module) -> np.ndarray:
+    return hf_module.lora_B["default"].weight.detach().numpy().T
+
+
+def get_fused_qkv_lora_weights(config: Qwen3Config, hf_attn) -> tuple[np.ndarray, np.ndarray]:
+    q_A = get_hf_lora_A(hf_attn.q_proj)
+    k_A = get_hf_lora_A(hf_attn.k_proj)
+    v_A = get_hf_lora_A(hf_attn.v_proj)
+    q_B = get_hf_lora_B(hf_attn.q_proj)
+    k_B = get_hf_lora_B(hf_attn.k_proj)
+    v_B = get_hf_lora_B(hf_attn.v_proj)
+
+    q_size, k_size, v_size = get_qkv_split_sizes(config)
+    q_block = pack_fused_qkv(
+        config,
+        q_B,
+        np.zeros((q_B.shape[0], k_size), dtype=q_B.dtype),
+        np.zeros((q_B.shape[0], v_size), dtype=q_B.dtype),
+    )
+    k_block = pack_fused_qkv(
+        config,
+        np.zeros((k_B.shape[0], q_size), dtype=k_B.dtype),
+        k_B,
+        np.zeros((k_B.shape[0], v_size), dtype=k_B.dtype),
+    )
+    v_block = pack_fused_qkv(
+        config,
+        np.zeros((v_B.shape[0], q_size), dtype=v_B.dtype),
+        np.zeros((v_B.shape[0], k_size), dtype=v_B.dtype),
+        v_B,
+    )
+    return np.concatenate((q_A, k_A, v_A), axis=-1), np.concatenate((q_block, k_block, v_block), axis=0)
+
+
+def get_fused_gate_up_lora_weights(hf_mlp) -> tuple[np.ndarray, np.ndarray]:
+    gate_A = get_hf_lora_A(hf_mlp.gate_proj)
+    up_A = get_hf_lora_A(hf_mlp.up_proj)
+    gate_B = get_hf_lora_B(hf_mlp.gate_proj)
+    up_B = get_hf_lora_B(hf_mlp.up_proj)
+
+    gate_block = np.stack(
+        (gate_B, np.zeros((gate_B.shape[0], up_B.shape[1]), dtype=gate_B.dtype)),
+        axis=-1,
+    ).reshape(gate_B.shape[0], -1)
+    up_block = np.stack(
+        (np.zeros((up_B.shape[0], gate_B.shape[1]), dtype=up_B.dtype), up_B),
+        axis=-1,
+    ).reshape(up_B.shape[0], -1)
+    return np.concatenate((gate_A, up_A), axis=-1), np.concatenate((gate_block, up_block), axis=0)
+
+
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
 def test_qwen3_moe_layer_lora(ep: int, tp: int):
-    """Test MoE LoRA by checking adapter isolation within a shared batch."""
+    """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
     model_name = "trl-internal-testing/tiny-Qwen3MoeForCausalLM"
     hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
     base_config = PretrainedConfig.from_pretrained(model_name)
@@ -133,84 +197,159 @@ def test_qwen3_moe_layer_lora(ep: int, tp: int):
                 lora_B = rng.normal(0, 1.0, proj.lora_B[...].shape[1:])
                 load_lora_weights(proj, adapter_idx, lora_A, lora_B, scaling, rank)
 
-        output_000, _ = moe_layer(x.numpy(), adapter_indices=jnp.array([0, 0, 0]), return_router_logits=True)
-        output_020, _ = moe_layer(x.numpy(), adapter_indices=jnp.array([0, 2, 0]), return_router_logits=True)
-        output_021, _ = moe_layer(x.numpy(), adapter_indices=jnp.array([0, 2, 1]), return_router_logits=True)
-        output_221, _ = moe_layer(x.numpy(), adapter_indices=jnp.array([2, 2, 1]), return_router_logits=True)
+        # Test with different adapters per sample
+        adapter_indices = jnp.array([0, 2, 1])
+        output_with_lora, _ = moe_layer(x.numpy(), adapter_indices=adapter_indices, return_router_logits=True)
 
-        # Changing one sample's adapter should not perturb the others in the same batch.
-        assert np.allclose(output_000[0], output_020[0], rtol=1e-3, atol=2e-2)
-        assert np.allclose(output_020[0], output_021[0], rtol=1e-3, atol=2e-2)
-        assert np.allclose(output_020[1], output_021[1], rtol=1e-3, atol=2e-2)
-        assert np.allclose(output_021[1], output_221[1], rtol=1e-3, atol=2e-2)
-        assert np.allclose(output_021[2], output_221[2], rtol=1e-3, atol=2e-2)
+        # Test each sample by comparing with merged weights for its adapter
+        for sample_idx in range(len(adapter_indices)):
+            adapter_idx = int(adapter_indices[sample_idx])
 
-        # The sample whose adapter changes should produce a measurably different result.
-        assert not np.allclose(output_000[1], output_020[1], rtol=1e-4, atol=1e-4)
-        assert not np.allclose(output_020[2], output_021[2], rtol=1e-4, atol=1e-4)
-        assert not np.allclose(output_021[0], output_221[0], rtol=1e-4, atol=1e-4)
+            # Create merged model by adding LoRA weights to base weights
+            moe_layer_merged = Qwen3MoeSparseMoeBlock(config, dtype=jnp.float32, rngs=nnx.Rngs(1 + adapter_idx))
+            moe_layer_merged.gate.kernel[:] = moe_layer.gate.kernel[:]
+
+            for proj_name in ["gate_proj", "up_proj", "down_proj"]:
+                proj = getattr(moe_layer.experts, proj_name)
+                proj_merged = getattr(moe_layer_merged.experts, proj_name)
+
+                # For each expert, merge: base + scaling * (lora_A @ lora_B)
+                for expert_idx in range(config.num_experts):
+                    lora_A = proj.lora_A[...][adapter_idx, expert_idx, :, :]
+                    lora_B = proj.lora_B[...][adapter_idx, expert_idx, :, :]
+                    lora_delta = scaling * (lora_A @ lora_B)
+
+                    merged_weight = proj.weight[expert_idx, :, :] + lora_delta
+                    proj_merged.weight[...] = proj_merged.weight[...].at[expert_idx, :, :].set(merged_weight)
+
+            # Run merged model on this sample
+            x_sample = x[sample_idx : sample_idx + 1].numpy()
+            output_merged, _ = moe_layer_merged(x_sample, return_router_logits=True)
+
+            assert np.allclose(output_with_lora[sample_idx : sample_idx + 1], output_merged, rtol=1e-3, atol=1e-3)
 
 
 def test_qwen3_lora():
-    """Test that batched multi-LoRA inference matches per-adapter inference."""
+    """Test multi-LoRA implementation by comparing with HuggingFace PEFT model using two different adapters."""
     base_model_name = "Qwen/Qwen3-0.6B"
-    supported_modules = {
-        "self_attn": ["o_proj"],
-        "mlp": ["down_proj"],
-    }
-    num_adapters = 2
-    rank = 8
-    scaling = 2.0
+    lora_adapters = ["pcmoritz/qwen3-0.6b-lora-random", "pcmoritz/qwen3-0.6b-lora-random2"]
 
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    # Use two different inputs to test with different adapters
     inputs = ["The capital of France is", "My name is"]
     batch = tokenizer(inputs, return_tensors="pt", padding=True)
+
+    # Create HF models with different adapters
+    hf_lora_models = []
+    lora_configs = []
+    for adapter_name in lora_adapters:
+        lora_config = LoraConfig.from_pretrained(adapter_name)
+        lora_config.target_modules = [
+            "embed_tokens",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+        lora_configs.append(lora_config)
+
+        hf_model = get_peft_model(
+            AutoModelForCausalLM.from_pretrained(base_model_name, attn_implementation="eager", use_safetensors=True),
+            lora_config,
+        )
+        hf_model.eval()
+        hf_model.load_adapter(adapter_name, adapter_name="default")
+        hf_lora_models.append(hf_model)
 
     config, model = load_model(
         base_model_name,
         Qwen3Config,
         Qwen3ForCausalLM,
         ("fsdp", "tp"),
-        max_lora_adapters=num_adapters,
-        max_lora_rank=rank,
+        max_lora_adapters=len(lora_adapters),
+        # qkv_proj fuses three HF LoRA branches and gate_up_proj fuses two.
+        max_lora_rank=3 * max(cfg.r for cfg in lora_configs),
     )
 
-    rng = np.random.default_rng(0)
-    for adapter_idx in range(num_adapters):
+    # Get outputs from all HF models
+    hf_outputs_list = []
+    with torch.no_grad():
+        for idx in range(len(lora_adapters)):
+            hf_output = hf_lora_models[idx](
+                batch.input_ids[idx : idx + 1],
+                attention_mask=batch.attention_mask[idx : idx + 1],
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            hf_outputs_list.append(hf_output)
+
+    # Load LoRA adapter weights from all adapters
+    for adapter_idx, (hf_model, lora_config) in enumerate(zip(hf_lora_models, lora_configs)):
+        # Load embed_tokens LoRA weights
+        hf_embed_tokens = hf_model.base_model.model.model.embed_tokens
+        load_lora_weights(
+            model.model.embed_tokens,
+            adapter_idx=adapter_idx,
+            lora_A_weights=hf_embed_tokens.lora_embedding_A["default"].detach().numpy().T,
+            lora_B_weights=hf_embed_tokens.lora_embedding_B["default"].detach().numpy().T,
+            scaling=lora_config.lora_alpha / lora_config.r,
+            rank=lora_config.r,
+        )
+
+        # Load layer LoRA weights
         for i in range(config.num_hidden_layers):
+            hf_layer = hf_model.base_model.model.model.layers[i]
             jax_layer = model.model.layers[i]
-            for module_name, projections in supported_modules.items():
-                for proj_name in projections:
-                    jax_proj = getattr(getattr(jax_layer, module_name), proj_name)
-                    load_lora_weights(
-                        jax_proj,
-                        adapter_idx=adapter_idx,
-                        lora_A_weights=rng.normal(0.0, 1e-2, size=jax_proj.lora_A[...].shape[1:]),
-                        lora_B_weights=rng.normal(0.0, 1e-2, size=jax_proj.lora_B[...].shape[1:]),
-                        scaling=scaling,
-                        rank=rank,
-                    )
+            qkv_lora_A, qkv_lora_B = get_fused_qkv_lora_weights(config, hf_layer.self_attn)
+            load_lora_weights(
+                jax_layer.self_attn.qkv_proj,
+                adapter_idx=adapter_idx,
+                lora_A_weights=qkv_lora_A,
+                lora_B_weights=qkv_lora_B,
+                scaling=lora_config.lora_alpha / lora_config.r,
+                rank=qkv_lora_A.shape[-1],
+            )
+            load_lora_weights(
+                jax_layer.self_attn.o_proj,
+                adapter_idx=adapter_idx,
+                lora_A_weights=get_hf_lora_A(hf_layer.self_attn.o_proj),
+                lora_B_weights=get_hf_lora_B(hf_layer.self_attn.o_proj),
+                scaling=lora_config.lora_alpha / lora_config.r,
+                rank=lora_config.r,
+            )
 
-    outputs_00 = model(
+            gate_up_lora_A, gate_up_lora_B = get_fused_gate_up_lora_weights(hf_layer.mlp)
+            load_lora_weights(
+                jax_layer.mlp.gate_up_proj,
+                adapter_idx=adapter_idx,
+                lora_A_weights=gate_up_lora_A,
+                lora_B_weights=gate_up_lora_B,
+                scaling=lora_config.lora_alpha / lora_config.r,
+                rank=gate_up_lora_A.shape[-1],
+            )
+            load_lora_weights(
+                jax_layer.mlp.down_proj,
+                adapter_idx=adapter_idx,
+                lora_A_weights=get_hf_lora_A(hf_layer.mlp.down_proj),
+                lora_B_weights=get_hf_lora_B(hf_layer.mlp.down_proj),
+                scaling=lora_config.lora_alpha / lora_config.r,
+                rank=lora_config.r,
+            )
+
+    # Use different adapter indices for each input
+    adapter_indices = jnp.arange(len(lora_adapters), dtype=jnp.int32)
+    outputs = model(
         batch.input_ids.numpy(),
         attention_mask=batch.attention_mask.numpy(),
         output_hidden_states=True,
-        adapter_indices=jnp.array([0, 0], dtype=jnp.int32),
-    )
-    outputs_01 = model(
-        batch.input_ids.numpy(),
-        attention_mask=batch.attention_mask.numpy(),
-        output_hidden_states=True,
-        adapter_indices=jnp.array([0, 1], dtype=jnp.int32),
-    )
-    outputs_11 = model(
-        batch.input_ids.numpy(),
-        attention_mask=batch.attention_mask.numpy(),
-        output_hidden_states=True,
-        adapter_indices=jnp.array([1, 1], dtype=jnp.int32),
+        adapter_indices=adapter_indices,
     )
 
-    assert np.allclose(outputs_00.last_hidden_state[0], outputs_01.last_hidden_state[0], rtol=1e-3, atol=2e-2)
-    assert np.allclose(outputs_01.last_hidden_state[1], outputs_11.last_hidden_state[1], rtol=1e-3, atol=2e-2)
-    assert not np.allclose(outputs_00.last_hidden_state[1], outputs_01.last_hidden_state[1], rtol=1e-4, atol=1e-4)
-    assert not np.allclose(outputs_01.last_hidden_state[0], outputs_11.last_hidden_state[0], rtol=1e-4, atol=1e-4)
+    logits = model.compute_logits(outputs.last_hidden_state, adapter_indices)
+
+    # Compare outputs with corresponding adapters
+    for idx in range(len(lora_adapters)):
+        assert np.allclose(hf_outputs_list[idx].logits[0], logits[idx], rtol=1e-3, atol=1e-3)
