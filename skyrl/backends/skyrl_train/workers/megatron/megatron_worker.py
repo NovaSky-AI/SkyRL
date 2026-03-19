@@ -815,11 +815,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         torch.cuda.empty_cache()
 
         # Extract and send weights using the sender created at init time
-        # from skyrl.env_vars import _SKYRL_USE_NEW_INFERENCE
-        # if _SKYRL_USE_NEW_INFERENCE:
         weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-        # else:
-        #     weight_metadata = None
         await self._weight_transfer_sender.send_chunks(
             self.weight_extractor.extract_weights(generator_dtype),
             weight_metadata=weight_metadata,
