@@ -55,12 +55,12 @@ envs:
   FLEET_API_KEY: ""
   LOGGER: "wandb"
   INFERENCE_BACKEND: "vllm"
-  DATA_VERSION: "v54"
+  DATA_VERSION: "v55"
   ENV_KEYS: ""
   DIFFICULTY: ""
   MODALITY: "tool_use"
   MAX_TURNS: 50
-  MAX_INPUT_LENGTH: 64000
+  MAX_INPUT_LENGTH: 96000
   MAX_GENERATE_LENGTH: 4096
   NUM_EPOCHS: 20
   RUN_ID: ""
@@ -84,13 +84,14 @@ run: |
     --set-ulimit --no-pytorch-alloc-conf \
     --nccl-heartbeat 1800 -- \
     environment.skyrl_gym.fleet_task.ttl_seconds=900 \
+    environment.skyrl_gym.fleet_task.partial_reward=true \
     trainer.algorithm.advantage_estimator=grpo \
     trainer.policy.model.path="Qwen/Qwen3.5-35B-A3B" \
     trainer.flash_attn=true \
     trainer.loss_chunk_size=4096 \
     trainer.use_sample_packing=false \
     +generator.chat_template_kwargs='{enable_thinking:true}' \
-    generator.inference_engine_tensor_parallel_size=1 \
+    generator.inference_engine_tensor_parallel_size=2 \
     trainer.epochs=${NUM_EPOCHS} \
     trainer.eval_batch_size=8 \
     trainer.eval_before_train=true \
