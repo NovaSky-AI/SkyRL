@@ -100,7 +100,7 @@ class InferenceEngineClient(InferenceEngineInterface):
                 add_generation_prompt=True,
                 return_dict=False,
                 tokenize=True,
-            )["input_ids"]
+            )
 
         num_prompts = len(prompt_token_ids)
         num_inference_engines = len(self.engines)

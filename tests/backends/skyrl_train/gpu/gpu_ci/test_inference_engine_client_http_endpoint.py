@@ -356,7 +356,7 @@ def test_http_endpoint_openai_api_with_weight_sync(ray_init_fixture):
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list[: num_samples // 2]
         ] + [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True)
+            tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_dict=False, tokenize=True)
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
@@ -498,7 +498,7 @@ def test_http_endpoint_with_remote_servers(ray_init_fixture, tp_size):
             tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=False)
             for conv in test_prompts_conv_list[: num_samples // 2]
         ] + [
-            tokenizer.apply_chat_template(conv, add_generation_prompt=True, tokenize=True)
+            tokenizer.apply_chat_template(conv, add_generation_prompt=True, return_dict=False, tokenize=True)
             for conv in test_prompts_conv_list[num_samples // 2 :]
         ]
 
