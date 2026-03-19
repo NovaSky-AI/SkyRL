@@ -220,42 +220,52 @@ class RemoteInferenceClient:
         session_ids = input_batch.get("session_ids")
         get_logprobs = sampling_params.get("logprobs") is not None
 
-        # Semaphore limits concurrent in-flight tasks to avoid overwhelming
-        # the router and vLLM server with thousands of simultaneous requests.
-        # Each task includes both the generate and detokenize HTTP calls.
+        # Two semaphores decouple the generate and detokenize stages:
+        #   gen_sem:   limits concurrent in-flight generate requests so we don't
+        #              overwhelm the router/vLLM scheduler.  Released as soon as
+        #              generation finishes, so the GPU slot is freed immediately.
+        #   detok_sem: limits concurrent detokenize calls independently.  Uses the
+        #              same concurrency limit so detokenize never starves generate.
         # Scales with number of engines so the limit fits the cluster size.
         # TODO (sumanthrh) (RemoteInferenceClient data-plane-deprecation): We should move this outside of the client to a runner abstraction that will also parallelize client requests across processes.
         num_engines = len(self.server_urls)
         concurrency = SKYRL_GENERATE_CONCURRENCY_PER_ENGINE * num_engines
-        sem = asyncio.Semaphore(concurrency) if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0 else None
+        gen_sem = asyncio.Semaphore(concurrency) if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0 else None
+        detok_sem = asyncio.Semaphore(concurrency) if SKYRL_GENERATE_CONCURRENCY_PER_ENGINE > 0 else None
         batch_size = len(prompt_token_ids)
         logger.info(
             f"generate: batch_size={batch_size}, concurrency_limit={concurrency} "
             f"({SKYRL_GENERATE_CONCURRENCY_PER_ENGINE}/engine × {num_engines} engines)"
         )
 
-        async def _throttled(idx: int) -> Dict[str, Any]:
-            if sem is None:
+        async def _throttled_generate(idx: int) -> Dict[str, Any]:
+            if gen_sem is None:
                 return await self._generate_single(
                     prompt_token_ids=prompt_token_ids[idx],
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                 )
-            async with sem:
+            async with gen_sem:
                 return await self._generate_single(
                     prompt_token_ids=prompt_token_ids[idx],
                     sampling_params=sampling_params,
                     session_id=session_ids[idx] if session_ids and idx < len(session_ids) else None,
                 )
 
-        tasks = [_throttled(idx) for idx in range(len(prompt_token_ids))]
-        results = await asyncio.gather(*tasks)
+        async def _throttled_detokenize(token_ids: List[int]) -> str:
+            if detok_sem is None:
+                return (await self.detokenize([token_ids]))[0]
+            async with detok_sem:
+                return (await self.detokenize([token_ids]))[0]
+
+        raw_results = await asyncio.gather(*[_throttled_generate(idx) for idx in range(batch_size)])
+        responses = await asyncio.gather(*[_throttled_detokenize(r["response_ids"]) for r in raw_results])
 
         return InferenceEngineOutput(
-            responses=[r["response"] for r in results],
-            stop_reasons=[r["stop_reason"] for r in results],
-            response_ids=[r["response_ids"] for r in results],
-            response_logprobs=[r["response_logprobs"] for r in results] if get_logprobs else None,
+            responses=responses,
+            stop_reasons=[r["stop_reason"] for r in raw_results],
+            response_ids=[r["response_ids"] for r in raw_results],
+            response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
         )
 
     async def _generate_single(
@@ -265,14 +275,14 @@ class RemoteInferenceClient:
         session_id: Optional[Any],
     ) -> Dict[str, Any]:
         """
-        Generate completion for a single prompt.
+        Generate completion for a single prompt. Does not detokenize.
 
         With keep-mode pause, in-flight requests are frozen by the vLLM
         scheduler and resume where they left off after /resume. No retry
         logic is needed.
 
         Returns:
-            Dict with keys: response, stop_reason, response_ids, response_logprobs
+            Dict with keys: stop_reason, response_ids, response_logprobs
         """
         url = f"{self.proxy_url}/inference/v1/generate"
 
@@ -303,7 +313,6 @@ class RemoteInferenceClient:
                 response_logprobs = [logprob_info["logprob"] for logprob_info in logprobs_content]
 
         return {
-            "response": (await self.detokenize([token_ids]))[0],
             "stop_reason": stop_reason,
             "response_ids": token_ids,
             "response_logprobs": response_logprobs,
