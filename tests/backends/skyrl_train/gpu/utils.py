@@ -533,6 +533,7 @@ class InferenceEngineState:
                 proxy_url=proxy_url,
                 server_urls=server_urls,
                 model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
+                enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
             )
         else:
             eps = create_ray_wrapped_inference_engines(

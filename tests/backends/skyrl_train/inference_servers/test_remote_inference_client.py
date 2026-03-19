@@ -43,17 +43,10 @@ def create_mock_vllm_server(server_id: int) -> FastAPI:
             ]
         }
 
-    @app.post("/inference/v1/generate")
+    @app.post("/skyrl/v1/generate")
     async def generate(request: Request):
-        body = await request.json()  # Consume body
-        num_prompts = len(body.get("token_ids", []))
-
-        return {
-            "choices": [
-                {"request_id": "dummy", "token_ids": [i, i + 1, i + 2], "finish_reason": "stop"}
-                for i in range(num_prompts)
-            ]
-        }
+        await request.json()  # Consume body
+        return {"choices": [{"token_ids": [1, 2, 3], "finish_reason": "stop"}]}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):

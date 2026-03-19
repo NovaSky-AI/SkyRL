@@ -33,6 +33,7 @@ def build_vllm_cli_args(cfg: SkyRLTrainConfig) -> Namespace:
         max_num_batched_tokens=ie_cfg.max_num_batched_tokens,
         max_num_seqs=ie_cfg.max_num_seqs,
         enable_sleep_mode=cfg.trainer.placement.colocate_all,
+        enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         weight_transfer_config=WeightTransferConfig(
             backend=get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
         ),
