@@ -13,7 +13,7 @@ import torch
 from jaxtyping import Float
 from loguru import logger
 from ray import ObjectRef
-from ray.util.placement_group import PlacementGroup, placement_group
+from ray.util.placement_group import placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -76,7 +76,7 @@ from skyrl.train.utils.trainer_utils import (
     validate_generator_output,
     zero_variance_filter,
 )
-from skyrl.train.utils.utils import configure_ray_worker_logging
+from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker_logging
 
 
 class RayPPOTrainer:
@@ -88,7 +88,7 @@ class RayPPOTrainer:
         train_dataset: Optional[PromptDataset],
         inference_engine_client: InferenceEngineClient,
         generator: GeneratorInterface,
-        colocate_pg: Optional[PlacementGroup] = None,
+        colocate_pg: Optional[ResolvedPlacementGroup] = None,
         eval_dataset: Optional[PromptDataset] = None,
     ):
         self.cfg = cfg
@@ -260,7 +260,6 @@ class RayPPOTrainer:
                     # 3. Convert GeneratorOutput to TrainingInputBatch
                     with Timer("convert_to_training_input", self.all_timings):
                         training_input: TrainingInputBatch = self.convert_to_training_input(generator_output, uids)
-                        logger.info(f"Number of sequences: {len(training_input['sequences'])}")
 
                     # 4. Inference and calculate values, log probs, rewards, kl divergence
                     with Timer("fwd_logprobs_values_reward", self.all_timings):
@@ -466,8 +465,9 @@ class RayPPOTrainer:
                     }
                     for _ in range(cfg.trainer.placement.policy_num_nodes)
                 ]
-                pg = placement_group(bundles, strategy="PACK")
-                get_ray_pg_ready_with_timeout(pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                raw_pg = placement_group(bundles, strategy="PACK")
+                get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                pg = ResolvedPlacementGroup(raw_pg)
 
             policy_model = PPORayActorGroup(
                 cfg.trainer,
@@ -629,6 +629,7 @@ class RayPPOTrainer:
             loss_masks,
             logprobs,
             rollout_expert_indices,
+            max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
 
         # sanity check for off_policy_correction
@@ -660,6 +661,14 @@ class RayPPOTrainer:
         training_input.metadata = {"uids": uids}
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
+        batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
+        logger.info(f"batch_num_seq: {batch_num_seq}, batch_padded_seq_len: {batch_padded_seq_len}")
+        self.all_metrics.update(
+            {
+                "generate/batch_num_seq": batch_num_seq,
+                "generate/batch_padded_seq_len": batch_padded_seq_len,
+            }
+        )
         if self.cfg.generator.step_wise_trajectories:
             assert (
                 "trajectory_ids" in generator_output

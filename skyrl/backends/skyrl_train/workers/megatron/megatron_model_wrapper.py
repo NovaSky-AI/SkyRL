@@ -367,6 +367,10 @@ class MegatronModelWrapper:
             return loss, metrics
 
         def forward_step(batch_iter, model):
+            # NOTE(Charlie): despite the name, methods like `remove_left_padding()` are padding-agnostic
+            # (can be left, or right) as it uses attention_mask to locate real tokens. Same thing
+            # for recover_left_padding and setup_per_microbatch_replay_forward. Especially relevant
+            # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             batch = next(batch_iter)
 
             rollout_expert_indices = batch.pop("rollout_expert_indices", None)
