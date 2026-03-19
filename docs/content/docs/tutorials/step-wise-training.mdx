@@ -12,6 +12,16 @@ However, re-tokenization has two fundamental limitations:
 
 **Step-wise training addresses both problems.** Instead of producing one `(prompt, response)` pair per trajectory, it decomposes each multi-turn trajectory into N separate training samples (one per LLM turn), using the **exact token IDs and logprobs from the inference engine** (via vLLM's `return_token_ids`). Each step's prompt is the full context the model saw at that turn, and the response is exactly the tokens the model generated. Because each turn is an independent sample, context management operations between turns are naturally supported — there is no requirement that turn N+1's prompt be a prefix extension of turn N's full sequence.
 
+### Quick start
+
+To see how `SkyRLGymGenerator` supports step-wise training, you can run it with the search-r1 example.
+
+```bash
+USE_CONVERSATION_MULTI_TURN=true STEP_WISE=true bash examples/train/search/run_search.sh
+```
+
+This page will also guide you how to implement step-wise training for your custom generator.
+
 ### Impact on Training
 
 When step-wise is enabled, a batch of T trajectories with an average of M turns per trajectory produces T×M training samples (sequences). This means:

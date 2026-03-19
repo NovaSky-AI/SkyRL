@@ -13,7 +13,7 @@ from unittest.mock import Mock, mock_open, patch
 import pytest
 import ray
 
-from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
+from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.utils.trainer_utils import (
     build_dataloader,
     calculate_per_dataset_metrics,
@@ -922,3 +922,143 @@ def test_validate_generator_output_invalid_rewards():
 
     generator_output["rewards"] = [[0.5, 0.6], [0.7, 0.8]]
     validate_generator_output(len(input_batch["prompts"]), generator_output)
+
+
+# ============================================================
+# Step-wise validation tests
+# ============================================================
+
+
+def _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 3), contiguous=True):
+    """Helper to build a step-wise GeneratorOutput for testing."""
+    items = []
+    for traj_idx in range(n_trajectories):
+        n_steps = steps_per_traj[traj_idx]
+        tid = TrajectoryID(instance_id=str(traj_idx), repetition_id=0)
+        for step in range(n_steps):
+            is_last = step == n_steps - 1
+            prompt = list(range(10 + traj_idx * 100, 10 + traj_idx * 100 + 3 + step))
+            resp = list(range(50 + traj_idx * 100 + step * 10, 50 + traj_idx * 100 + step * 10 + 3))
+            reward = [0.0, 0.0, float(traj_idx + 1) if is_last else 0.0]
+            items.append((prompt, resp, reward, [1, 1, 1], is_last, tid))
+
+    if not contiguous:
+        max_steps = max(steps_per_traj)
+        reordered = []
+        for step in range(max_steps):
+            for traj_idx in range(n_trajectories):
+                if step < steps_per_traj[traj_idx]:
+                    idx = sum(steps_per_traj[:traj_idx]) + step
+                    reordered.append(items[idx])
+        items = reordered
+
+    prompt_token_ids, response_ids, rewards, loss_masks = [], [], [], []
+    is_last_step, trajectory_ids = [], []
+    for prompt, resp, reward, mask, is_last, tid in items:
+        prompt_token_ids.append(prompt)
+        response_ids.append(resp)
+        rewards.append(reward)
+        loss_masks.append(mask)
+        is_last_step.append(is_last)
+        trajectory_ids.append(tid)
+
+    return {
+        "prompt_token_ids": prompt_token_ids,
+        "response_ids": response_ids,
+        "rewards": rewards,
+        "loss_masks": loss_masks,
+        "stop_reasons": ["complete"] * len(response_ids),
+        "rollout_metrics": {},
+        "rollout_logprobs": None,
+        "is_last_step": is_last_step,
+        "trajectory_ids": trajectory_ids,
+    }
+
+
+def test_validate_stepwise_valid():
+    """Valid step-wise output should pass validation."""
+    output = _make_stepwise_output(n_trajectories=3, steps_per_traj=(1, 2, 3))
+    validate_generator_output(num_prompts=3, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_single_step_trajectories():
+    """All single-step trajectories should pass."""
+    output = _make_stepwise_output(n_trajectories=4, steps_per_traj=(1, 1, 1, 1))
+    validate_generator_output(num_prompts=4, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_missing_is_last_step():
+    """Missing is_last_step should fail."""
+    output = _make_stepwise_output()
+    del output["is_last_step"]
+    with pytest.raises(AssertionError, match="is_last_step.*missing"):
+        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_missing_trajectory_ids():
+    """Missing trajectory_ids should fail."""
+    output = _make_stepwise_output()
+    del output["trajectory_ids"]
+    with pytest.raises(AssertionError, match="trajectory_ids.*missing"):
+        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_is_last_step_length_mismatch():
+    """is_last_step length mismatch should fail."""
+    output = _make_stepwise_output()
+    output["is_last_step"] = output["is_last_step"][:-1]
+    with pytest.raises(AssertionError, match="is_last_step length"):
+        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_last_element_not_true():
+    """is_last_step[-1] must be True."""
+    output = _make_stepwise_output()
+    output["is_last_step"][-1] = False
+    with pytest.raises(AssertionError, match="is_last_step\\[-1\\] must be True"):
+        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_non_contiguous():
+    """Non-contiguous trajectory ordering should fail."""
+    output = _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 2), contiguous=False)
+    with pytest.raises(AssertionError, match="Non-contiguous trajectory"):
+        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_boundary_without_is_last():
+    """Trajectory boundary where is_last_step is False should fail."""
+    output = _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 2))
+    # Traj 0 has steps at indices 0,1 and traj 1 at 2,3. Corrupt boundary.
+    output["is_last_step"][1] = False
+    with pytest.raises(AssertionError, match="Trajectory boundary at index 1"):
+        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_no_true_in_is_last_step():
+    """is_last_step with no True values should fail."""
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(3,))
+    output["is_last_step"] = [False, False, False]
+    with pytest.raises(AssertionError, match="is_last_step\\[-1\\] must be True"):
+        validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_num_prompts_not_checked():
+    """In step-wise mode, num_prompts != num_responses is allowed (expansion)."""
+    output = _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 3))
+    # 5 step-samples from 2 prompts
+    validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_multiple_is_last_step_true_per_trajectory():
+    """Multiple is_last_step=True within a single trajectory should fail.
+
+    A trajectory with 3 steps should have is_last_step=[False, False, True],
+    not [True, True, True]. Having multiple True values would corrupt the
+    cumsum(shifted_is_last_step) advantage broadcast.
+    """
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(3,))
+    # Corrupt: mark all steps as last
+    output["is_last_step"] = [True, True, True]
+    with pytest.raises(AssertionError, match="is_last_step.*True.*trajectory continues"):
+        validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
