@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import os
 import random
 import signal
@@ -15,6 +14,7 @@ import psutil
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import (
+    Base64Bytes,
     BaseModel,
     Discriminator,
     Field,
@@ -313,22 +313,13 @@ class EncodedTextChunk(BaseModel):
 
 class ImageChunk(BaseModel):
     type: Literal["image"] = "image"
-    data: str  # base64-encoded
+    data: Base64Bytes
     format: Literal["png", "jpeg"]
     expected_tokens: int | None = None
 
-    @field_validator("data")
-    @classmethod
-    def validate_base64(cls, v: str) -> str:
-        try:
-            base64.b64decode(v, validate=True)
-        except Exception:
-            raise ValueError("data must be valid base64")
-        return v
-
     def to_types(self) -> types.ImageChunk:
         return types.ImageChunk(
-            data=base64.b64decode(self.data),
+            data=self.data,
             format=self.format,
             expected_tokens=self.expected_tokens,
         )
