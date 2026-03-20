@@ -17,7 +17,7 @@ dependencies = [
     "rich>=14.1.0",
     "safetensors>=0.6.2",
     "tokenizers>=0.21.2",
-    "transformers>=4.56.1,<5",
+    "transformers>=5.3.0",
     "typer>=0.17.4",
     # "wandb>=0.22.0",
     "peft",
@@ -72,9 +72,9 @@ skyrl-train = [
     "ninja",
     "tensorboard",
     "func_timeout",
-    "transformers>=4.51.0",
+    "transformers>=5.3.0",
     "hydra-core==1.3.2",
-    "accelerate",
+    "accelerate>=1.13.0",
     "torchdata",
     "omegaconf",
     "ray==2.51.1",
@@ -97,26 +97,30 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.16.0; sys_platform == 'linux'",
+    "vllm==0.17.0; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.9.1; sys_platform == 'linux'",
-    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.10.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
+    "flash-linear-attention>=0.4.1; sys_platform == 'linux'",
+    "causal-conv1d>=1.4.0; sys_platform == 'linux'",
 ]
 
 megatron = [
     "skyrl[skyrl-train]",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "flash-attn==2.8.1; sys_platform == 'linux'",
-    "vllm==0.16.0; sys_platform == 'linux'",
-    "torch==2.9.1; sys_platform == 'linux'",
-    "flashinfer-python==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm==0.17.0; sys_platform == 'linux'",
+    "torch==2.10.0; sys_platform == 'linux'",
+    "flashinfer-python==0.6.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core==0.16.0; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.6.3; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "nvidia-modelopt; sys_platform == 'linux'",
+    "flash-linear-attention>=0.4.1; sys_platform == 'linux'",
+    "causal-conv1d>=1.4.0; sys_platform == 'linux'",
 ]
 
 flashrl = [
@@ -175,7 +179,7 @@ required-environments = [
 ]
 
 constraint-dependencies = [
-    "flashinfer-jit-cache==0.6.3",
+    "flashinfer-jit-cache==0.6.4",
 ]
 # each backend should have separate dependencies that can potentially clash
 # megatron also clashes with the jax dependency from gpu and tpu extras
@@ -205,10 +209,13 @@ no-build-isolation-package = [
 override-dependencies = [
     "nvidia-resiliency-ext; sys_platform == 'never'",
     "mamba-ssm; sys_platform == 'never'",
-    "causal-conv1d; sys_platform == 'never'",
+    "causal-conv1d>=1.4.0; sys_platform == 'linux'",
     "transformer-engine[pytorch]==2.10.0; sys_platform == 'linux'",
     "megatron-core==0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+    # Override vllm's transformers<5 cap: Qwen3.5 requires transformers>=5.3.0
+    # for native model type support in FSDP training.
+    "transformers>=5.3.0",
 ]
 
 [tool.uv.extra-build-dependencies]
@@ -240,6 +247,12 @@ explicit = true
 
 [tool.uv.sources]
 skyrl-gym = { path = "./skyrl-gym", editable = true }
+# Pre-built flash-attn wheel for torch 2.10.0+cu128 (official PyPI only has source tarballs)
+# From: https://github.com/mjun0812/flash-attention-prebuild-wheels
+flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.16/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
+# Pre-built causal-conv1d wheel for torch 2.10.0+cu12 (no PyPI wheel for this torch version)
+# From: https://github.com/Dao-AILab/causal-conv1d/releases
+causal-conv1d = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.6.1.post4/causal_conv1d-1.6.1%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux'" }
 # flashinfer wheels are only available from the custom cu128 index
 flashinfer-jit-cache = { index = "flashinfer-cu128", marker = "sys_platform == 'linux'" }
 # Use CUDA torch on Linux, CPU torch on macOS (must match skyrl-train config)
@@ -252,7 +265,7 @@ torchvision = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
 # pin megatron bridge commit to fix for MoE + LoRA merging. Update this when an official release is cut
-megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "02b5fccab5e5b21856d36c2e357839e0123b4b8f", marker = "sys_platform == 'linux'"}
+megatron-bridge = {git = "https://github.com/NVIDIA-NeMo/Megatron-Bridge", rev = "0034ddaad7fae7c658c3df7e12d13522a4935770", marker = "sys_platform == 'linux'"}
 harbor = { git = "https://github.com/laude-institute/harbor", rev = "8c040e1bb010201fd3c75bee3dede2407b9f57cd" }
 
 [tool.black]
