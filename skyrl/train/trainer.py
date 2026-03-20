@@ -1047,17 +1047,8 @@ class RayPPOTrainer:
 
         return data
 
-    def normalize_minibatch_advantages(self, data: TrainingInputBatch) -> TrainingInputBatch:
-        """Normalize the advantages in the mini-batch.
-
-        This function handles two types of normalization:
-        1. Batch normalization (z-score): if advantage_batch_normalize is True,
-           normalizes advantages to have zero mean and unit variance.
-        2. Loss reduction normalization: scales advantages based on the loss_reduction
-           type to calculate the correct minibatch loss when reducing with a sum.
-        """
+    def normalize_advantages(self, data: TrainingInputBatch, mini_batch_size: int) -> TrainingInputBatch:
         advantages = data["advantages"]
-        loss_mask = data["loss_mask"]
         response_mask = data["response_mask"]
 
         # Step 1: Z-score normalization (if enabled)
@@ -1066,15 +1057,33 @@ class RayPPOTrainer:
             mean = advantages.mean()
             std = ((advantages - mean).pow(2) * response_mask).sum()
             rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
-            advantages = (advantages - mean) * rstd
+            data["advantages"] = (advantages - mean) * rstd
 
         # Step 2: Loss reduction normalization
+        num_mini_batches = len(data) // mini_batch_size
+        normalized_advantages = torch.zeros_like(advantages)
+        for local_step in range(num_mini_batches):
+            start_idx = local_step * mini_batch_size
+            end_idx = (local_step + 1) * mini_batch_size
+            normalized_advantages[start_idx:end_idx] = self._normalize_minibatch_advantages(data[start_idx:end_idx])
+
+        data["advantages"] = normalized_advantages
+        return data
+
+    def _normalize_minibatch_advantages(self, data: TrainingInputBatch) -> torch.Tensor:
+        """Normalize the advantages in the mini-batch."""
+        advantages = data["advantages"]
+        loss_mask = data["loss_mask"]
+
+        normalized_advantages = torch.zeros_like(advantages)
+        batch_size = len(data)
+
         # Option 1: token mean
         if self.cfg.trainer.algorithm.loss_reduction == "token_mean":
-            data["advantages"] = advantages / loss_mask.sum().clamp(min=1)
+            normalized_advantages = advantages / loss_mask.sum().clamp(min=1)
 
-        # Option 1b: token-mean within each microbatch, then mean across microbatches
-        elif self.cfg.trainer.algorithm.loss_reduction == "token_mean_baseline":
+        # Option 1b: legacy token-mean implementation which averages token mean across microbatches
+        elif self.cfg.trainer.algorithm.loss_reduction == "token_mean_legacy":
             micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
             num_micro_batches = len(data) // micro_batch_size
             for i in range(num_micro_batches):
@@ -1086,25 +1095,21 @@ class RayPPOTrainer:
                 microbatch_advantages = microbatch_advantages / microbatch_loss_mask.sum().clamp(min=1)
                 # Average across microbatches
                 microbatch_advantages /= num_micro_batches
-                data["advantages"][start_idx:end_idx] = microbatch_advantages
+                normalized_advantages[start_idx:end_idx] = microbatch_advantages
 
         # Option 2: sequence mean
         elif self.cfg.trainer.algorithm.loss_reduction == "sequence_mean":
-            batch_size = len(data)
-            data["advantages"] = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
+            normalized_advantages = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
 
         # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
         elif self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
-            batch_size = len(data)
             max_seq_len = self.cfg.trainer.algorithm.max_seq_len
-            data["advantages"] = advantages / (batch_size * max_seq_len)
+            normalized_advantages = advantages / (batch_size * max_seq_len)
 
         else:
-            # No loss reduction normalization, but still apply batch normalization if it was done
-            if self.cfg.trainer.algorithm.advantage_batch_normalize:
-                data["advantages"] = advantages
+            raise ValueError(f"Invalid loss reduction type: {self.cfg.trainer.algorithm.loss_reduction}")
 
-        return data
+        return normalized_advantages
 
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """
@@ -1127,20 +1132,13 @@ class RayPPOTrainer:
         n_samples = self.cfg.generator.n_samples_per_prompt
         if model == "policy":
             mini_batch_size = self.cfg.trainer.policy_mini_batch_size * n_samples
+            # Normalize advantages for policy training; critic training does not need this
+            data = self.normalize_advantages(data, mini_batch_size)
         else:
             mini_batch_size = self.cfg.trainer.critic_mini_batch_size * n_samples
 
         all_metrics: Dict[str, List[float]] = defaultdict(list)
         num_mini_batches = len(data) // mini_batch_size
-
-        # iterate over mini-batches to do mini batch level normalization
-        for local_step in range(num_mini_batches):
-            start_idx = local_step * mini_batch_size
-            end_idx = (local_step + 1) * mini_batch_size
-            mini_batch = data[start_idx:end_idx]
-            mini_batch = self.normalize_minibatch_advantages(mini_batch)
-            # Copy normalized advantages back to original batch
-            data["advantages"][start_idx:end_idx] = mini_batch["advantages"]
 
         # Stage full batch in object store ONCE to avoid repeated serialization
         data_ref = self.dispatch.stage_data(data)
