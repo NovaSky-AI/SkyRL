@@ -863,14 +863,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if self._is_lora:
             lora_sync_path = self.cfg.policy.model.lora.lora_sync_path
             await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client)
-            return
-
-        # Extract and send weights using the sender created at init time
-        weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-        await self._weight_transfer_sender.send_chunks(
-            self.weight_extractor.extract_weights(generator_dtype),
-            weight_metadata=weight_metadata,
-        )
+        else:
+            # Extract and send weights using the sender created at init time
+            weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+            await self._weight_transfer_sender.send_chunks(
+                self.weight_extractor.extract_weights(generator_dtype),
+                weight_metadata=weight_metadata,
+            )
 
         if cache_reset_task is not None:
             await cache_reset_task
