@@ -843,8 +843,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             with open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
                 json.dump(adapter_config, f, ensure_ascii=False, indent=4)
 
-            lora_request = LoraLoadRequest(lora_path=lora_sync_path)
-            await inference_engine_client.update_named_weights(lora_request)
+            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+                RemoteInferenceClient,
+            )
+
+            if isinstance(inference_engine_client, RemoteInferenceClient):
+                await inference_engine_client.update_lora_from_disk(lora_sync_path)
+            else:
+                lora_request = LoraLoadRequest(lora_path=lora_sync_path)
+                await inference_engine_client.update_named_weights(lora_request)
 
         torch.distributed.barrier()
 
