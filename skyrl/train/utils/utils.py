@@ -453,10 +453,9 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     if ie_cfg.enable_return_routed_experts:
-        if not _SKYRL_USE_NEW_INFERENCE:
-            assert (
-                ie_cfg.distributed_executor_backend == "mp"
-            ), "rollout router replay (r3) can hang with the ray backend - use the vLLM mp backend instead"
+        assert (
+            ie_cfg.distributed_executor_backend == "mp"
+        ), "rollout router replay (r3) can hang with the ray backend - use the vLLM mp backend instead"
         assert (
             cfg.trainer.strategy == "megatron"
         ), "rollout router replay (r3) is only supported with Megatron training backend"
@@ -521,9 +520,10 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
             "the mp backend for vLLM is not yet fully supported for the new inference backend. See https://github.com/NovaSky-AI/SkyRL/issues/1309. Use the ray backend instead."
         )
 
-    if cfg.generator.inference_engine.enable_return_routed_experts and cfg.trainer.policy.model.lora.rank > 0:
+    if cfg.generator.inference_engine.enable_return_routed_experts:
         raise ValueError(
-            "LoRA and R3 (enable_return_routed_experts) cannot be used together with the new inference backend."
+            "rollout router replay (r3) is not yet fully supported for the new inference backend. "
+            "mp backend support is required — see https://github.com/NovaSky-AI/SkyRL/issues/1309."
         )
 
 
