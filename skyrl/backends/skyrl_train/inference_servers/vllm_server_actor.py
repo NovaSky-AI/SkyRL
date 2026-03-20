@@ -339,6 +339,9 @@ class VLLMServerActor(ServerActorProtocol):
             await engine.reset_prefix_cache()
             return {"status": "ok"}
 
+        # NOTE (sumanthrh): We use a custom generate endpoint /skyrl/v1/generate because the native
+        # endpoint /inference/v1/generate does not support returning routed expert IDs.
+        # TODO (sumanthrh): Migrate back to /inference/v1/generate once this is fixed on the vllm side
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
             """SkyRL generate endpoint that returns routed_experts alongside token output."""
