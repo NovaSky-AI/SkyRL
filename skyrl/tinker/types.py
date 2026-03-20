@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Discriminator
+from pydantic import BaseModel
 
 
 class RequestType(str, Enum):
@@ -97,10 +97,7 @@ class EncodedTextChunk(BaseModel):
     tokens: list[int]
 
 
-ModelInputChunk = Annotated[
-    EncodedTextChunk,
-    Discriminator("type"),
-]
+ModelInputChunk = EncodedTextChunk
 
 
 class ModelInput(BaseModel):

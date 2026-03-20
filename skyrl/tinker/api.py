@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
+from typing import Any, AsyncGenerator, ClassVar, Literal
 from uuid import uuid4
 
 import fastapi
@@ -15,9 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import (
     BaseModel,
-    Discriminator,
     Field,
-    Tag,
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
@@ -309,19 +307,7 @@ class EncodedTextChunk(BaseModel):
         return types.EncodedTextChunk(tokens=self.tokens)
 
 
-def _get_model_chunk_type(v: Any) -> str:
-    if isinstance(v, dict):
-        if "type" in v:
-            return v["type"]
-        if "tokens" in v:
-            return "encoded_text"
-    return getattr(v, "type", "encoded_text")
-
-
-ModelInputChunk = Annotated[
-    Annotated[EncodedTextChunk, Tag("encoded_text")],
-    Discriminator(_get_model_chunk_type),
-]
+ModelInputChunk = EncodedTextChunk
 
 
 class ModelInput(BaseModel):
