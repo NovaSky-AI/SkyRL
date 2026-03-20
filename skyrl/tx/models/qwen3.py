@@ -134,8 +134,9 @@ class Qwen3MLP(nnx.Module):
 
     def __call__(self, x: jax.Array, adapter_indices: jax.Array | None = None) -> jax.Array:
         gate_up = self.gate_up_proj(x, adapter_indices=adapter_indices)
-        gate_out = gate_up[..., 0::2]
-        up_out = gate_up[..., 1::2]
+        gate_up = gate_up.reshape(*gate_up.shape[:-1], self.intermediate_size, 2)
+        gate_out = gate_up[..., 0]
+        up_out = gate_up[..., 1]
         return self.down_proj(nnx.silu(gate_out) * up_out, adapter_indices=adapter_indices)
 
 
