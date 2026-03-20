@@ -28,9 +28,9 @@ class Qwen3Attention(nnx.Module):
         if shard_attention_heads:
             assert self.num_heads % tp == 0, f"num_heads={self.num_heads} must be divisible by tp={tp}"
             assert self.num_kv_heads % tp == 0, f"num_kv_heads={self.num_kv_heads} must be divisible by tp={tp}"
-        assert self.num_heads % self.num_kv_heads == 0, (
-            f"num_heads={self.num_heads} must be divisible by num_kv_heads={self.num_kv_heads}"
-        )
+        assert (
+            self.num_heads % self.num_kv_heads == 0
+        ), f"num_heads={self.num_heads} must be divisible by num_kv_heads={self.num_kv_heads}"
         tp_shard = "tp" if shard_attention_heads else None
         self.head_dim = getattr(config, "head_dim", None) or config.hidden_size // self.num_heads
         self.q_per_kv_head = self.num_heads // self.num_kv_heads
