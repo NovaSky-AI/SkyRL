@@ -249,9 +249,16 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             with io.open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
                 json.dump(peft_config, f, ensure_ascii=False, indent=4)
 
-            # Send LoRA disk loading request to inference engine
-            lora_request = LoraLoadRequest(lora_path=lora_sync_path)
-            await inference_engine_client.update_named_weights(lora_request)
+            # Send LoRA disk loading request to inference engine.
+            from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+                RemoteInferenceClient,
+            )
+
+            if isinstance(inference_engine_client, RemoteInferenceClient):
+                await inference_engine_client.update_lora_from_disk(lora_sync_path)
+            else:
+                lora_request = LoraLoadRequest(lora_path=lora_sync_path)
+                await inference_engine_client.update_named_weights(lora_request)
 
         torch.distributed.barrier()
 
@@ -274,15 +281,14 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # assume base model is already synced, sync LoRA adapters
             lora_sync_path = self.cfg.policy.model.lora.lora_sync_path
             await self._save_lora_adapters_and_sync(peft_model, lora_sync_path, inference_engine_client)
-            return
-
-        # Extract and send weights using the sender created at init time
-        weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
-        weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
-        await self._weight_transfer_sender.send_chunks(
-            weight_iterator,
-            weight_metadata=weight_metadata,
-        )
+        else:
+            # Extract and send weights using the sender created at init time
+            weight_iterator = self.weight_extractor.extract_weights(generator_dtype)
+            weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)
+            await self._weight_transfer_sender.send_chunks(
+                weight_iterator,
+                weight_metadata=weight_metadata,
+            )
 
         if cache_reset_task is not None:
             await cache_reset_task

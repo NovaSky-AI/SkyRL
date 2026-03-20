@@ -396,7 +396,10 @@ async def run_inference(client, prompts, sampling_params, tokenizer=None):
     engine_input = InferenceEngineInput(prompts=prompts, sampling_params=sampling_params)
     if isinstance(client, RemoteInferenceClient):
         # convert to prompt token ids for RemoteInferenceClient
-        assert tokenizer is not None
+        if tokenizer is None:
+            from skyrl.utils.tok import get_tokenizer
+
+            tokenizer = get_tokenizer(client.model_name)
         prompt_token_ids = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,
@@ -444,6 +447,7 @@ class InferenceEngineState:
         num_inference_engines: Optional[int] = None,
         sleep_level: int = 2,  # use level 1 in unit tests that do not explicitly sync weights or for LoRA
         enable_lora: bool = False,
+        active_lora_name: Optional[str] = None,
         max_num_seqs: Optional[int] = None,
         engine_init_kwargs: Optional[Dict[str, Any]] = None,
         use_new_inference_servers: Optional[bool] = None,
@@ -508,13 +512,15 @@ class InferenceEngineState:
         router = None
         server_group = None
         if use_new_inference_servers or (use_new_inference_servers is None and _SKYRL_USE_NEW_INFERENCE):
-            # init with internal router and servers
-            if enable_lora:
-                raise ValueError("LoRA is not supported with new inference backend")
             # NOTE: In the case of the new inference backend, server is up by default, so we don't need
             # any special handling for sleep
+            cli_args = build_vllm_cli_args(cfg)
+            if enable_lora:
+                cli_args.enable_lora = True
+                if active_lora_name is None:
+                    active_lora_name = "skyrl-lora"
             server_group = ServerGroup(
-                cli_args=build_vllm_cli_args(cfg),
+                cli_args=cli_args,
                 num_servers=ie_cfg.num_engines * ie_cfg.data_parallel_size,
                 placement_group=shared_pg if cfg.trainer.placement.colocate_all else None,
                 enable_dp=ie_cfg.data_parallel_size > 1,
@@ -533,6 +539,7 @@ class InferenceEngineState:
                 proxy_url=proxy_url,
                 server_urls=server_urls,
                 model_name=served_model_name if served_model_name else cfg.trainer.policy.model.path,
+                active_lora_name=active_lora_name,
             )
         else:
             eps = create_ray_wrapped_inference_engines(
