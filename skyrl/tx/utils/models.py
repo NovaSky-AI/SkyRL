@@ -181,11 +181,8 @@ def require_weights(
     return [tensors[k].T for k in keys]
 
 
-def get_shared_lora_A(
-    tensors: dict[str, np.ndarray], keys: Sequence[str], checkpoint_dir: str | os.PathLike
-) -> np.ndarray:
-    """Return a shared LoRA A matrix for fused projections."""
-    arrays = require_weights(tensors, keys, checkpoint_dir)
+def get_shared_lora_A(arrays: Sequence[np.ndarray]) -> np.ndarray:
+    """Return shared LoRA A matrix, validating all arrays are identical."""
     if not all(np.allclose(arrays[0], arr) for arr in arrays[1:]):
         raise RuntimeError(
             "Cannot load split LoRA adapter into fused projection because the source "
@@ -241,16 +238,18 @@ def load_safetensors(
             tensor = np.stack(require_weights(tensors, expert_keys, checkpoint_dir), axis=0)
         elif path[-2] == "qkv_proj":
             keys = get_fused_keys(path, QKV_COMPONENTS)
+            weights = require_weights(tensors, keys, checkpoint_dir)
             if path[-1] == "lora_A":
-                tensor = get_shared_lora_A(tensors, keys, checkpoint_dir)
+                tensor = get_shared_lora_A(weights)
             else:
-                tensor = pack_fused(*require_weights(tensors, keys, checkpoint_dir), group_sizes=get_qkv_group_sizes(config))
+                tensor = pack_fused(*weights, group_sizes=get_qkv_group_sizes(config))
         elif path[-2] == "gate_up_proj":
             keys = get_fused_keys(path, GATE_UP_COMPONENTS)
+            weights = require_weights(tensors, keys, checkpoint_dir)
             if path[-1] == "lora_A":
-                tensor = get_shared_lora_A(tensors, keys, checkpoint_dir)
+                tensor = get_shared_lora_A(weights)
             else:
-                tensor = pack_fused(*require_weights(tensors, keys, checkpoint_dir), group_sizes=(1, 1))
+                tensor = pack_fused(*weights, group_sizes=(1, 1))
         elif key not in tensors:
             raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
         else:
