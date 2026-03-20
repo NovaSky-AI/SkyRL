@@ -117,6 +117,7 @@ class MegatronModelWrapper:
                     rollout_expert_indices,
                     batch["attention_mask"],
                     model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
                 )
 
             sequences = batch["sequences"]
@@ -377,6 +378,7 @@ class MegatronModelWrapper:
                     rollout_expert_indices,
                     batch["attention_mask"],
                     model_config=get_model_config(model),
+                    use_sample_packing=self.use_sample_packing,
                 )
 
             sequences = batch["sequences"]
