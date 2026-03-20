@@ -1011,12 +1011,13 @@ class RayPPOTrainer:
         action_log_probs: torch.Tensor = data["action_log_probs"]
 
         # single batched computation
-        kl: Float[torch.Tensor, "batch_size seqlen"] = compute_approx_kl(  # type: ignore
-            action_log_probs,
-            base_action_log_probs,
-            loss_mask=loss_masks_all,
-            kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
-        )
+        with torch.no_grad():
+            kl: Float[torch.Tensor, "batch_size seqlen"] = compute_approx_kl(  # type: ignore
+                action_log_probs,
+                base_action_log_probs,
+                loss_mask=loss_masks_all,
+                kl_estimator_type=self.cfg.trainer.algorithm.kl_estimator_type,
+            )
         kl_max: Float[torch.Tensor, "batch_size"] = torch.max(kl.abs(), dim=-1)[0]  # noqa: F821
         kl_mean: Float[torch.Tensor, "batch_size"] = masked_mean(kl, loss_masks_all, dim=-1)  # noqa: F821
 

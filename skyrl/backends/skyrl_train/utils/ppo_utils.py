@@ -86,7 +86,6 @@ def get_kl_controller(algorithm_cfg: AlgorithmConfig):
         raise ValueError(f"Invalid KL controller type: {algorithm_cfg.kl_ctrl.type}")
 
 
-@torch.no_grad()
 def compute_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
