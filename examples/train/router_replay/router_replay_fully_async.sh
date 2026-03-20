@@ -51,7 +51,7 @@ DISTRIBUTED_EXECUTION_BACKEND="mp"
 
 RUN_NAME=gsm8k-fully-async-moonlight16b-a3b-useTIS_${TIS_TYPE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_POLICY_GPUS}train${NUM_INFERENCE_GPUS}gen_r3
 
-uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
+uv run --isolated --extra megatron -m examples.train.fully_async.main_fully_async \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
