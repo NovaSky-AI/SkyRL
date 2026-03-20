@@ -26,19 +26,6 @@ from skyrl.tinker.db_models import (
 from skyrl.utils.log import logger
 
 
-def input_to_text_tokens(model_input: types.ModelInput) -> list[int]:
-    """Concatenate text tokens from all EncodedTextChunk entries.
-
-    Non-text chunks (images, etc.) are skipped — multi-modal inputs
-    are passed to backends via the full ModelInput.chunks list.
-    """
-    tokens = []
-    for chunk in model_input.chunks:
-        if isinstance(chunk, types.EncodedTextChunk):
-            tokens.extend(chunk.tokens)
-    return tokens
-
-
 def _model_not_found_error(model_id: str) -> types.ErrorResponse:
     """Log and return an ErrorResponse for a request targeting a model that isn't loaded."""
     logger.info(
@@ -68,7 +55,6 @@ def prepare_sample_batch(
         PreparedSampleBatch with all data extracted from requests
     """
     all_prompts = []
-    all_prompt_inputs = []
     all_sampling_params = []
     all_model_ids = []
     all_checkpoint_ids = []
@@ -81,15 +67,13 @@ def prepare_sample_batch(
         request_start = len(all_prompts)
 
         # Expand requests for num_samples
-        prompt_tokens = input_to_text_tokens(request_data.prompt)
         checkpoint_path = ""
         if model_id and request_data.checkpoint_id and checkpoints_base:
             checkpoint_path = str(
                 checkpoints_base / model_id / "sampler_weights" / f"{request_data.checkpoint_id}.tar.gz"
             )
         for sample_idx in range(request_data.num_samples):
-            all_prompts.append(prompt_tokens)
-            all_prompt_inputs.append(request_data.prompt)
+            all_prompts.append(request_data.prompt)
             # Derive a unique seed per sample so that num_samples > 1 produces
             # diverse sequences, matching vLLM's behavior (seed + index).
             sample_params = request_data.sampling_params.model_copy(
@@ -106,7 +90,6 @@ def prepare_sample_batch(
 
     return types.PreparedSampleBatch(
         all_prompts=all_prompts,
-        all_prompt_inputs=all_prompt_inputs,
         all_sampling_params=all_sampling_params,
         all_model_ids=all_model_ids,
         all_checkpoint_ids=all_checkpoint_ids,
@@ -130,8 +113,7 @@ def prepare_model_pass_batch(
     Returns:
         PreparedModelPassBatch with all data extracted from requests
     """
-    all_input_ids = []
-    all_prompt_inputs = []
+    all_input_chunks = []
     all_targets = []
     all_token_weights = []
     all_model_ids = []
@@ -146,11 +128,9 @@ def prepare_model_pass_batch(
             raise ValueError(
                 f"Unknown loss function '{request_data.loss_fn}'. Must be one of: {list(types.LOSS_TYPES.keys())}"
             )
-        request_start = len(all_input_ids)
+        request_start = len(all_input_chunks)
         for item in request_data.data:
-            tokens = input_to_text_tokens(item.model_input)
-            all_input_ids.append(tokens)
-            all_prompt_inputs.append(item.model_input)
+            all_input_chunks.append(item.model_input)
             loss_fn_inputs = item.loss_fn_inputs
             all_targets.append(loss_fn_inputs.target_tokens.data)
             all_token_weights.append(loss_fn_inputs.weights.data)
@@ -160,11 +140,10 @@ def prepare_model_pass_batch(
             all_loss_fns.append(request_data.loss_fn)
             all_loss_fn_configs.append(request_data.loss_fn_config)
 
-        request_batch_slices.append((request_id, model_id, request_start, len(all_input_ids)))
+        request_batch_slices.append((request_id, model_id, request_start, len(all_input_chunks)))
 
     return types.PreparedModelPassBatch(
-        all_input_ids=all_input_ids,
-        all_prompt_inputs=all_prompt_inputs,
+        all_input_chunks=all_input_chunks,
         all_targets=all_targets,
         all_token_weights=all_token_weights,
         all_sampling_logprobs=all_sampling_logprobs,

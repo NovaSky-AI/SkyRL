@@ -262,14 +262,20 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_input_chunks:
             return TrainingInputBatch({})
+
+        # Extract token IDs from ModelInput chunks
+        all_input_ids = [
+            [tok for chunk in mi.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])]
+            for mi in prepared_batch.all_input_chunks
+        ]
 
         # SkyRL-Train shifts internally, so provide the full sequence length by
         # appending the last target token to each already-shifted input.
         full_sequences = [
             list(input_ids) + ([targets[-1]] if targets else [])
-            for input_ids, targets in zip(prepared_batch.all_input_ids, prepared_batch.all_targets)
+            for input_ids, targets in zip(all_input_ids, prepared_batch.all_targets)
         ]
 
         max_seq_len = max(len(seq) for seq in full_sequences)
@@ -387,7 +393,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_input_chunks:
             return {}
 
         self._sleep_inference_engines()
@@ -450,7 +456,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_input_chunks:
             return {}
 
         self._sleep_inference_engines()
@@ -534,7 +540,10 @@ class SkyRLTrainBackend(AbstractBackend):
         async def sample_all():
             tasks = []
             for i in range(len(prepared_batch.all_prompts)):
-                prompt = prepared_batch.all_prompts[i]
+                model_input = prepared_batch.all_prompts[i]
+                prompt_token_ids = [
+                    tok for chunk in model_input.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])
+                ]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
                 # Pass through common fields; only stop needs name translation
@@ -554,7 +563,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
                 tasks.append(
                     self._inference_engine_client.sample(
-                        prompt_token_ids=prompt,
+                        prompt_token_ids=prompt_token_ids,
                         num_samples=1,  # Tinker batches multiple samples separately
                         sampling_params=params_dict,
                     )

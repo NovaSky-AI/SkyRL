@@ -612,13 +612,16 @@ class JaxBackendImpl(AbstractBackend):
         Returns:
             Dict mapping request_id to result_data or error info
         """
-        if not prepared_batch.all_input_ids:
+        if not prepared_batch.all_input_chunks:
             return {}
 
         results = {}
 
-        # Extract data from prepared batch
-        all_input_ids = prepared_batch.all_input_ids
+        # Extract token IDs from ModelInput chunks
+        all_input_ids = [
+            [tok for chunk in mi.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])]
+            for mi in prepared_batch.all_input_chunks
+        ]
         all_targets = prepared_batch.all_targets
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
@@ -824,8 +827,11 @@ class JaxBackendImpl(AbstractBackend):
 
         results = {}
 
-        # Extract data from prepared batch
-        all_prompts = prepared_batch.all_prompts
+        # Extract token IDs from ModelInput chunks
+        all_prompts = [
+            [tok for chunk in mi.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])]
+            for mi in prepared_batch.all_prompts
+        ]
         all_sampling_params = prepared_batch.all_sampling_params
         request_batch_slices = prepared_batch.request_batch_slices
         needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs

@@ -133,4 +133,4 @@ def test_prepare_model_pass_batch_loss_fn_and_config(
     batch = prepare_model_pass_batch(requests)
     assert batch.all_loss_fns == [loss_fn]
     assert batch.all_loss_fn_configs == [loss_fn_config]
-    assert batch.all_prompt_inputs == [datum.model_input]
+    assert batch.all_input_chunks == [datum.model_input]
