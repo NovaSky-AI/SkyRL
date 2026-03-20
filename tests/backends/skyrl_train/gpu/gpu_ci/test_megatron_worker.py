@@ -122,7 +122,6 @@ def get_test_training_batch(batch_size=4) -> TrainingInputBatch:
     [
         pytest.param(True, 4, 2, 2, 1, None, False, marks=_skip_new_inference, id="colocate_all"),
         pytest.param(False, 2, 2, 1, 1, None, False, id="non_colocated"),
-        pytest.param(True, 4, 2, 2, 1, None, True, marks=_skip_new_inference, id="colocate_all_lora"),
     ],
 )
 @pytest.mark.megatron

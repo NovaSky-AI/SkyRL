@@ -35,7 +35,11 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingOutputBatch,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
-from skyrl.backends.skyrl_train.weight_sync import WeightChunk, WeightExtractor
+from skyrl.backends.skyrl_train.weight_sync import (
+    LoraLoadRequest,
+    WeightChunk,
+    WeightExtractor,
+)
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
@@ -802,6 +806,48 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             training_dtype=torch.bfloat16 if self.cfg.bf16 else torch.float32,
         )
 
+    async def _save_lora_adapters_and_sync(self, lora_sync_path, inference_engine_client):
+        """Export LoRA adapter weights via Megatron-Bridge and tell the inference engine to load them.
+
+        All ranks participate in the collective export (TP/PP/EP gathering is
+        handled internally by the bridge).  Only rank 0 writes to disk and
+        sends the ``LoraLoadRequest``.
+        """
+        import json
+
+        from megatron.bridge.models.conversion.peft_bridge import (
+            build_adapter_config_dict,
+            infer_target_modules_from_adapter_weights,
+        )
+        from safetensors.torch import save_file
+
+        adapter_state = {}
+        for name, tensor in self.bridge.export_adapter_weights(self.actor_module, cpu=True, show_progress=False):
+            adapter_state[f"base_model.model.{name}"] = tensor.clone().float()
+
+        if torch.distributed.get_rank() == 0:
+            os.makedirs(lora_sync_path, exist_ok=True)
+
+            target_modules = infer_target_modules_from_adapter_weights(adapter_state.keys())
+            base_model_name_or_path = str(
+                getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
+                or getattr(self.bridge.hf_pretrained, "name_or_path", "")
+            )
+            adapter_config = build_adapter_config_dict(
+                self.lora_cls,
+                target_modules=target_modules,
+                base_model_name_or_path=base_model_name_or_path,
+            )
+
+            save_file(adapter_state, os.path.join(lora_sync_path, "adapter_model.safetensors"))
+            with open(os.path.join(lora_sync_path, "adapter_config.json"), "w", encoding="utf-8") as f:
+                json.dump(adapter_config, f, ensure_ascii=False, indent=4)
+
+            lora_request = LoraLoadRequest(lora_path=lora_sync_path)
+            await inference_engine_client.update_named_weights(lora_request)
+
+        torch.distributed.barrier()
+
     async def broadcast_to_inference_engines(
         self, inference_engine_client: "InferenceEngineInterface", inference_engine_cfg: "InferenceEngineConfig"
     ):
@@ -813,6 +859,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             cache_reset_task = inference_engine_client.reset_prefix_cache()
 
         torch.cuda.empty_cache()
+
+        if self._is_lora:
+            lora_sync_path = self.cfg.policy.model.lora.lora_sync_path
+            await self._save_lora_adapters_and_sync(lora_sync_path, inference_engine_client)
+            return
 
         # Extract and send weights using the sender created at init time
         weight_metadata = self.weight_extractor.get_weight_metadata(generator_dtype)

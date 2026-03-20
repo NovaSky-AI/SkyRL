@@ -1,6 +1,9 @@
 """
-# Run tests (requires fsdp extra):
-uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py
+# Run FSDP tests:
+uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "fsdp"
+
+# Run Megatron tests:
+uv run --isolated --extra dev --extra megatron pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron"
 """
 
 import asyncio
@@ -22,17 +25,30 @@ from tests.backends.skyrl_train.gpu.utils import (
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
-def get_test_actor_config(enable_lora: bool = False) -> SkyRLTrainConfig:
+def get_test_actor_config(
+    strategy: str = "fsdp",
+    enable_lora: bool = False,
+    colocate_all: bool = False,
+    weight_sync_backend: str = "nccl",
+    tp_size: int = 2,
+) -> SkyRLTrainConfig:
     """Get base config with test-specific overrides."""
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
+    cfg.trainer.strategy = strategy
+    cfg.trainer.placement.colocate_all = colocate_all
     cfg.trainer.placement.policy_num_gpus_per_node = 2
     cfg.generator.inference_engine.async_engine = True
     cfg.generator.inference_engine.num_engines = 1
     cfg.generator.inference_engine.run_engines_locally = True
+    cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
+    cfg.generator.inference_engine.tensor_parallel_size = tp_size
 
-    # LoRA configuration
+    if strategy == "megatron":
+        cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 2
+        cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
+
     if enable_lora:
         cfg.trainer.policy.model.lora = SkyRLLoraConfig(
             rank=32,
@@ -51,23 +67,29 @@ def get_test_actor_config(enable_lora: bool = False) -> SkyRLTrainConfig:
         pytest.param(True, "nccl", "fsdp", 2),
         pytest.param(False, "nccl", "fsdp2", 2),
         pytest.param(True, "nccl", "fsdp2", 2),
+        pytest.param(False, "nccl", "megatron", 2, marks=pytest.mark.megatron),
+        pytest.param(True, "nccl", "megatron", 2, marks=pytest.mark.megatron),
     ],
     ids=[
         "no_colocate_nccl_fsdp",
         "colocate_nccl_fsdp",
         "no_colocate_nccl_fsdp2",
         "colocate_nccl_fsdp2",
+        "no_colocate_nccl_megatron",
+        "colocate_nccl_megatron",
     ],
 )
 def test_policy_local_engines_e2e(ray_init_fixture, colocate_all, weight_sync_backend, strategy, tp_size):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
-    cfg = get_test_actor_config(enable_lora=True)
-    cfg.trainer.placement.colocate_all = colocate_all
-    cfg.generator.inference_engine.weight_sync_backend = weight_sync_backend
-    cfg.trainer.strategy = strategy
-    cfg.generator.inference_engine.tensor_parallel_size = tp_size
+    cfg = get_test_actor_config(
+        strategy=strategy,
+        enable_lora=True,
+        colocate_all=colocate_all,
+        weight_sync_backend=weight_sync_backend,
+        tp_size=tp_size,
+    )
 
     # If colocate is True, this will load the engine, sleep, and wake up the engine
     with InferenceEngineState.create(
