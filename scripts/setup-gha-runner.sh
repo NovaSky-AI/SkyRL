@@ -168,24 +168,25 @@ log "Installing runner as service..."
 sudo ./svc.sh install
 sudo ./svc.sh start
 
-# 7. Configure systemd watchdog for auto-restart
-log "Configuring systemd watchdog..."
+# 7. Configure systemd for auto-restart on crash
+log "Configuring systemd overrides..."
 SERVICE_NAME=$(systemctl list-units --type=service --all | grep "actions.runner" | awk '{print $1}' | head -1)
 if [ -n "$SERVICE_NAME" ]; then
     OVERRIDE_DIR="/etc/systemd/system/${SERVICE_NAME}.d"
     sudo mkdir -p "$OVERRIDE_DIR"
-    sudo tee "$OVERRIDE_DIR/override.conf" > /dev/null << 'WATCHDOG_EOF'
+    # NOTE: Do NOT use WatchdogSec — the GHA runner doesn't send sd_notify
+    # heartbeats, so systemd would kill long-running jobs after the timeout.
+    sudo tee "$OVERRIDE_DIR/override.conf" > /dev/null << 'OVERRIDE_EOF'
 [Service]
 KillMode=control-group
 Restart=always
 RestartSec=10
-WatchdogSec=300
 StartLimitIntervalSec=600
 StartLimitBurst=5
 TimeoutStopSec=90
-WATCHDOG_EOF
+OVERRIDE_EOF
     sudo systemctl daemon-reload
-    log "Watchdog configured: auto-restart enabled"
+    log "Systemd overrides configured: auto-restart on crash enabled"
 fi
 
 # 8. Install health check cron job
