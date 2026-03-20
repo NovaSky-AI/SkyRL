@@ -36,6 +36,9 @@ from skyrl.train.utils.utils import (
 )
 from skyrl.utils.tok import get_tokenizer
 
+# Fixed LoRA adapter name used for generation requests when LoRA is active.
+_SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
+
 # NOTE (sumanthrh): We use ray heavily and thus disable `fork` start method.
 # forking within ray leads to undefined behaviour and often causes hard to debug
 # memory leaks.  See: https://docs.ray.io/en/latest/ray-core/patterns/fork-new-processes.html
@@ -376,10 +379,13 @@ class BasePPOExp:
                 f"proxy_url={proxy_url}, server_urls={server_urls}, colocated={is_colocated}"
             )
 
+        lora_cfg = self.cfg.trainer.policy.model.lora
+        active_lora_name = _SKYRL_LORA_ADAPTER_NAME if lora_cfg and lora_cfg.rank > 0 else None
         return RemoteInferenceClient(
             proxy_url=proxy_url,
             server_urls=server_urls,
             model_name=self.cfg.trainer.policy.model.path,
+            active_lora_name=active_lora_name,
         )
 
     def _setup_trainer(self):

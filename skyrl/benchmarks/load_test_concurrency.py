@@ -157,10 +157,11 @@ async def fire_chat_completions(base_url: str, n: int, model_name: str, max_toke
 async def fire_client_generate(
     client: RemoteInferenceClient, tokenizer, n: int, max_tokens: int, qps: float = math.inf
 ) -> dict:
-    """Send *n* concurrent prompts through RemoteInferenceClient.generate().
+    """Send *n* concurrent prompts through RemoteInferenceClient._generate_single().
 
-    Bypasses client.generate() to use return_exceptions=True so we get
-    per-request error counts instead of one failure killing the whole batch.
+    Calls _generate_single directly (generate stage only, no detokenize) so we
+    can use return_exceptions=True and get per-request error counts instead of
+    one failure killing the whole batch.
     """
     token_ids = tokenizer.apply_chat_template(
         [[{"role": "user", "content": "Say hi"}]],
