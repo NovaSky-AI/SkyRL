@@ -15,7 +15,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 from skyrl.tx.layers.lora import LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
-from skyrl.tx.utils.models import get_group_sizes, pack_fused
+from skyrl.tx.utils.models import get_fused_components, pack_fused
 from tests.tx.models.conftest import load_model
 
 
@@ -262,7 +262,7 @@ def test_qwen3_lora():
         )
 
         # Load layer LoRA weights
-        qkv_group_sizes = get_group_sizes("qkv_proj", config)
+        _, qkv_group_sizes = get_fused_components("qkv_proj", config)
         for i in range(config.num_hidden_layers):
             hf_layer = hf_model.base_model.model.model.layers[i]
             jax_layer = model.model.layers[i]

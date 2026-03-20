@@ -132,24 +132,18 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
     return prefix + ".".join(map(str, path))
 
 
-FUSED_COMPONENTS = {
-    "qkv_proj": ("q_proj", "k_proj", "v_proj"),
-    "gate_up_proj": ("gate_proj", "up_proj"),
-}
-
-
-def get_group_sizes(proj_name: str, config: ModelConfig) -> tuple[int, ...]:
-    """Return group sizes for interleaved packing of a fused projection."""
+def get_fused_components(proj_name: str, config: ModelConfig) -> tuple[tuple[str, ...], tuple[int, ...]] | None:
+    """Return (components, group_sizes) for a fused projection, or None if not fused."""
     if proj_name == "qkv_proj":
         base = config.get_config()
         num_heads = base.num_attention_heads
         num_kv_heads = getattr(base, "num_key_value_heads", num_heads)
         head_dim = getattr(base, "head_dim", None) or base.hidden_size // num_heads
         q_per_kv = num_heads // num_kv_heads
-        return (q_per_kv * head_dim, head_dim, head_dim)
+        return ("q_proj", "k_proj", "v_proj"), (q_per_kv * head_dim, head_dim, head_dim)
     if proj_name == "gate_up_proj":
-        return (1, 1)
-    raise ValueError(f"Unknown fused projection: {proj_name}")
+        return ("gate_proj", "up_proj"), (1, 1)
+    return None
 
 
 def pack_fused(*arrays: np.ndarray, group_sizes: tuple[int, ...]) -> np.ndarray:
@@ -237,13 +231,14 @@ def load_safetensors(
             assert num_experts is not None
             expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
             tensor = np.stack(require_weights(tensors, expert_keys, checkpoint_dir), axis=0)
-        elif (components := FUSED_COMPONENTS.get(path[-2])) is not None:
+        elif (fused := get_fused_components(path[-2], config)) is not None:
+            components, group_sizes = fused
             keys = [get_param_key((*path[:-2], name, path[-1])) for name in components]
             weights = require_weights(tensors, keys, checkpoint_dir)
             if path[-1] == "lora_A":
                 tensor = get_shared_lora_A(weights)
             else:
-                tensor = pack_fused(*weights, group_sizes=get_group_sizes(path[-2], config))
+                tensor = pack_fused(*weights, group_sizes=group_sizes)
         elif key not in tensors:
             raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
         else:
@@ -298,13 +293,14 @@ def save_safetensors(
             param = param.reshape(param.shape[0], -1)
         elif "o_proj" in path:
             param = param.reshape(-1, param.shape[-1])
-        elif (components := FUSED_COMPONENTS.get(path[-2])) is not None:
+        elif (fused := get_fused_components(path[-2], config)) is not None:
+            components, group_sizes = fused
             keys = [get_param_key((*path[:-2], name, path[-1]), prefix=prefix) for name in components]
             if path[-1] == "lora_A":
                 for k in keys:
                     tensors[k] = param.T
             else:
-                for k, p in zip(keys, unpack_fused(param, group_sizes=get_group_sizes(path[-2], config))):
+                for k, p in zip(keys, unpack_fused(param, group_sizes=group_sizes)):
                     tensors[k] = p.T
             continue
         tensors[key] = param if "embed_tokens" in path else param.T
