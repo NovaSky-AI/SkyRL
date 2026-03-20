@@ -132,16 +132,7 @@ def get_param_key(path: tuple, prefix: str = "") -> str:
     return prefix + ".".join(map(str, path))
 
 
-QKV_COMPONENTS = ("q_proj", "k_proj", "v_proj")
-GATE_UP_COMPONENTS = ("gate_proj", "up_proj")
-
-
-def get_fused_keys(path: tuple, components: tuple[str, ...], prefix: str = "") -> tuple[str, ...]:
-    """Get HF-compatible keys for components of a fused weight path."""
-    return tuple(get_param_key((*path[:-2], name, path[-1]), prefix=prefix) for name in components)
-
-
-def get_qkv_group_sizes(config: ModelConfig) -> tuple[int, int, int]:
+def _get_qkv_group_sizes(config: ModelConfig) -> tuple[int, int, int]:
     """Return per-KV-group sizes for (Q, K, V) projections."""
     base = config.get_config()
     num_heads = base.num_attention_heads
@@ -149,6 +140,18 @@ def get_qkv_group_sizes(config: ModelConfig) -> tuple[int, int, int]:
     head_dim = getattr(base, "head_dim", None) or base.hidden_size // num_heads
     q_per_kv = num_heads // num_kv_heads
     return (q_per_kv * head_dim, head_dim, head_dim)
+
+
+# Fused projection configs: (component_names, group_sizes_fn)
+FUSED_PROJECTIONS: dict[str, tuple[tuple[str, ...], Callable[[ModelConfig], tuple[int, ...]]]] = {
+    "qkv_proj": (("q_proj", "k_proj", "v_proj"), _get_qkv_group_sizes),
+    "gate_up_proj": (("gate_proj", "up_proj"), lambda _: (1, 1)),
+}
+
+
+def get_fused_keys(path: tuple, components: tuple[str, ...], prefix: str = "") -> tuple[str, ...]:
+    """Get HF-compatible keys for components of a fused weight path."""
+    return tuple(get_param_key((*path[:-2], name, path[-1]), prefix=prefix) for name in components)
 
 
 def pack_fused(*arrays: np.ndarray, group_sizes: tuple[int, ...]) -> np.ndarray:
@@ -236,20 +239,14 @@ def load_safetensors(
             assert num_experts is not None
             expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
             tensor = np.stack(require_weights(tensors, expert_keys, checkpoint_dir), axis=0)
-        elif path[-2] == "qkv_proj":
-            keys = get_fused_keys(path, QKV_COMPONENTS)
+        elif path[-2] in FUSED_PROJECTIONS:
+            components, get_group_sizes = FUSED_PROJECTIONS[path[-2]]
+            keys = get_fused_keys(path, components)
             weights = require_weights(tensors, keys, checkpoint_dir)
             if path[-1] == "lora_A":
                 tensor = get_shared_lora_A(weights)
             else:
-                tensor = pack_fused(*weights, group_sizes=get_qkv_group_sizes(config))
-        elif path[-2] == "gate_up_proj":
-            keys = get_fused_keys(path, GATE_UP_COMPONENTS)
-            weights = require_weights(tensors, keys, checkpoint_dir)
-            if path[-1] == "lora_A":
-                tensor = get_shared_lora_A(weights)
-            else:
-                tensor = pack_fused(*weights, group_sizes=(1, 1))
+                tensor = pack_fused(*weights, group_sizes=get_group_sizes(config))
         elif key not in tensors:
             raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
         else:
@@ -304,22 +301,14 @@ def save_safetensors(
             param = param.reshape(param.shape[0], -1)
         elif "o_proj" in path:
             param = param.reshape(-1, param.shape[-1])
-        elif "qkv_proj" in path:
-            keys = get_fused_keys(path, QKV_COMPONENTS, prefix=prefix)
+        elif path[-2] in FUSED_PROJECTIONS:
+            components, get_group_sizes = FUSED_PROJECTIONS[path[-2]]
+            keys = get_fused_keys(path, components, prefix=prefix)
             if path[-1] == "lora_A":
                 for k in keys:
                     tensors[k] = param.T
             else:
-                for k, p in zip(keys, unpack_fused(param, group_sizes=get_qkv_group_sizes(config))):
-                    tensors[k] = p.T
-            continue
-        elif "gate_up_proj" in path:
-            keys = get_fused_keys(path, GATE_UP_COMPONENTS, prefix=prefix)
-            if path[-1] == "lora_A":
-                for k in keys:
-                    tensors[k] = param.T
-            else:
-                for k, p in zip(keys, unpack_fused(param, group_sizes=(1, 1))):
+                for k, p in zip(keys, unpack_fused(param, group_sizes=get_group_sizes(config))):
                     tensors[k] = p.T
             continue
         tensors[key] = param if "embed_tokens" in path else param.T

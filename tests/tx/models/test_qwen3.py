@@ -15,7 +15,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 from skyrl.tx.layers.lora import LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
-from skyrl.tx.utils.models import get_qkv_group_sizes, pack_fused
+from skyrl.tx.utils.models import FUSED_PROJECTIONS, pack_fused
 from tests.tx.models.conftest import load_model
 
 
@@ -128,7 +128,8 @@ def get_fused_qkv_lora_weights(config: Qwen3Config, hf_attn) -> tuple[np.ndarray
     k_B = get_hf_lora_B(hf_attn.k_proj)
     v_B = get_hf_lora_B(hf_attn.v_proj)
 
-    group_sizes = get_qkv_group_sizes(config)
+    _, get_group_sizes = FUSED_PROJECTIONS["qkv_proj"]
+    group_sizes = get_group_sizes(config)
     base = config.get_config()
     num_kv_heads = getattr(base, "num_key_value_heads", base.num_attention_heads)
     q_size, k_size, v_size = [g * num_kv_heads for g in group_sizes]
