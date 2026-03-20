@@ -263,11 +263,11 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def _to_training_batch(self, prepared_batch: types.PreparedModelPassBatch) -> TrainingInputBatch:
         """Convert PreparedModelPassBatch to TrainingInputBatch."""
-        if not prepared_batch.all_input_chunks:
+        if not prepared_batch.all_model_inputs:
             return TrainingInputBatch({})
 
         # Extract token IDs from ModelInput chunks
-        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_input_chunks)]
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
 
         # SkyRL-Train shifts internally, so provide the full sequence length by
         # appending the last target token to each already-shifted input.
@@ -391,7 +391,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        if not prepared_batch.all_input_chunks:
+        if not prepared_batch.all_model_inputs:
             return {}
 
         self._sleep_inference_engines()
@@ -454,7 +454,7 @@ class SkyRLTrainBackend(AbstractBackend):
         self,
         prepared_batch: types.PreparedModelPassBatch,
     ) -> dict[str, types.ForwardBackwardOutput | types.ErrorResponse]:
-        if not prepared_batch.all_input_chunks:
+        if not prepared_batch.all_model_inputs:
             return {}
 
         self._sleep_inference_engines()
@@ -537,8 +537,8 @@ class SkyRLTrainBackend(AbstractBackend):
         # 3. Sample all prompts in parallel
         async def sample_all():
             tasks = []
-            for i in range(len(prepared_batch.all_prompts)):
-                model_input = prepared_batch.all_prompts[i]
+            for i in range(len(prepared_batch.all_model_inputs)):
+                model_input = prepared_batch.all_model_inputs[i]
                 prompt_token_ids = render_model_input([model_input])[0].prompt_ids
                 sampling_params = prepared_batch.all_sampling_params[i]
 

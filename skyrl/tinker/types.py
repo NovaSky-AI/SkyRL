@@ -233,7 +233,7 @@ class PreparedModelPassBatch(BaseModel):
     """
 
     # Per-example data (list of lists)
-    all_input_chunks: list[ModelInput]
+    all_model_inputs: list[ModelInput]
     all_targets: list[list[int]]
     all_token_weights: list[list[float]]
     all_sampling_logprobs: list[list[float]]
@@ -255,7 +255,7 @@ class PreparedSampleBatch(BaseModel):
     """
 
     # Per-sample data
-    all_prompts: list[ModelInput]
+    all_model_inputs: list[ModelInput]
     all_sampling_params: list[SamplingParams]
     all_model_ids: list[str]
     all_checkpoint_ids: list[str]
