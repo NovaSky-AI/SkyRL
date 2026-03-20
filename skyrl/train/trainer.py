@@ -33,6 +33,7 @@ from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     AdaptiveKLController,
     FixedKLController,
+    apply_loss_reduction_to_advantages_minibatch,
     compute_approx_kl,
     get_kl_controller,
 )
@@ -1059,57 +1060,23 @@ class RayPPOTrainer:
             rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
             data["advantages"] = (advantages - mean) * rstd
 
-        # Step 2: Loss reduction normalization
+        # Step 2: Loss reduction normalization per mini-batch
         num_mini_batches = len(data) // mini_batch_size
         normalized_advantages = torch.zeros_like(advantages)
         for local_step in range(num_mini_batches):
             start_idx = local_step * mini_batch_size
             end_idx = (local_step + 1) * mini_batch_size
-            normalized_advantages[start_idx:end_idx] = self._normalize_minibatch_advantages(data[start_idx:end_idx])
+            mini_batch = data[start_idx:end_idx]
+            normalized_advantages[start_idx:end_idx] = apply_loss_reduction_to_advantages_minibatch(
+                advantages=mini_batch["advantages"],
+                loss_mask=mini_batch["loss_mask"],
+                loss_reduction=self.cfg.trainer.algorithm.loss_reduction,
+                micro_batch_size=self.cfg.trainer.micro_train_batch_size_per_gpu,
+                max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
+            )
 
         data["advantages"] = normalized_advantages
         return data
-
-    def _normalize_minibatch_advantages(self, data: TrainingInputBatch) -> torch.Tensor:
-        """Normalize the advantages in the mini-batch."""
-        advantages = data["advantages"]
-        loss_mask = data["loss_mask"]
-
-        normalized_advantages = torch.zeros_like(advantages)
-        batch_size = len(data)
-
-        # Option 1: token mean
-        if self.cfg.trainer.algorithm.loss_reduction == "token_mean":
-            normalized_advantages = advantages / loss_mask.sum().clamp(min=1)
-
-        # Option 1b: legacy token-mean implementation which averages token mean across microbatches
-        elif self.cfg.trainer.algorithm.loss_reduction == "token_mean_legacy":
-            micro_batch_size = self.cfg.trainer.micro_train_batch_size_per_gpu
-            num_micro_batches = len(data) // micro_batch_size
-            for i in range(num_micro_batches):
-                start_idx = i * micro_batch_size
-                end_idx = (i + 1) * micro_batch_size
-                microbatch_advantages = advantages[start_idx:end_idx]
-                microbatch_loss_mask = loss_mask[start_idx:end_idx]
-                # Compute token-mean within each microbatch
-                microbatch_advantages = microbatch_advantages / microbatch_loss_mask.sum().clamp(min=1)
-                # Average across microbatches
-                microbatch_advantages /= num_micro_batches
-                normalized_advantages[start_idx:end_idx] = microbatch_advantages
-
-        # Option 2: sequence mean
-        elif self.cfg.trainer.algorithm.loss_reduction == "sequence_mean":
-            normalized_advantages = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
-
-        # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
-        elif self.cfg.trainer.algorithm.loss_reduction == "seq_mean_token_sum_norm":
-            max_seq_len = self.cfg.trainer.algorithm.max_seq_len
-            normalized_advantages = advantages / (batch_size * max_seq_len)
-
-        else:
-            raise ValueError(f"Invalid loss reduction type: {self.cfg.trainer.algorithm.loss_reduction}")
-
-        return normalized_advantages
 
     def _execute_training_step(self, model: str, data: TrainingInputBatch) -> Dict[str, float]:
         """

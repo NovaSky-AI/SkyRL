@@ -14,6 +14,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     AdvantageEstimatorRegistry,
     FixedKLController,
     PolicyLossRegistry,
+    apply_loss_reduction_to_advantages_minibatch,
     compute_advantages_and_returns,
     compute_approx_kl,
     compute_gae_advantage_return,
@@ -546,3 +547,98 @@ def test_registry_reset_after_ray_shutdown():
 
     finally:
         ray.shutdown()
+
+
+class TestApplyLossReductionToAdvantagesMinibatch:
+    """Tests for apply_loss_reduction_to_advantages_minibatch."""
+
+    def test_token_mean(self):
+        advantages = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        loss_mask = torch.tensor([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
+        # valid tokens: 1+2+4+5+6 = 18, count = 5, mean = 3.6
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="token_mean",
+            micro_batch_size=1,
+            max_seq_len=3,
+        )
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(3.6))
+
+    def test_token_mean_all_masked(self):
+        """Token mean with all-zero mask should produce zero loss, not NaN."""
+        advantages = torch.tensor([[1.0, 2.0]])
+        loss_mask = torch.tensor([[0.0, 0.0]])
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="token_mean",
+            micro_batch_size=1,
+            max_seq_len=2,
+        )
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(0.0))
+
+    def test_sequence_mean(self):
+        advantages = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0]])
+        # seq 0: token mean = (1+2)/2 = 1.5
+        # seq 1: token mean = 3/1 = 3.0
+        # sequence mean = (1.5 + 3.0) / 2 = 2.25
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="sequence_mean",
+            micro_batch_size=1,
+            max_seq_len=2,
+        )
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(2.25))
+
+    def test_seq_mean_token_sum_norm(self):
+        advantages = torch.tensor([[2.0, 3.0], [9.0, 12.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0]])
+        # seq 0: (2+3)/10 = 0.5
+        # seq 1: 9/10 = 0.9
+        # mean across batch = (0.5 + 0.9) / 2 = 0.7
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="seq_mean_token_sum_norm",
+            micro_batch_size=1,
+            max_seq_len=10,
+        )
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(0.7))
+
+    def test_token_mean_legacy(self):
+        """Legacy token mean: per-microbatch token mean, then averaged across microbatches."""
+        # 4 sequences, micro_batch_size=2 -> 2 microbatches
+        advantages = torch.tensor([[2.0, 4.0], [6.0, 8.0], [10.0, 12.0], [14.0, 16.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [1.0, 1.0]])
+        # microbatch 0: token mean = (2+4+6)/3 = 4
+        # microbatch 1: token mean = (10+12+14+16)/4 = 13
+        # average of microbatch means = (4.0 + 13.0) / 2 = 8.5
+        scaled = apply_loss_reduction_to_advantages_minibatch(
+            advantages=advantages,
+            loss_mask=loss_mask,
+            loss_reduction="token_mean_legacy",
+            micro_batch_size=2,
+            max_seq_len=2,
+        )
+        loss = reduce_loss(scaled, loss_mask)
+        assert torch.allclose(loss, torch.tensor(8.5))
+
+    def test_invalid_loss_reduction_raises(self):
+        """Invalid loss_reduction should raise ValueError."""
+        advantages = torch.tensor([[1.0]])
+        loss_mask = torch.tensor([[1.0]])
+        with pytest.raises(ValueError, match="Invalid loss reduction type"):
+            apply_loss_reduction_to_advantages_minibatch(
+                advantages=advantages,
+                loss_mask=loss_mask,
+                loss_reduction="invalid",
+                micro_batch_size=1,
+                max_seq_len=1,
+            )

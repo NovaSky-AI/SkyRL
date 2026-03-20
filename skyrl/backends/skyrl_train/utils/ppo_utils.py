@@ -996,6 +996,58 @@ def reduce_loss(
     return (loss * loss_mask).sum() if loss_mask is not None else loss.sum()
 
 
+def apply_loss_reduction_to_advantages_minibatch(
+    advantages: torch.Tensor,
+    loss_mask: torch.Tensor,
+    loss_reduction: str,
+    micro_batch_size: int,
+    max_seq_len: int,
+) -> torch.Tensor:
+    """Scale advantages so that reduce_loss (a simple sum) produces the desired loss reduction.
+
+    Args:
+        advantages: Advantage tensor of shape (minibatch_size, seq_len).
+        loss_mask: Mask of shape (minibatch_size, seq_len) indicating valid loss tokens.
+        loss_reduction: One of "token_mean", "token_mean_legacy", "sequence_mean", "seq_mean_token_sum_norm".
+        micro_batch_size: Number of sequences per micro-batch
+        max_seq_len: Maximum sequence length.
+
+    Returns:
+        Scaled advantages tensor.
+    """
+    batch_size = advantages.shape[0]
+    normalized_advantages = torch.zeros_like(advantages)
+
+    # Option 1: token mean
+    if loss_reduction == "token_mean":
+        normalized_advantages = advantages / loss_mask.sum().clamp(min=1)
+
+    # Option 1b: legacy token-mean that normalizes per-microbatch then averages across microbatches.
+    elif loss_reduction == "token_mean_legacy":
+        num_micro_batches = batch_size // micro_batch_size
+        for i in range(num_micro_batches):
+            start_idx = i * micro_batch_size
+            end_idx = (i + 1) * micro_batch_size
+            mb_advantages = advantages[start_idx:end_idx]
+            mb_loss_mask = loss_mask[start_idx:end_idx]
+            mb_advantages = mb_advantages / mb_loss_mask.sum().clamp(min=1)
+            mb_advantages /= num_micro_batches
+            normalized_advantages[start_idx:end_idx] = mb_advantages
+
+    # Option 2: sequence mean
+    elif loss_reduction == "sequence_mean":
+        normalized_advantages = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
+
+    # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
+    elif loss_reduction == "seq_mean_token_sum_norm":
+        normalized_advantages = advantages / (batch_size * max_seq_len)
+
+    else:
+        raise ValueError(f"Invalid loss reduction type: {loss_reduction}")
+
+    return normalized_advantages
+
+
 # NOTE (erictang000): below ported from verl
 @register_advantage_estimator(AdvantageEstimator.REINFORCE_PP)
 def compute_reinforce_plus_plus_outcome_advantage(
