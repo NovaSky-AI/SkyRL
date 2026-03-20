@@ -2,7 +2,7 @@
 """
 Load test for concurrency limits across the inference stack.
 
-NOTE: This is not a full fledged serving benchmark script. This is primarily 
+NOTE: This is not a full fledged serving benchmark script. This is primarily
 aimed to testing bottlenecks in client/ API server code in handling
 concurrent requests before they are handed off to the inference engine.
 
@@ -13,7 +13,8 @@ pipeline handles high concurrency without dropping connections.
 Three modes:
   direct  - Direct to vLLM server (bypasses router)
   router  - Through the InferenceRouter (tests httpx pool + uvicorn backlog)
-  e2e     - Via RemoteInferenceClient.generate() (tests aiohttp connector)
+  e2e     - Via RemoteInferenceClient.generate() (tests aiohttp connector +
+            shared semaphore throttling)
 
 Usage:
   # Requires at least 1 GPU
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 SERVED_MODEL_NAME = "load_test_model"
-VALID_MODES = ["direct", "router", "e2e", "fully_async"]
+VALID_MODES = ["direct", "router", "e2e"]
 
 
 def get_config() -> SkyRLTrainConfig:
@@ -158,11 +159,12 @@ async def fire_chat_completions(base_url: str, n: int, model_name: str, max_toke
 async def fire_client_generate(
     client: RemoteInferenceClient, tokenizer, n: int, max_tokens: int, qps: float = math.inf
 ) -> dict:
-    """Send *n* concurrent prompts through RemoteInferenceClient._generate_single().
+    """Send *n* concurrent single-prompt generate() calls through RemoteInferenceClient.
 
-    Calls _generate_single directly (generate stage only, no detokenize) so we
-    can use return_exceptions=True and get per-request error counts instead of
-    one failure killing the whole batch.
+    Each of the n calls is a separate client.generate() with batch_size=1, simulating
+    num_parallel_generation_workers concurrent async RL workers all sharing one client.
+    Concurrency is throttled by the shared semaphore inside RemoteInferenceClient
+    (SKYRL_GENERATE_CONCURRENCY_PER_ENGINE × num_engines), not by this function.
     """
     token_ids = tokenizer.apply_chat_template(
         [[{"role": "user", "content": "Say hi"}]],
@@ -170,111 +172,29 @@ async def fire_client_generate(
         tokenize=True,
     )
     sampling_params = {"max_tokens": max_tokens}
+    input_batch = {
+        "prompt_token_ids": [token_ids[0]],
+        "sampling_params": sampling_params,
+    }
 
-    async def _single(idx: int) -> dict:
-        """Wrap _generate_single to tag errors with the phase that failed."""
+    async def _call(idx: int):
         try:
-            return await client._generate_single(
-                prompt_token_ids=token_ids[0],
-                sampling_params=sampling_params,
-                session_id=None,
-            )
+            return await client.generate(input_batch)
         except Exception as e:
-            # Re-raise with context about which request and what type
             raise RuntimeError(f"request {idx}: {type(e).__name__}: {e}") from e
 
     t0 = time.monotonic()
     if math.isinf(qps):
-        tasks = [_single(i) for i in range(n)]
+        tasks = [_call(i) for i in range(n)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
     else:
-        coro_fns = [lambda i=i: _single(i) for i in range(n)]
+        coro_fns = [lambda i=i: _call(i) for i in range(n)]
         results = await _rate_limited_gather(coro_fns, qps)
     elapsed = time.monotonic() - t0
 
     ok = sum(1 for r in results if not isinstance(r, Exception))
     errors = [r for r in results if isinstance(r, Exception)]
     return {"n": n, "ok": ok, "errors": len(errors), "elapsed_s": elapsed, "first_errors": errors[:3]}
-
-
-async def fire_fully_async_generate(
-    client: RemoteInferenceClient,
-    tokenizer,
-    n_workers: int,
-    batch_size: int,
-    max_tokens: int,
-    pause_resume: bool = False,
-) -> dict:
-    """Simulate fully-async RL: n_workers concurrent generate() calls, each with batch_size prompts.
-
-    This mirrors the production scenario where num_parallel_generation_workers concurrent
-    asyncio Tasks all call generate() on the same client instance simultaneously.
-
-    With the buggy local semaphore: each generate() creates its own Semaphore(512), so
-    n_workers × batch_size requests fire simultaneously with no cross-call throttling.
-    With the fix: all calls share one Semaphore(512 × num_engines) on the client instance.
-
-    If pause_resume=True, simulates a training-step weight-sync cycle before the burst:
-      1. Warmup burst (builds the connection pool)
-      2. pause(KEEP) - freezes the server
-      3. Sleep until all keep-alive connections go stale on both sides
-      4. resume() - unfreezes the server
-      5. Immediately fire n_workers concurrent generate() calls
-    This is the exact trigger for ServerDisconnectedError in production async RL.
-    """
-    token_ids = tokenizer.apply_chat_template(
-        [[{"role": "user", "content": "Say hi"}]],
-        add_generation_prompt=True,
-        tokenize=True,
-    )
-    single_token_ids = token_ids[0]
-    sampling_params = {"max_tokens": max_tokens}
-    input_batch = {
-        "prompt_token_ids": [single_token_ids] * batch_size,
-        "sampling_params": sampling_params,
-    }
-
-    async def _worker(idx: int):
-        try:
-            return await client.generate(input_batch)
-        except Exception as e:
-            raise RuntimeError(f"worker {idx}: {type(e).__name__}: {e}") from e
-
-    async def _run_burst(label: str) -> dict:
-        t0 = time.monotonic()
-        tasks = [_worker(i) for i in range(n_workers)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        elapsed = time.monotonic() - t0
-        errors = [r for r in results if isinstance(r, Exception)]
-        ok = sum(1 for r in results if not isinstance(r, Exception))
-        return {"n": n_workers, "ok": ok, "errors": len(errors), "elapsed_s": elapsed, "first_errors": errors[:3]}
-
-    if pause_resume:
-        # Step 1: warmup burst to fill the connection pool
-        print("  [pause_resume] Step 1: warmup burst to build connection pool...")
-        warmup = await _run_burst("warmup")
-        print(f"  [pause_resume] Warmup: ok={warmup['ok']} errors={warmup['errors']}")
-
-        # Step 2: pause (keep mode - like weight sync)
-        print("  [pause_resume] Step 2: pausing server (KEEP mode)...")
-        await client.pause()
-
-        # Step 3: sleep until connections go stale
-        # uvicorn default timeout_keep_alive=5s; aiohttp keepalive_timeout=2s.
-        # Sleep 8s to ensure both sides have closed keep-alive connections.
-        stale_sleep = 8
-        print(f"  [pause_resume] Step 3: sleeping {stale_sleep}s to stale all keep-alive connections...")
-        await asyncio.sleep(stale_sleep)
-
-        # Step 4: resume (like after weight sync completes)
-        print("  [pause_resume] Step 4: resuming server...")
-        await client.resume()
-
-        # Step 5: immediately fire the burst into stale connections
-        print(f"  [pause_resume] Step 5: firing {n_workers} concurrent generate() calls into stale pool...")
-        return await _run_burst("post-resume")
-    else:
-        return await _run_burst("burst")
 
 
 def print_result(result: dict):
@@ -358,24 +278,11 @@ def parse_args():
         default=1,
         help="Number of worker processes for direct/router modes (default: 1)",
     )
-
     parser.add_argument(
         "--qps",
         type=float,
         default=math.inf,
-        help="Submit requests at a steady rate (requests/sec). " "Default: inf (all requests fired at time 0).",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=8,
-        help="Prompts per generate() call in fully_async mode (default: 8)",
-    )
-    parser.add_argument(
-        "--pause-resume",
-        action="store_true",
-        default=False,
-        help="In fully_async mode: do a pause/sleep/resume cycle before the burst to stale connections (default: False)",
+        help="Submit requests at a steady rate (requests/sec). Default: inf (all requests fired at time 0).",
     )
 
     args = parser.parse_args()
@@ -388,12 +295,12 @@ def parse_args():
     if args.max_workers > 1 and "e2e" in modes and len(modes) == 1:
         parser.error("--max-workers is not supported for e2e mode")
 
-    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers, args.batch_size, args.pause_resume
+    return args.num_prompts, modes, args.max_tokens, args.qps, args.max_workers
 
 
 def main():
     logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
-    num_prompts, modes, max_tokens, qps, max_workers, batch_size, pause_resume = parse_args()
+    num_prompts, modes, max_tokens, qps, max_workers = parse_args()
 
     print("Load test config:")
     print(f"  model={MODEL}")
@@ -402,7 +309,6 @@ def main():
     print(f"  modes={modes}")
     print(f"  qps={qps}")
     print(f"  max_workers={max_workers}")
-    print(f"  batch_size={batch_size} (fully_async mode)")
     print()
     print("Starting servers...")
 
@@ -447,32 +353,6 @@ def main():
                 await client.teardown()
 
             asyncio.run(_run_e2e())
-            print()
-
-        if "fully_async" in modes:
-            n_workers = num_prompts // batch_size
-            pr_label = " + pause/resume" if pause_resume else ""
-            print("=" * 60)
-            print(f"Mode: fully_async{pr_label} - {n_workers} concurrent generate() calls × batch_size={batch_size}")
-            print(f"  = {n_workers * batch_size} total simultaneous requests (no cross-call throttle on baseline)")
-            print("=" * 60)
-
-            async def _run_fully_async():
-                result = await fire_fully_async_generate(
-                    client, tokenizer, n_workers, batch_size, max_tokens, pause_resume=pause_resume
-                )
-                elapsed = result["elapsed_s"]
-                throughput = result["n"] / elapsed if elapsed > 0 else float("inf")
-                status = "PASS" if result["errors"] == 0 else "FAIL"
-                print(
-                    f"  [{status}] workers={result['n']:>6}  ok={result['ok']:>6}  "
-                    f"errors={result['errors']:>4}  time={elapsed:.2f}s  throughput={throughput:.1f} workers/s"
-                )
-                for e in result["first_errors"]:
-                    print(f"         err: {str(e)[:200]}")
-                await client.teardown()
-
-            asyncio.run(_run_fully_async())
             print()
 
     finally:
