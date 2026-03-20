@@ -15,7 +15,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import (
 from skyrl.tx.layers.lora import LoRAMixin
 from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM, Qwen3MoeSparseMoeBlock
-from skyrl.tx.utils.models import FUSED_PROJECTIONS, pack_fused
+from skyrl.tx.utils.models import get_group_sizes, pack_fused
 from tests.tx.models.conftest import load_model
 
 
@@ -262,14 +262,14 @@ def test_qwen3_lora():
         )
 
         # Load layer LoRA weights
-        _, get_qkv_sizes = FUSED_PROJECTIONS["qkv_proj"]
+        qkv_group_sizes = get_group_sizes("qkv_proj", config)
         for i in range(config.num_hidden_layers):
             hf_layer = hf_model.base_model.model.model.layers[i]
             jax_layer = model.model.layers[i]
             hf_attn, hf_mlp = hf_layer.self_attn, hf_layer.mlp
 
             scaling = lora_config.lora_alpha / lora_config.r
-            qkv_B = pack_fused(*[get_hf_lora_B(p) for p in [hf_attn.q_proj, hf_attn.k_proj, hf_attn.v_proj]], group_sizes=get_qkv_sizes(config))
+            qkv_B = pack_fused(*[get_hf_lora_B(p) for p in [hf_attn.q_proj, hf_attn.k_proj, hf_attn.v_proj]], group_sizes=qkv_group_sizes)
             load_lora_weights(jax_layer.self_attn.qkv_proj, adapter_idx, get_hf_lora_A(hf_attn.q_proj), qkv_B, scaling, lora_config.r)
             load_lora_weights(jax_layer.self_attn.o_proj, adapter_idx, get_hf_lora_A(hf_attn.o_proj), get_hf_lora_B(hf_attn.o_proj), scaling, lora_config.r)
 

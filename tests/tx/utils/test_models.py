@@ -18,8 +18,8 @@ from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
 from skyrl.tx.utils import models
 from skyrl.tx.utils.models import (
-    FUSED_PROJECTIONS,
     extract_adapter_state,
+    get_group_sizes,
     insert_adapter_state,
     is_stacked_path,
     unpack_fused,
@@ -72,9 +72,8 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     # The fused qkv_proj lora_A is shared, so q_proj gets the same lora_A
     expected_lora_A = np.array(qkv_proj.lora_A[...][adapter_index, :, :rank].T)
     # For lora_B, we need to unpack the fused output and get just the q portion
-    _, get_group_sizes = FUSED_PROJECTIONS["qkv_proj"]
     fused_lora_B = np.array(qkv_proj.lora_B[...][adapter_index, :rank, :])
-    q_lora_B, _, _ = unpack_fused(fused_lora_B, group_sizes=get_group_sizes(config))
+    q_lora_B, _, _ = unpack_fused(fused_lora_B, group_sizes=get_group_sizes("qkv_proj", config))
     expected_lora_B = q_lora_B.T
 
     # Save and verify checkpoint exists
