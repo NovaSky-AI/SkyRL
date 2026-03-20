@@ -29,7 +29,7 @@ from tests.backends.skyrl_train.gpu.utils import (
     init_worker_with_type,
 )
 
-MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B-Instruct"
+MOE_MODEL_NAME = "moonshotai/Moonlight-16B-A3B"
 NUM_PROMPTS = 5
 N_SAMPLES_PER_PROMPT = 2
 MAX_GENERATE_LENGTH = 128
@@ -45,10 +45,12 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     # flash attn + mla works without sample packing, logprobs are crazy/wrong
     # but flash-attn correctly throws error with sample packing
     # we should add an assert that if you set use_sample_packing=False flash attn can accidentally be used
+    # and that we enable nvte fused attn for moonlight models with use_sample_packing=True
     cfg.trainer.logger = "console"
     if "moonlight" in model_name:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
+            
         cfg.trainer.flash_attn = False
     validate_cfg(cfg)
     return cfg
@@ -229,8 +231,8 @@ def test_logprobs(ray_init_fixture, tp, pp, cp, ep, etp, extra_tf_kwargs):
         cfg.trainer.policy.megatron_config.context_parallel_size = cp
         cfg.trainer.policy.megatron_config.expert_model_parallel_size = ep
         cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = etp
-        cfg.trainer.micro_forward_batch_size_per_gpu = 1
-        cfg.trainer.micro_train_batch_size_per_gpu = 1
+        cfg.trainer.micro_forward_batch_size_per_gpu = 2
+        cfg.trainer.micro_train_batch_size_per_gpu = 2
 
         def run_megatron_forward(enable_replay: bool) -> torch.Tensor:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {

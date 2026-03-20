@@ -172,7 +172,30 @@ def _pack_replay_indices(
         packed[offset : offset + n] = d
         offset += seqlens_padded_cpu[i]
 
-    return packed.unsqueeze(0)  # [1, total_packed_len, layers, topk]
+    if cp_size > 1:
+        cp_rank = mpu.get_context_parallel_rank()
+        out = torch.zeros(
+            total_packed_len // cp_size,
+            num_layers,
+            topk,
+            dtype=packed.dtype,
+            device=packed.device,
+        )
+        src_offset = 0
+        dst_offset = 0
+        for i in range(batch_size):
+            seqlen_padded_i = seqlens_padded_cpu[i]
+            seqlen_per_cp = seqlen_padded_i // cp_size
+            half = seqlen_per_cp // 2
+            out[dst_offset : dst_offset + half] = packed[src_offset + half * cp_rank : src_offset + half * (cp_rank + 1)]
+            back_start = src_offset + seqlen_padded_i - half * (cp_rank + 1)
+            back_end = src_offset + seqlen_padded_i - half * cp_rank
+            out[dst_offset + half : dst_offset + seqlen_per_cp] = packed[back_start:back_end]
+            src_offset += seqlen_padded_i
+            dst_offset += seqlen_per_cp
+        packed = out
+
+    return packed.unsqueeze(0)  # [1, packed_len_per_cp, layers, topk]
 
 
 def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
@@ -280,19 +303,6 @@ def setup_per_microbatch_replay_forward(
 
     if use_sample_packing:
         aligned = _pack_replay_indices(rollout_expert_indices, attention_mask)
-
-        # CP splitting: mirror the front+back chunking from preprocess_packed_seqs.
-        cp_size = mpu.get_context_parallel_world_size()
-        if cp_size > 1:
-            cp_rank = mpu.get_context_parallel_rank()
-            seq_len = aligned.shape[1]
-            seqlen_per_cp = seq_len // cp_size
-            half = seqlen_per_cp // 2
-            front = aligned[:, half * cp_rank : half * (cp_rank + 1), :, :]
-            back_start = seq_len - half * (cp_rank + 1)
-            back_end = seq_len - half * cp_rank
-            back = aligned[:, back_start:back_end, :, :]
-            aligned = torch.cat([front, back], dim=1)
     else:
         aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)
 

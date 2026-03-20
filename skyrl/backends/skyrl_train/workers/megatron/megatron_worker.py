@@ -374,7 +374,9 @@ class MegatronWorker:
 
         self.strategy.hf_config = hf_config
         self.tokenizer = tokenizer
-        self.enable_router_replay = megatron_config.moe_enable_routing_replay
+        self.enable_router_replay = transformer_config_kwargs.get(
+            "moe_enable_routing_replay", megatron_config.moe_enable_routing_replay
+        )
 
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora"):
         if lora_type == "lora":
