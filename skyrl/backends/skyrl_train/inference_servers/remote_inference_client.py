@@ -612,29 +612,27 @@ class RemoteInferenceClient:
         update_info: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Update weights via vLLM native /update_weights, or load a LoRA adapter from disk.
+        Update model weights via vLLM native /update_weights. Used for full parameter fine-tuning.
+
+        For LoRA weight sync, use update_lora_from_disk() instead.
 
         Args:
-            update_info: Dict with keys expected by vLLM. For weight sync: names,
-                dtype_names, shapes, packed. For LoRA loading: lora_path.
+            update_info: Dict with keys expected by vLLM (names, dtype_names, shapes, packed, etc.)
 
         Returns:
             Dict mapping server_url to response.
         """
-        if "lora_path" in update_info:
-            return await self.load_lora_adapter(update_info["lora_path"])
-
         return await self._call_all_servers(
             "/update_weights",
             {"update_info": update_info},
         )
 
-    async def load_lora_adapter(
+    async def update_lora_from_disk(
         self,
         lora_path: str,
     ) -> Dict[str, Any]:
         """
-        Load a LoRA adapter from disk on all backend servers via /v1/load_lora_adapter.
+        Update LoRA adapter weights by loading from disk on all backend servers via /v1/load_lora_adapter.
 
         Always loads under self.active_lora_name so the same slot is reused across
         weight syncs.

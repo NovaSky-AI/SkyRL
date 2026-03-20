@@ -255,7 +255,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             )
 
             if isinstance(inference_engine_client, RemoteInferenceClient):
-                await inference_engine_client.load_lora_adapter(lora_sync_path)
+                await inference_engine_client.update_lora_from_disk(lora_sync_path)
             else:
                 lora_request = LoraLoadRequest(lora_path=lora_sync_path)
                 await inference_engine_client.update_named_weights(lora_request)
