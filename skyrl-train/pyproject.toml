@@ -39,7 +39,7 @@ dependencies = [
     "jaxtyping",
     "skyrl-gym",
     "flash-attn",
-    "causal-conv1d",
+    "causal-conv1d>=1.6.0",
     "flash-linear-attention",
     "polars",
     "s3fs",
