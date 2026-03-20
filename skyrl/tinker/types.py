@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import Base64Bytes, BaseModel, Discriminator
 
 
 class RequestType(str, Enum):
@@ -97,7 +97,24 @@ class EncodedTextChunk(BaseModel):
     tokens: list[int]
 
 
-ModelInputChunk = EncodedTextChunk
+class ImageChunk(BaseModel):
+    type: Literal["image"] = "image"
+    data: Base64Bytes
+    format: Literal["png", "jpeg"]
+    expected_tokens: int | None = None
+
+
+class ImageAssetPointerChunk(BaseModel):
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+    format: Literal["png", "jpeg"]
+    location: str
+    expected_tokens: int | None = None
+
+
+ModelInputChunk = Annotated[
+    EncodedTextChunk | ImageAssetPointerChunk | ImageChunk,
+    Discriminator("type"),
+]
 
 
 class ModelInput(BaseModel):

@@ -1,7 +1,11 @@
+import base64
+
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from skyrl.tinker import api
+
+_B64_PNG = base64.b64encode(b"\x89PNG").decode()
 
 
 def _make_datum() -> api.Datum:
@@ -52,3 +56,16 @@ class TestApiChunkDiscriminatorWithoutType:
     def test_encoded_text(self):
         obj = _api_adapter.validate_python({"tokens": [1, 2]})
         assert isinstance(obj, api.EncodedTextChunk)
+
+    def test_image(self):
+        obj = _api_adapter.validate_python({"data": _B64_PNG, "format": "png"})
+        assert isinstance(obj, api.ImageChunk)
+
+    def test_image_asset_pointer(self):
+        obj = _api_adapter.validate_python({"format": "png", "location": "s3://bucket/img.png"})
+        assert isinstance(obj, api.ImageAssetPointerChunk)
+
+
+def test_api_chunk_discriminator_rejects_unrecognised_payload():
+    with pytest.raises(ValidationError):
+        _api_adapter.validate_python({"format": "png"})

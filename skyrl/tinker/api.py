@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, ClassVar, Literal
+from typing import Annotated, Any, AsyncGenerator, ClassVar, Literal
 from uuid import uuid4
 
 import fastapi
@@ -14,8 +14,12 @@ import psutil
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import (
+    Base64Bytes,
     BaseModel,
+    Discriminator,
     Field,
+    Tag,
+    field_validator,
     model_validator,
 )
 from sqlalchemy.exc import IntegrityError
@@ -307,7 +311,60 @@ class EncodedTextChunk(BaseModel):
         return types.EncodedTextChunk(tokens=self.tokens)
 
 
-ModelInputChunk = EncodedTextChunk
+class ImageChunk(BaseModel):
+    type: Literal["image"] = "image"
+    data: Base64Bytes
+    format: Literal["png", "jpeg"]
+    expected_tokens: int | None = None
+
+    def to_types(self) -> types.ImageChunk:
+        return types.ImageChunk(
+            data=self.data,
+            format=self.format,
+            expected_tokens=self.expected_tokens,
+        )
+
+
+class ImageAssetPointerChunk(BaseModel):
+    type: Literal["image_asset_pointer"] = "image_asset_pointer"
+    format: Literal["png", "jpeg"]
+    location: str
+    expected_tokens: int | None = None
+
+    @field_validator("location")
+    @classmethod
+    def validate_location(cls, v: str) -> str:
+        if not v:
+            raise ValueError("location must not be empty")
+        return v
+
+    def to_types(self) -> types.ImageAssetPointerChunk:
+        return types.ImageAssetPointerChunk(
+            format=self.format,
+            location=self.location,
+            expected_tokens=self.expected_tokens,
+        )
+
+
+def _get_model_chunk_type(v: Any) -> str:
+    if isinstance(v, dict):
+        if "type" in v:
+            return v["type"]
+        if "tokens" in v:
+            return "encoded_text"
+        if "location" in v:
+            return "image_asset_pointer"
+        if "data" in v:
+            return "image"
+    return getattr(v, "type", "encoded_text")
+
+
+ModelInputChunk = Annotated[
+    Annotated[EncodedTextChunk, Tag("encoded_text")]
+    | Annotated[ImageAssetPointerChunk, Tag("image_asset_pointer")]
+    | Annotated[ImageChunk, Tag("image")],
+    Discriminator(_get_model_chunk_type),
+]
 
 
 class ModelInput(BaseModel):
