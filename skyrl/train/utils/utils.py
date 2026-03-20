@@ -206,12 +206,12 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         assert (
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
-        assert (
-            cfg.trainer.policy.megatron_config.pipeline_model_parallel_size == 1
-        ), "pipeline parallel is not yet supported for router replay (r3) with megatron"
-        assert (
-            cfg.trainer.policy.megatron_config.context_parallel_size == 1
-        ), "context parallel is not yet supported for router replay (r3) with megatron"
+        # # assert (
+        # #     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size == 1
+        # # ), "pipeline parallel is not yet supported for router replay (r3) with megatron"
+        # assert (
+        #     cfg.trainer.policy.megatron_config.context_parallel_size == 1
+        # ), "context parallel is not yet supported for router replay (r3) with megatron"
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:

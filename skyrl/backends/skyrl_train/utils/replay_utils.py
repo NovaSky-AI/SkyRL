@@ -187,7 +187,9 @@ def _pack_replay_indices(
             seqlen_padded_i = seqlens_padded_cpu[i]
             seqlen_per_cp = seqlen_padded_i // cp_size
             half = seqlen_per_cp // 2
-            out[dst_offset : dst_offset + half] = packed[src_offset + half * cp_rank : src_offset + half * (cp_rank + 1)]
+            out[dst_offset : dst_offset + half] = packed[
+                src_offset + half * cp_rank : src_offset + half * (cp_rank + 1)
+            ]
             back_start = src_offset + seqlen_padded_i - half * (cp_rank + 1)
             back_end = src_offset + seqlen_padded_i - half * cp_rank
             out[dst_offset + half : dst_offset + seqlen_per_cp] = packed[back_start:back_end]

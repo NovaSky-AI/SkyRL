@@ -36,9 +36,9 @@ MODEL_NAME="moonshotai/Moonlight-16B-A3B-Instruct"
 NUM_NODES=1
 NUM_GPUS=8
 
-MEGATRON_TP=4
-MEGATRON_PP=1
-MEGATRON_CP=1
+MEGATRON_TP=1
+MEGATRON_PP=2
+MEGATRON_CP=2
 MEGATRON_EP=4
 MEGATRON_ETP=1
 
@@ -73,6 +73,13 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.eval_batch_size=1024 \
   trainer.eval_before_train=false \
   trainer.eval_interval=4 \
+  trainer.strategy=megatron \
+  trainer.policy.megatron_config.tensor_model_parallel_size=$MEGATRON_TP \
+  trainer.policy.megatron_config.pipeline_model_parallel_size=$MEGATRON_PP \
+  trainer.policy.megatron_config.context_parallel_size=$MEGATRON_CP \
+  trainer.policy.megatron_config.expert_model_parallel_size=$MEGATRON_EP \
+  trainer.policy.megatron_config.expert_tensor_parallel_size=$MEGATRON_ETP \
+  trainer.policy.megatron_config.moe_enable_routing_replay=$ROUTER_REPLAY \
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=${MINI_BATCH_SIZE} \
   trainer.policy_mini_batch_size=${MINI_BATCH_SIZE} \

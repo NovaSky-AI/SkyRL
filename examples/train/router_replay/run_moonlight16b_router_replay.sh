@@ -16,10 +16,10 @@ INFERENCE_BACKEND="vllm" # currently only vllm is supported for megatron
 NUM_NODES=1
 NUM_GPUS=8
 
-MEGATRON_TP=4
-MEGATRON_PP=1
-MEGATRON_CP=1
-MEGATRON_EP=8
+MEGATRON_TP=1
+MEGATRON_PP=2
+MEGATRON_CP=2
+MEGATRON_EP=4
 MEGATRON_ETP=1
 
 NUM_INFERENCE_ENGINES=1
@@ -41,6 +41,7 @@ SKYRL_RAY_PG_TIMEOUT_IN_S=300 uv run --isolated --extra megatron --with blobfile
   trainer.placement.colocate_all=true \
   trainer.strategy=megatron \
   trainer.placement.policy_num_nodes=$NUM_NODES \
+  trainer.policy.megatron_config.transformer_config_kwargs.num_layers_in_last_pipeline_stage=13 \
   trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
   generator.inference_engine.num_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine.tensor_parallel_size=$INFERENCE_ENGINE_TP \

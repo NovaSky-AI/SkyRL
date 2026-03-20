@@ -50,7 +50,7 @@ def get_test_actor_config(model_name=MOE_MODEL_NAME) -> SkyRLTrainConfig:
     if "moonlight" in model_name:
         if cfg.trainer.policy.megatron_config.transformer_config_kwargs is None:
             cfg.trainer.policy.megatron_config.transformer_config_kwargs = {}
-            
+
         cfg.trainer.flash_attn = False
     validate_cfg(cfg)
     return cfg
