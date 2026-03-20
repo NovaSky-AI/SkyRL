@@ -180,12 +180,11 @@ class ServerGroup:
                 **self._server_actor_kwargs,
             )
 
-            use_mp = self._server_actor_kwargs.get("distributed_executor_backend", "ray") == "mp"
             actor = ServerActorClass.remote(
                 self._cli_args,
                 self._start_port + server_idx,
                 server_idx=server_idx,
-                bundle_indices=None if use_mp else bundle_indices,
+                bundle_indices=bundle_indices,
                 dp_size=self._num_servers if self._enable_dp else -1,
                 dp_master_address=dp_address,
                 dp_rpc_port=dp_rpc_port,

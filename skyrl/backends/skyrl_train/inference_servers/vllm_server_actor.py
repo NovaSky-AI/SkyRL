@@ -169,11 +169,6 @@ class VLLMServerActor(ServerActorProtocol):
         # Configure GPU visibility for this server's TP/PP workers
         if self._use_mp_backend:
             self._setup_mp_gpu_visibility(mp_cuda_visible_devices)
-            if bundle_indices is not None:
-                raise ValueError(
-                    f"Server {server_idx}: bundle_indices={bundle_indices} must be None with the mp backend. "
-                    "GPU visibility is controlled by CUDA_VISIBLE_DEVICES via mp_cuda_visible_devices."
-                )
         else:
             os.environ["VLLM_RAY_PER_WORKER_GPUS"] = str(0.2 if colocated_training else 1.0)
             # Set bundle indices for this server's TP/PP workers in the placement group.
