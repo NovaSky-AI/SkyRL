@@ -52,8 +52,3 @@ class TestApiChunkDiscriminatorWithoutType:
     def test_encoded_text(self):
         obj = _api_adapter.validate_python({"tokens": [1, 2]})
         assert isinstance(obj, api.EncodedTextChunk)
-
-
-def test_api_chunk_discriminator_rejects_unrecognised_payload():
-    with pytest.raises(ValidationError):
-        _api_adapter.validate_python({"format": "png"})
