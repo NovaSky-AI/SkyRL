@@ -242,9 +242,43 @@ class InferenceRouter:
         raise RuntimeError(f"Router failed to start within {timeout}s")
 
     def shutdown(self) -> None:
-        """Shutdown the router gracefully."""
+        """Shutdown the router and ensure the port is released."""
         logger.info("Shutting down router...")
+
         if self._server:
             self._server.should_exit = True
+
         if self._server_thread:
-            self._server_thread.join(timeout=5)
+            self._server_thread.join(timeout=10)
+
+            if self._server_thread.is_alive():
+                logger.warning("Router thread did not exit gracefully, forcing server socket closure")
+                self._force_close_server_sockets()
+
+        if self._client:
+            try:
+                asyncio.get_event_loop().run_until_complete(self._client.aclose())
+            except Exception:
+                pass
+            self._client = None
+
+        self._server = None
+        self._server_thread = None
+        self._app = None
+
+    def _force_close_server_sockets(self) -> None:
+        """Force-close the underlying server sockets to release the port."""
+        if self._server and hasattr(self._server, "servers"):
+            for server in self._server.servers:
+                server.close()
+        import socket
+
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            result = s.connect_ex((self._host if self._host != "0.0.0.0" else "127.0.0.1", self._port))
+            s.close()
+            if result == 0:
+                logger.warning(f"Port {self._port} still in use after forced close")
+        except Exception:
+            pass
