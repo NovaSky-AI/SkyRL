@@ -46,7 +46,7 @@ _SKYRL_LORA_ADAPTER_NAME = "skyrl-lora"
 mp.set_start_method("spawn", force=True)
 
 config_dir = str(Path(__file__).parent.parent / "config")
-__all__ = ["BasePPOExp", "config_dir"]
+__all__ = ["BasePPOExp", "config_dir", "create_teacher_inference_engines_from_config"]
 
 
 def create_ray_wrapped_inference_engines_from_config(
@@ -111,6 +111,67 @@ def create_ray_wrapped_inference_engines_from_config(
         engine_kwargs["served_model_name"] = ie_cfg.served_model_name
 
     return create_ray_wrapped_inference_engines(**engine_kwargs)
+
+
+def create_teacher_inference_engines_from_config(cfg: SkyRLTrainConfig, tokenizer: PreTrainedTokenizerBase):
+    """Create vLLM inference engines for the teacher model (distillation).
+
+    Unlike the student engines, teacher engines:
+    - Use the teacher model path (not policy model path)
+    - Set max_logprobs to top_k_logprobs (not 1)
+    - Don't enable sleep mode (teacher doesn't share GPU with training)
+    - Don't set up weight sync (teacher weights are static)
+
+    Also loads the teacher's own tokenizer for cross-model distillation.
+
+    Args:
+        cfg: The fully resolved SkyRLTrainConfig instance. Must have teacher.model_path set.
+        tokenizer: The student tokenizer (not used for engine creation, but kept
+            for API consistency with the student engine factory).
+
+    Returns:
+        Tuple of (engines, teacher_tokenizer).
+    """
+    from transformers import AutoTokenizer
+
+    from skyrl.backends.skyrl_train.inference_engines.ray_wrapped_inference_engine import (
+        create_ray_wrapped_inference_engines,
+    )
+
+    teacher_cfg = cfg.teacher
+    assert teacher_cfg.model_path is not None, "teacher.model_path must be set for distillation"
+
+    # Load teacher's own tokenizer for cross-model retokenization.
+    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_cfg.model_path, trust_remote_code=True)
+    logger.info(f"Loaded teacher tokenizer: {teacher_cfg.model_path} " f"(vocab_size={teacher_tokenizer.vocab_size})")
+
+    engine_kwargs = {
+        "num_inference_engines": teacher_cfg.num_inference_engines,
+        "tensor_parallel_size": teacher_cfg.inference_engine_tensor_parallel_size,
+        "pipeline_parallel_size": teacher_cfg.inference_engine_pipeline_parallel_size,
+        "model_dtype": "auto",
+        "pretrain": teacher_cfg.model_path,
+        "seed": cfg.trainer.seed,
+        "vllm_v1_disable_multiproc": False,
+        "enable_prefix_caching": False,
+        "enforce_eager": teacher_cfg.enforce_eager,
+        "expert_parallel_size": 1,
+        "data_parallel_size": 1,
+        "shared_pg": None,  # teacher gets its own placement group
+        "gpu_memory_utilization": teacher_cfg.gpu_memory_utilization,
+        "inference_engine_enable_sleep": False,  # teacher doesn't share GPU
+        "async_engine": False,
+        "max_num_batched_tokens": None,
+        "max_num_seqs": None,
+        "tokenizer": teacher_tokenizer,
+        "backend": teacher_cfg.backend,
+        "engine_init_kwargs": dict(teacher_cfg.engine_init_kwargs),
+        "enable_ray_prometheus_stats": False,
+        "max_logprobs": teacher_cfg.top_k_logprobs,
+    }
+
+    engines = create_ray_wrapped_inference_engines(**engine_kwargs)
+    return engines, teacher_tokenizer
 
 
 def create_remote_inference_engines_from_config(cfg: SkyRLTrainConfig, tokenizer: PreTrainedTokenizerBase):

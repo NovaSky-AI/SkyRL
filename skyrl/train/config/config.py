@@ -689,6 +689,30 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
 
 
 # ---------------------------------------------------------------------------
+# Teacher config (for distillation)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TeacherConfig(BaseConfig):
+    """Configuration for a separate teacher model used in distillation.
+
+    When model_path is set, a dedicated vLLM inference engine is created for the
+    teacher. The teacher scores student-generated sequences with top-K logprobs.
+    """
+
+    model_path: Optional[str] = None
+    top_k_logprobs: int = 256
+    num_inference_engines: int = 1
+    inference_engine_tensor_parallel_size: int = 1
+    inference_engine_pipeline_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.9
+    enforce_eager: bool = False
+    backend: str = "vllm"
+    engine_init_kwargs: Dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
 
@@ -699,6 +723,7 @@ class SkyRLTrainConfig(BaseConfig):
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
     generator: GeneratorConfig = field(default_factory=GeneratorConfig)
     environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
+    teacher: TeacherConfig = field(default_factory=TeacherConfig)
 
     def __post_init__(self):
 
