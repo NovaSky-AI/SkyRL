@@ -18,9 +18,11 @@ from skyrl.tx.models.configs import Qwen3Config
 from skyrl.tx.models.qwen3 import Qwen3ForCausalLM
 from skyrl.tx.utils import models
 from skyrl.tx.utils.models import (
+    FUSED_PROJECTIONS,
     extract_adapter_state,
     insert_adapter_state,
     is_stacked_path,
+    unpack_fused,
 )
 from skyrl.utils.storage import download_and_unpack
 
@@ -61,14 +63,19 @@ def test_save_load_lora_checkpoint(storage_type: str, monkeypatch, tmp_path: Pat
     adapter_config = LoraConfig(rank=rank, alpha=alpha, seed=0)
 
     # Set LoRA weights to random values for testing (to catch transpose bugs)
-    q_proj = model.model.layers[0].self_attn.q_proj
+    qkv_proj = model.model.layers[0].self_attn.qkv_proj
     rng1, rng2 = jax.random.split(jax.random.PRNGKey(42))
-    q_proj.lora_A[...] = jax.random.normal(rng1, q_proj.lora_A[...].shape)
-    q_proj.lora_B[...] = jax.random.normal(rng2, q_proj.lora_B[...].shape)
+    qkv_proj.lora_A[...] = jax.random.normal(rng1, qkv_proj.lora_A[...].shape)
+    qkv_proj.lora_B[...] = jax.random.normal(rng2, qkv_proj.lora_B[...].shape)
 
     # Store expected values (trimmed to rank and transposed)
-    expected_lora_A = np.array(q_proj.lora_A[...][adapter_index, :, :rank].T)
-    expected_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :].T)
+    # The fused qkv_proj lora_A is shared, so q_proj gets the same lora_A
+    expected_lora_A = np.array(qkv_proj.lora_A[...][adapter_index, :, :rank].T)
+    # For lora_B, we need to unpack the fused output and get just the q portion
+    _, get_group_sizes = FUSED_PROJECTIONS["qkv_proj"]
+    fused_lora_B = np.array(qkv_proj.lora_B[...][adapter_index, :rank, :])
+    q_lora_B, _, _ = unpack_fused(fused_lora_B, group_sizes=get_group_sizes(config))
+    expected_lora_B = q_lora_B.T
 
     # Save and verify checkpoint exists
     models.save_lora_checkpoint(model, base_model_name, adapter_config, adapter_index, output_path, rank=0)
@@ -136,17 +143,17 @@ def test_extract_insert_adapter_state_roundtrip():
     _, _, model = create_test_model(base_model_name, rank, alpha, adapter_index)
 
     # Set LoRA weights to random values
-    q_proj = model.model.layers[0].self_attn.q_proj
+    qkv_proj = model.model.layers[0].self_attn.qkv_proj
     rng1, rng2 = jax.random.split(jax.random.PRNGKey(123))
-    q_proj.lora_A[...] = jax.random.normal(rng1, q_proj.lora_A[...].shape)
-    q_proj.lora_B[...] = jax.random.normal(rng2, q_proj.lora_B[...].shape)
+    qkv_proj.lora_A[...] = jax.random.normal(rng1, qkv_proj.lora_A[...].shape)
+    qkv_proj.lora_B[...] = jax.random.normal(rng2, qkv_proj.lora_B[...].shape)
 
     # Split model to get lora_params
     _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
 
     # Store original values for comparison
-    original_lora_A = np.array(q_proj.lora_A[...][adapter_index, :, :rank])
-    original_lora_B = np.array(q_proj.lora_B[...][adapter_index, :rank, :])
+    original_lora_A = np.array(qkv_proj.lora_A[...][adapter_index, :, :rank])
+    original_lora_B = np.array(qkv_proj.lora_B[...][adapter_index, :rank, :])
 
     # Extract adapter state
     extracted = extract_adapter_state(adapter_index, lora_params, rank)
@@ -161,12 +168,12 @@ def test_extract_insert_adapter_state_roundtrip():
                 assert leaf.ndim == 3  # (layers, in_dim, rank) or (layers, rank, out_dim)
 
     # Zero out the adapter's weights
-    q_proj.lora_A[...] = q_proj.lora_A[...].at[adapter_index].set(0)
-    q_proj.lora_B[...] = q_proj.lora_B[...].at[adapter_index].set(0)
+    qkv_proj.lora_A[...] = qkv_proj.lora_A[...].at[adapter_index].set(0)
+    qkv_proj.lora_B[...] = qkv_proj.lora_B[...].at[adapter_index].set(0)
 
     # Verify weights are zeroed
-    assert np.allclose(q_proj.lora_A[...][adapter_index], 0)
-    assert np.allclose(q_proj.lora_B[...][adapter_index], 0)
+    assert np.allclose(qkv_proj.lora_A[...][adapter_index], 0)
+    assert np.allclose(qkv_proj.lora_B[...][adapter_index], 0)
 
     # Re-split to get updated lora_params
     _, lora_params, _ = nnx.split(model, model.is_lora_param, ...)
@@ -179,9 +186,9 @@ def test_extract_insert_adapter_state_roundtrip():
         key = path[-2].key if hasattr(path[-2], "key") else str(path[-2])
         # leaf is a state wrapper with .value, or can be an array directly
         arr = leaf.value if hasattr(leaf, "value") else leaf
-        if "q_proj" in str(path) and key == "lora_A":
+        if "qkv_proj" in str(path) and key == "lora_A":
             restored_lora_A = np.array(arr[0, adapter_index, :, :rank])
-        elif "q_proj" in str(path) and key == "lora_B":
+        elif "qkv_proj" in str(path) and key == "lora_B":
             restored_lora_B = np.array(arr[0, adapter_index, :rank, :])
 
     assert np.allclose(original_lora_A, restored_lora_A), "lora_A not restored correctly"
