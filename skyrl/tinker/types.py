@@ -97,22 +97,8 @@ class EncodedTextChunk(BaseModel):
     tokens: list[int]
 
 
-class ImageChunk(BaseModel):
-    type: Literal["image"] = "image"
-    data: bytes
-    format: Literal["png", "jpeg"]
-    expected_tokens: int | None = None
-
-
-class ImageAssetPointerChunk(BaseModel):
-    type: Literal["image_asset_pointer"] = "image_asset_pointer"
-    format: Literal["png", "jpeg"]
-    location: str
-    expected_tokens: int | None = None
-
-
 ModelInputChunk = Annotated[
-    EncodedTextChunk | ImageAssetPointerChunk | ImageChunk,
+    EncodedTextChunk,
     Discriminator("type"),
 ]
 

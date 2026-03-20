@@ -1,5 +1,3 @@
-import base64
-
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
@@ -46,7 +44,6 @@ def test_forward_backward_input_rejects_loss_fn_config_for_cross_entropy():
 # --- ModelInputChunk discriminator tests (api) ---
 
 _api_adapter = TypeAdapter(api.ModelInputChunk)
-_B64_PNG = base64.b64encode(b"\x89PNG").decode()
 
 
 class TestApiChunkDiscriminatorWithoutType:
@@ -55,14 +52,6 @@ class TestApiChunkDiscriminatorWithoutType:
     def test_encoded_text(self):
         obj = _api_adapter.validate_python({"tokens": [1, 2]})
         assert isinstance(obj, api.EncodedTextChunk)
-
-    def test_image(self):
-        obj = _api_adapter.validate_python({"data": _B64_PNG, "format": "png"})
-        assert isinstance(obj, api.ImageChunk)
-
-    def test_image_asset_pointer(self):
-        obj = _api_adapter.validate_python({"format": "png", "location": "s3://bucket/img.png"})
-        assert isinstance(obj, api.ImageAssetPointerChunk)
 
 
 def test_api_chunk_discriminator_rejects_unrecognised_payload():
