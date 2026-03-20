@@ -104,6 +104,10 @@ class ModelInput(BaseModel):
     chunks: list[ModelInputChunk]
 
 
+class RenderedModelInput(BaseModel):
+    prompt_ids: list[int]
+
+
 class TensorData(BaseModel):
     data: list[int] | list[float]
 

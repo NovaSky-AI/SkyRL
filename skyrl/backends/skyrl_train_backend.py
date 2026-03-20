@@ -16,6 +16,7 @@ from ray.util.placement_group import placement_group
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from skyrl.backends.backend import AbstractBackend
+from skyrl.backends.renderer import render_model_input
 from skyrl.backends.skyrl_train.inference_engines.inference_engine_client import (
     InferenceEngineClient,
 )
@@ -266,10 +267,7 @@ class SkyRLTrainBackend(AbstractBackend):
             return TrainingInputBatch({})
 
         # Extract token IDs from ModelInput chunks
-        all_input_ids = [
-            [tok for chunk in mi.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])]
-            for mi in prepared_batch.all_input_chunks
-        ]
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_input_chunks)]
 
         # SkyRL-Train shifts internally, so provide the full sequence length by
         # appending the last target token to each already-shifted input.
@@ -541,9 +539,7 @@ class SkyRLTrainBackend(AbstractBackend):
             tasks = []
             for i in range(len(prepared_batch.all_prompts)):
                 model_input = prepared_batch.all_prompts[i]
-                prompt_token_ids = [
-                    tok for chunk in model_input.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])
-                ]
+                prompt_token_ids = render_model_input([model_input])[0].prompt_ids
                 sampling_params = prepared_batch.all_sampling_params[i]
 
                 # Pass through common fields; only stop needs name translation

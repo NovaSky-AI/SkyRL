@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 from transformers import AutoTokenizer, PretrainedConfig
 
 from skyrl.backends.backend import AbstractBackend
+from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import pad, pad_batch, pad_to_fsdp
 from skyrl.tinker import types
 from skyrl.tinker.loss_fns import LOSS_FUNCTIONS, LossFnConfig
@@ -618,10 +619,7 @@ class JaxBackendImpl(AbstractBackend):
         results = {}
 
         # Extract token IDs from ModelInput chunks
-        all_input_ids = [
-            [tok for chunk in mi.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])]
-            for mi in prepared_batch.all_input_chunks
-        ]
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_input_chunks)]
         all_targets = prepared_batch.all_targets
         all_token_weights = prepared_batch.all_token_weights
         all_sampling_logprobs = prepared_batch.all_sampling_logprobs
@@ -828,10 +826,7 @@ class JaxBackendImpl(AbstractBackend):
         results = {}
 
         # Extract token IDs from ModelInput chunks
-        all_prompts = [
-            [tok for chunk in mi.chunks for tok in (chunk.tokens if hasattr(chunk, "tokens") else [])]
-            for mi in prepared_batch.all_prompts
-        ]
+        all_prompts = [r.prompt_ids for r in render_model_input(prepared_batch.all_prompts)]
         all_sampling_params = prepared_batch.all_sampling_params
         request_batch_slices = prepared_batch.request_batch_slices
         needs_prompt_logprobs = prepared_batch.needs_prompt_logprobs
