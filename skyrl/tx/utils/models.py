@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -171,26 +171,27 @@ def unpack_fused(array: np.ndarray, group_sizes: tuple[int, ...]) -> tuple[np.nd
     return tuple(results)
 
 
-def get_shared_lora_A(
-    tensors: dict[str, np.ndarray], keys: tuple[str, ...], checkpoint_dir: str | os.PathLike
-) -> np.ndarray:
-    """Return a shared LoRA A matrix for fused projections.
+def require_weights(
+    tensors: dict[str, np.ndarray], keys: Sequence[str], checkpoint_dir: str | os.PathLike
+) -> list[np.ndarray]:
+    """Get transposed weight tensors for keys, raising if any are missing."""
+    missing = [k for k in keys if k not in tensors]
+    if missing:
+        raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing}")
+    return [tensors[k].T for k in keys]
 
-    Fused LoRA layers can only be represented as separate HF modules when all split
-    branches share the same A matrix. Checkpoints saved by SkyRL satisfy this by
-    construction; arbitrary external adapters may not.
-    """
-    missing_keys = [key for key in keys if key not in tensors]
-    if missing_keys:
-        raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-    arrays = [tensors[key].T for key in keys]
-    first = arrays[0]
-    if not all(np.allclose(first, arr) for arr in arrays[1:]):
+
+def get_shared_lora_A(
+    tensors: dict[str, np.ndarray], keys: Sequence[str], checkpoint_dir: str | os.PathLike
+) -> np.ndarray:
+    """Return a shared LoRA A matrix for fused projections."""
+    arrays = require_weights(tensors, keys, checkpoint_dir)
+    if not all(np.allclose(arrays[0], arr) for arr in arrays[1:]):
         raise RuntimeError(
             "Cannot load split LoRA adapter into fused projection because the source "
             "branches do not share the same lora_A matrix."
         )
-    return first
+    return arrays[0]
 
 
 def get_expert_key(path: tuple, expert_idx: int) -> str:
@@ -237,28 +238,19 @@ def load_safetensors(
             num_experts = config.get_num_experts()
             assert num_experts is not None
             expert_keys = [get_expert_key(path, i) for i in range(num_experts)]
-            missing_keys = [expert_key for expert_key in expert_keys if expert_key not in tensors]
-            if missing_keys:
-                raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-            tensor = np.stack([tensors[expert_key].T for expert_key in expert_keys], axis=0)
+            tensor = np.stack(require_weights(tensors, expert_keys, checkpoint_dir), axis=0)
         elif path[-2] == "qkv_proj":
             keys = get_fused_keys(path, QKV_COMPONENTS)
             if path[-1] == "lora_A":
                 tensor = get_shared_lora_A(tensors, keys, checkpoint_dir)
             else:
-                missing_keys = [k for k in keys if k not in tensors]
-                if missing_keys:
-                    raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-                tensor = pack_fused(*[tensors[k].T for k in keys], group_sizes=get_qkv_group_sizes(config))
+                tensor = pack_fused(*require_weights(tensors, keys, checkpoint_dir), group_sizes=get_qkv_group_sizes(config))
         elif path[-2] == "gate_up_proj":
             keys = get_fused_keys(path, GATE_UP_COMPONENTS)
             if path[-1] == "lora_A":
                 tensor = get_shared_lora_A(tensors, keys, checkpoint_dir)
             else:
-                missing_keys = [k for k in keys if k not in tensors]
-                if missing_keys:
-                    raise RuntimeError(f"Missing keys while loading from {checkpoint_dir}: {missing_keys}")
-                tensor = pack_fused(*[tensors[k].T for k in keys], group_sizes=(1, 1))
+                tensor = pack_fused(*require_weights(tensors, keys, checkpoint_dir), group_sizes=(1, 1))
         elif key not in tensors:
             raise RuntimeError(f"Missing key while loading from {checkpoint_dir}: {key}")
         else:
