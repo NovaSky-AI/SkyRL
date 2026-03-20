@@ -335,7 +335,7 @@ def setup_per_microbatch_replay_forward(
             if layer_number is not None:
                 layer_idx = layer_number - 1  # layer_number is 1-based
             else:
-                layer_idx = local_layer_offset + local_router_idx
+                layer_idx = local_layer_offset + local_router_idx + (local_num_layers - num_instances)
             if layer_idx < 0 or layer_idx >= global_num_layers_in_data:
                 raise ValueError(
                     f"Router replay layer index {layer_idx} out of range "
