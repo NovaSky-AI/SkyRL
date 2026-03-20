@@ -104,10 +104,7 @@ def load_lora_weights(
     padded_lora_A = np.zeros(jax_module.lora_A[...].shape[1:], dtype=lora_A_weights.dtype)
     padded_lora_B = np.zeros(jax_module.lora_B[...].shape[1:], dtype=lora_B_weights.dtype)
     padded_lora_A[..., : lora_A_weights.shape[-1]] = lora_A_weights
-    rank_axis = padded_lora_B.ndim - 2
-    rank_slice = [slice(None)] * padded_lora_B.ndim
-    rank_slice[rank_axis] = slice(0, lora_B_weights.shape[-2])
-    padded_lora_B[tuple(rank_slice)] = lora_B_weights
+    padded_lora_B[..., : lora_B_weights.shape[-2], :] = lora_B_weights
 
     jax_module.lora_A[...] = jax_module.lora_A[...].at[adapter_idx].set(jnp.array(padded_lora_A))
     jax_module.lora_B[...] = jax_module.lora_B[...].at[adapter_idx].set(jnp.array(padded_lora_B))
