@@ -112,64 +112,27 @@ def load_lora_weights(
     jax_module.lora_ranks[...] = jax_module.lora_ranks[...].at[adapter_idx].set(rank)
 
 
-def get_hf_lora_A(hf_module) -> np.ndarray:
-    return hf_module.lora_A["default"].weight.detach().numpy().T
+def get_hf_lora(hf_module) -> tuple[np.ndarray, np.ndarray]:
+    """Extract lora_A and lora_B from an HF module."""
+    lora_A = hf_module.lora_A["default"].weight.detach().numpy().T
+    lora_B = hf_module.lora_B["default"].weight.detach().numpy().T
+    return lora_A, lora_B
 
 
-def get_hf_lora_B(hf_module) -> np.ndarray:
-    return hf_module.lora_B["default"].weight.detach().numpy().T
+def fuse_lora_weights(
+    hf_modules: list, group_sizes: tuple[int, ...]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fuse separate HF LoRA weights into block-diagonal structure for fused layers."""
+    lora_As, lora_Bs = zip(*[get_hf_lora(m) for m in hf_modules])
+    sizes = [b.shape[1] for b in lora_Bs]
 
+    # Build block-diagonal lora_B: each block has one non-zero component
+    blocks = []
+    for i, lora_B in enumerate(lora_Bs):
+        arrays = [lora_B if j == i else np.zeros((lora_B.shape[0], sizes[j]), dtype=lora_B.dtype) for j in range(len(lora_Bs))]
+        blocks.append(pack_fused(*arrays, group_sizes=group_sizes))
 
-def get_fused_qkv_lora_weights(config: Qwen3Config, hf_attn) -> tuple[np.ndarray, np.ndarray]:
-    q_A = get_hf_lora_A(hf_attn.q_proj)
-    k_A = get_hf_lora_A(hf_attn.k_proj)
-    v_A = get_hf_lora_A(hf_attn.v_proj)
-    q_B = get_hf_lora_B(hf_attn.q_proj)
-    k_B = get_hf_lora_B(hf_attn.k_proj)
-    v_B = get_hf_lora_B(hf_attn.v_proj)
-
-    _, get_group_sizes = FUSED_PROJECTIONS["qkv_proj"]
-    group_sizes = get_group_sizes(config)
-    base = config.get_config()
-    num_kv_heads = getattr(base, "num_key_value_heads", base.num_attention_heads)
-    q_size, k_size, v_size = [g * num_kv_heads for g in group_sizes]
-
-    q_block = pack_fused(
-        q_B,
-        np.zeros((q_B.shape[0], k_size), dtype=q_B.dtype),
-        np.zeros((q_B.shape[0], v_size), dtype=q_B.dtype),
-        group_sizes=group_sizes,
-    )
-    k_block = pack_fused(
-        np.zeros((k_B.shape[0], q_size), dtype=k_B.dtype),
-        k_B,
-        np.zeros((k_B.shape[0], v_size), dtype=k_B.dtype),
-        group_sizes=group_sizes,
-    )
-    v_block = pack_fused(
-        np.zeros((v_B.shape[0], q_size), dtype=v_B.dtype),
-        np.zeros((v_B.shape[0], k_size), dtype=v_B.dtype),
-        v_B,
-        group_sizes=group_sizes,
-    )
-    return np.concatenate((q_A, k_A, v_A), axis=-1), np.concatenate((q_block, k_block, v_block), axis=0)
-
-
-def get_fused_gate_up_lora_weights(hf_mlp) -> tuple[np.ndarray, np.ndarray]:
-    gate_A = get_hf_lora_A(hf_mlp.gate_proj)
-    up_A = get_hf_lora_A(hf_mlp.up_proj)
-    gate_B = get_hf_lora_B(hf_mlp.gate_proj)
-    up_B = get_hf_lora_B(hf_mlp.up_proj)
-
-    gate_block = np.stack(
-        (gate_B, np.zeros((gate_B.shape[0], up_B.shape[1]), dtype=gate_B.dtype)),
-        axis=-1,
-    ).reshape(gate_B.shape[0], -1)
-    up_block = np.stack(
-        (np.zeros((up_B.shape[0], gate_B.shape[1]), dtype=up_B.dtype), up_B),
-        axis=-1,
-    ).reshape(up_B.shape[0], -1)
-    return np.concatenate((gate_A, up_A), axis=-1), np.concatenate((gate_block, up_block), axis=0)
+    return np.concatenate(lora_As, axis=-1), np.concatenate(blocks, axis=0)
 
 
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
@@ -302,43 +265,34 @@ def test_qwen3_lora():
         )
 
         # Load layer LoRA weights
+        _, get_qkv_sizes = FUSED_PROJECTIONS["qkv_proj"]
         for i in range(config.num_hidden_layers):
             hf_layer = hf_model.base_model.model.model.layers[i]
             jax_layer = model.model.layers[i]
-            qkv_lora_A, qkv_lora_B = get_fused_qkv_lora_weights(config, hf_layer.self_attn)
-            load_lora_weights(
-                jax_layer.self_attn.qkv_proj,
-                adapter_idx=adapter_idx,
-                lora_A_weights=qkv_lora_A,
-                lora_B_weights=qkv_lora_B,
-                scaling=lora_config.lora_alpha / lora_config.r,
-                rank=qkv_lora_A.shape[-1],
+            hf_attn, hf_mlp = hf_layer.self_attn, hf_layer.mlp
+
+            qkv_A, qkv_B = fuse_lora_weights(
+                [hf_attn.q_proj, hf_attn.k_proj, hf_attn.v_proj], get_qkv_sizes(config)
             )
             load_lora_weights(
-                jax_layer.self_attn.o_proj,
-                adapter_idx=adapter_idx,
-                lora_A_weights=get_hf_lora_A(hf_layer.self_attn.o_proj),
-                lora_B_weights=get_hf_lora_B(hf_layer.self_attn.o_proj),
-                scaling=lora_config.lora_alpha / lora_config.r,
-                rank=lora_config.r,
+                jax_layer.self_attn.qkv_proj, adapter_idx, qkv_A, qkv_B,
+                lora_config.lora_alpha / lora_config.r, qkv_A.shape[-1],
+            )
+            o_A, o_B = get_hf_lora(hf_attn.o_proj)
+            load_lora_weights(
+                jax_layer.self_attn.o_proj, adapter_idx, o_A, o_B,
+                lora_config.lora_alpha / lora_config.r, lora_config.r,
             )
 
-            gate_up_lora_A, gate_up_lora_B = get_fused_gate_up_lora_weights(hf_layer.mlp)
+            gate_up_A, gate_up_B = fuse_lora_weights([hf_mlp.gate_proj, hf_mlp.up_proj], (1, 1))
             load_lora_weights(
-                jax_layer.mlp.gate_up_proj,
-                adapter_idx=adapter_idx,
-                lora_A_weights=gate_up_lora_A,
-                lora_B_weights=gate_up_lora_B,
-                scaling=lora_config.lora_alpha / lora_config.r,
-                rank=gate_up_lora_A.shape[-1],
+                jax_layer.mlp.gate_up_proj, adapter_idx, gate_up_A, gate_up_B,
+                lora_config.lora_alpha / lora_config.r, gate_up_A.shape[-1],
             )
+            down_A, down_B = get_hf_lora(hf_mlp.down_proj)
             load_lora_weights(
-                jax_layer.mlp.down_proj,
-                adapter_idx=adapter_idx,
-                lora_A_weights=get_hf_lora_A(hf_layer.mlp.down_proj),
-                lora_B_weights=get_hf_lora_B(hf_layer.mlp.down_proj),
-                scaling=lora_config.lora_alpha / lora_config.r,
-                rank=lora_config.r,
+                jax_layer.mlp.down_proj, adapter_idx, down_A, down_B,
+                lora_config.lora_alpha / lora_config.r, lora_config.r,
             )
 
     # Use different adapter indices for each input
