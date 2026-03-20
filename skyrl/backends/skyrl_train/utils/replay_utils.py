@@ -125,6 +125,56 @@ def _remove_left_padding_from_indices(
     return new_rii
 
 
+def _pack_replay_indices(
+    rollout_expert_indices: torch.Tensor,
+    attention_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Pack routing indices to match the token layout produced by preprocess_packed_seqs.
+
+    With sample packing, Megatron concatenates all sequences into one packed
+    sequence with per-sample alignment padding.  The MoE router sees tokens in
+    this packed order, so replay indices must follow the same layout.
+
+    Returns:
+        [1, total_packed_len, layers, topk] matching the packed model input.
+    """
+    import megatron.core.parallel_state as mpu
+
+    batch_size = rollout_expert_indices.shape[0]
+    num_layers = rollout_expert_indices.shape[2]
+    topk = rollout_expert_indices.shape[3]
+
+    seq_lens = attention_mask.sum(dim=-1, dtype=torch.int32)
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    cp_size = mpu.get_context_parallel_world_size()
+    align_size = tp_size * cp_size * 2 if cp_size > 1 else tp_size
+
+    pad_sizes = (align_size - seq_lens % align_size) % align_size
+    seqlens_padded = seq_lens + pad_sizes
+
+    total_packed_len = int(seqlens_padded.sum().item())
+
+    packed = torch.zeros(
+        total_packed_len,
+        num_layers,
+        topk,
+        dtype=rollout_expert_indices.dtype,
+        device=rollout_expert_indices.device,
+    )
+
+    seq_lens_cpu = seq_lens.tolist()
+    seqlens_padded_cpu = seqlens_padded.tolist()
+    offset = 0
+    for i in range(batch_size):
+        n = seq_lens_cpu[i]
+        mask = attention_mask[i].bool()
+        d = rollout_expert_indices[i, mask]
+        packed[offset : offset + n] = d
+        offset += seqlens_padded_cpu[i]
+
+    return packed.unsqueeze(0)  # [1, total_packed_len, layers, topk]
+
+
 def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
     """Return the current PP rank's transformer-layer range.
 
@@ -194,6 +244,7 @@ def setup_per_microbatch_replay_forward(
     rollout_expert_indices: torch.Tensor,
     attention_mask: torch.Tensor,
     model_config,
+    use_sample_packing: bool = False,
 ) -> None:
     """Set up RouterReplay for a single micro-batch, aligning indices
     with the left-padding-removed token layout that the MoE layer sees.
@@ -227,20 +278,23 @@ def setup_per_microbatch_replay_forward(
 
     _patch_alltoall_dispatcher_for_replay()
 
-    aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)
+    if use_sample_packing:
+        aligned = _pack_replay_indices(rollout_expert_indices, attention_mask)
 
-    # CP splitting: mirror the front+back chunking from preprocess_packed_seqs
-    cp_size = mpu.get_context_parallel_world_size()
-    if cp_size > 1:
-        cp_rank = mpu.get_context_parallel_rank()
-        seq_len = aligned.shape[1]
-        seqlen_per_cp = seq_len // cp_size
-        half = seqlen_per_cp // 2  # we do *2 for causal masking, so get half of the sequence length per CP rank
-        front = aligned[:, half * cp_rank : half * (cp_rank + 1), :, :]
-        back_start = seq_len - half * (cp_rank + 1)
-        back_end = seq_len - half * cp_rank
-        back = aligned[:, back_start:back_end, :, :]
-        aligned = torch.cat([front, back], dim=1)
+        # CP splitting: mirror the front+back chunking from preprocess_packed_seqs.
+        cp_size = mpu.get_context_parallel_world_size()
+        if cp_size > 1:
+            cp_rank = mpu.get_context_parallel_rank()
+            seq_len = aligned.shape[1]
+            seqlen_per_cp = seq_len // cp_size
+            half = seqlen_per_cp // 2
+            front = aligned[:, half * cp_rank : half * (cp_rank + 1), :, :]
+            back_start = seq_len - half * (cp_rank + 1)
+            back_end = seq_len - half * cp_rank
+            back = aligned[:, back_start:back_end, :, :]
+            aligned = torch.cat([front, back], dim=1)
+    else:
+        aligned = _remove_left_padding_from_indices(rollout_expert_indices, attention_mask)
 
     # TP splitting: sequence parallelism across the tensor model parallel region
     tp_size = mpu.get_tensor_model_parallel_world_size()
