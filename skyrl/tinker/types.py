@@ -232,7 +232,7 @@ class PreparedModelPassBatch(BaseModel):
     Engine extracts this from requests, backend converts to JAX arrays and computes.
     """
 
-    # Per-example data (list of lists)
+    # Per-example data
     all_model_inputs: list[ModelInput]
     all_targets: list[list[int]]
     all_token_weights: list[list[float]]
