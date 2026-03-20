@@ -121,8 +121,17 @@ class ModelInput(BaseModel):
     chunks: list[ModelInputChunk]
 
 
+class MultiModalPlaceholder(BaseModel):
+    """Denotes where placeholder tokens are within a prompt_ids list."""
+
+    offset: int  # Start index of the placeholder tokens
+    length: int  # Length of the placeholder tokens
+
+
 class RenderedModelInput(BaseModel):
     prompt_ids: list[int]
+    multi_modal_kwargs: dict[str, Base64Bytes] | None = None
+    mm_placeholders: list[MultiModalPlaceholder] | None = None
 
 
 class TensorData(BaseModel):
