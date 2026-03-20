@@ -535,11 +535,12 @@ class SkyRLTrainBackend(AbstractBackend):
             return {req_id: error for req_id, _, _, _, _ in prepared_batch.request_batch_slices}
 
         # 3. Sample all prompts in parallel
+        all_input_ids = [r.prompt_ids for r in render_model_input(prepared_batch.all_model_inputs)]
+
         async def sample_all():
             tasks = []
-            for i in range(len(prepared_batch.all_model_inputs)):
-                model_input = prepared_batch.all_model_inputs[i]
-                prompt_token_ids = render_model_input([model_input])[0].prompt_ids
+            for i in range(len(all_input_ids)):
+                prompt_token_ids = all_input_ids[i]
                 sampling_params = prepared_batch.all_sampling_params[i]
 
                 # Pass through common fields; only stop needs name translation
