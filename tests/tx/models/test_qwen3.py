@@ -127,6 +127,11 @@ def share_hf_lora_A(hf_modules: list) -> None:
         m.lora_A["default"].weight.data.copy_(first_A)
 
 
+def load_fused_hf_lora(jax_proj, hf_projs, adapter_idx, scaling, rank, group_sizes):
+    lora_B = pack_fused(*(get_hf_lora_B(p) for p in hf_projs), group_sizes=group_sizes)
+    load_lora_weights(jax_proj, adapter_idx, get_hf_lora_A(hf_projs[0]), lora_B, scaling, rank)
+
+
 @pytest.mark.parametrize("ep,tp", [(1, 1), (1, 2), (2, 1)])
 def test_qwen3_moe_layer_lora(ep: int, tp: int):
     """Test MoE LoRA by merging adapter into base weights and comparing outputs."""
@@ -269,12 +274,9 @@ def test_qwen3_lora():
             hf_attn, hf_mlp = hf_layer.self_attn, hf_layer.mlp
 
             scaling = lora_config.lora_alpha / lora_config.r
-            qkv_B = pack_fused(*[get_hf_lora_B(p) for p in [hf_attn.q_proj, hf_attn.k_proj, hf_attn.v_proj]], group_sizes=qkv_group_sizes)
-            load_lora_weights(jax_layer.self_attn.qkv_proj, adapter_idx, get_hf_lora_A(hf_attn.q_proj), qkv_B, scaling, lora_config.r)
+            load_fused_hf_lora(jax_layer.self_attn.qkv_proj, [hf_attn.q_proj, hf_attn.k_proj, hf_attn.v_proj], adapter_idx, scaling, lora_config.r, qkv_group_sizes)
             load_lora_weights(jax_layer.self_attn.o_proj, adapter_idx, get_hf_lora_A(hf_attn.o_proj), get_hf_lora_B(hf_attn.o_proj), scaling, lora_config.r)
-
-            gate_up_B = pack_fused(get_hf_lora_B(hf_mlp.gate_proj), get_hf_lora_B(hf_mlp.up_proj), group_sizes=(1, 1))
-            load_lora_weights(jax_layer.mlp.gate_up_proj, adapter_idx, get_hf_lora_A(hf_mlp.gate_proj), gate_up_B, scaling, lora_config.r)
+            load_fused_hf_lora(jax_layer.mlp.gate_up_proj, [hf_mlp.gate_proj, hf_mlp.up_proj], adapter_idx, scaling, lora_config.r, (1, 1))
             load_lora_weights(jax_layer.mlp.down_proj, adapter_idx, get_hf_lora_A(hf_mlp.down_proj), get_hf_lora_B(hf_mlp.down_proj), scaling, lora_config.r)
 
     # Use different adapter indices for each input

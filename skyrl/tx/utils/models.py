@@ -148,20 +148,20 @@ def get_fused_components(proj_name: str, config: ModelConfig) -> tuple[tuple[str
 
 def pack_fused(*arrays: np.ndarray, group_sizes: tuple[int, ...]) -> np.ndarray:
     """Pack weight arrays by interleaving groups."""
-    in_features = arrays[0].shape[0]
+    leading_dim = arrays[0].shape[0]
     num_groups = arrays[0].shape[-1] // group_sizes[0]
-    reshaped = [arr.reshape(in_features, num_groups, g) for arr, g in zip(arrays, group_sizes)]
-    return np.concatenate(reshaped, axis=2).reshape(in_features, -1)
+    reshaped = [arr.reshape(leading_dim, num_groups, g) for arr, g in zip(arrays, group_sizes)]
+    return np.concatenate(reshaped, axis=2).reshape(leading_dim, -1)
 
 
 def unpack_fused(array: np.ndarray, group_sizes: tuple[int, ...]) -> tuple[np.ndarray, ...]:
     """Unpack a fused tensor by de-interleaving groups."""
-    in_features = array.shape[0]
+    leading_dim = array.shape[0]
     num_groups = array.shape[-1] // sum(group_sizes)
-    reshaped = array.reshape(in_features, num_groups, sum(group_sizes))
+    reshaped = array.reshape(leading_dim, num_groups, sum(group_sizes))
     results, offset = [], 0
     for g in group_sizes:
-        results.append(reshaped[:, :, offset : offset + g].reshape(in_features, -1))
+        results.append(reshaped[:, :, offset : offset + g].reshape(leading_dim, -1))
         offset += g
     return tuple(results)
 
