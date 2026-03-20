@@ -182,7 +182,7 @@ class RemoteInferenceClient:
             )
             self._session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=None))
         logger.info(
-            f"Number of connections for session: {self._session.connector._conns=}, {self._session.connector._acquired=}"
+            f"Number of connections for session: conns={len(self._session.connector._conns)}, acquired={len(self._session.connector._acquired)}"
         )
         return self._session
 
